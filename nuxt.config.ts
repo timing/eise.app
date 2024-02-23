@@ -10,6 +10,6 @@ export default defineNuxtConfig({
 		{src: '~/plugins/opencv.js', mode: 'client'}
 	],
 	serverMiddleware: [
-		'~/middleware/securityHeaders.js',
+		'~/server/middleware/headers.ts',
 	]
 })

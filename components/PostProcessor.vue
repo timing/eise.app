@@ -40,14 +40,27 @@
 import { ref, onMounted, watch, defineProps } from 'vue';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 
-import Module from '@/utils/wavelet_sharpen.js'
+let waveletWorker;
+
+onMounted(() => {
+	waveletWorker = new Worker(new URL('@/utils/wavelet_worker.js', import.meta.url), {type: 'module'});
+	waveletWorker.addEventListener('message', (e) => {
+		if (e.data.status === 'wasmLoaded') {
+        	console.log('WASM module is ready to use.');
+		}
+		console.log(e); 
+	});
+	waveletWorker.onerror = (event) => { console.error(event); };
+});
+
+/*import Module from '@/utils/wavelet_sharpen.js'
 
 let wasmInstance;
 
 Module().then((module) => {
 	wasmInstance = module;
 	console.log(wasmInstance);
-});
+});*/
 
 
 const props = defineProps({
@@ -63,9 +76,6 @@ const waveletsAmount = ref(9);
 const bilateralFraction = ref(0.5);
 const bilateralRange = ref(50);
 const postNoiseReduction = ref(50);
-
-// In your component or main script
-const waveletWorker = new Worker('/waveletWorker.js');
 
 onMounted(() => {
 	if (props.file) {
@@ -140,7 +150,7 @@ const applyProcessing = () => {
 
 	//imageData = waveletSharpen(imageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
 
-	if( true ){
+	if( false ){
 	// THIS WORKS, but tryint to work with the web worker for now
 		imageData = waveletSharpenPerChannel(imageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
 		ctx.putImageData(new ImageData(imageData, initCanvasImageData.width, initCanvasImageData.height), 0, 0);
@@ -174,7 +184,9 @@ function extractChannelData(data) {
 		greenChannel.push(data[i + 1]); // G
 		blueChannel.push(data[i + 2]); // B
 	}
-	
+
+	console.log('extractChannelData length compare', data.length, redChannel.length);
+
 	return [redChannel, greenChannel, blueChannel];
 }
 
@@ -267,6 +279,10 @@ function hatTransform(temp, base, st, size, sc) {
 }
 
 function logCopy(name, array){
+	if( array === undefined ){
+		console.log(name, 'undefined');
+		return;
+	}
 	console.log(name, JSON.parse(JSON.stringify(array)));
 }
 
@@ -284,15 +300,23 @@ function waveletSharpenPerChannel(imageData, width, height, amount, radius) {
 function waveletSharpenInWorker(imageData, width, height, amount, radius){
 
 	let channelsCount = 0;
+	let allChannelsData = [];
 
 	function handleWorkerMsg(e){
 		// Get the processed image data from the worker
 		const { channel, channelData } = e.data;
+
+		allChannelsData[channel] = channelData;
 	
 		channelsCount++;
+		
+		console.log('handleWorkerMsg', e.data, channelsCount, allChannelsData);
+		/*logCopy('channelData', channelData);
+		logCopy('allChannelsData', allChannelsData);*/
 
 		if( channelsCount == 3 ){
-			ctx.putImageData(new ImageData(Uint8ClampedArray(mergeChannelsIntoImageData(channelData)), initCanvasImageData.width, initCanvasImageData.height), 0, 0);
+			console.log(allChannelsData, mergeChannelsIntoImageData(allChannelsData).length, initCanvasImageData.width, initCanvasImageData.height);
+			ctx.putImageData(new ImageData(new Uint8ClampedArray(mergeChannelsIntoImageData(allChannelsData)), initCanvasImageData.width, initCanvasImageData.height), 0, 0);
 			waveletWorker.removeEventListener('message', handleWorkerMsg)
 		}
 	}
@@ -303,7 +327,7 @@ function waveletSharpenInWorker(imageData, width, height, amount, radius){
 
 	for( let c in channelData ){
 		// To send data to the worker for processing
-		waveletWorker.postMessage({ c, imageData, width, height, amount, radius });	
+		waveletWorker.postMessage({ channel: parseInt(c, 10), imageData: channelData[c], width, height, amount, radius });	
 	}
 }
 
