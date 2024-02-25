@@ -7,7 +7,8 @@
     "dev": "nuxt dev",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
-    "postinstall": "nuxt prepare"
+    "postinstall": "nuxt prepare",
+	"postgenerate": "cp config/cloudflare_headers.txt dist/_headers"
   },
   "dependencies": {
     "@ffmpeg/core": "^0.10.0",
