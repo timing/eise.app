@@ -150,6 +150,11 @@ if (ENVIRONMENT_IS_SHELL) {
     console.warn = console.error = /** @type{!function(this:Console, ...*): undefined} */ (typeof printErr != 'undefined' ? printErr : print);
   }
 
+  // If target shell does not support Wasm, load the JS version of the code.
+  if (typeof WebAssembly == 'undefined') {
+    eval(read(locateFile('wavelet_sharpen_worker.wasm.js'))+'');
+  }
+
 } else
 
 // Note that this includes Node.js workers when relevant (pthreads is enabled).
@@ -290,10 +295,28 @@ assert(!ENVIRONMENT_IS_SHELL, 'shell environment detected but not enabled at bui
 var wasmBinary; 
 if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];legacyModuleProp('wasmBinary', 'wasmBinary');
 
-if (typeof WebAssembly != 'object') {
-  abort('no native wasm support detected');
+// include: base64Utils.js
+// Converts a string of base64 into a byte array (Uint8Array).
+function intArrayFromBase64(s) {
+
+  var decoded = atob(s);
+  var bytes = new Uint8Array(decoded.length);
+  for (var i = 0 ; i < decoded.length ; ++i) {
+    bytes[i] = decoded.charCodeAt(i);
+  }
+  return bytes;
 }
 
+// If filename is a base64 data URI, parses and returns data (Buffer on node,
+// Uint8Array otherwise). If filename is not a base64 data URI, returns undefined.
+function tryParseAsDataURI(filename) {
+  if (!isDataURI(filename)) {
+    return;
+  }
+
+  return intArrayFromBase64(filename.slice(dataURIPrefix.length));
+}
+// end include: base64Utils.js
 // Wasm globals
 
 var wasmMemory;
@@ -659,6 +682,10 @@ function getBinarySync(file) {
   if (file == wasmBinaryFile && wasmBinary) {
     return new Uint8Array(wasmBinary);
   }
+  var binary = tryParseAsDataURI(file);
+  if (binary) {
+    return binary;
+  }
   if (readBinary) {
     return readBinary(file);
   }
@@ -672,6 +699,7 @@ function getBinaryPromise(binaryFile) {
   // Cordova or Electron apps are typically loaded from a file:// url.
   // So use fetch if it is available and the url is not a file, otherwise fall back to XHR.
   if (!wasmBinary
+      && !isDataURI(binaryFile)
       && (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER)) {
     if (typeof fetch == 'function'
     ) {
@@ -693,6 +721,16 @@ function instantiateArrayBuffer(binaryFile, imports, receiver) {
     return WebAssembly.instantiate(binary, imports);
   }).then(receiver, (reason) => {
     err(`failed to asynchronously prepare wasm: ${reason}`);
+
+      // WebAssembly compilation failed, try running the JS fallback instead.
+      var search = location.search;
+      if (search.indexOf('_rwasm=0') < 0) {
+        location.href += (search ? search + '&' : '?') + '_rwasm=0';
+        // Return here to avoid calling abort() below.  The application
+        // still has a chance to start sucessfully do we don't want to
+        // trigger onAbort or onExit handlers.
+        return;
+      }
 
     // Warn on some common problems.
     if (isFileURI(wasmBinaryFile)) {
@@ -980,16 +1018,80 @@ function dbg(...args) {
     };
 
   var getHeapMax = () =>
-      HEAPU8.length;
+      // Stay one Wasm page short of 4GB: while e.g. Chrome is able to allocate
+      // full 4GB Wasm memories, the size will wrap back to 0 bytes in Wasm side
+      // for any code that deals with heap sizes, which would require special
+      // casing all heap size related code to treat 0 specially.
+      2147483648;
   
-  var abortOnCannotGrowMemory = (requestedSize) => {
-      abort(`Cannot enlarge memory arrays to size ${requestedSize} bytes (OOM). Either (1) compile with -sINITIAL_MEMORY=X with X higher than the current value ${HEAP8.length}, (2) compile with -sALLOW_MEMORY_GROWTH which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with -sABORTING_MALLOC=0`);
+  var growMemory = (size) => {
+      var b = wasmMemory.buffer;
+      var pages = (size - b.byteLength + 65535) / 65536;
+      try {
+        // round size grow request up to wasm page size (fixed 64KB per spec)
+        wasmMemory.grow(pages); // .grow() takes a delta compared to the previous size
+        updateMemoryViews();
+        return 1 /*success*/;
+      } catch(e) {
+        err(`growMemory: Attempted to grow heap from ${b.byteLength} bytes to ${size} bytes, but got error: ${e}`);
+      }
+      // implicit 0 return to save code size (caller will cast "undefined" into 0
+      // anyhow)
     };
   var _emscripten_resize_heap = (requestedSize) => {
       var oldSize = HEAPU8.length;
       // With CAN_ADDRESS_2GB or MEMORY64, pointers are already unsigned.
       requestedSize >>>= 0;
-      abortOnCannotGrowMemory(requestedSize);
+      // With multithreaded builds, races can happen (another thread might increase the size
+      // in between), so return a failure, and let the caller retry.
+      assert(requestedSize > oldSize);
+  
+      // Memory resize rules:
+      // 1.  Always increase heap size to at least the requested size, rounded up
+      //     to next page multiple.
+      // 2a. If MEMORY_GROWTH_LINEAR_STEP == -1, excessively resize the heap
+      //     geometrically: increase the heap size according to
+      //     MEMORY_GROWTH_GEOMETRIC_STEP factor (default +20%), At most
+      //     overreserve by MEMORY_GROWTH_GEOMETRIC_CAP bytes (default 96MB).
+      // 2b. If MEMORY_GROWTH_LINEAR_STEP != -1, excessively resize the heap
+      //     linearly: increase the heap size by at least
+      //     MEMORY_GROWTH_LINEAR_STEP bytes.
+      // 3.  Max size for the heap is capped at 2048MB-WASM_PAGE_SIZE, or by
+      //     MAXIMUM_MEMORY, or by ASAN limit, depending on which is smallest
+      // 4.  If we were unable to allocate as much memory, it may be due to
+      //     over-eager decision to excessively reserve due to (3) above.
+      //     Hence if an allocation fails, cut down on the amount of excess
+      //     growth, in an attempt to succeed to perform a smaller allocation.
+  
+      // A limit is set for how much we can grow. We should not exceed that
+      // (the wasm binary specifies it, so if we tried, we'd fail anyhow).
+      var maxHeapSize = getHeapMax();
+      if (requestedSize > maxHeapSize) {
+        err(`Cannot enlarge memory, requested ${requestedSize} bytes, but the limit is ${maxHeapSize} bytes!`);
+        return false;
+      }
+  
+      var alignUp = (x, multiple) => x + (multiple - x % multiple) % multiple;
+  
+      // Loop through potential heap size increases. If we attempt a too eager
+      // reservation that fails, cut down on the attempted size and reserve a
+      // smaller bump instead. (max 3 times, chosen somewhat arbitrarily)
+      for (var cutDown = 1; cutDown <= 4; cutDown *= 2) {
+        var overGrownHeapSize = oldSize * (1 + 0.2 / cutDown); // ensure geometric growth
+        // but limit overreserving (default to capping at +96MB overgrowth at most)
+        overGrownHeapSize = Math.min(overGrownHeapSize, requestedSize + 100663296 );
+  
+        var newSize = Math.min(maxHeapSize, alignUp(Math.max(requestedSize, overGrownHeapSize), 65536));
+  
+        var replacement = growMemory(newSize);
+        if (replacement) {
+          err('Warning: Enlarging memory arrays, this is not fast! ' + [oldSize, newSize]);
+  
+          return true;
+        }
+      }
+      err(`Failed to grow the heap from ${oldSize} bytes to ${newSize} bytes, not enough memory!`);
+      return false;
     };
 
   var getCFunc = (ident) => {
@@ -1268,7 +1370,6 @@ var missingLibrarySymbols = [
   'convertU32PairToI53',
   'zeroMemory',
   'exitJS',
-  'growMemory',
   'isLeapYear',
   'ydayFromDate',
   'arraySum',
@@ -1464,9 +1565,11 @@ var unexportedSymbols = [
   'setTempRet0',
   'writeStackCookie',
   'checkStackCookie',
+  'intArrayFromBase64',
+  'tryParseAsDataURI',
   'ptrToString',
   'getHeapMax',
-  'abortOnCannotGrowMemory',
+  'growMemory',
   'ENV',
   'MONTH_DAYS_REGULAR',
   'MONTH_DAYS_LEAP',

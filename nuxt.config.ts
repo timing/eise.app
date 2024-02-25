@@ -8,7 +8,14 @@ export default defineNuxtConfig({
 	},
 	plugins: [
 		{src: '~/plugins/opencv.js', mode: 'client'}
-	],
+	]/*,
+	security: {
+        headers: {
+			crossOriginEmbedderPolicy: 'require-corp',
+			crossOriginOpenerPolicy: 'same-origin'
+		}
+	}*/
+	,
 	serverMiddleware: [
 		'~/server/middleware/headers.ts',
 	]

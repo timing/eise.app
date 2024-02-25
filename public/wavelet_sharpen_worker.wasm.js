@@ -177,7 +177,7 @@ function asmFunc(imports) {
   $2_1 = $2_1 | 0;
   $3_1 = +$3_1;
   $4_1 = +$4_1;
-  var $7_1 = 0, $68 = 0, $368 = 0.0, $232 = 0, $244 = 0, $262 = 0, $20_1 = 0;
+  var $7_1 = 0, $68 = 0, $368 = 0.0, $232 = 0, $244 = 0, $262 = 0, $20_1 = 0, wasm2js_i32$0 = 0, wasm2js_i32$1 = 0, wasm2js_f32$0 = Math_fround(0);
   $7_1 = global$0 - 80 | 0;
   global$0 = $7_1;
   HEAP32[($7_1 + 76 | 0) >> 2] = $0_1;
@@ -226,7 +226,7 @@ function asmFunc(imports) {
     }
     $68 = HEAP32[($7_1 + 68 | 0) >> 2] | 0;
    }
-   HEAP32[($7_1 + 32 | 0) >> 2] = $15($68 << 2 | 0 | 0) | 0;
+   (wasm2js_i32$0 = $7_1, wasm2js_i32$1 = $15($68 << 2 | 0 | 0) | 0), HEAP32[(wasm2js_i32$0 + 32 | 0) >> 2] = wasm2js_i32$1;
    HEAP32[($7_1 + 12 | 0) >> 2] = 0;
    HEAP32[($7_1 + 20 | 0) >> 2] = 0;
    label$9 : {
@@ -280,7 +280,7 @@ function asmFunc(imports) {
       };
      }
      $368 = +((HEAP32[($7_1 + 20 | 0) >> 2] | 0) >>> 0) - +HEAPF64[($7_1 + 48 | 0) >> 3];
-     HEAPF32[($7_1 + 28 | 0) >> 2] = Math_fround(+HEAPF64[($7_1 + 56 | 0) >> 3] * +$7(+($368 * $368 / -1.5)) + 1.0);
+     (wasm2js_i32$0 = $7_1, wasm2js_f32$0 = Math_fround(+HEAPF64[($7_1 + 56 | 0) >> 3] * +$7(+($368 * $368 / -1.5)) + 1.0)), HEAPF32[(wasm2js_i32$0 + 28 | 0) >> 2] = wasm2js_f32$0;
      HEAP32[($7_1 + 24 | 0) >> 2] = 0;
      label$19 : {
       label$20 : while (1) {
@@ -599,7 +599,7 @@ function asmFunc(imports) {
  
  function $14($0_1) {
   $0_1 = $0_1 | 0;
-  var $1_1 = 0, $2_1 = 0;
+  var $1_1 = 0, $2_1 = 0, wasm2js_i32$0 = 0, wasm2js_i32$1 = 0;
   $1_1 = HEAP32[(0 + 67696 | 0) >> 2] | 0;
   $2_1 = ($0_1 + 7 | 0) & -8 | 0;
   $0_1 = $1_1 + $2_1 | 0;
@@ -620,7 +620,7 @@ function asmFunc(imports) {
      break label$1
     }
    }
-   HEAP32[($13() | 0) >> 2] = 48;
+   (wasm2js_i32$0 = $13() | 0, wasm2js_i32$1 = 48), HEAP32[wasm2js_i32$0 >> 2] = wasm2js_i32$1;
    return -1 | 0;
   }
   HEAP32[(0 + 67696 | 0) >> 2] = $0_1;
@@ -629,7 +629,7 @@ function asmFunc(imports) {
  
  function $15($0_1) {
   $0_1 = $0_1 | 0;
-  var $5_1 = 0, $4_1 = 0, $7_1 = 0, $8_1 = 0, $3_1 = 0, $2_1 = 0, $6_1 = 0, $10_1 = 0, $11_1 = 0, i64toi32_i32$0 = 0, i64toi32_i32$1 = 0, i64toi32_i32$2 = 0, $1_1 = 0, $9_1 = 0, $79 = 0, $183 = 0, $782 = 0, $784 = 0;
+  var $5_1 = 0, $4_1 = 0, $7_1 = 0, $8_1 = 0, $3_1 = 0, $2_1 = 0, $6_1 = 0, $10_1 = 0, $11_1 = 0, i64toi32_i32$0 = 0, i64toi32_i32$1 = 0, i64toi32_i32$2 = 0, $1_1 = 0, $9_1 = 0, $79 = 0, $183 = 0, $782 = 0, $784 = 0, wasm2js_i32$0 = 0, wasm2js_i32$1 = 0;
   $1_1 = global$0 - 16 | 0;
   global$0 = $1_1;
   label$1 : {
@@ -664,7 +664,7 @@ function asmFunc(imports) {
                 if (($0_1 | 0) != ($5_1 | 0)) {
                  break label$14
                 }
-                HEAP32[(0 + 67704 | 0) >> 2] = $2_1 & (__wasm_rotl_i32(-2 | 0, $3_1 | 0) | 0) | 0;
+                (wasm2js_i32$0 = 0, wasm2js_i32$1 = $2_1 & (__wasm_rotl_i32(-2 | 0, $3_1 | 0) | 0) | 0), HEAP32[(wasm2js_i32$0 + 67704 | 0) >> 2] = wasm2js_i32$1;
                 break label$13;
                }
                HEAP32[($5_1 + 12 | 0) >> 2] = $0_1;
@@ -1452,7 +1452,7 @@ function asmFunc(imports) {
        $0_1 = $0_1 + 8 | 0;
        break label$1;
       }
-      HEAP32[($13() | 0) >> 2] = 48;
+      (wasm2js_i32$0 = $13() | 0, wasm2js_i32$1 = 48), HEAP32[wasm2js_i32$0 >> 2] = wasm2js_i32$1;
       $0_1 = 0;
       break label$1;
      }
@@ -1614,7 +1614,7 @@ function asmFunc(imports) {
       if ($0_1) {
        break label$100
       }
-      HEAP32[(0 + 67708 | 0) >> 2] = $9_1 & (__wasm_rotl_i32(-2 | 0, $8_1 | 0) | 0) | 0;
+      (wasm2js_i32$0 = 0, wasm2js_i32$1 = $9_1 & (__wasm_rotl_i32(-2 | 0, $8_1 | 0) | 0) | 0), HEAP32[(wasm2js_i32$0 + 67708 | 0) >> 2] = wasm2js_i32$1;
       break label$99;
      }
      HEAP32[($10_1 + ((HEAP32[($10_1 + 16 | 0) >> 2] | 0 | 0) == ($7_1 | 0) ? 16 : 20) | 0) >> 2] = $0_1;
@@ -1689,7 +1689,7 @@ function asmFunc(imports) {
   $0_1 = $0_1 | 0;
   $1_1 = $1_1 | 0;
   $2_1 = $2_1 | 0;
-  var $4_1 = 0, $5_1 = 0, $7_1 = 0, $8_1 = 0, $9_1 = 0, $3_1 = 0, $6_1 = 0;
+  var $4_1 = 0, $5_1 = 0, $7_1 = 0, $8_1 = 0, $9_1 = 0, $3_1 = 0, $6_1 = 0, wasm2js_i32$0 = 0, wasm2js_i32$1 = 0;
   $3_1 = $0_1 + ((-8 - $0_1 | 0) & 7 | 0) | 0;
   HEAP32[($3_1 + 4 | 0) >> 2] = $2_1 | 3 | 0;
   $4_1 = $1_1 + ((-8 - $1_1 | 0) & 7 | 0) | 0;
@@ -1736,7 +1736,7 @@ function asmFunc(imports) {
        if (($2_1 | 0) != ($7_1 | 0)) {
         break label$7
        }
-       HEAP32[(0 + 67704 | 0) >> 2] = (HEAP32[(0 + 67704 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $8_1 | 0) | 0) | 0;
+       (wasm2js_i32$0 = 0, wasm2js_i32$1 = (HEAP32[(0 + 67704 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $8_1 | 0) | 0) | 0), HEAP32[(wasm2js_i32$0 + 67704 | 0) >> 2] = wasm2js_i32$1;
        break label$5;
       }
       HEAP32[($7_1 + 12 | 0) >> 2] = $2_1;
@@ -1805,7 +1805,7 @@ function asmFunc(imports) {
        if ($2_1) {
         break label$14
        }
-       HEAP32[(0 + 67708 | 0) >> 2] = (HEAP32[(0 + 67708 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $7_1 | 0) | 0) | 0;
+       (wasm2js_i32$0 = 0, wasm2js_i32$1 = (HEAP32[(0 + 67708 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $7_1 | 0) | 0) | 0), HEAP32[(wasm2js_i32$0 + 67708 | 0) >> 2] = wasm2js_i32$1;
        break label$5;
       }
       HEAP32[($9_1 + ((HEAP32[($9_1 + 16 | 0) >> 2] | 0 | 0) == ($4_1 | 0) ? 16 : 20) | 0) >> 2] = $2_1;
@@ -1920,7 +1920,7 @@ function asmFunc(imports) {
  
  function $17($0_1) {
   $0_1 = $0_1 | 0;
-  var $4_1 = 0, $2_1 = 0, $1_1 = 0, $5_1 = 0, $3_1 = 0, $6_1 = 0, $7_1 = 0;
+  var $4_1 = 0, $2_1 = 0, $1_1 = 0, $5_1 = 0, $3_1 = 0, $6_1 = 0, $7_1 = 0, wasm2js_i32$0 = 0, wasm2js_i32$1 = 0;
   label$1 : {
    if (!$0_1) {
     break label$1
@@ -1961,7 +1961,7 @@ function asmFunc(imports) {
          if (($2_1 | 0) != ($5_1 | 0)) {
           break label$7
          }
-         HEAP32[(0 + 67704 | 0) >> 2] = (HEAP32[(0 + 67704 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $6_1 | 0) | 0) | 0;
+         (wasm2js_i32$0 = 0, wasm2js_i32$1 = (HEAP32[(0 + 67704 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $6_1 | 0) | 0) | 0), HEAP32[(wasm2js_i32$0 + 67704 | 0) >> 2] = wasm2js_i32$1;
          break label$2;
         }
         HEAP32[($5_1 + 12 | 0) >> 2] = $2_1;
@@ -2037,7 +2037,7 @@ function asmFunc(imports) {
       if ($2_1) {
        break label$12
       }
-      HEAP32[(0 + 67708 | 0) >> 2] = (HEAP32[(0 + 67708 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $5_1 | 0) | 0) | 0;
+      (wasm2js_i32$0 = 0, wasm2js_i32$1 = (HEAP32[(0 + 67708 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $5_1 | 0) | 0) | 0), HEAP32[(wasm2js_i32$0 + 67708 | 0) >> 2] = wasm2js_i32$1;
       break label$2;
      }
      HEAP32[($7_1 + ((HEAP32[($7_1 + 16 | 0) >> 2] | 0 | 0) == ($1_1 | 0) ? 16 : 20) | 0) >> 2] = $2_1;
@@ -2115,7 +2115,7 @@ function asmFunc(imports) {
           if (($2_1 | 0) != ($5_1 | 0)) {
            break label$23
           }
-          HEAP32[(0 + 67704 | 0) >> 2] = (HEAP32[(0 + 67704 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $3_1 | 0) | 0) | 0;
+          (wasm2js_i32$0 = 0, wasm2js_i32$1 = (HEAP32[(0 + 67704 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $3_1 | 0) | 0) | 0), HEAP32[(wasm2js_i32$0 + 67704 | 0) >> 2] = wasm2js_i32$1;
           break label$16;
          }
          HEAP32[($5_1 + 12 | 0) >> 2] = $2_1;
@@ -2187,7 +2187,7 @@ function asmFunc(imports) {
        if ($2_1) {
         break label$28
        }
-       HEAP32[(0 + 67708 | 0) >> 2] = (HEAP32[(0 + 67708 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $5_1 | 0) | 0) | 0;
+       (wasm2js_i32$0 = 0, wasm2js_i32$1 = (HEAP32[(0 + 67708 | 0) >> 2] | 0) & (__wasm_rotl_i32(-2 | 0, $5_1 | 0) | 0) | 0), HEAP32[(wasm2js_i32$0 + 67708 | 0) >> 2] = wasm2js_i32$1;
        break label$16;
       }
       HEAP32[($7_1 + ((HEAP32[($7_1 + 16 | 0) >> 2] | 0 | 0) == ($3_1 | 0) ? 16 : 20) | 0) >> 2] = $2_1;
@@ -2511,10 +2511,32 @@ function asmFunc(imports) {
   return buffer.byteLength / 65536 | 0;
  }
  
+ function __wasm_memory_grow(pagesToAdd) {
+  pagesToAdd = pagesToAdd | 0;
+  var oldPages = __wasm_memory_size() | 0;
+  var newPages = oldPages + pagesToAdd | 0;
+  if ((oldPages < newPages) && (newPages < 65536)) {
+   var newBuffer = new ArrayBuffer(Math_imul(newPages, 65536));
+   var newHEAP8 = new Int8Array(newBuffer);
+   newHEAP8.set(HEAP8);
+   HEAP8 = new Int8Array(newBuffer);
+   HEAP16 = new Int16Array(newBuffer);
+   HEAP32 = new Int32Array(newBuffer);
+   HEAPU8 = new Uint8Array(newBuffer);
+   HEAPU16 = new Uint16Array(newBuffer);
+   HEAPU32 = new Uint32Array(newBuffer);
+   HEAPF32 = new Float32Array(newBuffer);
+   HEAPF64 = new Float64Array(newBuffer);
+   buffer = newBuffer;
+   bufferView = HEAPU8;
+  }
+  return oldPages;
+ }
+ 
  return {
   "memory": Object.create(Object.prototype, {
    "grow": {
-    
+    "value": __wasm_memory_grow
    }, 
    "buffer": {
     "get": function () {

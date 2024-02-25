@@ -8,12 +8,12 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-	"postgenerate": "cp config/cloudflare_headers.txt dist/_headers"
+    "postgenerate": "cp config/cloudflare_headers.txt dist/_headers"
   },
   "dependencies": {
     "@ffmpeg/core": "^0.10.0",
     "@ffmpeg/ffmpeg": "^0.10.1",
-    "nuxt": "^3.10.2",
+    "nuxt": "^3.10.3",
     "vue": "^3.4.19",
     "vue-router": "^4.2.5"
   }
