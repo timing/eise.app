@@ -1,7 +1,6 @@
 // this one only works with the wavelet wasm, only the first two lines are needed for that, the rest is just trying to copy from below to have it work in both ways
 /*export default defineEventHandler((event) => {
 	setHeader(event, 'Cross-Origin-Embedder-Policy', 'require-corp');
-	setHeader(event, 'crossOriginEmbedderPolicy', 'require-corp');
 	setHeader(event, 'Cross-Origin-Opener-Policy', 'same-origin');
 	setHeader(event, 'Access-Control-Allow-Origin', 'same-origin');
 	setHeader(event, 'Cross-Origin-Resource-Policy', 'same-origin');
