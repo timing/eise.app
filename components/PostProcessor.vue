@@ -141,25 +141,7 @@ const applyProcessing = () => {
 	let imageData = prevGain == gain.value ? initCanvasImageData.data : initCanvasImageData.data.map(value => value * gain.value);
 	prevGain = gain.value;
 	
-
-	/*console.log('cv.bilateralFilter start');
-	cv.bilateralFilter(gainedMat, gainedMat, 0, parseFloat(bilateralFraction.value), parseFloat(bilateralRange.value), cv.BORDER_DEFAULT);
-	console.log('cv.bilateralFilter end');*/
-
-	//let sharpenedImageData = sharpenImage(matToImageData(gainedMat), parseFloat(waveletsRadius.value), parseFloat(waveletsAmount.value));
-
-	//imageData = waveletSharpen(imageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
-
-	if( false ){
-	// THIS WORKS, but tryint to work with the web worker for now
-		imageData = waveletSharpenPerChannel(imageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
-		ctx.putImageData(new ImageData(imageData, initCanvasImageData.width, initCanvasImageData.height), 0, 0);
-	} else {
-		imageData = waveletSharpenInWorker(imageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
-	}
-
-	//workingMat.delete();
-	//gainedMat.delete();
+	imageData = waveletSharpenInWorker(imageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
 };
 
 function matToArray(mat) {
@@ -362,16 +344,8 @@ function waveletSharpen(imageData, width, height, amount, radius) {
 </script>
 
 <style>
-.wrapper {
-	max-width: 100vw;
-	overflow: scroll;
-	max-height: 70vh;
-	border: 1px solid lightyellow; /* Optional: for visual boundary */
-}
-canvas {
-	display: block; /* Prevents inline default and allows for proper overflow handling */
-	width: auto;
-	height: auto;
-}
+	canvas {
+
+	}
 </style>
 

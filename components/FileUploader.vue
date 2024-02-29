@@ -1,6 +1,6 @@
 <template>
 	<div>
-		<input type="file" accept="video/*,image/*" multiple @change="processVideo" />
+		<input type="file" accept="video/*,image/*,.ser" multiple @change="processVideo" />
 		Select one file for just post processing
 	</div>
 </template>
@@ -9,7 +9,7 @@
 import { createFFmpeg, fetchFile } from '@ffmpeg/ffmpeg';
 import { defineEmits, ref } from 'vue';
 
-const emit = defineEmits(['frames']);
+const emit = defineEmits(['frames', 'postProcessing']);
 
 let ffmpeg = null;
 
@@ -19,7 +19,7 @@ async function processVideo(event) {
 
 	console.log(files);
         
-	const videoFiles = files.filter(file => file.type.startsWith('video/'));
+	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser'));
 	const imageFiles = files.filter(file => file.type.startsWith('image/'));
 
 	if (videoFiles.length > 1) {
