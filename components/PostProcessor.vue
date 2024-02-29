@@ -104,6 +104,7 @@ let initialMat;
 let workingMat;
 let initCanvas;
 let initCanvasImageData;
+let gainedImageData;
 let ctx = null;
 
 let prevGain;
@@ -138,10 +139,12 @@ const applyProcessing = () => {
 	});
 	
 	// Gain
-	let imageData = prevGain == gain.value ? initCanvasImageData.data : initCanvasImageData.data.map(value => value * gain.value);
-	prevGain = gain.value;
+	if( prevGain != gain.value ){ 
+		gainedImageData = initCanvasImageData.data.map(value => value * gain.value);
+		prevGain = gain.value;
+	}
 	
-	imageData = waveletSharpenInWorker(imageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
+	imageData = waveletSharpenInWorker(gainedImageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
 };
 
 function matToArray(mat) {
