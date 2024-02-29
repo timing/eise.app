@@ -144,7 +144,7 @@ const applyProcessing = () => {
 		prevGain = gain.value;
 	}
 	
-	imageData = waveletSharpenInWorker(gainedImageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
+	waveletSharpenInWorker(gainedImageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
 };
 
 function matToArray(mat) {
