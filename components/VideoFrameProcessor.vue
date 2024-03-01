@@ -6,7 +6,7 @@
 
 <script setup>
 import { onMounted, ref, watch, defineProps, defineEmits } from 'vue';
-import { calculateSharpness } from '@/utils/sobel.js'
+import { calculateSharpness, isImageCutOff, calculateCenterOfGravity } from '@/utils/sobel.js'
 import { io } from "socket.io-client";
 
 const emit = defineEmits(['postProcessing']);
@@ -53,10 +53,14 @@ async function processImageFrames(frames) {
 				//ctx.clearRect(0, 0, canvasRef.value.width, canvasRef.value.height);
 				ctx.drawImage(img, 0, 0);
 
-				frames[frame].sharpness = calculateSharpness(ctx.getImageData(0, 0, canvasRef.value.width, canvasRef.value.height));	
-				//frames[frame].center_of_gravity = calculateCenterOfGravity(frames[frame].imageData);
+				const imageData = ctx.getImageData(0, 0, canvasRef.value.width, canvasRef.value.height)
+				frames[frame].sharpness = calculateSharpness(imageData);
+				frames[frame].isCutOff = isImageCutOff(imageData);
+				frames[frame].center_of_gravity = calculateCenterOfGravity(imageData);
 
 				frames[frame].data = null;
+				
+				console.log('yoyo', frames[frame]);
 
 				if( frames[frame].sharpness > frames[bestFrame].sharpness ){
 					bestFrame = frame;
@@ -124,6 +128,8 @@ async function processImageFrames(frames) {
 
 function filterSharpestFrames(frames, percentage){
 	frames.sort((a, b) => b.sharpness - a.sharpness);
+
+	frames = frames.filter(frame => !frame.isCutOff);
 
 	// Calculate the number of sharpest frames to select
 	const numSharpest = Math.ceil(frames.length * (percentage / 100));

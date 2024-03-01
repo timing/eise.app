@@ -1,37 +1,41 @@
 <template>
 	<div class="wrapper">
-		<canvas ref="canvas"></canvas>
+		<canvas id="postProcessCanvas" ref="canvas"></canvas>
 	</div>
 	<div class="controls">
 		<div>
 			<label>Gain:</label>
-			<input type="range" min="0" max="2" step="0.01" v-model="gain" @input="applyProcessing"/>
+			<input type="range" min="0" max="3" step="0.01" v-model="gain" @input="applyProcessing"/>
 		</div>
 		<div>
 			<label>Pre Noise Reduction:</label>
-			<input type="range" min="0" max="3" step="0.01" v-model="preNoiseReduction" @input="applyProcessing"/>
+			<input type="range" min="1" max="50" step="2" v-model="preNoiseReduction" @input="applyProcessing"/>
+			<span>{{ preNoiseReduction }}</span>
 		</div>
 		<div>
 			<label>Wavelets Radius:</label>
-			<input type="range" min="0" max="10" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
+			<input type="range" min="0" max="2" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
 			<span>{{ waveletsRadius }}</span>
 		</div>
 		<div>
 			<label>Wavelets Amount:</label>
-			<input type="range" min="0" max="200" step="0.01" v-model="waveletsAmount" @input="applyProcessing"/>
+			<input type="range" min="0" max="100" step="0.01" v-model="waveletsAmount" @input="applyProcessing"/>
 			<span>{{ waveletsAmount }}</span>
 		</div>
-		<div>
+		<!--<div>
 			<label>Bilateral Fraction:</label>
 			<input type="range" min="0" max="1" step="0.01" v-model="bilateralFraction" @input="applyProcessing"/>
+			<span>{{ bilateralFraction }}</span>
 		</div>
 		<div>
 			<label>Bilateral Range:</label>
 			<input type="range" min="0" max="255" step="0.1" v-model="bilateralRange" @input="applyProcessing"/>
-		</div>
+			<span>{{ bilateralRange }}</span>
+		</div>-->
 		<div>
 			<label>Post Noise Reduction:</label>
-			<input type="range" min="0" max="1" step="0.01" v-model="postNoiseReduction" @input="applyProcessing"/>
+			<input type="range" min="1" max="50" step="2" v-model="postNoiseReduction" @input="applyProcessing"/>
+			<span>{{ postNoiseReduction }}</span>
 		</div>
 	</div>
 </template>
@@ -46,7 +50,7 @@ onMounted(() => {
 	waveletWorker = new Worker(new URL('@/utils/wavelet_worker.js', import.meta.url), {type: 'module'});
 	waveletWorker.addEventListener('message', (e) => {
 		if (e.data.status === 'wasmLoaded') {
-        	console.log('WASM module is ready to use.');
+			console.log('WASM module is ready to use.');
 		}
 		console.log(e); 
 	});
@@ -70,12 +74,12 @@ const props = defineProps({
 const canvas = ref(null);
 
 const gain = ref(1);
-const preNoiseReduction = ref(50);
-const waveletsRadius = ref(0.3);
-const waveletsAmount = ref(9);
+const preNoiseReduction = ref(1);
+const waveletsRadius = ref(0);
+const waveletsAmount = ref(0);
 const bilateralFraction = ref(0.5);
 const bilateralRange = ref(50);
-const postNoiseReduction = ref(50);
+const postNoiseReduction = ref(1);
 
 onMounted(() => {
 	if (props.file) {
@@ -100,14 +104,29 @@ watch(() => props.file, (newVal) => {
 	}
 });
 
-let initialMat;
 let workingMat;
 let initCanvas;
 let initCanvasImageData;
 let gainedImageData;
+let preNoiseReducedImageData;
+let sharpenedImageData;
 let ctx = null;
 
 let prevGain;
+
+let prevValues = {}
+
+function valueIsChanged(prop, value){
+	if( prevValues[prop] === undefined ){
+		prevValues[prop] = value;
+		return true;
+	}
+
+	let isChanged = prevValues[prop] != value;
+	prevValues[prop] = value;
+
+	return isChanged;
+}
 
 async function loadImage(file) {
 
@@ -122,40 +141,43 @@ async function loadImage(file) {
 
 		initCanvas = canvas;
 		initCanvasImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
-		//console.log('canvas ImageData', initCanvasImageData);
-
-		initialMat = cv.matFromImageData(initCanvasImageData);
+		gainedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
+		preNoiseReducedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
+		sharpenedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
 	};
 	img.src = URL.createObjectURL(file);
 }
 
-const applyProcessing = () => {
-	// Apply OpenCV.js operations based on the current state of controls
-	// This is where you'd use cv.GaussianBlur, cv.bilateralFilter, etc.
-	console.log("Applying processing with current settings:", {
-		gain: gain.value,
-		preNoiseReduction: preNoiseReduction.value,
-		// Add other parameters
-	});
-	
-	// Gain
-	if( prevGain != gain.value ){ 
-		gainedImageData = initCanvasImageData.data.map(value => value * gain.value);
-		prevGain = gain.value;
+async function applyProcessing (){
+	if( valueIsChanged('gain', gain.value) ){ 
+		gainedImageData = new ImageData(initCanvasImageData.data.map(value => value * gain.value), canvas.value.width, canvas.value.height);
+		preNoiseReducedImageData = gainedImageData;
+		ctx.putImageData(gainedImageData, 0, 0);
 	}
-	
-	waveletSharpenInWorker(gainedImageData, initCanvasImageData.width, initCanvasImageData.height, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
-};
 
-function matToArray(mat) {
-	const dataArray = new Array(mat.rows * mat.cols);
-	for (let i = 0; i < mat.rows; i++) {
-		for (let j = 0; j < mat.cols; j++) {
-			dataArray[i * mat.cols + j] = mat.ucharPtr(i, j)[0];
-		}
+	if( valueIsChanged('preNoiseReduction', preNoiseReduction.value) ){
+		const srcMat = imageDataToMat(gainedImageData);
+		const dstMat = new cv.Mat();
+		cv.cvtColor(srcMat, srcMat, cv.COLOR_RGBA2RGB, 0);
+		cv.GaussianBlur(srcMat, dstMat, new cv.Size(parseInt(preNoiseReduction.value, 10), parseInt(preNoiseReduction.value, 10)), 0, 0, cv.BORDER_DEFAULT);
+		cv.imshow('postProcessCanvas', dstMat);
+		//preNoiseReducedImageData = matToImageData(dstMat);
+		preNoiseReducedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
 	}
-	return dataArray;
-}
+
+	if( valueIsChanged('waveletsAmount', waveletsAmount.value) || valueIsChanged('waveletsRadius', waveletsRadius.value) ){
+		sharpenedImageData = await waveletSharpenInWorker(preNoiseReducedImageData, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
+		ctx.putImageData(sharpenedImageData, 0, 0);
+	}
+
+	if( valueIsChanged('postNoiseReduction', postNoiseReduction.value) ){
+		const srcMat = imageDataToMat(sharpenedImageData);
+		const dstMat = new cv.Mat();
+		cv.cvtColor(srcMat, srcMat, cv.COLOR_RGBA2RGB, 0);
+		cv.GaussianBlur(srcMat, dstMat, new cv.Size(parseInt(postNoiseReduction.value, 10), parseInt(postNoiseReduction.value, 10)), 0, 0, cv.BORDER_DEFAULT);
+		cv.imshow('postProcessCanvas', dstMat);
+	}
+};
 
 function extractChannelData(data) {
 	// Initialize arrays to hold channel data
@@ -175,13 +197,9 @@ function extractChannelData(data) {
 	return [redChannel, greenChannel, blueChannel];
 }
 
-function arrayToMat(array, width, height) {
-	const mat = new cv.Mat(height, width, cv.CV_8UC1);
-	for (let i = 0; i < height; i++) {
-		for (let j = 0; j < width; j++) {
-			mat.ucharPtr(i, j)[0] = array[i * width + j];
-		}
-	}
+function imageDataToMat(imageData) {
+	let mat = new cv.Mat(imageData.height, imageData.width, cv.CV_8UC4);
+	mat.data.set(imageData.data);
 	return mat;
 }
 
@@ -199,70 +217,6 @@ function mergeChannelsIntoImageData(channels) {
 	return mergedData;
 }
 
-function normalizeMat(inputMat) {
-	// Assuming the inputMat is CV_8UC3 for color images or CV_8UC1 for grayscale
-	// and you want to normalize to the range [0, 1]
-	let normalizedMat = new cv.Mat();
-	// Convert and normalize to [0, 1]
-	inputMat.convertTo(normalizedMat, cv.CV_32F, 1.0 / 255.0);
-	return normalizedMat;
-}
-
-function matToPSSImageData(mat) {
-	const rows = mat.rows;
-	const cols = mat.cols;
-	const channels = mat.channels();
-	const imageData = new Array(rows);
-	
-	for (let i = 0; i < rows; i++) {
-		imageData[i] = new Array(cols);
-		for (let j = 0; j < cols; j++) {
-			imageData[i][j] = new Array(channels);
-			const pixel = mat.ucharPtr(i, j);
-			for (let k = 0; k < channels; k++) {
-				imageData[i][j][k] = pixel[k];
-			}
-		}
-	}
-	return imageData; // imageData[rows][cols][color_channel]
-}
-
-function pssImageDataToMat(imageData, targetMat) {
-	const rows = imageData.length;
-	const cols = imageData[0].length;
-	const channels = 3;
-
-	/*if (!targetMat) {
-		targetMat = new cv.Mat(rows, cols, cv.CV_8UC(channels));
-	} else {
-		if (targetMat.rows !== rows || targetMat.cols !== cols || targetMat.channels() !== channels) {
-			console.error('Target Mat dimensions do not match the dimensions of the imageData array.');
-			return null;
-		}
-	}*/
-
-	for (let row = 0; row < rows; row++) {
-		for (let col = 0; col < cols; col++) {
-			for (let ch = 0; ch < channels; ch++) {
-				//targetMat.at(row, col * channels + ch, pixel[ch] * 65535);
-				targetMat.ucharPtr(row, col)[ch] = Math.max(imageData[row][col][ch] * 65535, 65535);
-			}
-		}
-	}
-
-	return targetMat;
-}
-
-function hatTransform(temp, base, st, size, sc) {
-	let i;
-	for (i = 0; i < sc; i++)
-		temp[i] = 2 * base[st * i] + base[st * (sc - i)] + base[st * (i + sc)];
-	for (; i + sc < size; i++)
-		temp[i] = 2 * base[st * i] + base[st * (i - sc)] + base[st * (i + sc)];
-	for (; i < size; i++)
-		temp[i] = 2 * base[st * i] + base[st * (i - sc)] + base[st * (2 * size - 2 - (i + sc))];
-}
-
 function logCopy(name, array){
 	if( array === undefined ){
 		console.log(name, 'undefined');
@@ -271,78 +225,38 @@ function logCopy(name, array){
 	console.log(name, JSON.parse(JSON.stringify(array)));
 }
 
-function waveletSharpenPerChannel(imageData, width, height, amount, radius) {
+function waveletSharpenInWorker(imageData, amount, radius){
+	const width = imageData.width
+	const height = imageData.height;
+	return new Promise((resolve, reject) => {
+		let channelsCount = 0;
+		let allChannelsData = [];
 
-	const channelData = extractChannelData(imageData);
+		function handleWorkerMsg(e){
+			// Get the processed image data from the worker
+			const { channel, channelData } = e.data;
 
-	for( let c in channelData ){
-		channelData[c] = waveletSharpen(channelData[c], width, height, amount, radius);
-	}
-
-	return new Uint8ClampedArray(mergeChannelsIntoImageData(channelData));
-}
-
-function waveletSharpenInWorker(imageData, width, height, amount, radius){
-
-	let channelsCount = 0;
-	let allChannelsData = [];
-
-	function handleWorkerMsg(e){
-		// Get the processed image data from the worker
-		const { channel, channelData } = e.data;
-
-		allChannelsData[channel] = channelData;
-	
-		channelsCount++;
+			allChannelsData[channel] = channelData;
 		
-		console.log('handleWorkerMsg', e.data, channelsCount, allChannelsData);
-		/*logCopy('channelData', channelData);
-		logCopy('allChannelsData', allChannelsData);*/
-
-		if( channelsCount == 3 ){
-			console.log(allChannelsData, mergeChannelsIntoImageData(allChannelsData).length, initCanvasImageData.width, initCanvasImageData.height);
-			ctx.putImageData(new ImageData(new Uint8ClampedArray(mergeChannelsIntoImageData(allChannelsData)), initCanvasImageData.width, initCanvasImageData.height), 0, 0);
-			waveletWorker.removeEventListener('message', handleWorkerMsg)
+			channelsCount++;
+			
+			if( channelsCount == 3 ){
+				//ctx.putImageData(new ImageData(new Uint8ClampedArray(mergeChannelsIntoImageData(allChannelsData)), initCanvasImageData.width, initCanvasImageData.height), 0, 0);
+				waveletWorker.removeEventListener('message', handleWorkerMsg)
+				resolve(new ImageData(new Uint8ClampedArray(mergeChannelsIntoImageData(allChannelsData)), initCanvasImageData.width, initCanvasImageData.height));
+			}
 		}
-	}
 
-	waveletWorker.addEventListener('message', handleWorkerMsg);
+		waveletWorker.addEventListener('message', handleWorkerMsg);
 
-	const channelData = extractChannelData(imageData);
+		const channelData = extractChannelData(imageData.data);
 
-	for( let c in channelData ){
-		// To send data to the worker for processing
-		waveletWorker.postMessage({ channel: parseInt(c, 10), imageData: channelData[c], width, height, amount, radius });	
-	}
+		for( let c in channelData ){
+			// To send data to the worker for processing
+			waveletWorker.postMessage({ channel: parseInt(c, 10), imageData: channelData[c], width, height, amount, radius });	
+		}
+	});
 }
-
-/* THE REAL DEAL */
-function waveletSharpen(imageData, width, height, amount, radius) {
-	// Normalize imageData to floating-point values in the range [0, 1]
-	let floatData = Float32Array.from(imageData, val => val / 255.0);
-
-	// Allocate memory for the floating-point data
-	const numBytes = floatData.length * floatData.BYTES_PER_ELEMENT;
-	const ptr = wasmInstance._malloc(numBytes);
-
-	// Copy the normalized floating-point data to WebAssembly memory
-	let heapFloatArray = new Float32Array(wasmInstance.HEAPF32.buffer, ptr, floatData.length);
-	heapFloatArray.set(floatData);
-	
-	// Call the WebAssembly function
-	wasmInstance._wavelet_sharpen(ptr, width, height, amount, radius);
-
-	// Retrieve the modified data
-	let modifiedData = new Float32Array(wasmInstance.HEAPF32.buffer, ptr, floatData.length);
-	
-	// Denormalize the data back to [0, 255] and convert to Uint8ClampedArray
-	let denormalizedData = Uint8ClampedArray.from(modifiedData, val => val * 255.0);
-
-	wasmInstance._free(ptr);
-
-	return denormalizedData;
-}
-
 
 </script>
 

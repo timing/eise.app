@@ -444,3 +444,32 @@ function sobel(imageData) {
 	return avgGradient;
 }
 
+export function isImageCutOff(imageData, border = 5, threshold = 10) {
+	const { data, width, height } = imageData;
+
+	// Helper function to check if a pixel is not black
+	function isNotBlack(index) {
+		return data[index] > threshold || data[index + 1] > threshold || data[index + 2] > threshold;
+	}
+
+	// Check top and bottom borders
+	for (let x = 0; x < width; x++) {
+		for (let y = 0; y < border; y++) {
+			if (isNotBlack((y * width + x) * 4) || isNotBlack(((height - 1 - y) * width + x) * 4)) {
+				return true;
+			}
+		}
+	}
+
+	// Check left and right borders
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < border; x++) {
+			if (isNotBlack((y * width + x) * 4) || isNotBlack((y * width + (width - 1 - x)) * 4)) {
+				return true;
+			}
+		}
+	}
+
+	return false; // No cut-off detected
+}
+
