@@ -1,3 +1,8 @@
+/* 
+	this file is moved to public folder because Vite/Nuxt/Vue whatever tries 
+	to optimize it by using globalThis.__publicAssetsURL, but then it breaks
+*/
+
 let wasmInstance;
 
 import( new URL('/wavelet_sharpen_worker.js', import.meta.url))

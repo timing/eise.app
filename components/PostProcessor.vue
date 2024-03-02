@@ -47,7 +47,7 @@ import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.
 let waveletWorker;
 
 onMounted(() => {
-	waveletWorker = new Worker(new URL('@/utils/wavelet_worker.js', import.meta.url), {type: 'module'});
+	waveletWorker = new Worker(new URL('/wavelet_worker.js', import.meta.url), {type: 'module'});
 	waveletWorker.addEventListener('message', (e) => {
 		if (e.data.status === 'wasmLoaded') {
 			console.log('WASM module is ready to use.');
