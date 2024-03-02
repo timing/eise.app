@@ -4,3 +4,6 @@ Cross-Origin-Opener-Policy: same-origin
 
 /_nuxt/wavelet_worker*
 Cross-Origin-Embedder-Policy: require-corp
+
+/wavelet_worker*
+Cross-Origin-Embedder-Policy: require-corp
