@@ -13,7 +13,7 @@ self.addEventListener('message', async (e) => {
 
 	const { channel, imageData, width, height, amount, radius } = e.data;
 
-	console.log(channel);
+	//console.log(channel);
 
 	// Normalize imageData to floating-point values in the range [0, 1]
 	let floatData = Float32Array.from(imageData, val => val / 255.0);
@@ -29,7 +29,7 @@ self.addEventListener('message', async (e) => {
 	//logCopy('pixel 4553 before', floatData[4553]);
 
 	// Call the WebAssembly function
-	console.log('wavelet_sharpen', width, height, amount, radius);
+	//console.log('wavelet_sharpen', width, height, amount, radius);
 	wasmInstance._wavelet_sharpen(ptr, width, height, amount, radius);
 
 	// Retrieve the modified data
@@ -42,7 +42,7 @@ self.addEventListener('message', async (e) => {
 
 	wasmInstance._free(ptr);
 	
-	console.log(channel, denormalizedData);
+	//console.log(channel, denormalizedData);
 
 	self.postMessage({ channel, channelData: denormalizedData });
 });
