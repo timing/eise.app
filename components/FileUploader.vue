@@ -8,8 +8,12 @@
 <script setup>
 import { createFFmpeg, fetchFile } from '@ffmpeg/ffmpeg';
 import { defineEmits, ref } from 'vue';
+import { useEventBus } from '@/composables/eventBus';
 
 const emit = defineEmits(['frames', 'postProcessing']);
+
+const { addLog } = useEventBus();
+
 
 let ffmpeg = null;
 
@@ -18,7 +22,7 @@ async function processVideo(event) {
 	const files = Array.from(event.target.files); // Convert FileList to Array
 
 	console.log(files);
-        
+	
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser'));
 	const imageFiles = files.filter(file => file.type.startsWith('image/'));
 
@@ -37,6 +41,8 @@ async function processVideo(event) {
 	const frames = [];
 
 	if( videoFiles.length == 1 ){
+
+		addLog('Video selected, we need to convert this to a bunch of PNGs');
 
 		await loadFfmpeg();
 		
@@ -60,6 +66,9 @@ async function processVideo(event) {
 		console.log('typecheck', imageFiles[0].type, ['image/png', 'image/jpg', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'].indexOf(imageFiles[0].type));
 
 		if( ['image/png', 'image/jpg', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'].indexOf(imageFiles[0].type) == -1 ){
+		
+			addLog('One image selected that is not natively supported by browsers, converting..');
+
 			await loadFfmpeg();
 
 			ffmpeg.FS('writeFile', imageFiles[0].name, await fetchFile(imageFiles[0]));
@@ -75,8 +84,12 @@ async function processVideo(event) {
 			ffmpeg.FS('unlink', imageFiles[0].name);
 			ffmpeg.FS('unlink', imageFiles[0].name + '.png');
 
+			addLog('Load post processing');
+
 			emit('postProcessing', blob)
 		} else {
+
+			addLog('One image selected that is supported right away, load post processing');
 			emit('postProcessing', imageFiles[0]);
 		}
 	} else if( imageFiles.length >= 2 ){
@@ -94,12 +107,23 @@ async function loadFfmpeg(){
 	if( ffmpeg ){
 		return;
 	}
+
+	addLog('Loading FFmpeg')
+
 	ffmpeg = createFFmpeg({ 
 		corePath: 'https://unpkg.com/@ffmpeg/core@0.10.0/dist/ffmpeg-core.js',
 		log: true 
 	});
-
+	
 	await ffmpeg.load();
+
+	addLog('Loading FFmpeg done');
+
+    ffmpeg.setLogger(({ type, message }) => {
+		if( message.includes('frame=') ){
+			addLog(message);
+		}
+	}) 
 }
 </script>
 

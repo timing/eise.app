@@ -1,6 +1,6 @@
 <template>
 	<div class="wrapper">
-		<canvas id="postProcessCanvas" ref="canvas"></canvas>
+		<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" />
 	</div>
 	<div class="controls">
 		<div>
@@ -43,8 +43,17 @@
 <script setup>
 import { ref, onMounted, watch, defineProps } from 'vue';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
+import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 
 let waveletWorker;
+let canvas;
+
+const handleCanvasReady = (canvasRef) => {
+	// canvasRef is the direct ref to the canvas element
+	console.log('Canvas is ready:', canvasRef);
+	canvas = canvasRef;
+	// You can now use canvasRef.value to access the canvas element directly
+};
 
 onMounted(() => {
 	//waveletWorker = new Worker(new URL('@/utils/wavelet_worker.js', import.meta.url), {type: 'module'});
@@ -72,8 +81,6 @@ Module().then((module) => {
 const props = defineProps({
 	file: Object
 });
-
-const canvas = ref(null);
 
 const gain = ref(1);
 const preNoiseReduction = ref(1);

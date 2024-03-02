@@ -8,6 +8,9 @@
 import { onMounted, ref, watch, defineProps, defineEmits } from 'vue';
 import { calculateSharpness, isImageCutOff, calculateCenterOfGravity } from '@/utils/sobel.js'
 import { io } from "socket.io-client";
+import { useEventBus } from '@/composables/eventBus';
+
+const { addLog } = useEventBus();
 
 const emit = defineEmits(['postProcessing']);
 
@@ -59,9 +62,10 @@ async function processImageFrames(frames) {
 				frames[frame].center_of_gravity = calculateCenterOfGravity(imageData);
 
 				frames[frame].data = null;
+		
+				addLog('Frame ' + frame + '. Sharpness:' + frames[frame].sharpness + ', isCutOff:' + frames[frame].isCutOff + ', CoG: ' + 
+					frames[frame].center_of_gravity.x + ',' + frames[frame].center_of_gravity.x  );
 				
-				console.log('yoyo', frames[frame]);
-
 				if( frames[frame].sharpness > frames[bestFrame].sharpness ){
 					bestFrame = frame;
 				}

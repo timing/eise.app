@@ -3,6 +3,7 @@
 		<FileUploader @frames="handleFrames" @postProcessing="handlePostProcessing" />
 		<VideoFrameProcessor :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor :file="selectedFile" v-if="selectedFile" />
+		<Logger />
 		<div>
 			Stacking job in the cloud powered by <a href="https://m.do.co/c/5d8cf0a2f4b6">Digital Ocean</a> (get $200 in credits if you use this link).
 		</div>
@@ -13,6 +14,7 @@
 import FileUploader from '~/components/FileUploader.vue';
 import VideoFrameProcessor from './components/VideoFrameProcessor.vue';
 import PostProcessor from './components/PostProcessor.vue';
+import Logger from './components/Logger.vue';
 import { ref } from 'vue';
 
 const frames = ref(null);
@@ -29,12 +31,6 @@ async function handlePostProcessing(data) {
 </script>
 
 <style>
-.wrapper {
-	max-width: 100vw;
-	overflow: scroll;
-	max-height: 70vh;
-	border: 2px solid white;
-}
 canvas {
 	display: block; /* Prevents inline default and allows for proper overflow handling */
 	border: 2px solid white;
