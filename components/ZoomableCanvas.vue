@@ -124,10 +124,10 @@ const endDrag = () => {
 
 <style scoped>
 .zoomable-canvas-wrapper {
-	border: 1px solid red;
+	background: #eeeeee;
+	height: 80vh;
 }
 .zoomable-canvas-container {
-	border: 1px solid blue;
 	overflow: hidden;
 	align-items: center;
 	justify-content: center;

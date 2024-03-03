@@ -1,8 +1,12 @@
 <template>
-	<div>
-		<input type="file" accept="video/*,image/*,.ser" multiple @change="processVideo" />
-		Select one file for just post processing
-	</div>
+	<label class="file-upload-wrapper" for="file-upload">
+		<input id="file-upload" type="file" accept="video/*,image/*,.ser" multiple @change="processVideo" />
+		<h3>Select file(s)</h3>
+		<ul>
+			<li>Select one video file or list of image files for stacking and post processing.</li>
+			<li>Select one image file for post processing only.</li>
+		</ul>
+	</label>
 </template>
 
 <script setup>
@@ -119,7 +123,7 @@ async function loadFfmpeg(){
 
 	addLog('Loading FFmpeg done');
 
-    ffmpeg.setLogger(({ type, message }) => {
+	ffmpeg.setLogger(({ type, message }) => {
 		if( message.includes('frame=') ){
 			addLog(message);
 		}
@@ -127,3 +131,18 @@ async function loadFfmpeg(){
 }
 </script>
 
+<style>
+.file-upload-wrapper {
+	display: block;
+	color: #003366;
+	border: 3px dashed #003366;
+	border-radius: 10px;
+	max-width: 400px;
+	margin: 80px auto 50px auto;
+	padding: 50px;
+	cursor: pointer;
+}
+.file-upload-wrapper:hover {
+	background: #ffeeff;
+}
+</style>

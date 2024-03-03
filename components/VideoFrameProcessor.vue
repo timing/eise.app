@@ -104,12 +104,12 @@ async function processImageFrames(frames) {
 
 	ws.on('connect', () => {
 		console.log('Connected to server');
-
 		// Join a room
 		ws.emit('join', {room: jobId});
 	});
 
 	ws.on('console_output', (data) => {
+		addLog(data.data);
 		console.log('Console output', data);
 	});
 
@@ -118,9 +118,11 @@ async function processImageFrames(frames) {
 	});
 
 	ws.on('image_data', (blob) => {
+		addLog('Server side stack finished, loading post processing.');
 		emit('postProcessing', new Blob([blob]));	
 	});
 	
+	addLog('Uploading best frames to server, for stacking with Planetary System Stacker (see about)');
 	fetch(host + '/upload', {
 		method: 'POST',
 		body: formData

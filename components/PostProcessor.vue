@@ -1,20 +1,19 @@
 <template>
-	<div class="wrapper">
-		<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" />
-	</div>
+<div>
 	<div class="controls">
+		<h4>Wavelets sharpen</h4>
 		<div>
 			<label>Gain:</label>
 			<input type="range" min="0" max="3" step="0.01" v-model="gain" @input="applyProcessing"/>
 		</div>
-		<div>
+		<div style="display:none;">
 			<label>Pre Noise Reduction:</label>
-			<input type="range" min="1" max="50" step="2" v-model="preNoiseReduction" @input="applyProcessing"/>
+			<input type="range" min="-1" max="50" step="2" v-model="preNoiseReduction" @input="applyProcessing"/>
 			<span>{{ preNoiseReduction }}</span>
 		</div>
 		<div>
 			<label>Wavelets Radius:</label>
-			<input type="range" min="0" max="2" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
+			<input type="range" min="0" max="5" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
 			<span>{{ waveletsRadius }}</span>
 		</div>
 		<div>
@@ -34,10 +33,17 @@
 		</div>-->
 		<div>
 			<label>Post Noise Reduction:</label>
-			<input type="range" min="1" max="50" step="2" v-model="postNoiseReduction" @input="applyProcessing"/>
+			<input type="range" min="-1" max="50" step="2" v-model="postNoiseReduction" @input="applyProcessing"/>
 			<span>{{ postNoiseReduction }}</span>
 		</div>
+
+		<button class="download" @click="downloadCanvasAsPNG">Save / Download as PNG</button>
+
 	</div>
+	<div class="wrapper">
+		<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" />
+	</div>
+</div>
 </template>
 
 <script setup>
@@ -53,6 +59,18 @@ const handleCanvasReady = (canvasRef) => {
 	console.log('Canvas is ready:', canvasRef);
 	canvas = canvasRef;
 	// You can now use canvasRef.value to access the canvas element directly
+};
+
+const downloadCanvasAsPNG = () => {
+	if (!canvas) return;
+
+	const dataURL = canvas.value.toDataURL('image/png');
+	const link = document.createElement('a');
+	link.download = 'PICS_stacked_pps.png';
+	link.href = dataURL;
+	document.body.appendChild(link); // Required for Firefox
+	link.click();
+	document.body.removeChild(link);
 };
 
 onMounted(() => {
@@ -83,27 +101,16 @@ const props = defineProps({
 });
 
 const gain = ref(1);
-const preNoiseReduction = ref(1);
+const preNoiseReduction = ref(0);
 const waveletsRadius = ref(0);
 const waveletsAmount = ref(0);
 const bilateralFraction = ref(0.5);
 const bilateralRange = ref(50);
-const postNoiseReduction = ref(1);
+const postNoiseReduction = ref(0);
 
 onMounted(() => {
 	if (props.file) {
 		loadImage(props.file);
-	}
-});
-
-
-onMounted(async () => {
-	try {
-		
-		// If the module exports a function you want to call, do it here
-		// module.yourExportedFunction();
-	} catch (error) {
-		console.error('Failed to load the module:', error);
 	}
 });
 
@@ -178,8 +185,12 @@ async function applyProcessing (){
 		sharpenedImageData = await waveletSharpenInWorker(preNoiseReducedImageData, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
 		ctx.putImageData(sharpenedImageData, 0, 0);
 	}
+		
+	if( postNoiseReduction.value == -1 ){
+		postNoiseReduction.value = 0;
+	}
 
-	if( valueIsChanged('postNoiseReduction', postNoiseReduction.value) ){
+	if( valueIsChanged('postNoiseReduction', postNoiseReduction.value) && postNoiseReduction.value >= 3 ){
 		const srcMat = imageDataToMat(sharpenedImageData);
 		const dstMat = new cv.Mat();
 		cv.cvtColor(srcMat, srcMat, cv.COLOR_RGBA2RGB, 0);
@@ -270,8 +281,18 @@ function waveletSharpenInWorker(imageData, amount, radius){
 </script>
 
 <style>
-	canvas {
+canvas {
 
-	}
+}
+.controls {
+	float: right;
+	width: 300px; 
+	background: white;
+	height: 100vh;
+	padding: 10px;	
+}
+.download {
+	margin-top: 10px;
+}
 </style>
 
