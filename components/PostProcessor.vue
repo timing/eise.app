@@ -48,6 +48,7 @@
 
 <script setup>
 import { ref, onMounted, watch, defineProps } from 'vue';
+import { throttle } from 'lodash';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 
@@ -74,8 +75,6 @@ const downloadCanvasAsPNG = () => {
 };
 
 onMounted(() => {
-	//waveletWorker = new Worker(new URL('@/utils/wavelet_worker.js', import.meta.url), {type: 'module'});
-	// we cannot load it like above, then CF breaks it
 	waveletWorker = new Worker('/wavelet_worker.js', {type: 'module'});
 	waveletWorker.addEventListener('message', (e) => {
 		if (e.data.status === 'wasmLoaded') {
@@ -164,7 +163,7 @@ async function loadImage(file) {
 	img.src = URL.createObjectURL(file);
 }
 
-async function applyProcessing (){
+const applyProcessing = throttle(async() => {
 	if( valueIsChanged('gain', gain.value) ){ 
 		gainedImageData = new ImageData(initCanvasImageData.data.map(value => value * gain.value), canvas.value.width, canvas.value.height);
 		preNoiseReducedImageData = gainedImageData;
@@ -197,44 +196,12 @@ async function applyProcessing (){
 		cv.GaussianBlur(srcMat, dstMat, new cv.Size(parseInt(postNoiseReduction.value, 10), parseInt(postNoiseReduction.value, 10)), 0, 0, cv.BORDER_DEFAULT);
 		cv.imshow('postProcessCanvas', dstMat);
 	}
-};
-
-function extractChannelData(data) {
-	// Initialize arrays to hold channel data
-	let redChannel = [];
-	let greenChannel = [];
-	let blueChannel = [];
-	
-	// Extract each channel
-	for (let i = 0; i < data.length; i += 4) {
-		redChannel.push(data[i]); // R
-		greenChannel.push(data[i + 1]); // G
-		blueChannel.push(data[i + 2]); // B
-	}
-
-	console.log('extractChannelData length compare', data.length, redChannel.length);
-
-	return [redChannel, greenChannel, blueChannel];
-}
+}, 100);
 
 function imageDataToMat(imageData) {
 	let mat = new cv.Mat(imageData.height, imageData.width, cv.CV_8UC4);
 	mat.data.set(imageData.data);
 	return mat;
-}
-
-function mergeChannelsIntoImageData(channels) {
-	const [redChannel, greenChannel, blueChannel] = channels;
-	const mergedData = [];
-	
-	for (let i = 0; i < redChannel.length; i++) {
-		mergedData[i * 4] = redChannel[i]; // R
-		mergedData[i * 4 + 1] = greenChannel[i]; // G
-		mergedData[i * 4 + 2] = blueChannel[i];	// B
-		mergedData[i * 4 + 3] = 255;						 // Alpha channel set to fully opaque
-	}
-	
-	return mergedData;
 }
 
 function logCopy(name, array){
@@ -249,32 +216,20 @@ function waveletSharpenInWorker(imageData, amount, radius){
 	const width = imageData.width
 	const height = imageData.height;
 	return new Promise((resolve, reject) => {
-		let channelsCount = 0;
-		let allChannelsData = [];
 
 		function handleWorkerMsg(e){
 			// Get the processed image data from the worker
-			const { channel, channelData } = e.data;
+			const { imageData } = e.data;
 
-			allChannelsData[channel] = channelData;
-		
-			channelsCount++;
-			
-			if( channelsCount == 3 ){
-				//ctx.putImageData(new ImageData(new Uint8ClampedArray(mergeChannelsIntoImageData(allChannelsData)), initCanvasImageData.width, initCanvasImageData.height), 0, 0);
-				waveletWorker.removeEventListener('message', handleWorkerMsg)
-				resolve(new ImageData(new Uint8ClampedArray(mergeChannelsIntoImageData(allChannelsData)), initCanvasImageData.width, initCanvasImageData.height));
-			}
+			console.log('imageDataaa', imageData);
+
+			waveletWorker.removeEventListener('message', handleWorkerMsg)
+			resolve(imageData);
 		}
 
 		waveletWorker.addEventListener('message', handleWorkerMsg);
 
-		const channelData = extractChannelData(imageData.data);
-
-		for( let c in channelData ){
-			// To send data to the worker for processing
-			waveletWorker.postMessage({ channel: parseInt(c, 10), imageData: channelData[c], width, height, amount, radius });	
-		}
+		waveletWorker.postMessage({ imageData: imageData.data, width, height, amount, radius });	
 	});
 }
 

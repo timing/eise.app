@@ -3,6 +3,7 @@
 export default defineNuxtConfig({
 	devtools: { enabled: true },
 	plugins: [
+		'~/plugins/ffmpeg.js',
 		{src: '~/plugins/opencv.js', mode: 'client'}
 	],
 	// see https://github.com/nuxt/nuxt/issues/22141

@@ -11,7 +11,8 @@
 		</nav>
 
 		<FileUploader v-show="currentTab === 'FileUploader'" @frames="handleFrames" @postProcessing="handlePostProcessing" />
-		<VideoFrameProcessor v-show="currentTab === 'VideoFrameProcessor'" :frames="frames" @postProcessing="handlePostProcessing" />
+		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'VideoFrameProcessor'" 
+			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" />
 		<Logger />
 		<div style="display:none;">
@@ -27,13 +28,26 @@ import PostProcessor from './components/PostProcessor.vue';
 import Logger from './components/Logger.vue';
 import { ref } from 'vue';
 
+
 const frames = ref(null);
+const currentFrame = ref(null);
 const selectedFile = ref(null);
 const currentTab = ref('FileUploader');
+const videoProcessorRef = ref(null);
+
 
 async function handleFrames(data) {
 	frames.value = data; 
 	currentTab.value = 'VideoFrameProcessor'
+}
+
+async function handleSingleFrame(data, index, frameCount){
+	currentFrame.value = data;
+	currentTab.value = 'VideoFrameProcessor'
+
+	if( index >= frameCount -1 ){
+		videoProcessorRef.value.filterAndStack();
+	}
 }
 
 async function handlePostProcessing(data) {

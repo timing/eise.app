@@ -12,6 +12,8 @@ import { useEventBus } from '@/composables/eventBus';
 
 const { addLog } = useEventBus();
 
+const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
+
 const emit = defineEmits(['postProcessing']);
 
 const props = defineProps({
@@ -31,22 +33,39 @@ watch(() => props.frames, (newVal) => {
 	}
 });
 
-async function processImageFrames(frames) {
+async function processImageFrames(files) {
 	if (!canvasRef.value) return;
 
 	const ctx = canvasRef.value.getContext('2d', {willReadFrequently: true});
+	
+	const promises = [];	
 
-	const promises = [];
+	const frames = new Array(files.length).fill().map(() => ({}));
 
-	let bestFrame = 0;
+	const bestFramesCapacity = Math.min(300, Math.ceil(files.length * 0.3));
+	const bestFrames = [];
 
-	for( const frame in frames ){
+	function addFrameToBest(frame) {
+		if (bestFrames.length < bestFramesCapacity) {
+			bestFrames.push(frame);
+		} else {
+			// Find the least sharp frame
+			let minSharpnessIndex = bestFrames.reduce((minIdx, currFrame, idx, arr) => 
+				(currFrame.sharpness < arr[minIdx].sharpness) ? idx : minIdx, 0);
+				
+			if (frame.sharpness > bestFrames[minSharpnessIndex].sharpness) {
+				bestFrames[minSharpnessIndex] = frame; // Replace the least sharp frame
+			}
+		}
+	}	
+
+	for( const [index, file] of files.entries() ){	
 
 		const promise = new Promise((resolve, reject) => {
 
-			const frameData = frames[frame].data;
-			const blob = new Blob([frameData], { type: 'image/png' });
-			frames[frame].pngBlob = blob;
+			const blob = new Blob([$ffmpeg.FS('readFile', file)], { type: 'image/png' });
+			$ffmpeg.FS('unlink', file); 
+
 			const url = URL.createObjectURL(blob);
 			const img = new Image();
 
@@ -57,18 +76,17 @@ async function processImageFrames(frames) {
 				ctx.drawImage(img, 0, 0);
 
 				const imageData = ctx.getImageData(0, 0, canvasRef.value.width, canvasRef.value.height)
-				frames[frame].sharpness = calculateSharpness(imageData);
-				frames[frame].isCutOff = isImageCutOff(imageData);
-				frames[frame].center_of_gravity = calculateCenterOfGravity(imageData);
 
-				frames[frame].data = null;
-		
-				addLog('Frame ' + frame + '. Sharpness:' + frames[frame].sharpness + ', isCutOff:' + frames[frame].isCutOff + ', CoG: ' + 
-					frames[frame].center_of_gravity.x + ',' + frames[frame].center_of_gravity.x  );
-				
-				if( frames[frame].sharpness > frames[bestFrame].sharpness ){
-					bestFrame = frame;
+				const frameData = { sharpness: calculateSharpness(imageData), pngBlob: blob };
+
+				if( !isImageCutOff(imageData) ){ 
+					addFrameToBest(frameData);
 				}
+				//frameData.center_of_gravity = calculateCenterOfGravity(imageData);
+
+				addLog('Frame ' + index + '. Sharpness:' + frameData.sharpness + ', isCutOff:' + frameData.isCutOff + ', CoG: '
+					// + frameData.center_of_gravity.x + ',' + frameData.center_of_gravity.x	
+				);	
 
 				URL.revokeObjectURL(url); // Clean up the object URL after drawing the image
 
@@ -83,14 +101,14 @@ async function processImageFrames(frames) {
 
 	await Promise.all(promises); // Wait for all frame processing promises to resolve
 
-	const sharpestFrames = filterSharpestFrames(frames, 30);
-
 	const formData = new FormData();
 
 	const imageIdentifier = Math.round(Math.random() * 10000);
 
-	for( const s in sharpestFrames ){
-		formData.append('imageFiles', sharpestFrames[s].pngBlob, `${imageIdentifier}-${s}.png`);
+	console.log(bestFrames);
+
+	for( const s in bestFrames ){
+		formData.append('imageFiles', bestFrames[s].pngBlob, `${imageIdentifier}-${s}.png`);
 	}
 
 	const host = 'https://cloud-stacker.playli.be'
@@ -130,17 +148,6 @@ async function processImageFrames(frames) {
 	.then(response => response.json())
 	.then(data => console.log(data))
 	.catch(error => console.error('Error:', error));
-}
-
-function filterSharpestFrames(frames, percentage){
-	frames.sort((a, b) => b.sharpness - a.sharpness);
-
-	frames = frames.filter(frame => !frame.isCutOff);
-
-	// Calculate the number of sharpest frames to select
-	const numSharpest = Math.ceil(frames.length * (percentage / 100));
-
-	return frames.slice(0, numSharpest);
 }
 
 </script>

@@ -31,7 +31,7 @@ onMounted(async () => {
 
 const handleWheel = (event) => {
 	event.preventDefault(); // Prevent the page from scrolling
-	const scaleAmount = 0.05;
+	const scaleAmount = 0.02;
 	const rect = canvas.value.getBoundingClientRect(); // Get canvas position and size
 	const mouseX = event.clientX - rect.left; // Mouse X position within the canvas
 	const mouseY = event.clientY - rect.top; // Mouse Y position within the canvas
