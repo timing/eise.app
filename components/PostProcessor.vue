@@ -48,7 +48,7 @@
 
 <script setup>
 import { ref, onMounted, watch, defineProps } from 'vue';
-import { throttle } from 'lodash';
+import throttle from 'lodash/throttle';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 
