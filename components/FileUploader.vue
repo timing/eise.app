@@ -1,4 +1,9 @@
 <template>
+<div>
+	<div class="content">
+		<h2>Welcome to Planetary Image Cloud Stacker!</h2>
+		<p>The name says what it is, maybe a bit boring though. Get started by uploading a video file.</p>
+	</div>
 	<label class="file-upload-wrapper" for="file-upload">
 		<h3>Select file(s)</h3>
 		<input id="file-upload" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
@@ -9,6 +14,7 @@
 			<li>Max 2k frames are extracted from video files. 30% or 300 frames are used for the final stack.</li>
 		</ul>
 	</label>
+</div>
 </template>
 
 <script setup>
@@ -127,6 +133,9 @@ async function processVideo(event) {
 	margin: 80px auto 50px auto;
 	padding: 50px;
 	cursor: pointer;
+}
+.file-upload-wrapper ul {
+	padding-left: 0;
 }
 .file-upload-wrapper:hover {
 	background: #ffeeff;

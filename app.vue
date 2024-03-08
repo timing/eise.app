@@ -108,7 +108,7 @@ button:hover {
 	color: white;
 }
 .content {
-	max-width: 800px;
+	max-width: 500px;
 	margin: 0 auto;
 }
 canvas {
