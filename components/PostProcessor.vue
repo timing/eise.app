@@ -1,47 +1,51 @@
 <template>
 <div>
-	<div class="controls">
-		<h4>Wavelets sharpen</h4>
-		<div>
-			<label>Gain:</label>
-			<input type="range" min="0" max="3" step="0.01" v-model="gain" @input="applyProcessing"/>
-		</div>
-		<div style="display:none;">
-			<label>Pre Noise Reduction:</label>
-			<input type="range" min="-1" max="50" step="2" v-model="preNoiseReduction" @input="applyProcessing"/>
-			<span>{{ preNoiseReduction }}</span>
-		</div>
-		<div>
-			<label>Wavelets Radius:</label>
-			<input type="range" min="0" max="5" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
-			<span>{{ waveletsRadius }}</span>
-		</div>
-		<div>
-			<label>Wavelets Amount:</label>
-			<input type="range" min="0" max="100" step="0.01" v-model="waveletsAmount" @input="applyProcessing"/>
-			<span>{{ waveletsAmount }}</span>
-		</div>
-		<!--<div>
-			<label>Bilateral Fraction:</label>
-			<input type="range" min="0" max="1" step="0.01" v-model="bilateralFraction" @input="applyProcessing"/>
-			<span>{{ bilateralFraction }}</span>
-		</div>
-		<div>
-			<label>Bilateral Range:</label>
-			<input type="range" min="0" max="255" step="0.1" v-model="bilateralRange" @input="applyProcessing"/>
-			<span>{{ bilateralRange }}</span>
-		</div>-->
-		<div>
-			<label>Post Noise Reduction:</label>
-			<input type="range" min="-1" max="50" step="2" v-model="postNoiseReduction" @input="applyProcessing"/>
-			<span>{{ postNoiseReduction }}</span>
-		</div>
-
-		<button class="download" @click="downloadCanvasAsPNG">Save / Download as PNG</button>
-
+	<div class="content" v-if="!props.file">
+		<h2>Nothing loaded yet</h2>
+		<p>Please upload a video (or bunch of files) for analyzing and stacking frames. Upload one image file for direct post processing.</p>
 	</div>
-	<div class="wrapper">
-		<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" />
+	<div v-else>
+		<div class="controls">
+			<h4>Wavelets sharpen</h4>
+			<div>
+				<label>Gain:</label>
+				<input type="range" min="0" max="3" step="0.01" v-model="gain" @input="applyProcessing"/>
+			</div>
+			<div style="display:none;">
+				<label>Pre Noise Reduction:</label>
+				<input type="range" min="-1" max="50" step="2" v-model="preNoiseReduction" @input="applyProcessing"/>
+				<span>{{ preNoiseReduction }}</span>
+			</div>
+			<div>
+				<label>Wavelets Radius:</label>
+				<input type="range" min="0" max="5" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
+				<span>{{ waveletsRadius }}</span>
+			</div>
+			<div>
+				<label>Wavelets Amount:</label>
+				<input type="range" min="0" max="100" step="0.01" v-model="waveletsAmount" @input="applyProcessing"/>
+				<span>{{ waveletsAmount }}</span>
+			</div>
+			<!--<div>
+				<label>Bilateral Fraction:</label>
+				<input type="range" min="0" max="1" step="0.01" v-model="bilateralFraction" @input="applyProcessing"/>
+				<span>{{ bilateralFraction }}</span>
+			</div>
+			<div>
+				<label>Bilateral Range:</label>
+				<input type="range" min="0" max="255" step="0.1" v-model="bilateralRange" @input="applyProcessing"/>
+				<span>{{ bilateralRange }}</span>
+			</div>-->
+			<div>
+				<label>Post Noise Reduction:</label>
+				<input type="range" min="-1" max="50" step="2" v-model="postNoiseReduction" @input="applyProcessing"/>
+				<span>{{ postNoiseReduction }}</span>
+			</div>
+
+			<button class="download" @click="downloadCanvasAsPNG">Save / Download as PNG</button>
+
+		</div>
+			<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" />
 	</div>
 </div>
 </template>

@@ -1,7 +1,7 @@
 <template>
 	<label class="file-upload-wrapper" for="file-upload">
-		<input id="file-upload" type="file" accept="video/*,image/*,.ser" multiple @change="processVideo" />
 		<h3>Select file(s)</h3>
+		<input id="file-upload" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
 		<ul>
 			<li>Select one video file for stacking and post processing.</li>
 			<li>Coming soon: Select multiple image files for stacking and post processing.</li>
@@ -23,6 +23,11 @@ const emit = defineEmits(['singleFrame', 'frames', 'postProcessing', 'lastFrame'
 const { addLog } = useEventBus();
 
 let ffmpeg = null;
+
+async function onFileChanged(event){
+	useEventBus().emit('start-loading');
+	await processVideo(event);
+}
 
 async function processVideo(event) {
 

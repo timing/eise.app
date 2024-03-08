@@ -1,12 +1,15 @@
 <template>
 	<div>
 		<header>
-			<div class="info">8bit</div>
+			<div class="info">8bit per channel</div>
 			<h1>PICS - Planetary Image Cloud Stacker</h1>
 		</header>
+
+		<LoadingIndicator />
+
 		<nav class="tabs">
 			<button :class="{ active: currentTab === 'FileUploader' }" @click="currentTab = 'FileUploader'">📁 Upload File(s)</button>
-			<button :class="{ active: currentTab === 'VideoFrameProcessor' }" @click="currentTab = 'VideoFrameProcessor'">🎞️ Process Frames</button>
+			<button :class="{ active: currentTab === 'VideoFrameProcessor' }" @click="currentTab = 'VideoFrameProcessor'">🎞️ Analyze Frames</button>
 			<button :class="{ active: currentTab === 'PostProcessor' }" @click="currentTab = 'PostProcessor'">✨ Post Process</button>	
 		</nav>
 
@@ -29,7 +32,7 @@ import Logger from './components/Logger.vue';
 import { ref } from 'vue';
 
 
-const frames = ref(null);
+const frames = ref([]);
 const currentFrame = ref(null);
 const selectedFile = ref(null);
 const currentTab = ref('FileUploader');
@@ -97,12 +100,16 @@ button {
 	border-radius: 5px 5px 0 0;
 	margin-right: 5px;
 }
-.tabs button:hover {
+button:hover {
 	background-color: #003366; 
 }
 .tabs button.active {
 	background-color: #001122; 
 	color: white;
+}
+.content {
+	max-width: 800px;
+	margin: 0 auto;
 }
 canvas {
 	display: block; 

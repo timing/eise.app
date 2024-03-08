@@ -125,7 +125,7 @@ const endDrag = () => {
 <style scoped>
 .zoomable-canvas-wrapper {
 	background: #eeeeee;
-	height: 80vh;
+	height: 60vh;
 }
 .zoomable-canvas-container {
 	overflow: hidden;

@@ -1,5 +1,9 @@
 <template>
 	<div>
+		<div class="content" v-if="props.frames && props.frames.length === 0">
+			<h2>Nothing loaded yet</h2>
+			<p>To get started, please upload a video or bunch of files for analyzing and stacking.</p>
+		</div>
 		<canvas ref="canvasRef"></canvas>
 	</div>
 </template>
@@ -22,7 +26,7 @@ const props = defineProps({
 const canvasRef = ref(null);
 
 onMounted(() => {
-	if (props.frames) {
+	if (props.frames.length > 0) {
 		processImageFrames(props.frames);
 	}
 });
@@ -35,6 +39,8 @@ watch(() => props.frames, (newVal) => {
 
 async function processImageFrames(files) {
 	if (!canvasRef.value) return;
+
+	useEventBus().emit('start-loading');
 
 	const ctx = canvasRef.value.getContext('2d', {willReadFrequently: true});
 	
@@ -84,11 +90,15 @@ async function processImageFrames(files) {
 				}
 				//frameData.center_of_gravity = calculateCenterOfGravity(imageData);
 
-				addLog('Frame ' + index + '. Sharpness:' + frameData.sharpness + ', isCutOff:' + frameData.isCutOff + ', CoG: '
+				addLog('Frame ' + index + '. Sharpness:' + frameData.sharpness);
+
+				/*	 + ', isCutOff:' + frameData.isCutOff + ', CoG: '
 					// + frameData.center_of_gravity.x + ',' + frameData.center_of_gravity.x	
-				);	
+				);*/
 
 				URL.revokeObjectURL(url); // Clean up the object URL after drawing the image
+
+				useEventBus().emit('update-loading', index / files.length * 100);
 
 				resolve(); 
 			};
@@ -137,8 +147,11 @@ async function processImageFrames(files) {
 
 	ws.on('image_data', (blob) => {
 		addLog('Server side stack finished, loading post processing.');
+		useEventBus().emit('stop-loading');
 		emit('postProcessing', new Blob([blob]));	
 	});
+
+	useEventBus().emit('start-loading');
 	
 	addLog('Uploading best frames to server, for stacking with Planetary System Stacker (see about)');
 	fetch(host + '/upload', {
@@ -146,8 +159,8 @@ async function processImageFrames(files) {
 		body: formData
 	})
 	.then(response => response.json())
-	.then(data => console.log(data))
-	.catch(error => console.error('Error:', error));
+	.then(data => { addLog(data.message); console.log(data)})
+	.catch(error => { addLog(error.message); console.error('Error:', error) });
 }
 
 </script>
