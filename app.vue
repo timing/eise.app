@@ -1,7 +1,7 @@
 <template>
 	<div>
 		<header>
-			<div class="info">8bit per channel</div>
+			<div class="info" title="This tool is in development, and the URL might not work in the future.">DEVELOPMENT</div>
 			<h1>PICS - Planetary Image Cloud Stacker</h1>
 		</header>
 
