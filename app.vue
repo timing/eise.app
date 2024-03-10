@@ -21,6 +21,8 @@
 		<div style="display:none;">
 			Stacking job in the cloud powered by <a href="https://m.do.co/c/5d8cf0a2f4b6">Digital Ocean</a> (get $200 in credits if you use this link).
 		</div>
+
+		<img v-if="loadPixel" src="https://analytics.tijmentiming.workers.dev/pixel.gif"/>
 	</div>
 </template>
 
@@ -38,6 +40,11 @@ const selectedFile = ref(null);
 const currentTab = ref('FileUploader');
 const videoProcessorRef = ref(null);
 
+const loadPixel = ref(false)
+
+onMounted(() => {
+	loadPixel.value = true
+});
 
 async function handleFrames(data) {
 	frames.value = data; 
