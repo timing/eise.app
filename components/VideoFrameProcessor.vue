@@ -117,7 +117,11 @@ async function processImageFrames(files) {
 
 	const imageIdentifier = Math.round(Math.random() * 10000);
 
-	console.log(bestFrames);
+	if( bestFrames.length == 0 ){
+		addLog('No frames to stack.');
+		useEventBus().emit('stop-loading');
+		return false;
+	}
 
 	for( const s in bestFrames ){
 		formData.append('imageFiles', bestFrames[s].pngBlob, `${imageIdentifier}-${s}.png`);

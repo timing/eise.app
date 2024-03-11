@@ -46,13 +46,11 @@ const handleWheel = (event) => {
 	}
 	const newZoom = zoomLevel.value;
 
-	console.log(newZoom);
-
-	if( Math.abs(1, zoomLevel.value) < 0.05 ){
-	//	zoomLevel.value = 1;
+	if( Math.abs(1, zoomLevel.value) < 0.1 ){
+		zoomLevel.value = 1;
 	}
 
-	zoomLevel.value = Math.round(zoomLevel.value, 2);
+	zoomLevel.value = Math.round(zoomLevel.value * 100) / 100;
 
 	// Calculate the factor of zoom change
 	const zoomFactor = newZoom - oldZoom;

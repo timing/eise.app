@@ -39,7 +39,7 @@
 				<li>A very basic post processor is opened, providing Wavelets sharpening, and some noise reduction. Code is from OpenCV and a GIMP plugin compiled to WebAssembly using emscripten.</li>
 			</ul>
 			<p>In essence, PICS is a blend of PSS's stacking capabilities combined with browser-based frame ranking and (post) processing.</p>
-			<p>I hope this web-app will improve your astrophotography workflow.</p>
+			<p>I hope this web-app will improve your astrophotography workflow, or helps beginners not giving up when trying to set-up their software.</p>
 			<p>Happy Stacking,<br/> Tijmen</p>
 		</div>
 

@@ -12,6 +12,7 @@
 			<li>Coming soon: Select multiple image files for stacking and post processing.</li>
 			<li>Select one image file for post processing only.</li>
 			<li>Max 2k frames are extracted from video files. 30% or 300 frames are used for the final stack.</li>
+			<li>For now choosing video files smaller than 2GB works, but let us find the limit!</li>
 		</ul>
 	</label>
 </div>
@@ -33,6 +34,7 @@ let ffmpeg = null;
 async function onFileChanged(event){
 	useEventBus().emit('start-loading');
 	await processVideo(event);
+	useEventBus().emit('stop-loading');
 }
 
 async function processVideo(event) {
