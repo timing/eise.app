@@ -87,10 +87,12 @@ async function processImageFrames(files) {
 
 				if( !isImageCutOff(imageData) ){ 
 					addFrameToBest(frameData);
+					addLog('Frame ' + index + '. Sharpness:' + frameData.sharpness);
+				} else {
+					addLog('Frame skipped (cut off) ' + index + '. Sharpness:' + frameData.sharpness);
 				}
 				//frameData.center_of_gravity = calculateCenterOfGravity(imageData);
 
-				addLog('Frame ' + index + '. Sharpness:' + frameData.sharpness);
 
 				/*	 + ', isCutOff:' + frameData.isCutOff + ', CoG: '
 					// + frameData.center_of_gravity.x + ',' + frameData.center_of_gravity.x	

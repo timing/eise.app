@@ -444,7 +444,7 @@ function sobel(imageData) {
 	return avgGradient;
 }
 
-export function isImageCutOff(imageData, border = 5, threshold = 10) {
+export function isImageCutOff(imageData, border = 5, threshold = 30) {
 	const { data, width, height } = imageData;
 
 	// Helper function to check if a pixel is not black
