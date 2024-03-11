@@ -46,6 +46,14 @@ const handleWheel = (event) => {
 	}
 	const newZoom = zoomLevel.value;
 
+	console.log(newZoom);
+
+	if( Math.abs(1, zoomLevel.value) < 0.05 ){
+	//	zoomLevel.value = 1;
+	}
+
+	zoomLevel.value = Math.round(zoomLevel.value, 2);
+
 	// Calculate the factor of zoom change
 	const zoomFactor = newZoom - oldZoom;
 
@@ -125,12 +133,19 @@ const endDrag = () => {
 <style scoped>
 .zoomable-canvas-wrapper {
 	background: #eeeeee;
-	height: 60vh;
+	height: calc(100vh - 98px);
+	width: calc(100% - 320px);
+	position: relative;
 }
 .zoomable-canvas-container {
 	overflow: hidden;
 	align-items: center;
 	justify-content: center;
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	right: 0;
 	/*touch-action: none;*/
 }
 canvas {

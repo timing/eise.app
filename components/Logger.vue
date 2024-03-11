@@ -33,8 +33,7 @@ onMounted(() => {
 	position: fixed;
 	bottom: 0;
 	right: 0;
-	min-width: 600px;
-	max-width: 50%;
+	width: 298px;
 }
 .logger pre {
 	overflow-y: scroll;

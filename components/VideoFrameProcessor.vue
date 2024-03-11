@@ -4,7 +4,7 @@
 			<h2>Nothing loaded yet</h2>
 			<p>To get started, please upload a video or bunch of files for analyzing and stacking.</p>
 		</div>
-		<canvas ref="canvasRef"></canvas>
+		<canvas id="analyzeCanvas" ref="canvasRef"></canvas>
 	</div>
 </template>
 
@@ -167,8 +167,8 @@ async function processImageFrames(files) {
 
 </script>
 
-<style>
-	canvas {
-	
+<style scoped>
+	canvas#analyzeCanvas {
+		margin: 20px auto;
 	}
 </style>
