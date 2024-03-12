@@ -36,7 +36,8 @@
 					<a target="_blank" href="https://m.do.co/c/5d8cf0a2f4b6" title="get $200 in credits if you use this link">Digital Ocean</a>.</li>
 				<li>On the server a slightly modified <a target="_blank" href="https://github.com/Rolf-Hempel/PlanetarySystemStacker">Planetary System Stacker</a> (by Rolf Hempel) is stacking all frames it receives.</li>
 				<li>The server returns the stacked image to the browser.</li>
-				<li>A very basic post processor is opened, providing Wavelets sharpening, and some noise reduction. Code is from OpenCV and a GIMP plugin compiled to WebAssembly using emscripten.</li>
+				<li>A very basic post processor is opened, providing Wavelets sharpening, and some noise reduction. 
+					Code is from OpenCV and a <a href="https://github.com/mrossini-ethz/gimp-wavelet-sharpen/blob/master/src/wavelet.c" target="_blank">GIMP plugin</a> compiled to WebAssembly using emscripten.</li>
 			</ul>
 			<p>In essence, PICS is a blend of PSS's stacking capabilities combined with browser-based frame ranking and (post) processing.</p>
 			<p>I hope this web-app will improve your astrophotography workflow, or helps beginners not giving up when trying to set-up their software.</p>
@@ -92,6 +93,14 @@ async function handlePostProcessing(data) {
 	currentTab.value = 'PostProcessor';
 	selectedFile.value = data; 
 }
+
+useHead({
+  title: 'PICS - Planetary Image Cloud Stacker',
+  meta: [
+    { name: 'description', content: 'Planetary Image Cloud Stacker' },
+  ],
+});
+
 </script>
 
 <style>
