@@ -17,7 +17,7 @@ const logContent = ref(null);
 onMounted(() => {
   onLogAdded((log) => {
 
-	logContent.value.innerHTML += log + '\n';
+	logContent.value.innerHTML += (new Date()).toLocaleString() + ': ' + log + '\n';
 
 	nextTick(() => {
 		logContent.value.scrollTop = logContent.value.scrollHeight;
@@ -33,13 +33,13 @@ onMounted(() => {
 	position: fixed;
 	bottom: 0;
 	right: 0;
-	width: 298px;
+	left: 0;
 }
 .logger pre {
 	overflow-y: scroll;
 	font-size: 10px;
 	line-height: 12px;
-	height: 120px;
+	height: 12px;
 }
 </style>
 

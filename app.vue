@@ -96,6 +96,7 @@ async function handlePostProcessing(data) {
 
 useHead({
   title: 'PICS - Planetary Image Cloud Stacker',
+  // Overview Effect
   meta: [
     { name: 'description', content: 'Planetary Image Cloud Stacker' },
   ],

@@ -42,11 +42,27 @@
 				<input type="range" min="-1" max="50" step="2" v-model="postNoiseReduction" @input="applyProcessing"/>
 				<span>{{ postNoiseReduction }}</span>
 			</div>
+			
+			<h4>Move blue color channel</h4>
+
+			<button @click="processChromaticAbberation('up', 1, 'blue')">↑</button>
+			<button @click="processChromaticAbberation('down', 1, 'blue')">↓</button>
+			<button @click="processChromaticAbberation('left', 1, 'blue')">←</button>
+			<button @click="processChromaticAbberation('right', 1, 'blue')">→</button>
+			
+			<h4>Move red color channel</h4>
+
+			<button @click="processChromaticAbberation('up', 1, 'red')">↑</button>
+			<button @click="processChromaticAbberation('down', 1, 'red')">↓</button>
+			<button @click="processChromaticAbberation('left', 1, 'red')">←</button>
+			<button @click="processChromaticAbberation('right', 1, 'right')">→</button>
+			
+			<h4>Save image</h4>
 
 			<button class="download" @click="downloadCanvasAsPNG">Save / Download as PNG</button>
 
 		</div>
-			<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" />
+		<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" />
 	</div>
 </div>
 </template>
@@ -111,6 +127,7 @@ const waveletsAmount = ref(0);
 const bilateralFraction = ref(0.5);
 const bilateralRange = ref(50);
 const postNoiseReduction = ref(0);
+const blueDown = ref(0);
 
 onMounted(() => {
 	if (props.file) {
@@ -201,6 +218,7 @@ const applyProcessing = throttle(async() => {
 		cv.GaussianBlur(srcMat, dstMat, new cv.Size(parseInt(postNoiseReduction.value, 10), parseInt(postNoiseReduction.value, 10)), 0, 0, cv.BORDER_DEFAULT);
 		cv.imshow('postProcessCanvas', dstMat);
 	}
+
 }, 100);
 
 function imageDataToMat(imageData) {
@@ -237,6 +255,57 @@ function waveletSharpenInWorker(imageData, amount, radius){
 		waveletWorker.postMessage({ imageData: imageData.data, width, height, amount, radius });	
 	});
 }
+
+function processChromaticAbberation(direction, magnitude, channel){
+	fixChromaticAberration(canvas.value, direction, magnitude, channel);
+}
+
+function fixChromaticAberration(canvas, direction, magnitude, channel) {
+	const ctx = canvas.getContext('2d');
+	const width = canvas.width;
+	const height = canvas.height;
+
+	// Get the image data
+	const imageData = ctx.getImageData(0, 0, width, height);
+	const data = imageData.data;
+
+	// Create a copy of the original image data
+	const originalData = new Uint8ClampedArray(data);
+
+	for (let i = 0; i < data.length; i += 4) {
+		// Calculate the pixel index adjustment
+		let indexAdjustment = 0;
+		switch (direction) {
+			case 'down':
+				indexAdjustment = -width * 4;
+				break;
+			case 'up':
+				indexAdjustment = width * 4;
+				break;
+			case 'right':
+				indexAdjustment = -4;
+				break;
+			case 'left':
+				indexAdjustment = 4;
+				break;
+		}
+
+		// Adjust specified color channels
+		const channelIndexes = {
+			'red': 0,
+			'blue': 2
+		};
+		const channelIndex = channelIndexes[channel];
+
+		if (i + channelIndex + indexAdjustment * magnitude >= 0 && i + channelIndex + indexAdjustment * magnitude < data.length) {
+			data[i + channelIndex] = originalData[i + channelIndex + indexAdjustment * magnitude];
+		}
+	}
+
+	// Put the image data back to canvas
+	ctx.putImageData(imageData, 0, 0);
+}
+
 
 </script>
 

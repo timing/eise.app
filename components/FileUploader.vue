@@ -73,7 +73,7 @@ async function processVideo(event) {
 		//await $ffmpeg.run('-formats');
 
 		// Extract frames from the video
-		await $ffmpeg.run('-i', videoFiles[0].name, '-vframes', '2000', 'out%d.png');
+		await $ffmpeg.run('-i', videoFiles[0].name, '-vframes', '2500', 'out%d.png');
 
 		addLog('Analyzing frames for quality, and cleaning up memory');
 

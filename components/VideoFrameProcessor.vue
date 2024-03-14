@@ -48,7 +48,7 @@ async function processImageFrames(files) {
 
 	const frames = new Array(files.length).fill().map(() => ({}));
 
-	const bestFramesCapacity = Math.min(300, Math.ceil(files.length * 0.3));
+	const bestFramesCapacity = Math.min(150, Math.ceil(files.length * 0.3));
 	const bestFrames = [];
 
 	function addFrameToBest(frame) {
