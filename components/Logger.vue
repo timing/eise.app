@@ -15,12 +15,15 @@ const loggerContainer = ref(null);
 const logContent = ref(null);
 
 onMounted(() => {
-  onLogAdded((log) => {
 
-	logContent.value.innerHTML += (new Date()).toLocaleString() + ': ' + log + '\n';
+	logContent.value.innerHTML += (new Date()).toLocaleString() + ': Welcome to eise.app! \n';	
 
-	nextTick(() => {
-		logContent.value.scrollTop = logContent.value.scrollHeight;
+	onLogAdded((log) => {
+
+		logContent.value.innerHTML += (new Date()).toLocaleString() + ': ' + log + '\n';
+
+		nextTick(() => {
+			logContent.value.scrollTop = logContent.value.scrollHeight;
 })})});
 
 </script>

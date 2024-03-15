@@ -1,8 +1,9 @@
 <template>
 <div>
 	<div class="content">
-		<h2>Welcome to Planetary Image Cloud Stacker!</h2>
-		<p>The name says what it is, maybe a bit boring though. Get started by uploading a video file.</p>
+		<h2>Welcome to eise.app</h2>
+		<h3>An easy planetary image stacker</h3>
+		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image.</p>
 	</div>
 	<label class="file-upload-wrapper" for="file-upload">
 		<h3>Select file(s)</h3>
@@ -133,7 +134,7 @@ async function processVideo(event) {
 	border-radius: 10px;
 	max-width: 400px;
 	margin: 80px auto 50px auto;
-	padding: 50px;
+	padding: 30px 50px;
 	cursor: pointer;
 }
 .file-upload-wrapper ul {

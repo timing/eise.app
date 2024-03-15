@@ -42,21 +42,41 @@
 				<input type="range" min="-1" max="50" step="2" v-model="postNoiseReduction" @input="applyProcessing"/>
 				<span>{{ postNoiseReduction }}</span>
 			</div>
-			
-			<h4>Move blue color channel</h4>
 
-			<button @click="processChromaticAbberation('up', 1, 'blue')">↑</button>
-			<button @click="processChromaticAbberation('down', 1, 'blue')">↓</button>
-			<button @click="processChromaticAbberation('left', 1, 'blue')">←</button>
-			<button @click="processChromaticAbberation('right', 1, 'blue')">→</button>
+			<div class="color-alignment">
 			
-			<h4>Move red color channel</h4>
+				<h4 style="color:blue;">Blue color alignment</h4>
 
-			<button @click="processChromaticAbberation('up', 1, 'red')">↑</button>
-			<button @click="processChromaticAbberation('down', 1, 'red')">↓</button>
-			<button @click="processChromaticAbberation('left', 1, 'red')">←</button>
-			<button @click="processChromaticAbberation('right', 1, 'right')">→</button>
-			
+				<button @click="processChromaticAbberation('y', -1, 'blue')">↑ 
+					{{ fixedAberration.blue?.y < 0 ? Math.abs(fixedAberration.blue.y) : '' }}
+				</button>
+				<button @click="processChromaticAbberation('y', 1, 'blue')">↓ 
+					{{ fixedAberration.blue?.y > 0 ? fixedAberration.blue.y : '' }}
+				</button>
+				<button @click="processChromaticAbberation('x', -1, 'blue')">← 
+					{{ fixedAberration.blue?.x < 0 ? Math.abs(fixedAberration.blue.x) : '' }}
+				</button>
+				<button @click="processChromaticAbberation('x', 1, 'blue')">→ 
+					{{ fixedAberration.blue?.x > 0 ? fixedAberration.blue.x : '' }}
+				</button>
+				
+				<h4 style="color:red;">Red color alignment</h4>
+
+				<button @click="processChromaticAbberation('y', -1, 'red')">↑ 
+					{{ fixedAberration.red?.y < 0 ? Math.abs(fixedAberration.red.y) : '' }}
+				</button>
+				<button @click="processChromaticAbberation('y', 1, 'red')">↓ 
+					{{ fixedAberration.red?.y > 0 ? fixedAberration.red.y : '' }}
+				</button>
+				<button @click="processChromaticAbberation('x', -1, 'red')">← 
+					{{ fixedAberration.red?.x < 0 ? Math.abs(fixedAberration.red.x) : '' }}
+				</button>
+				<button @click="processChromaticAbberation('x', 1, 'red')">→ 
+					{{ fixedAberration.red?.x > 0 ? fixedAberration.red.x : '' }}
+				</button>
+
+			</div>
+
 			<h4>Save image</h4>
 
 			<button class="download" @click="downloadCanvasAsPNG">Save / Download as PNG</button>
@@ -68,7 +88,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, defineProps } from 'vue';
+import { ref, onMounted, watch, defineProps, reactive } from 'vue';
 import throttle from 'lodash/throttle';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
@@ -88,7 +108,7 @@ const downloadCanvasAsPNG = () => {
 
 	const dataURL = canvas.value.toDataURL('image/png');
 	const link = document.createElement('a');
-	link.download = 'PICS_stacked_pps.png';
+	link.download = 'EISE_stacked_pps.png';
 	link.href = dataURL;
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
@@ -122,8 +142,8 @@ const props = defineProps({
 
 const gain = ref(1);
 const preNoiseReduction = ref(0);
-const waveletsRadius = ref(0);
-const waveletsAmount = ref(0);
+const waveletsRadius = ref(0.42);
+const waveletsAmount = ref(4.2);
 const bilateralFraction = ref(0.5);
 const bilateralRange = ref(50);
 const postNoiseReduction = ref(0);
@@ -181,18 +201,25 @@ async function loadImage(file) {
 		gainedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
 		preNoiseReducedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
 		sharpenedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
+
+		// give a small processing improvement
+		applyProcessing();
+
 	};
 	img.src = URL.createObjectURL(file);
 }
 
 const applyProcessing = throttle(async() => {
+	console.log('applyProcessing');
 	if( valueIsChanged('gain', gain.value) ){ 
+		console.log('gain');
 		gainedImageData = new ImageData(initCanvasImageData.data.map(value => value * gain.value), canvas.value.width, canvas.value.height);
 		preNoiseReducedImageData = gainedImageData;
 		ctx.putImageData(gainedImageData, 0, 0);
 	}
 
-	if( valueIsChanged('preNoiseReduction', preNoiseReduction.value) ){
+	/*if( valueIsChanged('preNoiseReduction', preNoiseReduction.value) ){
+		console.log('preNoise');
 		const srcMat = imageDataToMat(gainedImageData);
 		const dstMat = new cv.Mat();
 		cv.cvtColor(srcMat, srcMat, cv.COLOR_RGBA2RGB, 0);
@@ -200,9 +227,10 @@ const applyProcessing = throttle(async() => {
 		cv.imshow('postProcessCanvas', dstMat);
 		//preNoiseReducedImageData = matToImageData(dstMat);
 		preNoiseReducedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
-	}
+	}*/
 
 	if( valueIsChanged('waveletsAmount', waveletsAmount.value) || valueIsChanged('waveletsRadius', waveletsRadius.value) ){
+		console.log('wavelets');
 		sharpenedImageData = await waveletSharpenInWorker(preNoiseReducedImageData, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
 		ctx.putImageData(sharpenedImageData, 0, 0);
 	}
@@ -212,6 +240,7 @@ const applyProcessing = throttle(async() => {
 	}
 
 	if( valueIsChanged('postNoiseReduction', postNoiseReduction.value) && postNoiseReduction.value >= 3 ){
+		console.log('postNoise');
 		const srcMat = imageDataToMat(sharpenedImageData);
 		const dstMat = new cv.Mat();
 		cv.cvtColor(srcMat, srcMat, cv.COLOR_RGBA2RGB, 0);
@@ -256,11 +285,23 @@ function waveletSharpenInWorker(imageData, amount, radius){
 	});
 }
 
-function processChromaticAbberation(direction, magnitude, channel){
-	fixChromaticAberration(canvas.value, direction, magnitude, channel);
+let fixedAberration = reactive({});
+
+function processChromaticAbberation(axis, magnitude, channel){
+	fixChromaticAberration(canvas.value, axis, magnitude, channel);
+
+	if( fixedAberration[channel] == undefined ){
+		fixedAberration[channel] = reactive({});
+	}
+
+	if( fixedAberration[channel][axis] == undefined ){
+		fixedAberration[channel][axis] = 0;
+	}
+	
+	fixedAberration[channel][axis] += magnitude;
 }
 
-function fixChromaticAberration(canvas, direction, magnitude, channel) {
+function fixChromaticAberration(canvas, axis, magnitude, channel) {
 	const ctx = canvas.getContext('2d');
 	const width = canvas.width;
 	const height = canvas.height;
@@ -273,38 +314,34 @@ function fixChromaticAberration(canvas, direction, magnitude, channel) {
 	const originalData = new Uint8ClampedArray(data);
 
 	for (let i = 0; i < data.length; i += 4) {
-		// Calculate the pixel index adjustment
+		// Calculate the pixel index adjustment based on axis and magnitude
 		let indexAdjustment = 0;
-		switch (direction) {
-			case 'down':
-				indexAdjustment = -width * 4;
-				break;
-			case 'up':
-				indexAdjustment = width * 4;
-				break;
-			case 'right':
-				indexAdjustment = -4;
-				break;
-			case 'left':
-				indexAdjustment = 4;
-				break;
+		if (axis === 'x') {
+			// Moving horizontally
+			indexAdjustment = magnitude * -4; // Each pixel is 4 units in data (RGBA)
+		} else if (axis === 'y') {
+			// Moving vertically
+			indexAdjustment = magnitude * width * -4; // Moving a full width's worth of pixels up or down
 		}
 
 		// Adjust specified color channels
 		const channelIndexes = {
 			'red': 0,
+			'green': 1,
 			'blue': 2
 		};
-		const channelIndex = channelIndexes[channel];
+		const channelIndex = channelIndexes[channel] ?? null;
 
-		if (i + channelIndex + indexAdjustment * magnitude >= 0 && i + channelIndex + indexAdjustment * magnitude < data.length) {
-			data[i + channelIndex] = originalData[i + channelIndex + indexAdjustment * magnitude];
+		// Ensure the channelIndex is valid to prevent processing undefined channels
+		if (channelIndex !== null && i + channelIndex + indexAdjustment >= 0 && i + channelIndex + indexAdjustment < data.length) {
+			data[i + channelIndex] = originalData[i + channelIndex + indexAdjustment];
 		}
 	}
 
 	// Put the image data back to canvas
 	ctx.putImageData(imageData, 0, 0);
 }
+
 
 
 </script>
@@ -319,6 +356,10 @@ canvas {
 	background: white;
 	height: 100vh;
 	padding: 10px;	
+}
+.color-alignment button {
+	margin-right: 2px;
+	min-width: 66px;
 }
 .download {
 	margin-top: 10px;

@@ -1,8 +1,8 @@
 <template>
 	<div>
 		<header>
-			<div class="info" title="This tool is in development, and the URL might not work in the future.">DEVELOPMENT</div>
-			<h1>PICS - Planetary Image Cloud Stacker</h1>
+			<!--<div class="info">DEVELOPMENT <a href="https://eise.app">(prod)</a></div>-->
+			<h1>eise.app <span class="subtitle">- Easy (planetary) Image Stacker Engine</span></h1>
 		</header>
 
 		<LoadingIndicator />
@@ -15,23 +15,24 @@
 		</nav>
 
 		<div v-show="currentTab === 'About'" class="content">
-			<h2>About PICS - Planetary Image Cloud Stacker</h2>
-			<p>PICS is the first web-based online planetary image stacking tool available in the solar system. 
+			<h2>About eise.app - Planetary Image Cloud Stacker</h2>
+			<p>eise.app is the first web-based online planetary image stacking tool available in the solar system. 
+			The name is an ode to Eise Eisinga, a Frisian amateur astronomer who built a planetarium in his house. 
 			The main reason for developing yet another application for stacking is because of recent frustrations I had getting software running on my ARM based macbook. 
 			AutoStakkert4! didn't work in Wine, Planetary System Stacker by Rolf Hempel had python dependency issues, Lynkeos was slow with a very wonky UI and crashed continuously.
 			</p>
 			<p>
 			As a web developer, I saw an opportunity to make something simpler that works directly in your browser, regardless of your operating system. 
 			Initially, I thought about doing all the processing on a server, but that would be expensive and not scalable.
-			Instead, PICS does a chunk of the work in your browser using WebAssembly and WebWorkers, which turns out to be quite fast, and it just works (hopefully!) by navigating to this website!
+			Instead, eise.app does a chunk of the work in your browser using WebAssembly and WebWorkers, which turns out to be quite fast, and it just works (hopefully!) by navigating to this website!
 			</p>
 			<p>
-			Currently PICS works as follows:
+			Currently eise.app works as follows:
 			</p>
 			<ul>
 				<li>The astrophotographer selects a video file from their machine.</li>
 				<li>FFmpeg.js is used to extract frames from the video file.</li>
-				<li>PICS starts ranking up to 2k frames of the video based on sharpness.</li>
+				<li>eise.app starts ranking up to 2k frames of the video based on sharpness.</li>
 				<li>The best 30% (with a max of 300) frames are uploaded to a VPS powered by 
 					<a target="_blank" href="https://m.do.co/c/5d8cf0a2f4b6" title="get $200 in credits if you use this link">Digital Ocean</a>.</li>
 				<li>On the server a slightly modified <a target="_blank" href="https://github.com/Rolf-Hempel/PlanetarySystemStacker">Planetary System Stacker</a> (by Rolf Hempel) is stacking all frames it receives.</li>
@@ -39,7 +40,7 @@
 				<li>A very basic post processor is opened, providing Wavelets sharpening, and some noise reduction. 
 					Code is from OpenCV and a <a href="https://github.com/mrossini-ethz/gimp-wavelet-sharpen/blob/master/src/wavelet.c" target="_blank">GIMP plugin</a> compiled to WebAssembly using emscripten.</li>
 			</ul>
-			<p>In essence, PICS is a blend of PSS's stacking capabilities combined with browser-based frame ranking and (post) processing.</p>
+			<p>In essence, eise.app is a blend of PSS's stacking capabilities combined with browser-based frame ranking and (post) processing.</p>
 			<p>I hope this web-app will improve your astrophotography workflow, or helps beginners not giving up when trying to set-up their software.</p>
 			<p>Happy Stacking,<br/> Tijmen</p>
 		</div>
@@ -95,10 +96,10 @@ async function handlePostProcessing(data) {
 }
 
 useHead({
-  title: 'PICS - Planetary Image Cloud Stacker',
+  title: 'eise.app - Easy (planetary) Image Stacker online',
   // Overview Effect
   meta: [
-    { name: 'description', content: 'Planetary Image Cloud Stacker' },
+    { name: 'description', content: 'Easy Planetary Image Stacker online' },
   ],
 });
 
@@ -111,6 +112,9 @@ html,body {
 	font-family: Verdana, Arial, sans-serif;
 	font-size: 12px;
 	color: #111;
+	-moz-osx-font-smoothing: grayscale;
+	-webkit-font-smoothing: antialiased;
+	-webkit-min-device-pixel-ratio: 1.5;
 }
 header {
 	background: #0A2940;	
@@ -122,11 +126,18 @@ header h1 {
 	line-height: 50px;
 	color: white; 
 }
+header .subtitle {
+	font-size: 12px;
+	font-weight: normal;
+}
 header .info {
 	float: right;
 	color: #8CCF7E;
 	line-height: 50px;
 	padding-right: 10px;
+}
+header a {
+	color: #8CCF7E;
 }
 .tabs {
 	padding: 10px 0 0 80px;

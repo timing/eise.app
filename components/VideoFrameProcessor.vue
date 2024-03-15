@@ -48,7 +48,7 @@ async function processImageFrames(files) {
 
 	const frames = new Array(files.length).fill().map(() => ({}));
 
-	const bestFramesCapacity = Math.min(150, Math.ceil(files.length * 0.3));
+	const bestFramesCapacity = Math.min(300, Math.ceil(files.length * 0.3));
 	const bestFrames = [];
 
 	function addFrameToBest(frame) {
@@ -127,8 +127,7 @@ async function processImageFrames(files) {
 		formData.append('imageFiles', bestFrames[s].pngBlob, `${imageIdentifier}-${s}.png`);
 	}
 
-	const host = 'https://cloud-stacker.playli.be'
-	//const host = 'http://142.93.131.136:8080'
+	const host = 'https://stack.eise.app'
 	const jobId = crypto.randomUUID();
 	formData.append('job_id', jobId)
 
