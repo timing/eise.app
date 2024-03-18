@@ -7,3 +7,6 @@ Cross-Origin-Embedder-Policy: require-corp
 
 /wavelet_worker*
 Cross-Origin-Embedder-Policy: require-corp
+
+/analyze_worker.js
+Cross-Origin-Embedder-Policy: require-corp

@@ -4,18 +4,26 @@
 		<h2>Welcome to eise.app</h2>
 		<h3>An easy planetary image stacker</h3>
 		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image.</p>
+	
+		<label class="file-upload-wrapper" for="file-upload">
+			<h3>Select file(s)</h3>
+			<input id="file-upload" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
+			<ul>
+				<li>Select one video file for stacking and post processing.</li>
+				<li>Coming soon: Select multiple image files for stacking and post processing.</li>
+				<li>Select one image file for post processing only.</li>
+				<li>For now choosing video files smaller than 2GB works, but let us find the limit!</li>
+			</ul>
+		</label>
+
+		<h3>Maximum frames to analyze</h3>
+		<input type="range" min="2" max="5000" step="1" v-model="maxFrames" /> {{ maxFrames }}
+		<p>Memory issues? Lower the amount of frames to import from the video.</p>
+
+		<h3>Amount of best frames to use for stacking</h3>
+		<p>30%</p>
+		
 	</div>
-	<label class="file-upload-wrapper" for="file-upload">
-		<h3>Select file(s)</h3>
-		<input id="file-upload" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
-		<ul>
-			<li>Select one video file for stacking and post processing.</li>
-			<li>Coming soon: Select multiple image files for stacking and post processing.</li>
-			<li>Select one image file for post processing only.</li>
-			<li>Max 2k frames are extracted from video files. 30% or 300 frames are used for the final stack.</li>
-			<li>For now choosing video files smaller than 2GB works, but let us find the limit!</li>
-		</ul>
-	</label>
 </div>
 </template>
 
@@ -25,6 +33,8 @@ import { defineEmits, ref } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
+
+const maxFrames = ref(1000)
 
 const emit = defineEmits(['singleFrame', 'frames', 'postProcessing', 'lastFrame']);
 
@@ -63,24 +73,44 @@ async function processVideo(event) {
 
 	if( videoFiles.length == 1 ){
 
-		addLog('Video selected, we need to convert this to a bunch of PNGs');
+
+		let fileToProcess = videoFiles[0]; // Default to the first file selected
+		
+		/*const MAX_SIZE = 2 * 1024 * 1024 * 1024; // First int is the amount of GB
+
+		// If the file is larger than MAX_SIZE, trim it
+		if (fileToProcess.size > MAX_SIZE) {
+			const trimmedBlob = fileToProcess.slice(0, MAX_SIZE);
+			console.log(trimmedBlob);
+			fileToProcess = new File([trimmedBlob], fileToProcess.name, { type: fileToProcess.type });
+			addLog('File trimmed to fit within the memory limit');
+		}*/
 
 		await $loadFFmpeg();
-		
-		// Write the video file to the FFmpeg filesystem
-		addLog('Storing video in memory');
-		$ffmpeg.FS('writeFile', videoFiles[0].name, await fetchFile(videoFiles[0]));
 
+		// Storing video in memory
+		addLog('Storing video in memory');
+		await $ffmpeg.FS('writeFile', fileToProcess.name, await fetchFile(fileToProcess));
+		fileToProcess = null;
+		addLog('Storing video in memory done');
+		
 		//await $ffmpeg.run('-formats');
 
 		// Extract frames from the video
-		await $ffmpeg.run('-i', videoFiles[0].name, '-vframes', '2500', 'out%d.png');
+		try {
+			await $ffmpeg.run('-i', videoFiles[0].name, '-vframes', '' + maxFrames.value + '', 'out%d.png');
+		} catch(err){
+			console.log(err);
+			addLog('FFmpeg forcefully exited, but continuing!');
+		}
 
-		addLog('Analyzing frames for quality, and cleaning up memory');
+		addLog('Cleaning up ffmpeg memory');
 
 		filesInternal = $ffmpeg.FS('readdir', '.').filter(file => file.endsWith('.png'));
 		
 		$ffmpeg.FS('unlink', videoFiles[0].name);
+
+		addLog('Cleanup done. Analyzing frames for quality.');
 
 		emit('frames', filesInternal);
 	
@@ -132,9 +162,8 @@ async function processVideo(event) {
 	color: #003366;
 	border: 3px dashed #003366;
 	border-radius: 10px;
-	max-width: 400px;
-	margin: 80px auto 50px auto;
-	padding: 30px 50px;
+	margin: 30px auto;
+	padding: 20px 40px;
 	cursor: pointer;
 }
 .file-upload-wrapper ul {

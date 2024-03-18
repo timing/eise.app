@@ -5,8 +5,6 @@
 			<h1>eise.app <span class="subtitle">- Easy (planetary) Image Stacker Engine</span></h1>
 		</header>
 
-		<LoadingIndicator />
-
 		<nav class="tabs">
 			<button :class="{ active: currentTab === 'FileUploader' }" @click="currentTab = 'FileUploader'">📁 Upload File(s)</button>
 			<button :class="{ active: currentTab === 'VideoFrameProcessor' }" @click="currentTab = 'VideoFrameProcessor'">🎞️ Analyze Frames</button>
@@ -49,6 +47,9 @@
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'VideoFrameProcessor'" 
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" />
+
+		<LoadingIndicator />
+
 		<Logger />
 
 		<img v-if="loadPixel" src="https://analytics.tijmentiming.workers.dev/pixel.gif"/>
