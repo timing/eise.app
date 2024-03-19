@@ -62,7 +62,7 @@ async function processImageFrames(files) {
 
 	const frames = new Array(files.length).fill().map(() => ({}));
 
-	const bestFramesCapacity = files.length * 0.3;
+	const bestFramesCapacity = Math.min(600, files.length * 0.3);
 	const bestFrames = [];
 	let highestSharpness = 0;
 
@@ -90,7 +90,7 @@ async function processImageFrames(files) {
 	}	
 
 	function updateCanvasWithFrame(frame) {
-		createImageBitmap(new Blob(frame.pngFile)).then(img => {
+		createImageBitmap(new Blob(frame.pngFile, {type: 'image/png'})).then(img => {
 			canvasRef.value.width = img.width;
 			canvasRef.value.height = img.height;
 			ctx.drawImage(img, 0, 0);
@@ -131,10 +131,13 @@ async function processImageFrames(files) {
 			resolveFunctions[index] = resolve;
 			rejectFunctions[index] = reject;
 
-			filesMap[index] = [$ffmpeg.FS('readFile', file)], { type: 'image/png' };
-			analyzeWorkers[index % 12].postMessage({analyze: filesMap[index], index: index});
-			//addLog('Cleaning up memory, deleting frame ' + index);
-			//$ffmpeg.FS('unlink', file);
+			// this is a timeout to give the UI some slack and be able to update. preferably we run this whole thing in another worker as well
+			setTimeout(() => {
+				filesMap[index] = [$ffmpeg.FS('readFile', file)];
+				analyzeWorkers[index % 12].postMessage({analyze: filesMap[index], index: index});
+				//addLog('Cleaning up memory, deleting frame ' + index);
+				$ffmpeg.FS('unlink', file);
+			}, 10);
 		});
 	});
 
@@ -160,7 +163,7 @@ async function processImageFrames(files) {
 	}
 
 	for( const s in bestFrames ){
-		formData.append('imageFiles', new Blob(bestFrames[s].pngFile), `${imageIdentifier}-${s}.png`);
+		formData.append('imageFiles', new Blob(bestFrames[s].pngFile, {type: 'image/png'}), `${imageIdentifier}-${s}.png`);
 	}
 
 	const host = 'https://stack.eise.app'

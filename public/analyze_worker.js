@@ -3,7 +3,7 @@ let ctx = null;
 
 self.addEventListener('message', async (e) => {
 
-	createImageBitmap(new Blob(e.data.analyze)).then(img => {
+	createImageBitmap(new Blob(e.data.analyze, {type: 'image/png'})).then(img => {
 
 		if( offscreen === null ){
 			offscreen = new OffscreenCanvas(img.width, img.height);

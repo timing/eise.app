@@ -1,9 +1,11 @@
 <template>
-	<div class="zoomable-canvas-wrapper">
-		<div class="zoomable-canvas-container" @wheel.prevent="handleWheel" @mousedown="startDrag" @dblclick="handleDoubleClick" ref="container">
-			<canvas ref="canvas" :id="id" :style="canvasStyle"></canvas>
+	<div>
+		<div class="canvas-topbar">Zoom: {{ Math.round(zoomLevel * 100) }}%</div>
+		<div class="zoomable-canvas-wrapper">
+			<div class="zoomable-canvas-container" @wheel.prevent="handleWheel" @mousedown="startDrag" @dblclick="handleDoubleClick" ref="container">
+				<canvas ref="canvas" :id="id" :style="canvasStyle"></canvas>
+			</div>
 		</div>
-		{{ zoomLevel }}
 	</div>
 </template>
 
@@ -44,11 +46,12 @@ const handleWheel = (event) => {
 		// Zoom out
 		zoomLevel.value = Math.max(zoomLevel.value - scaleAmount, 0.3); // Limit zoom out
 	}
-	const newZoom = zoomLevel.value;
 
 	if( Math.abs(1, zoomLevel.value) < 0.1 ){
 		zoomLevel.value = 1;
 	}
+	
+	const newZoom = zoomLevel.value;
 
 	zoomLevel.value = Math.round(zoomLevel.value * 100) / 100;
 
@@ -129,6 +132,11 @@ const endDrag = () => {
 </script>
 
 <style scoped>
+.canvas-topbar {
+	background: #111;
+	line-height: 20px;
+	color: white;
+}
 .zoomable-canvas-wrapper {
 	background: #eeeeee;
 	height: calc(100vh - 98px);

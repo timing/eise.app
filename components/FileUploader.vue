@@ -21,7 +21,7 @@
 		<p>Memory issues? Lower the amount of frames imported from the video.</p>
 
 		<h3>Amount of best frames to use for stacking</h3>
-		<p>30%</p>
+		<p>30% (with a max of 600 for now)</p>
 		
 	</div>
 </div>
