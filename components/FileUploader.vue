@@ -22,6 +22,12 @@
 
 		<h3>Amount of best frames to use for stacking</h3>
 		<p>30% (with a max of 600 for now)</p>
+
+		<h3>Aggressive file trimmer</h3>
+		<label>
+			<input type="checkbox" id="maxFileSizeCut" v-model="maxFileSizeCut" />
+	    	Enable Max File Size Cut
+		</label>
 		
 	</div>
 </div>
@@ -35,6 +41,7 @@ import { useEventBus } from '@/composables/eventBus';
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
 const maxFrames = ref(1000)
+const maxFileSizeCut = ref(false);
 
 const emit = defineEmits(['singleFrame', 'frames', 'postProcessing', 'lastFrame']);
 
@@ -76,15 +83,17 @@ async function processVideo(event) {
 
 		let fileToProcess = videoFiles[0]; // Default to the first file selected
 		
-		/*const MAX_SIZE = 2 * 1024 * 1024 * 1024; // First int is the amount of GB
+		if( maxFileSizeCut.value  ){
+			const MAX_SIZE = 1.9 * 1024 * 1024 * 1024; // First int is the amount of GB
 
-		// If the file is larger than MAX_SIZE, trim it
-		if (fileToProcess.size > MAX_SIZE) {
-			const trimmedBlob = fileToProcess.slice(0, MAX_SIZE);
-			console.log(trimmedBlob);
-			fileToProcess = new File([trimmedBlob], fileToProcess.name, { type: fileToProcess.type });
-			addLog('File trimmed to fit within the memory limit');
-		}*/
+			// If the file is larger than MAX_SIZE, trim it
+			if (fileToProcess.size > MAX_SIZE) {
+				const trimmedBlob = fileToProcess.slice(0, MAX_SIZE);
+				console.log(trimmedBlob);
+				fileToProcess = new File([trimmedBlob], fileToProcess.name, { type: fileToProcess.type });
+				addLog('File trimmed to fit within the memory limit');
+			}
+		}
 
 		await $loadFFmpeg();
 
