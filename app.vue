@@ -2,7 +2,7 @@
 	<div>
 		<header>
 			<!--<div class="info">DEVELOPMENT <a href="https://eise.app">(prod)</a></div>-->
-			<h1>eise.app <span class="subtitle">- Easy (planetary) Image Stacker Engine</span></h1>
+			<h1><a href="/">eise.app</a> <span class="subtitle">- Easy (planetary) Image Stacker Engine</span></h1>
 		</header>
 
 		<nav class="tabs">
@@ -30,25 +30,27 @@
 			<ul>
 				<li>The astrophotographer selects a video file from their machine.</li>
 				<li>FFmpeg.js is used to extract frames from the video file.</li>
-				<li>eise.app starts ranking up to 2k frames of the video based on sharpness.</li>
-				<li>The best 30% (with a max of 300) frames are uploaded to a VPS powered by 
+				<li>eise.app starts ranking (up to 5k) frames of the video based on sharpness.</li>
+				<li>The best 30% of frames are uploaded to a VPS powered by 
 					<a target="_blank" href="https://m.do.co/c/5d8cf0a2f4b6" title="get $200 in credits if you use this link">Digital Ocean</a>.</li>
 				<li>On the server a slightly modified <a target="_blank" href="https://github.com/Rolf-Hempel/PlanetarySystemStacker">Planetary System Stacker</a> (by Rolf Hempel) is stacking all frames it receives.</li>
 				<li>The server returns the stacked image to the browser.</li>
-				<li>A very basic post processor is opened, providing Wavelets sharpening, and some noise reduction. 
+				<li>A very basic post processor is opened, providing Wavelets sharpening, some noise reduction and color alignment. 
 					Code is from OpenCV and a <a href="https://github.com/mrossini-ethz/gimp-wavelet-sharpen/blob/master/src/wavelet.c" target="_blank">GIMP plugin</a> compiled to WebAssembly using emscripten.</li>
 			</ul>
 			<p>In essence, eise.app is a blend of PSS's stacking capabilities combined with browser-based frame ranking and (post) processing.</p>
 			<p>I hope this web-app will improve your astrophotography workflow, or helps beginners not giving up when trying to set-up their software.</p>
 			<p>Happy Stacking,<br/> Tijmen</p>
 		</div>
-
+	
 		<FileUploader v-show="currentTab === 'FileUploader'" @frames="handleFrames" @postProcessing="handlePostProcessing" />
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'VideoFrameProcessor'" 
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" />
 
-		<LoadingIndicator />
+		<div class="content">
+			<LoadingIndicator />
+		</div>
 
 		<Logger />
 

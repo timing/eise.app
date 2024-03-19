@@ -77,7 +77,7 @@
 
 			</div>
 
-			<h4>Save image</h4>
+			<h4>Save lossless image</h4>
 
 			<button class="download" @click="downloadCanvasAsPNG">Save / Download as PNG</button>
 
@@ -211,11 +211,12 @@ async function loadImage(file) {
 
 const applyProcessing = throttle(async() => {
 	console.log('applyProcessing');
-	if( valueIsChanged('gain', gain.value) ){ 
+	let doGain = valueIsChanged('gain', gain.value);
+	if( doGain ){ 
 		console.log('gain');
 		gainedImageData = new ImageData(initCanvasImageData.data.map(value => value * gain.value), canvas.value.width, canvas.value.height);
 		preNoiseReducedImageData = gainedImageData;
-		ctx.putImageData(gainedImageData, 0, 0);
+		//ctx.putImageData(gainedImageData, 0, 0);
 	}
 
 	/*if( valueIsChanged('preNoiseReduction', preNoiseReduction.value) ){
@@ -229,7 +230,8 @@ const applyProcessing = throttle(async() => {
 		preNoiseReducedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
 	}*/
 
-	if( valueIsChanged('waveletsAmount', waveletsAmount.value) || valueIsChanged('waveletsRadius', waveletsRadius.value) ){
+	let doSharpening = (doGain || valueIsChanged('waveletsAmount', waveletsAmount.value) || valueIsChanged('waveletsRadius', waveletsRadius.value));
+	if( doSharpening ){
 		console.log('wavelets');
 		sharpenedImageData = await waveletSharpenInWorker(preNoiseReducedImageData, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
 		ctx.putImageData(sharpenedImageData, 0, 0);
@@ -239,7 +241,7 @@ const applyProcessing = throttle(async() => {
 		postNoiseReduction.value = 0;
 	}
 
-	if( valueIsChanged('postNoiseReduction', postNoiseReduction.value) && postNoiseReduction.value >= 3 ){
+	if( (doSharpening && postNoiseReduction.value >= 3) || valueIsChanged('postNoiseReduction', postNoiseReduction.value) && postNoiseReduction.value >= 3 ){
 		console.log('postNoise');
 		const srcMat = imageDataToMat(sharpenedImageData);
 		const dstMat = new cv.Mat();
@@ -360,9 +362,6 @@ canvas {
 .color-alignment button {
 	margin-right: 2px;
 	min-width: 66px;
-}
-.download {
-	margin-top: 10px;
 }
 </style>
 

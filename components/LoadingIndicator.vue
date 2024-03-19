@@ -43,9 +43,7 @@ onUnmounted(() => {
 
 <style>
 .loading-indicator {
-	width: 100%;
 	height: 5px;
-	position: absolute;
 	background-color: #4A90E2;
 	overflow: hidden;
 }
@@ -55,6 +53,7 @@ onUnmounted(() => {
 	background-color: #8CCF7E;
 	width: 0%; 
 	transition: width 0.5s ease; 
+	position: relative;
 }
 
 .indeterminate {

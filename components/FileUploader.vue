@@ -18,7 +18,7 @@
 
 		<h3>Maximum frames to analyze</h3>
 		<input type="range" min="2" max="5000" step="1" v-model="maxFrames" /> {{ maxFrames }}
-		<p>Memory issues? Lower the amount of frames to import from the video.</p>
+		<p>Memory issues? Lower the amount of frames imported from the video.</p>
 
 		<h3>Amount of best frames to use for stacking</h3>
 		<p>30%</p>

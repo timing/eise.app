@@ -5,7 +5,10 @@
 				<h2>Nothing loaded yet</h2>
 				<p>To get started, please upload a video or bunch of files for analyzing and stacking.</p>
 			</div>
-			<h4 v-else>Showing one of the sharpest frames</h4>
+			<div v-else>
+				<h4>Analyzing frames</h4>
+				<p>Found {{ bestFramesCount }} best frames. Which will be uploaded for stacking.</p>
+			</div>
 			<canvas id="analyzeCanvas" ref="canvasRef"></canvas>
 		</div>
 	</div>
@@ -27,6 +30,7 @@ const props = defineProps({
 	frames: Array
 });
 const canvasRef = ref(null);
+const bestFramesCount = ref(0);
 
 let analyzeWorkers = new Array(12);
 
@@ -60,14 +64,14 @@ async function processImageFrames(files) {
 
 	const bestFramesCapacity = files.length * 0.3;
 	const bestFrames = [];
+	let highestSharpness = 0;
 
 	function addFrameToBest(frame) {
 		if (bestFrames.length < bestFramesCapacity) {
-			createImageBitmap(new Blob(frame.pngFile)).then(img => {
-				canvasRef.value.width = img.width;
-				canvasRef.value.height = img.height;
-				ctx.drawImage(img, 0, 0);
-			})
+			if (frame.sharpness > highestSharpness) {
+				highestSharpness = frame.sharpness;
+				updateCanvasWithFrame(frame);
+			}
 			bestFrames.push(frame);
 		} else {
 			// Find the least sharp frame
@@ -75,15 +79,30 @@ async function processImageFrames(files) {
 				(currFrame.sharpness < arr[minIdx].sharpness) ? idx : minIdx, 0);
 				
 			if (frame.sharpness > bestFrames[minSharpnessIndex].sharpness) {
-				bestFrames[minSharpnessIndex] = frame; // Replace the least sharp frame
+				bestFrames[minSharpnessIndex] = frame; 
+				if (frame.sharpness > highestSharpness) {
+					highestSharpness = frame.sharpness;
+					updateCanvasWithFrame(frame);
+				}
 			}
 		}
+		bestFramesCount.value = bestFrames.length;
 	}	
+
+	function updateCanvasWithFrame(frame) {
+		createImageBitmap(new Blob(frame.pngFile)).then(img => {
+			canvasRef.value.width = img.width;
+			canvasRef.value.height = img.height;
+			ctx.drawImage(img, 0, 0);
+		});
+	}
 
 	// Initialize an array to hold the resolve functions
 	const resolveFunctions = new Array(files.length);
 	const rejectFunctions = new Array(files.length);
 	const filesMap = new Array(files.length); // Array to store blobs
+
+	addLog('Analyzing all frames for sharpness');
 
 	for (let i = 0; i < analyzeWorkers.length; i++) {
 		analyzeWorkers[i].addEventListener('message', (e) => {
@@ -91,7 +110,7 @@ async function processImageFrames(files) {
 			const pngFile = filesMap[index]; // Retrieve the blob using the index
 
 			if(e.data.frameData !== undefined) {
-				console.log(index, e.data);
+				//console.log(index, e.data);
 				if(e.data.frameData.is_cut_off) {
 					//addLog(`Frame skipped (cut off) ${index}. Sharpness: ${e.data.frameData.sharpness}`);
 				} else {
@@ -121,7 +140,7 @@ async function processImageFrames(files) {
 
 	await Promise.all(promises); // Wait for all the promises to resolve
 
-	addLog('Cleaning up');
+	addLog('Done analyzing frames. Cleaning up');
 	try {
 		$ffmpeg.exit();
 	} catch(e) {
@@ -191,6 +210,7 @@ async function processImageFrames(files) {
 	xhr.onload = function() {
 		if (xhr.status === 200 || xhr.status === 202 ) {
 			const data = JSON.parse(xhr.responseText);
+			useEventBus().emit('start-loading');
 			addLog(data.message);
 			console.log(data);
 		} else {
@@ -220,7 +240,7 @@ async function processImageFrames(files) {
 </script>
 
 <style scoped>
-	h4 {
+	h4, p {
 		text-align: center;
 	}
 	canvas#analyzeCanvas {
