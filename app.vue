@@ -95,10 +95,10 @@ async function handlePostProcessing(data) {
 }
 
 useHead({
-  title: 'eise.app - Easy (planetary) Image Stacker online',
+  title: 'eise.app - Easy (planetary) Image Stacker in your browser',
   // Overview Effect
   meta: [
-    { name: 'description', content: 'Easy Planetary Image Stacker online' },
+    { name: 'description', content: 'Easy (planetary) Image Stacker Engine, made to work in your browser. Turn your blurry videos of planets into sharp images.' },
   ],
 });
 
