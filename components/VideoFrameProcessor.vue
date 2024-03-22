@@ -10,6 +10,9 @@
 				<p>Found {{ bestFramesCount }} best frames. Which will be uploaded for stacking.</p>
 			</div>
 			<canvas id="analyzeCanvas" ref="canvasRef"></canvas>
+
+			<LoadingIndicator />
+
 		</div>
 	</div>
 </template>
@@ -62,7 +65,7 @@ async function processImageFrames(files) {
 
 	const frames = new Array(files.length).fill().map(() => ({}));
 
-	const bestFramesCapacity = Math.min(600, files.length * 0.3);
+	const bestFramesCapacity = /*files.length * 0.3;*/ Math.min(600, files.length * 0.3);
 	const bestFrames = [];
 	let highestSharpness = 0;
 
@@ -199,7 +202,7 @@ async function processImageFrames(files) {
 	
 	addLog('Uploading best frames to server, for stacking with Planetary System Stacker (see about)');
 
-	// Use XMLHttpRequest for upload to monitor progress
+	// Use XMLHttpRequest for uploads, because fetch does not allow progress bars
 	const xhr = new XMLHttpRequest();
 	xhr.open('POST', `${host}/upload`, true);
 

@@ -18,7 +18,7 @@ export default defineNuxtPlugin(nuxtApp => {
 			addLog('Loading FFmpeg done');
 
 			ffmpeg.setLogger(({ type, message }) => {
-				if (message.includes('frame=')) {
+				if (message && message.includes('frame=')) {
 					// some ffmpeg log is soo often that it slows things down
 					addLog(message);
 				}

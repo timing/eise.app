@@ -48,10 +48,6 @@
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" />
 
-		<div class="content">
-			<LoadingIndicator />
-		</div>
-
 		<Logger />
 
 		<img v-if="loadPixel" src="https://analytics.tijmentiming.workers.dev/pixel.gif"/>

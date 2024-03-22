@@ -16,14 +16,18 @@
 			</ul>
 		</label>
 
-		<h3>Maximum frames to analyze</h3>
+		<LoadingIndicator />
+
+		<h3>Settings</h3>
+
+		<h4>Maximum frames to analyze</h4>
 		<input type="range" min="2" max="5000" step="1" v-model="maxFrames" /> {{ maxFrames }}
 		<p>Memory issues? Lower the amount of frames imported from the video.</p>
 
-		<h3>Amount of best frames to use for stacking</h3>
+		<h4>Amount of best frames to use for stacking</h4>
 		<p>30% (with a max of 600 for now)</p>
 
-		<h3>Aggressive file trimmer</h3>
+		<h4>Aggressive file trimmer</h4>
 		<label>
 			<input type="checkbox" id="maxFileSizeCut" v-model="maxFileSizeCut" />
 	    	Enable Max File Size Cut
@@ -171,7 +175,7 @@ async function processVideo(event) {
 	color: #003366;
 	border: 3px dashed #003366;
 	border-radius: 10px;
-	margin: 30px auto;
+	margin: 20px auto;
 	padding: 20px 40px;
 	cursor: pointer;
 }

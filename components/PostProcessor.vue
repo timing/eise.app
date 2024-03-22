@@ -215,6 +215,7 @@ const applyProcessing = throttle(async() => {
 	if( doGain ){ 
 		console.log('gain');
 		gainedImageData = new ImageData(initCanvasImageData.data.map(value => value * gain.value), canvas.value.width, canvas.value.height);
+		//gainedImageData = applyConditionalGain(initCanvasImageData, gain.value, 10, 0.8); // the edges get too hard
 		preNoiseReducedImageData = gainedImageData;
 		//ctx.putImageData(gainedImageData, 0, 0);
 	}
@@ -264,6 +265,27 @@ function logCopy(name, array){
 		return;
 	}
 	console.log(name, JSON.parse(JSON.stringify(array)));
+}
+
+function applyConditionalGain(imageData, gain, threshold, reducedGainFactor) {
+	const data = imageData.data;
+	const width = imageData.width;
+	const height = imageData.height;
+	const newData = new Uint8ClampedArray(data.length);
+
+	for (let i = 0; i < data.length; i += 4) {
+		// For RGB channels
+		for (let j = 0; j < 3; j++) {
+			const value = data[i + j];
+			const applyFullGain = value > threshold; // Determine whether to apply full gain
+			const effectiveGain = applyFullGain ? gain : gain * reducedGainFactor;
+			newData[i + j] = value * effectiveGain;
+		}
+		// Copy the alpha channel without change
+		newData[i + 3] = data[i + 3];
+	}
+
+	return new ImageData(newData, width, height);
 }
 
 function waveletSharpenInWorker(imageData, amount, radius){

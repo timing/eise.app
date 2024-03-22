@@ -14,9 +14,12 @@ self.addEventListener('message', async (e) => {
 
 		const imageData = ctx.getImageData(0, 0, img.width, img.height)
 
-		const frameData = { sharpness: calculateSharpness(imageData), is_cut_off: isImageCutOff(imageData) };
+		const frameData = { sharpness: calculateSharpness(imageData) };
+	
+		//frameData.center_of_gravity = calculateCenterOfGravity(imageData);
+		const {cog, boundingBox} = calculateCenterOfGravityAndBoundingBox(imageData);
 
-		console.log('AnalyzeWorker', e.data.index, frameData);
+		frameData.is_cut_off = isImageCutOff(cog, boundingBox, img.width, img.height);
 
 		/*if( !isImageCutOff(imageData) ){ 
 			addFrameToBest(frameData);
@@ -24,8 +27,8 @@ self.addEventListener('message', async (e) => {
 		} else {
 			addLog('Frame skipped (cut off) ' + index + '. Sharpness:' + frameData.sharpness);
 		}*/
-		//frameData.center_of_gravity = calculateCenterOfGravity(imageData);
 
+		console.log('AnalyzeWorker', e.data.index, frameData, cog, boundingBox);
 
 		/*	 + ', isCutOff:' + frameData.isCutOff + ', CoG: '
 			// + frameData.center_of_gravity.x + ',' + frameData.center_of_gravity.x	
@@ -91,7 +94,7 @@ function calculateSharpness(imageData) {
 }
 
 // detect non black pixels.. should not be used at some point. Fix server side PSS instead
-function isImageCutOff(imageData, border = 5, threshold = 30) {
+/*function isImageCutOff(imageData, border = 5, threshold = 30) {
 	const { data, width, height } = imageData;
 
 	// Helper function to check if a pixel is not black
@@ -118,5 +121,165 @@ function isImageCutOff(imageData, border = 5, threshold = 30) {
 	}
 
 	return false; // No cut-off detected
+}*/
+
+function calculateCenterOfGravity(imageData) {
+	let totalWeight = 0;
+	let xWeight = 0;
+	let yWeight = 0;
+	const width = imageData.width;
+	const height = imageData.height;
+	const data = gaussianBlur(imageData).data;
+
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			const index = (y * width + x) * 4;
+			const brightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
+			totalWeight += brightness;
+			xWeight += x * brightness;
+			yWeight += y * brightness;
+		}
+	}
+
+	const cog = {
+		x: xWeight / totalWeight,
+		y: yWeight / totalWeight,
+	};
+
+	return cog;
 }
 
+function calculateCenterOfGravityAndBoundingBox(imageData) {
+	let totalWeight = 0;
+	let xWeight = 0;
+	let yWeight = 0;
+	let minX = Infinity;
+	let maxX = 0;
+	let minY = Infinity;
+	let maxY = 0;
+	const width = imageData.width;
+	const height = imageData.height;
+	const data = gaussianBlur(imageData).data;
+	const brightnessThreshold = 10; // Example threshold, adjust based on your image characteristics
+
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			const index = (y * width + x) * 4;
+			const brightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
+			if (brightness > brightnessThreshold) {
+				totalWeight += brightness;
+				xWeight += x * brightness;
+				yWeight += y * brightness;
+				minX = Math.min(minX, x);
+				maxX = Math.max(maxX, x);
+				minY = Math.min(minY, y);
+				maxY = Math.max(maxY, y);
+			}
+		}
+	}
+
+	const cog = {
+		x: xWeight / totalWeight,
+		y: yWeight / totalWeight,
+	};
+
+	const boundingBox = {
+		left: minX,
+		right: maxX,
+		top: minY,
+		bottom: maxY,
+		width: maxX - minX + 1,
+		height: maxY - minY + 1
+	};
+
+	return { cog, boundingBox };
+}
+
+function gaussianBlur(imageData) {
+	const kernel = [1 / 16, 1 / 4, 3 / 8, 1 / 4, 1 / 16];
+	const width = imageData.width;
+	const height = imageData.height;
+	const data = new Uint8ClampedArray(imageData.data);
+	const blurredData = new Uint8ClampedArray(data.length);
+
+	// Horizontal pass
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			let r = 0, g = 0, b = 0, a = 0;
+			for (let k = -2; k <= 2; k++) {
+				const xk = Math.max(0, Math.min(width - 1, x + k));
+				const i = (y * width + xk) * 4;
+				r += data[i] * kernel[k + 2];
+				g += data[i + 1] * kernel[k + 2];
+				b += data[i + 2] * kernel[k + 2];
+				a += data[i + 3] * kernel[k + 2];
+			}
+			const index = (y * width + x) * 4;
+			blurredData[index] = r;
+			blurredData[index + 1] = g;
+			blurredData[index + 2] = b;
+			blurredData[index + 3] = a;
+		}
+	}
+
+	// Vertical pass
+	for (let x = 0; x < width; x++) {
+		for (let y = 0; y < height; y++) {
+			let r = 0, g = 0, b = 0, a = 0;
+			for (let k = -2; k <= 2; k++) {
+				const yk = Math.max(0, Math.min(height - 1, y + k));
+				const i = (yk * width + x) * 4;
+				r += blurredData[i] * kernel[k + 2];
+				g += blurredData[i + 1] * kernel[k + 2];
+				b += blurredData[i + 2] * kernel[k + 2];
+				a += blurredData[i + 3] * kernel[k + 2];
+			}
+			const index = (y * width + x) * 4;
+			data[index] = r;
+			data[index + 1] = g;
+			data[index + 2] = b;
+			data[index + 3] = a;
+		}
+	}
+
+	return new ImageData(data, width, height);
+}
+
+
+function isImageCutOff(cog, boundingBox, imgWidth, imgHeight) {
+	// Define thresholds
+	const centerThreshold = 0.25; // CoG must be within 25% of the center
+	const boundingBoxSizeThreshold = 0.5; // Bounding box must be bigger than 50% of the image dimensions
+
+	// Calculate center of the image
+	const imageCenterX = imgWidth / 2;
+	const imageCenterY = imgHeight / 2;
+
+	// Calculate distances of CoG from the image center
+	const distanceFromCenterX = Math.abs(cog.x - imageCenterX) / imageCenterX;
+	const distanceFromCenterY = Math.abs(cog.y - imageCenterY) / imageCenterY;
+
+	// Check if CoG is close to the center (within 25%)
+	if (distanceFromCenterX < centerThreshold && distanceFromCenterY < centerThreshold) {
+		return false; // Image is not cut off
+	}
+
+	// Calculate bounding box size as a fraction of the image size
+	const boundingBoxWidthFraction = (boundingBox.right - boundingBox.left) / imgWidth;
+	const boundingBoxHeightFraction = (boundingBox.bottom - boundingBox.top) / imgHeight;
+
+	// Check if bounding box is fairly big (more than 50% of the image in both dimensions)
+	if (boundingBoxWidthFraction > boundingBoxSizeThreshold && boundingBoxHeightFraction > boundingBoxSizeThreshold) {
+		return false; // Image is not cut off
+	}
+
+	// Finally, check if CoG is outside the 25% center area and the bounding box hits the sides of the image
+	if ((distanceFromCenterX > centerThreshold || distanceFromCenterY > centerThreshold) &&
+		(boundingBox.left === 0 || boundingBox.right === imgWidth - 1 ||
+		 boundingBox.top === 0 || boundingBox.bottom === imgHeight - 1)) {
+		return true; // Image is cut off
+	}
+
+	// If none of the above conditions met, consider the image not cut off by default
+	return false;
+}
