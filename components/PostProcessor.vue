@@ -47,31 +47,31 @@
 			
 				<h4 style="color:blue;">Blue color alignment</h4>
 
-				<button @click="processChromaticAbberation('y', -1, 'blue')">↑ 
+				<button @click="processChromaticAberration('blue', 'y', -1)">↑ 
 					{{ fixedAberration.blue?.y < 0 ? Math.abs(fixedAberration.blue.y) : '' }}
 				</button>
-				<button @click="processChromaticAbberation('y', 1, 'blue')">↓ 
+				<button @click="processChromaticAberration('blue', 'y', 1)">↓ 
 					{{ fixedAberration.blue?.y > 0 ? fixedAberration.blue.y : '' }}
 				</button>
-				<button @click="processChromaticAbberation('x', -1, 'blue')">← 
+				<button @click="processChromaticAberration('blue', 'x', -1)">← 
 					{{ fixedAberration.blue?.x < 0 ? Math.abs(fixedAberration.blue.x) : '' }}
 				</button>
-				<button @click="processChromaticAbberation('x', 1, 'blue')">→ 
+				<button @click="processChromaticAberration('blue', 'x', 1)">→ 
 					{{ fixedAberration.blue?.x > 0 ? fixedAberration.blue.x : '' }}
 				</button>
 				
 				<h4 style="color:red;">Red color alignment</h4>
 
-				<button @click="processChromaticAbberation('y', -1, 'red')">↑ 
+				<button @click="processChromaticAberration('red', 'y', -1)">↑ 
 					{{ fixedAberration.red?.y < 0 ? Math.abs(fixedAberration.red.y) : '' }}
 				</button>
-				<button @click="processChromaticAbberation('y', 1, 'red')">↓ 
+				<button @click="processChromaticAberration('red', 'y', 1)">↓ 
 					{{ fixedAberration.red?.y > 0 ? fixedAberration.red.y : '' }}
 				</button>
-				<button @click="processChromaticAbberation('x', -1, 'red')">← 
+				<button @click="processChromaticAberration('red', 'x', -1)">← 
 					{{ fixedAberration.red?.x < 0 ? Math.abs(fixedAberration.red.x) : '' }}
 				</button>
-				<button @click="processChromaticAbberation('x', 1, 'red')">→ 
+				<button @click="processChromaticAberration('red', 'x', 1)">→ 
 					{{ fixedAberration.red?.x > 0 ? fixedAberration.red.x : '' }}
 				</button>
 
@@ -251,6 +251,8 @@ const applyProcessing = throttle(async() => {
 		cv.imshow('postProcessCanvas', dstMat);
 	}
 
+	redoChromaticAberration()
+
 }, 100);
 
 function imageDataToMat(imageData) {
@@ -311,8 +313,8 @@ function waveletSharpenInWorker(imageData, amount, radius){
 
 let fixedAberration = reactive({});
 
-function processChromaticAbberation(axis, magnitude, channel){
-	fixChromaticAberration(canvas.value, axis, magnitude, channel);
+function processChromaticAberration(channel, axis, magnitude){
+	fixChromaticAberration(canvas.value, channel, axis, magnitude);
 
 	if( fixedAberration[channel] == undefined ){
 		fixedAberration[channel] = reactive({});
@@ -325,7 +327,15 @@ function processChromaticAbberation(axis, magnitude, channel){
 	fixedAberration[channel][axis] += magnitude;
 }
 
-function fixChromaticAberration(canvas, axis, magnitude, channel) {
+function redoChromaticAberration(){
+	for( const channel in fixedAberration ){
+		for( const axis in fixedAberration[channel] ){
+			fixChromaticAberration(canvas.value, channel, axis, fixedAberration[channel][axis])
+		}
+	}
+}
+
+function fixChromaticAberration(canvas, channel, axis, magnitude) {
 	const ctx = canvas.getContext('2d');
 	const width = canvas.width;
 	const height = canvas.height;

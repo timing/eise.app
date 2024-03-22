@@ -142,7 +142,7 @@ header a {
 	padding: 10px 0 0 80px;
 	background: #4A90E2;
 }
-button {
+button, a.button {
 	background-color: #004488; 
 	border: none;
 	color: #A0E8A0; 
@@ -150,15 +150,17 @@ button {
 	cursor: pointer;
 	transition: background-color 0.3s;
 	border-radius: 5px;
+	text-decoration: none;
+	font-size: 13px;
 }
-.tabs button {
+.tabs button, .tabs a.button {
 	border-radius: 5px 5px 0 0;
 	margin-right: 5px;
 }
-button:hover {
+button:hover, a.button:hover {
 	background-color: #003366; 
 }
-.tabs button.active {
+.tabs button.active, .tabs a.button.active {
 	background-color: #001122; 
 	color: white;
 }
