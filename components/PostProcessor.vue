@@ -93,7 +93,6 @@ import throttle from 'lodash/throttle';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 
-let waveletWorker;
 let canvas;
 
 const handleCanvasReady = (canvasRef) => {
@@ -108,33 +107,20 @@ const downloadCanvasAsPNG = () => {
 
 	const dataURL = canvas.value.toDataURL('image/png');
 	const link = document.createElement('a');
-	link.download = 'EISE_stacked_pps.png';
+	link.download = 'eise_app_stacked_pps.png';
 	link.href = dataURL;
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
 	document.body.removeChild(link);
 };
 
+let waveletWorkers = new Array(8);
 onMounted(() => {
-	waveletWorker = new Worker('/wavelet_worker.js', {type: 'module'});
-	waveletWorker.addEventListener('message', (e) => {
-		if (e.data.status === 'wasmLoaded') {
-			console.log('WASM module is ready to use.');
-		}
-		console.log(e); 
-	});
-	waveletWorker.onerror = (event) => { console.error(event); };
+	for (let i = 0; i < waveletWorkers.length; i++) {
+		waveletWorkers[i] = new Worker('/wavelet_worker.js', {type: 'module'});
+		waveletWorkers[i].onerror = (e) => { console.error(e); };
+	}
 });
-
-/*import Module from '@/utils/wavelet_sharpen.js'
-
-let wasmInstance;
-
-Module().then((module) => {
-	wasmInstance = module;
-	console.log(wasmInstance);
-});*/
-
 
 const props = defineProps({
 	file: Object
@@ -234,7 +220,11 @@ const applyProcessing = throttle(async() => {
 	let doSharpening = (doGain || valueIsChanged('waveletsAmount', waveletsAmount.value) || valueIsChanged('waveletsRadius', waveletsRadius.value));
 	if( doSharpening ){
 		console.log('wavelets');
-		sharpenedImageData = await waveletSharpenInWorker(preNoiseReducedImageData, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
+		try {
+			sharpenedImageData = await waveletSharpenInWorker(preNoiseReducedImageData, parseFloat(waveletsAmount.value), parseFloat(waveletsRadius.value));
+		} catch( e ){
+			console.log('Recent sharpening rejected because newer task is doing work');
+		}
 		ctx.putImageData(sharpenedImageData, 0, 0);
 	}
 		
@@ -253,7 +243,7 @@ const applyProcessing = throttle(async() => {
 
 	redoChromaticAberration()
 
-}, 250);
+}, 100);
 
 function imageDataToMat(imageData) {
 	let mat = new cv.Mat(imageData.height, imageData.width, cv.CV_8UC4);
@@ -290,24 +280,36 @@ function applyConditionalGain(imageData, gain, threshold, reducedGainFactor) {
 	return new ImageData(newData, width, height);
 }
 
+let currentTaskId = 0;
+let lastReturnedTaskId = 0;
 function waveletSharpenInWorker(imageData, amount, radius){
 	const width = imageData.width
 	const height = imageData.height;
+	currentTaskId++;
+	const workerId = currentTaskId % waveletWorkers.length;
+
 	return new Promise((resolve, reject) => {
 
 		function handleWorkerMsg(e){
 			// Get the processed image data from the worker
-			const { imageData } = e.data;
+			const { imageData, taskId } = e.data;
 
-			console.log('imageDataaa', imageData);
+			//console.log('imageDataaa', imageData);
 
-			waveletWorker.removeEventListener('message', handleWorkerMsg)
-			resolve(imageData);
+			waveletWorkers[workerId].removeEventListener('message', handleWorkerMsg)
+
+			if( currentTaskId == taskId || taskId > lastReturnedTaskId ){
+				lastReturnedTaskId = taskId;
+				resolve(imageData);
+			} else {
+				console.log('reject', currentTaskId, taskId);
+				reject();
+			}
 		}
 
-		waveletWorker.addEventListener('message', handleWorkerMsg);
+		waveletWorkers[workerId].addEventListener('message', handleWorkerMsg);
 
-		waveletWorker.postMessage({ imageData: imageData.data, width, height, amount, radius });	
+		waveletWorkers[workerId].postMessage({ imageData: imageData.data, width, height, amount, radius, taskId: currentTaskId });	
 	});
 }
 

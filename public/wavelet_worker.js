@@ -6,7 +6,7 @@
 const workers = [];
 const channelDataResults = [null, null, null];
 let pendingResults = 3; // Expecting 3 results
-let globalWidth, globalHeight;
+let globalWidth, globalHeight, globalTaskId;
 
 // Initialize workers
 for (let i = 0; i < 3; i++) {
@@ -17,11 +17,12 @@ for (let i = 0; i < 3; i++) {
 self.addEventListener('message', async (e) => {
 	console.log('msg received', e.data);
 
-	const { imageData, width, height, amount, radius } = e.data;
+	const { imageData, width, height, amount, radius, taskId } = e.data;
 
-	// Store width and height for later use
+	// Store for later use
     globalWidth = width;
     globalHeight = height;
+	globalTaskId = taskId;
 
 	let channelData = extractChannelData(imageData);
 
@@ -39,7 +40,7 @@ function handleWorkerResponse(index) {
 		// When all channels are processed
 		if (pendingResults === 0) {
 			const imageData = new ImageData(new Uint8ClampedArray(mergeChannelsIntoImageData(channelDataResults)), globalWidth, globalHeight);
-			self.postMessage({ imageData });
+			self.postMessage({ imageData, taskId: globalTaskId });
 			pendingResults = 3; // Reset for next image processing
 		}
 	};
