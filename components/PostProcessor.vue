@@ -253,7 +253,7 @@ const applyProcessing = throttle(async() => {
 
 	redoChromaticAberration()
 
-}, 100);
+}, 250);
 
 function imageDataToMat(imageData) {
 	let mat = new cv.Mat(imageData.height, imageData.width, cv.CV_8UC4);
