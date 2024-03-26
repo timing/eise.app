@@ -25,12 +25,12 @@
 		<p>Memory issues? Lower the amount of frames imported from the video.</p>
 
 		<h4>Amount of best frames to use for stacking</h4>
-		<p>30% (with a max of 600 for now)</p>
+		<p>30%</p>
 
 		<h4>Aggressive file trimmer</h4>
 		<label>
 			<input type="checkbox" id="maxFileSizeCut" v-model="maxFileSizeCut" />
-	    	Enable Max File Size Cut
+	    	Enable aggressive file trimmer, which just analyzes 2G of the file and nothing more. FFmpeg might not like this.
 		</label>
 		
 	</div>

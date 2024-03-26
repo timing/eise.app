@@ -115,6 +115,9 @@ html,body {
 	-webkit-font-smoothing: antialiased;
 	-webkit-min-device-pixel-ratio: 1.5;
 }
+body {
+	padding-bottom: 80px;
+}
 header {
 	background: #0A2940;	
 	padding: 0 10px;

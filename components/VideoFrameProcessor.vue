@@ -65,7 +65,7 @@ async function processImageFrames(files) {
 
 	const frames = new Array(files.length).fill().map(() => ({}));
 
-	const bestFramesCapacity = /*files.length * 0.3;*/ Math.min(600, files.length * 0.3);
+	const bestFramesCapacity = files.length * 0.3;
 	const bestFrames = [];
 	let highestSharpness = 0;
 
