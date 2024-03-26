@@ -11,7 +11,9 @@ from queue import Queue
 from threading import Thread, Semaphore
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024 # 1024MB
+# Flask originally does not have a max file size, but I kept getting http error 413 when uploading 249M. Here I'm trying to set it to 1G, but it does not work
+# Maybe Flask's memory does not allow bigger files? I don't know
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins=['http://localhost:3001','https://cloud-stacker.pages.dev', 'https://eise.app'])
 
@@ -35,7 +37,7 @@ for _ in range(CONCURRENT_JOBS_LIMIT):
 def process_file(job_id):
     jobs_semaphore.acquire()
     try:
-        command = "python ../PlanetarySystemStacker/src/stack_frames.py uploads/" + job_id + "/*.png --output output/" + job_id + "-stacked.png"
+        command = "python ../../PlanetarySystemStacker/src/stack_frames.py uploads/" + job_id + "/*.png --output output/" + job_id + "-stacked.png"
 
         # Use Popen to execute the command and capture stdout in real-time
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, shell=True)
@@ -132,6 +134,25 @@ def handle_join(data):
     join_room(room)
     emit('joined_room', {'message': f'Joined room {room}'}, room=room)
 
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    # Log the error and any other relevant information
+    app.logger.error(f"413 Error: {error}")
+    app.logger.error(f"Request path: {request.path}")
+    app.logger.error(f"Request headers: {request.headers}")
+    app.logger.error(f"Request content length: {request.content_length}")
+
+    # Return a custom message or JSON response with debug information
+    return jsonify({
+        "error": "File too large",
+        "message": "The file exceeds the maximum allowed size.",
+        "debug": {
+            "path": request.path,
+            "content_length": request.content_length,
+            "headers": dict(request.headers)
+        }
+    }), 413
+
 if __name__ == '__main__':
-    socketio.run(app, host='142.93.131.136', port='8080', debug=True)
+    socketio.run(app, host='127.0.0.1', port='8080', debug=True)
 
