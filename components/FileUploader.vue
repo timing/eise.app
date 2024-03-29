@@ -1,38 +1,43 @@
 <template>
 <div>
+	<div class="card">
+		<label for="file-upload">
+			<h3>Select file(s)</h3>
+			<input id="file-upload" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
+			<p>Max filesize: 2G (or use file trimmer below)</p>
+		</label>
+
+		<LoadingIndicator />
+
+		<div class="separator"></div>
+
+		<h4>Maximum number of frames to analyze</h4>
+		<input type="range" min="2" max="5000" step="1" v-model="maxFrames" /> {{ maxFrames }}
+		<p>Memory issues? Lower the amount of frames imported from the video.</p>
+		
+		<div class="separator"></div>
+
+		<h4>File trimmer</h4>
+		<label>
+			<input type="checkbox" id="maxFileSizeCut" v-model="maxFileSizeCut" />
+			Only loads the first 2G of the selected file.
+		</label>
+		<p>(FFmpeg might not like this.)</p>
+	
+	</div>
 	<div class="content">
 		<h2>Welcome to eise.app</h2>
 		<h3>An easy planetary image stacker</h3>
 		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image.</p>
 	
-		<label class="file-upload-wrapper" for="file-upload">
-			<h3>Select file(s)</h3>
-			<input id="file-upload" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
-			<ul>
-				<li>Select one video file for stacking and post processing.</li>
-				<li>Coming soon: Select multiple image files for stacking and post processing.</li>
-				<li>Select one image file for post processing only.</li>
-				<li>For now choosing video files smaller than 2GB works, but let us find the limit!</li>
-			</ul>
-		</label>
+		<ul>
+			<li>Select one video file for stacking followed by post processing.</li>
+			<!-- <li>Coming soon: Select multiple image files for stacking and post processing.</li> -->
+			<li>Select one image file for post processing only.</li>
+		</ul>	
 
-		<LoadingIndicator />
+		<p>When stacking a video, eise.app will first analyze all frames, and then use 30% of the best frames for stacking.</p>
 
-		<h3>Settings</h3>
-
-		<h4>Maximum frames to analyze</h4>
-		<input type="range" min="2" max="5000" step="1" v-model="maxFrames" /> {{ maxFrames }}
-		<p>Memory issues? Lower the amount of frames imported from the video.</p>
-
-		<h4>Amount of best frames to use for stacking</h4>
-		<p>30%</p>
-
-		<h4>Aggressive file trimmer</h4>
-		<label>
-			<input type="checkbox" id="maxFileSizeCut" v-model="maxFileSizeCut" />
-	    	Enable aggressive file trimmer, which just analyzes 2G of the file and nothing more. FFmpeg might not like this.
-		</label>
-		
 	</div>
 </div>
 </template>

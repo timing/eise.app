@@ -1,16 +1,15 @@
 <template>
-	<div>
+	<div>	
+		<nav class="tabs">
+			<button :class="{ active: currentTab === 'FileUploader' }" @click="currentTab = 'FileUploader'">📁 &nbsp; Upload File(s)</button>
+			<button :class="{ active: currentTab === 'VideoFrameProcessor' }" @click="currentTab = 'VideoFrameProcessor'">🎞️ &nbsp; Analyze Frames</button>
+			<button :class="{ active: currentTab === 'PostProcessor' }" @click="currentTab = 'PostProcessor'">✨ &nbsp; Post Process</button>	
+			<button :class="{ active: currentTab === 'About' }" style="float:right;" @click="currentTab = 'About'">ℹ️  &nbsp; About</button>	
+		</nav>
+
 		<header>
-			<!--<div class="info">DEVELOPMENT <a href="https://eise.app">(prod)</a></div>-->
 			<h1><a href="/">eise.app</a> <span class="subtitle">- Easy (planetary) Image Stacker Engine</span></h1>
 		</header>
-
-		<nav class="tabs">
-			<button :class="{ active: currentTab === 'FileUploader' }" @click="currentTab = 'FileUploader'">📁 Upload File(s)</button>
-			<button :class="{ active: currentTab === 'VideoFrameProcessor' }" @click="currentTab = 'VideoFrameProcessor'">🎞️ Analyze Frames</button>
-			<button :class="{ active: currentTab === 'PostProcessor' }" @click="currentTab = 'PostProcessor'">✨ Post Process</button>	
-			<button :class="{ active: currentTab === 'About' }" style="float:right;" @click="currentTab = 'About'">ℹ️  About</button>	
-		</nav>
 
 		<div v-show="currentTab === 'About'" class="content">
 			<h2>About eise.app - Planetary Image Cloud Stacker</h2>
@@ -108,18 +107,25 @@ useHead({
 html,body {
 	padding: 0;
 	margin: 0;
-	font-family: Verdana, Arial, sans-serif;
-	font-size: 12px;
-	color: #111;
+	font-family: -apple-system,\.SFNSText-Regular,San Francisco,Roboto,Segoe UI,Helvetica Neue,Lucida Grande,sans-serif;
+	/*font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;*/
+	font-size: 13px;
 	-moz-osx-font-smoothing: grayscale;
 	-webkit-font-smoothing: antialiased;
 	-webkit-min-device-pixel-ratio: 1.5;
+	color: #c6fffd;
+	min-height: 100%;
+}
+html {
+	background: radial-gradient(circle at bottom, #27587c, #0A2940);
+}
+.content a, .content a:visited {
+	color: inherit;
 }
 body {
 	padding-bottom: 80px;
 }
 header {
-	background: #0A2940;	
 	padding: 0 10px;
 }
 header h1 {
@@ -140,15 +146,18 @@ header .info {
 }
 header a {
 	color: #8CCF7E;
+	text-decoration: none;
 }
 .tabs {
-	padding: 10px 0 0 80px;
-	background: #4A90E2;
+	float: right;
+	border-radius: 5px;
+	margin: 10px 10px 0 0;
+	overflow: hidden;
 }
 button, a.button {
-	background-color: #004488; 
+	background-color: #eee; 
 	border: none;
-	color: #A0E8A0; 
+	color: #333; 
 	padding: 10px 20px;
 	cursor: pointer;
 	transition: background-color 0.3s;
@@ -157,26 +166,47 @@ button, a.button {
 	font-size: 13px;
 }
 .tabs button, .tabs a.button {
-	border-radius: 5px 5px 0 0;
-	margin-right: 5px;
+	border-radius: 0;
+	border-right: 1px solid #ccc;
+	font-weight:bold;
 }
 button:hover, a.button:hover {
-	background-color: #003366; 
+	background-color: #70f1ec; 
 }
 .tabs button.active, .tabs a.button.active {
-	background-color: #001122; 
-	color: white;
+	background-color: #8CCF7E; 
+	color: #111;
 }
 .content {
 	max-width: 500px;
-	margin: 0 auto;
-	padding: 0 5px;
+	margin-left: 400px;
+	padding: 50px 5px 5px 5px;
 	line-height: 1.5;
 }
 canvas {
 	display: block; 
-	border: 2px solid white;
 	width: auto;
 	height: auto;
+}
+.card {
+	background-color: #fefefe;
+	color: #333;
+	border: 1px solid #ddd;
+	border-radius: 10px;
+	margin: 50px;
+	padding: 10px 20px 20px 20px;
+	width: 272px;
+	min-height: 340px;
+	float: left;
+}
+.separator {
+	border-top: 1px solid #ddd;
+}
+.card .separator {
+	margin-left: -20px;
+	margin-right: -20px;
+}
+.card h4 {
+	margin-bottom: 0;
 }
 </style>

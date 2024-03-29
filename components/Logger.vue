@@ -43,13 +43,13 @@ onMounted(() => {
 
 <style scoped>
 .logger {
-	background-color: #f0f0f0;
-	border: 1px solid #ddd;
+	background-color: rgba(0,0,0,.5);
 	padding: 10px;
 	position: fixed;
 	bottom: 0;
 	right: 0;
 	left: 0;
+	color: #eee;
 }
 .logger pre {
 	overflow-y: scroll;
@@ -63,8 +63,9 @@ button.expand-button {
 	top: 0;
 	right: 0;
 	background: transparent;
-	color: black;
 	font-size: 10px;
+	color: #eee;
+	font-weight: bold;
 }
 </style>
 

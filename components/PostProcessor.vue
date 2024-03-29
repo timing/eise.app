@@ -1,10 +1,6 @@
 <template>
 <div>
-	<div class="content" v-if="!props.file">
-		<h2>Nothing loaded yet</h2>
-		<p>Please upload a video (or bunch of files) for analyzing and stacking frames. Upload one image file for direct post processing.</p>
-	</div>
-	<div v-else>
+	<div class="card">
 		<div class="controls">
 			<h4>Wavelets sharpen</h4>
 			<div>
@@ -82,8 +78,15 @@
 			<button class="download" @click="downloadCanvasAsPNG">Save / Download as PNG</button>
 
 		</div>
-		<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" />
 	</div>
+	<div class="content">
+		<div v-if="!props.file">
+			<h2>Nothing loaded yet</h2>
+			<p>Please upload a video (or bunch of files) for analyzing and stacking frames. Upload one image file for direct post processing.</p>
+		</div>
+		<ZoomableCanvas v-else id="postProcessCanvas" @canvasReady="handleCanvasReady" />
+	</div>
+
 </div>
 </template>
 
@@ -382,16 +385,12 @@ function fixChromaticAberration(canvas, channel, axis, magnitude) {
 
 </script>
 
-<style>
+<style scoped>
 canvas {
 
 }
-.controls {
-	float: right;
-	width: 300px; 
-	background: white;
-	height: 100vh;
-	padding: 10px;	
+.content {
+	max-width: none;
 }
 .color-alignment button {
 	margin-right: 2px;

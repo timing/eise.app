@@ -1,5 +1,10 @@
 <template>
 	<div>
+		<div class="card">
+			<h3>Analyzing frames..</h3>	
+			<LoadingIndicator />
+		</div>
+
 		<div class="content">
 			<div v-if="props.frames && props.frames.length === 0">
 				<h2>Nothing loaded yet</h2>
@@ -10,8 +15,6 @@
 				<p>Found {{ bestFramesCount }} best frames. Which will be uploaded for stacking.</p>
 			</div>
 			<canvas id="analyzeCanvas" ref="canvasRef"></canvas>
-
-			<LoadingIndicator />
 
 		</div>
 	</div>
@@ -246,9 +249,6 @@ async function processImageFrames(files) {
 </script>
 
 <style scoped>
-	h4, p {
-		text-align: center;
-	}
 	canvas#analyzeCanvas {
 		margin: 20px auto;
 		max-width: 70%;
