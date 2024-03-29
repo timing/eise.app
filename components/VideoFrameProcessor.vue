@@ -147,7 +147,12 @@ async function processImageFrames(files) {
 		});
 	});
 
-	await Promise.all(promises); // Wait for all the promises to resolve
+	try {
+		await Promise.all(promises); // Wait for all the promises to resolve
+	} catch(error){
+		console.log('One or more frames failed analyzing. Trying to continue.', error);
+		addLog('One or more frames failed analyzing. Trying to continue.');
+	}
 
 	addLog('Done analyzing frames. Cleaning up');
 	try {
