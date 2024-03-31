@@ -184,9 +184,16 @@ button:hover, a.button:hover {
 }
 .content {
 	max-width: 500px;
-	margin-left: 400px;
-	padding: 50px 5px 5px 5px;
+	padding: 5px 5px 5px 50px;
 	line-height: 1.5;
+	clear:both;
+}
+@media (min-width: 728px) {
+	.content {
+		clear: none;
+		margin-left: 370px;
+		padding-top: 50px;
+	}
 }
 canvas {
 	display: block; 

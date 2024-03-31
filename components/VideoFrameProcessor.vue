@@ -126,6 +126,7 @@ async function processImageFrames(files) {
 				//useEventBus().emit('update-loading', index / files.length * 100);
 				resolveFunctions[index](); // Resolve the promise for this index
 			} else {
+				addLog('Failed analyzing frame ' + index);
 				rejectFunctions[index](new Error("Processing failed.")); // Reject the promise for this index
 			}
 		});
