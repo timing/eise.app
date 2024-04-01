@@ -1,9 +1,9 @@
 <template>
-	<div v-if="loading" class="loading-indicator">
-		<div v-if="isIndeterminate" class="indeterminate"></div>
-		<div v-else class="determinate" :style="{ width: progress + '%' }"></div>
-	</div>
-	<div v-else class="loading-empty">
+	<div class="loading-wrapper">
+		<div v-if="loading" class="loading-indicator">
+			<div v-if="isIndeterminate" class="indeterminate"></div>
+			<div v-else class="determinate" :style="{ width: progress + '%' }"></div>
+		</div>
 	</div>
 </template>
 
@@ -49,8 +49,9 @@ onUnmounted(() => {
 	background-color: #4A90E2;
 	overflow: hidden;
 }
-.loading-empty {
+.loading-wrapper {
 	height: 5px;
+	margin-bottom: 5px;
 }
 .determinate {
 	height: 100%;

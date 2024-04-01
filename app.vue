@@ -213,6 +213,7 @@ canvas {
 }
 .separator {
 	border-top: 1px solid #ddd;
+	margin: 10px 0;
 }
 .card .separator {
 	margin-left: -20px;

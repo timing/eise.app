@@ -3,6 +3,13 @@
 		<div class="card">
 			<h3>Analyzing frames..</h3>	
 			<LoadingIndicator />
+
+			<div class="separator"></div>
+
+			<table>
+				<tr><td>Amount analyzed</td><td>{{ allFramesCount }}</td></tr>
+				<tr><td>Amount of best frames</td><td>{{ bestFramesCount }}</td></tr>
+			</table>
 		</div>
 
 		<div class="content">
@@ -11,8 +18,8 @@
 				<p>To get started, please upload a video or bunch of files for analyzing and stacking.</p>
 			</div>
 			<div v-else>
-				<h4>Analyzing frames</h4>
-				<p>Found {{ bestFramesCount }} best frames. Which will be uploaded for stacking.</p>
+				<h4>Best frame</h4>
+				<p>This is the best frame from the data</p>
 			</div>
 			<canvas id="analyzeCanvas" ref="canvasRef"></canvas>
 
@@ -37,6 +44,7 @@ const props = defineProps({
 });
 const canvasRef = ref(null);
 const bestFramesCount = ref(0);
+const allFramesCount = ref(0);
 
 let analyzeWorkers = new Array(12);
 
@@ -114,6 +122,8 @@ async function processImageFrames(files) {
 		analyzeWorkers[i].addEventListener('message', (e) => {
 			const index = e.data.index; // Assuming the worker sends back the index
 			const pngFile = filesMap[index]; // Retrieve the blob using the index
+
+			allFramesCount.value++;
 
 			if(e.data.frameData !== undefined) {
 				//console.log(index, e.data);
@@ -256,7 +266,21 @@ async function processImageFrames(files) {
 
 <style scoped>
 	canvas#analyzeCanvas {
-		margin: 20px auto;
-		max-width: 70%;
+		max-width: 100%;
+		border: 1px solid white;
+	}
+	table {
+		border-collapse: collapse;
+	}
+	table td {
+		border: 1px solid #eee;
+		padding: 5px;
+	}
+	table td:first-child {
+		padding-right: 10px;
+	}
+	table td:last-child {
+		min-width: 60px;
+		text-align: right;
 	}
 </style>
