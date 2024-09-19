@@ -17,6 +17,7 @@
 			</div>
 			<div class="content">
 			<h2>About eise.app - Planetary Image Cloud Stacker</h2>
+			<h3>Perfect for beginners in Astrophotography</h3>
 			<p>eise.app is the first web-based online planetary image stacking tool available in the solar system. 
 			The name is an ode to Eise Eisinga, a Frisian amateur astronomer who built a planetarium in his house. 
 			The main reason for developing yet another application for stacking is because of recent frustrations I had getting software running on my ARM based macbook. 
@@ -41,7 +42,7 @@
 				<li>A very basic post processor is opened, providing Wavelets sharpening, some noise reduction and color alignment. 
 					Code is from OpenCV and a <a href="https://github.com/mrossini-ethz/gimp-wavelet-sharpen/blob/master/src/wavelet.c" target="_blank">GIMP plugin</a> compiled to WebAssembly using emscripten.</li>
 			</ul>
-			<p>In essence, eise.app is a blend of PSS's stacking capabilities combined with browser-based frame ranking and (post) processing.</p>
+			<p>In essence, eise.app is a blend of Planetary System Stacker's capabilities combined with browser-based frame ranking and (post) processing.</p>
 			<p>I hope this web-app will improve your astrophotography workflow, or helps beginners not giving up when trying to set-up their software.</p>
 			<p>Happy Stacking,<br/> Tijmen</p>
 			</div>
@@ -99,10 +100,10 @@ async function handlePostProcessing(data) {
 }
 
 useHead({
-  title: 'eise.app - Easy (planetary) Image Stacker in your browser',
+  title: 'eise.app - Easy (planetary) Image Stacker in your browser for your Astrophotography',
   // Overview Effect
   meta: [
-    { name: 'description', content: 'Easy (planetary) Image Stacker Engine, made to work in your browser. Turn your blurry videos of planets into sharp images.' },
+    { name: 'description', content: 'Easy (planetary) Image Stacker Engine, made to work in your browser. Turn your blurry videos of planets into sharp images. Perfect for beginners in Astrophotography. Using Planetary System Stacker under the hood.' },
   ],
 });
 

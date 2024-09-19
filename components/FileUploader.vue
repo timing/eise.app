@@ -27,7 +27,7 @@
 	</div>
 	<div class="content">
 		<h2>Welcome to eise.app</h2>
-		<h3>An easy planetary image stacker</h3>
+		<h3>An easy planetary image stacker for astrophotography</h3>
 		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image.</p>
 	
 		<ul>
