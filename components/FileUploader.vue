@@ -27,7 +27,7 @@
 	</div>
 	<div class="content">
 		<h2>Welcome to eise.app</h2>
-		<h3>An easy planetary image stacker</h3>
+		<h3>An easy planetary image stacker for astrophotography</h3>
 		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image.</p>
 	
 		<ul>
@@ -89,7 +89,6 @@ async function processVideo(event) {
 
 	if( videoFiles.length == 1 ){
 
-
 		let fileToProcess = videoFiles[0]; // Default to the first file selected
 		
 		if( maxFileSizeCut.value  ){
@@ -104,6 +103,10 @@ async function processVideo(event) {
 			}
 		}
 
+		emit('analyzeVideo', fileToProcess, maxFrames.value);
+
+		return;	
+
 		await $loadFFmpeg();
 
 		// Storing video in memory
@@ -113,10 +116,18 @@ async function processVideo(event) {
 		addLog('Storing video in memory done');
 		
 		//await $ffmpeg.run('-formats');
+		var exportFormat = 'png';
 
 		// Extract frames from the video
 		try {
-			await $ffmpeg.run('-i', videoFiles[0].name, '-vframes', '' + maxFrames.value + '', 'out%d.png');
+			// as png, uses less memory, is slower
+			if( exportFormat == 'png' ){
+				await $ffmpeg.run('-i', videoFiles[0].name, '-vframes', '' + maxFrames.value + '', 'out%d.png');
+			} else {
+				// uses more memory, is faster, could be efficient if we also analyze frames during this process
+				await $ffmpeg.run('-i', videoFiles[0].name, '-vframes', '' + maxFrames.value + '', '-pix_fmt', 'rgb24', 'out%d.raw');
+			}
+			
 		} catch(err){
 			console.log(err);
 			addLog('FFmpeg forcefully exited, but continuing!');
@@ -124,7 +135,7 @@ async function processVideo(event) {
 
 		addLog('Cleaning up ffmpeg memory');
 
-		filesInternal = $ffmpeg.FS('readdir', '.').filter(file => file.endsWith('.png'));
+		filesInternal = $ffmpeg.FS('readdir', '.').filter(file => file.endsWith('.' + exportFormat));
 		
 		$ffmpeg.FS('unlink', videoFiles[0].name);
 

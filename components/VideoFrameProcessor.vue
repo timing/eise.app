@@ -7,8 +7,10 @@
 			<div class="separator"></div>
 
 			<table>
-				<tr><td>Amount analyzed</td><td>{{ allFramesCount }}</td></tr>
-				<tr><td>Amount of best frames</td><td>{{ bestFramesCount }}</td></tr>
+				<tbody>
+					<tr><td>Amount analyzed</td><td>{{ allFramesCount }}</td></tr>
+					<tr><td>Amount of best frames</td><td>{{ bestFramesCount }}</td></tr>
+				</tbody>
 			</table>
 		</div>
 
@@ -36,15 +38,21 @@ import { useEventBus } from '@/composables/eventBus';
 const { addLog } = useEventBus();
 
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
+import { fetchFile } from '@ffmpeg/ffmpeg';
 
 const emit = defineEmits(['postProcessing']);
 
 const props = defineProps({
-	frames: Array
+	frames: Array,
+	selectedFile: null,
+	maxFrames: 1000,
 });
 const canvasRef = ref(null);
 const bestFramesCount = ref(0);
 const allFramesCount = ref(0);
+
+let vidWidth = 0;
+let vidHeight = 0;
 
 let analyzeWorkers = new Array(12);
 
@@ -58,6 +66,9 @@ onMounted(() => {
 		processImageFrames(props.frames);
 	}
 
+	if( props.selectedFile ){
+		extractFramesAndProcess(props.selectedFile);
+	}
 });
 
 
@@ -66,6 +77,90 @@ watch(() => props.frames, (newVal) => {
 		processImageFrames(newVal);
 	}
 });
+
+watch(() => props.selectedFile, (newVal) => {
+	if (newVal) {
+		extractFramesAndProcess(props.selectedFile);
+	}
+});
+
+function getImageDimensions(data) {
+	return new Promise((resolve, reject) => {
+		const blob = new Blob([data.buffer], { type: 'image/png' });
+		const url = URL.createObjectURL(blob);
+		const image = new Image();
+
+		image.onload = () => {
+			// Resolve the promise with the width and height
+			resolve({ width: image.width, height: image.height });
+
+			// Clean up the object URL after loading the image
+			URL.revokeObjectURL(url);
+		};
+		image.onerror = () => {
+			reject(new Error('Failed to load the image'));
+		};
+
+		image.src = url;
+	});
+}
+
+async function extractFramesAndProcess(selectedFile){
+
+	useEventBus().emit('start-loading');
+
+	await $loadFFmpeg();
+
+	// Storing video in memory
+	addLog('Storing video in memory');
+	console.log(selectedFile.name);
+	await $ffmpeg.FS('writeFile', selectedFile.name, await fetchFile(selectedFile));
+
+	await $ffmpeg.run('-i', selectedFile.name, '-vframes', '1', 'sample.png');
+	const data = $ffmpeg.FS('readFile', 'sample.png');
+	const dimensions = await getImageDimensions(data);	
+	vidWidth = dimensions.width;
+	vidHeight = dimensions.height;
+	
+	canvasRef.value.width = vidWidth;
+	canvasRef.value.height = vidHeight;
+
+	addLog('Video dimensions: ' + vidWidth + 'x' + vidHeight);
+	addLog('======= Running ffmpeg in background ========');
+	let FFmpegIsRunning = true;
+	// as of now we need the await as ffmpeg probably only gives access to the files when the process is done, not while doing it.
+	// so the lower "reading frames while exporting" code is only running at the end.
+	await $ffmpeg.run('-i', selectedFile.name, '-vframes', '' + props.maxFrames + '', '-pix_fmt', 'rgb24', 'out%d.raw').then(() => {
+		addLog('FFmpeg done');
+		FFmpegIsRunning = false;
+	});
+
+	
+
+	let batchCheckCount = 0;
+	function loadFrames(){
+
+		const files = $ffmpeg.FS('readdir', '.').filter(file => file.endsWith('.raw'));
+		console.log(files);
+		
+		addLog('Batch load and analyze frames. length: ' + files.length);
+	
+		processImageFrames(files);	
+
+		if( files.length === 0 && batchCheckCount >= 5 ){
+			addLog('FFmpeg timed out');
+			FFmpegIsRunning = false;
+		}
+
+		if( FFmpegIsRunning ){
+			setTimeout(loadFrames, 1000);
+		}
+
+		batchCheckCount++;
+	}
+	loadFrames();
+
+}
 
 async function processImageFrames(files) {
 	if (!canvasRef.value) return;
@@ -151,7 +246,8 @@ async function processImageFrames(files) {
 			// this is a timeout to give the UI some slack and be able to update. preferably we run this whole thing in another worker as well
 			setTimeout(() => {
 				filesMap[index] = [$ffmpeg.FS('readFile', file)];
-				analyzeWorkers[index % 12].postMessage({analyze: filesMap[index], index: index});
+				console.log('analyze', filesMap[index]);
+				analyzeWorkers[index % 12].postMessage({analyze: filesMap[index], index: index, exportFormat: 'raw', width: vidWidth, height: vidHeight});
 				//addLog('Cleaning up memory, deleting frame ' + index);
 				$ffmpeg.FS('unlink', file);
 			}, 10);

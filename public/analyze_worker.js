@@ -2,6 +2,61 @@ let offscreen = null;
 let ctx = null;
 
 self.addEventListener('message', async (e) => {
+	const { analyze, index, exportFormat, width, height } = e.data;
+
+	console.log('data', e.data);
+
+	if (exportFormat === 'raw') {
+		// Handle raw RGB24 data
+		// Convert the raw RGB24 data into ImageData
+		const imageData = rgb24ToImageData(new Uint8Array(analyze[0]), width, height);
+		console.log(analyze, imageData);
+
+		processImageData(imageData, index);
+	} else {
+		// Existing PNG handling code
+		createImageBitmap(new Blob(analyze, {type: 'image/png'})).then(img => {
+			// Your existing processing code
+			processImageBitmap(img, index);
+		}).catch(error => {
+			console.error('Error creating ImageBitmap:', error);
+			self.postMessage({error: error, index: index});
+		});
+	}
+});
+
+function rgb24ToImageData(rgbData, width, height) {
+	let imageData = new ImageData(width, height);
+	for (let i = 0, j = 0; i < rgbData.length; i += 3, j += 4) {
+		imageData.data[j] = rgbData[i];	 // R
+		imageData.data[j + 1] = rgbData[i + 1]; // G
+		imageData.data[j + 2] = rgbData[i + 2]; // B
+		imageData.data[j + 3] = 255; // A
+	}
+	return imageData;
+}
+
+function processImageData(imageData, index) {
+	const frameData = { sharpness: calculateSharpness(imageData) };
+	const { cog, boundingBox } = calculateCenterOfGravityAndBoundingBox(imageData);
+	frameData.is_cut_off = isImageCutOff(cog, boundingBox, imageData.width, imageData.height);
+	console.log('AnalyzeWorker', index, frameData, cog, boundingBox);
+	self.postMessage({frameData: frameData, index: index});
+}
+
+function processImageBitmap(img, index) {
+	if( offscreen === null ){
+		offscreen = new OffscreenCanvas(img.width, img.height);
+		ctx = offscreen.getContext('2d', {willReadFrequently: true});
+	}
+
+	ctx.drawImage(img, 0, 0);
+	const imageData = ctx.getImageData(0, 0, img.width, img.height);
+	processImageData(imageData, index);
+}
+
+
+self.addEventListener('old_message', async (e) => {
 
 	createImageBitmap(new Blob(e.data.analyze, {type: 'image/png'})).then(img => {
 
@@ -92,36 +147,6 @@ function calculateSharpness(imageData) {
 
 	return avgGradient;
 }
-
-// detect non black pixels.. should not be used at some point. Fix server side PSS instead
-/*function isImageCutOff(imageData, border = 5, threshold = 30) {
-	const { data, width, height } = imageData;
-
-	// Helper function to check if a pixel is not black
-	function isNotBlack(index) {
-		return data[index] > threshold || data[index + 1] > threshold || data[index + 2] > threshold;
-	}
-
-	// Check top and bottom borders
-	for (let x = 0; x < width; x++) {
-		for (let y = 0; y < border; y++) {
-			if (isNotBlack((y * width + x) * 4) || isNotBlack(((height - 1 - y) * width + x) * 4)) {
-				return true;
-			}
-		}
-	}
-
-	// Check left and right borders
-	for (let y = 0; y < height; y++) {
-		for (let x = 0; x < border; x++) {
-			if (isNotBlack((y * width + x) * 4) || isNotBlack((y * width + (width - 1 - x)) * 4)) {
-				return true;
-			}
-		}
-	}
-
-	return false; // No cut-off detected
-}*/
 
 function calculateCenterOfGravity(imageData) {
 	let totalWeight = 0;

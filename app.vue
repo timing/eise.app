@@ -17,6 +17,7 @@
 			</div>
 			<div class="content">
 			<h2>About eise.app - Planetary Image Cloud Stacker</h2>
+			<h3>Perfect for beginners in Astrophotography</h3>
 			<p>eise.app is the first web-based online planetary image stacking tool available in the solar system. 
 			The name is an ode to Eise Eisinga, a Frisian amateur astronomer who built a planetarium in his house. 
 			The main reason for developing yet another application for stacking is because of recent frustrations I had getting software running on my ARM based macbook. 
@@ -41,15 +42,14 @@
 				<li>A very basic post processor is opened, providing Wavelets sharpening, some noise reduction and color alignment. 
 					Code is from OpenCV and a <a href="https://github.com/mrossini-ethz/gimp-wavelet-sharpen/blob/master/src/wavelet.c" target="_blank">GIMP plugin</a> compiled to WebAssembly using emscripten.</li>
 			</ul>
-			<p>In essence, eise.app is a blend of PSS's stacking capabilities combined with browser-based frame ranking and (post) processing.</p>
+			<p>In essence, eise.app is a blend of Planetary System Stacker's capabilities combined with browser-based frame ranking and (post) processing.</p>
 			<p>I hope this web-app will improve your astrophotography workflow, or helps beginners not giving up when trying to set-up their software.</p>
 			<p>Happy Stacking,<br/> Tijmen</p>
 			</div>
 		</div>
 	
-		<FileUploader v-show="currentTab === 'FileUploader'" @frames="handleFrames" @postProcessing="handlePostProcessing" />
-		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'VideoFrameProcessor'" 
-			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
+		<FileUploader v-show="currentTab === 'FileUploader'" @frames="handleFrames" @postProcessing="handlePostProcessing" @analyzeVideo="handleAnalyzeVideo" />
+		<VideoFrameProcessor v-show="currentTab === 'VideoFrameProcessor'" :maxFrames="maxFrames" :selectedFile="selectedFile" :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" />
 
 		<Logger />
@@ -67,10 +67,9 @@ import { ref } from 'vue';
 
 
 const frames = ref([]);
-const currentFrame = ref(null);
 const selectedFile = ref(null);
 const currentTab = ref('FileUploader');
-const videoProcessorRef = ref(null);
+const maxFrames = ref(1000);
 
 const loadPixel = ref(false)
 
@@ -83,13 +82,10 @@ async function handleFrames(data) {
 	currentTab.value = 'VideoFrameProcessor'
 }
 
-async function handleSingleFrame(data, index, frameCount){
-	currentFrame.value = data;
+async function handleAnalyzeVideo(data, maxFramesSel) {
+	selectedFile.value = data;
+	maxFrames.value = maxFramesSel;
 	currentTab.value = 'VideoFrameProcessor'
-
-	if( index >= frameCount -1 ){
-		videoProcessorRef.value.filterAndStack();
-	}
 }
 
 async function handlePostProcessing(data) {
@@ -99,10 +95,10 @@ async function handlePostProcessing(data) {
 }
 
 useHead({
-  title: 'eise.app - Easy (planetary) Image Stacker in your browser',
+  title: 'eise.app - Easy (planetary) Image Stacker in your browser for your Astrophotography',
   // Overview Effect
   meta: [
-    { name: 'description', content: 'Easy (planetary) Image Stacker Engine, made to work in your browser. Turn your blurry videos of planets into sharp images.' },
+    { name: 'description', content: 'Easy (planetary) Image Stacker Engine, made to work in your browser. Turn your blurry videos of planets into sharp images. Perfect for beginners in Astrophotography. Using Planetary System Stacker under the hood.' },
   ],
 });
 
