@@ -16,7 +16,7 @@
 				<img src="/public/EiseApp-NoCopyright-L.webp" width="260" />
 			</div>
 			<div class="content">
-			<h2>About eise.app - Planetary Image Cloud Stacker</h2>
+			<h2>About eise.app - An open source Planetary Image Cloud Stacker</h2>
 			<h3>Perfect for beginners in Astrophotography</h3>
 			<p>eise.app is the first web-based online planetary image stacking tool available in the solar system. 
 			The name is an ode to Eise Eisinga, a Frisian amateur astronomer who built a planetarium in his house. 
@@ -44,6 +44,10 @@
 			</ul>
 			<p>In essence, eise.app is a blend of Planetary System Stacker's capabilities combined with browser-based frame ranking and (post) processing.</p>
 			<p>I hope this web-app will improve your astrophotography workflow, or helps beginners not giving up when trying to set-up their software.</p>
+
+			<h3>Do you have bugs or feature requests?</h3>
+			<p>Would love to hear your thoughts! Head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a> if you have any suggestions or bug reports.</p>
+
 			<p>Happy Stacking,<br/> Tijmen</p>
 			</div>
 		</div>

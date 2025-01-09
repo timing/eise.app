@@ -38,6 +38,9 @@
 
 		<p>When stacking a video, eise.app will first analyze all frames, and then use 30% of the best frames for stacking.</p>
 
+		<h3>More information, bugs and feature requests?</h3>
+		<p>Read more about Eise.app on the About page, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>.</p>
+
 	</div>
 </div>
 </template>
