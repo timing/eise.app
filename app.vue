@@ -2,7 +2,6 @@
 	<div>	
 		<nav class="tabs">
 			<button :class="{ active: currentTab === 'FileUploader' }" @click="currentTab = 'FileUploader'">📁 &nbsp; Upload File(s)</button>
-			<button :class="{ active: currentTab === 'VideoFrameProcessor' }" @click="currentTab = 'VideoFrameProcessor'">🎞️ &nbsp; Analyze Frames</button>
 			<button :class="{ active: currentTab === 'PostProcessor' }" @click="currentTab = 'PostProcessor'">✨ &nbsp; Post Process</button>	
 			<button :class="{ active: currentTab === 'About' }" style="float:right;" @click="currentTab = 'About'">ℹ️  &nbsp; About</button>	
 		</nav>
@@ -52,8 +51,8 @@
 			</div>
 		</div>
 	
-		<FileUploader v-show="currentTab === 'FileUploader'" @frames="handleFrames" @postProcessing="handlePostProcessing" />
-		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'VideoFrameProcessor'" 
+		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
+		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing" 
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" />
 
@@ -69,6 +68,9 @@ import VideoFrameProcessor from './components/VideoFrameProcessor.vue';
 import PostProcessor from './components/PostProcessor.vue';
 import Logger from './components/Logger.vue';
 import { ref } from 'vue';
+import { useEventBus } from '@/composables/eventBus';
+
+const { on } = useEventBus();
 
 
 const frames = ref([]);
@@ -76,31 +78,30 @@ const currentFrame = ref(null);
 const selectedFile = ref(null);
 const currentTab = ref('FileUploader');
 const videoProcessorRef = ref(null);
+const isProcessing = ref(false);
 
 const loadPixel = ref(false)
 
 onMounted(() => {
-	loadPixel.value = true
+	loadPixel.value = true;
+	on('postProcessing', handlePostProcessing);
 });
 
 async function handleFrames(data) {
-	frames.value = data; 
-	currentTab.value = 'VideoFrameProcessor'
+	frames.value = data;
+	// isProcessing is already true from processing-started
+	// This will now trigger the watcher in VideoFrameProcessor
 }
 
-async function handleSingleFrame(data, index, frameCount){
-	currentFrame.value = data;
-	currentTab.value = 'VideoFrameProcessor'
-
-	if( index >= frameCount -1 ){
-		videoProcessorRef.value.filterAndStack();
-	}
+function handleProcessingStarted() {
+	isProcessing.value = true;
 }
 
 async function handlePostProcessing(data) {
 	console.log('handlePostProcessing', data);
 	currentTab.value = 'PostProcessor';
 	selectedFile.value = data; 
+	isProcessing.value = false;
 }
 
 useHead({

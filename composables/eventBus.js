@@ -2,6 +2,7 @@ import { ref } from 'vue';
 
 const logs = ref([]);
 const eventCallbacks = {};
+const caption = ref('');
 
 export const useEventBus = () => {
 	const addLog = (log) => {
@@ -19,8 +20,15 @@ export const useEventBus = () => {
 		eventCallbacks['log'].push(cb);
 	};
 
+	const setCaption = (newCaption) => {
+		caption.value = newCaption;
+	};
+
 	// General purpose methods for handling various events
 	const emit = (event, payload) => {
+		if (event === 'set-caption') {
+			setCaption(payload);
+		}
 		if (eventCallbacks[event]) {
 			eventCallbacks[event].forEach(cb => cb(payload));
 		}
@@ -42,6 +50,6 @@ export const useEventBus = () => {
 		}
 	};
 
-	return { logs, addLog, onLogAdded, emit, on, off };
+	return { logs, addLog, onLogAdded, emit, on, off, caption, setCaption };
 };
 
