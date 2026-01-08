@@ -19,7 +19,6 @@ const progress = ref(0);
 
 onMounted(() => {
 	on('start-loading', (newCaption) => {
-		console.log('LoadingIndicator: Received start-loading', newCaption);
 		loading.value = true;
 		isIndeterminate.value = true;
 		if (newCaption) {
@@ -27,17 +26,14 @@ onMounted(() => {
 		}
 	});
 	on('update-loading', (newProgress) => {
-		console.log('LoadingIndicator: Received update-loading', newProgress);
 		isIndeterminate.value = false;
 		progress.value = Math.ceil(newProgress);
 	});
 	on('stop-loading', () => {
-		console.log('LoadingIndicator: Received stop-loading');
 		loading.value = false;
 		setCaption('');
 	});
 	on('set-caption', (newCaption) => {
-		console.log('LoadingIndicator: Received set-caption', newCaption);
 		setCaption(newCaption);
 	});
 });

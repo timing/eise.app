@@ -53,12 +53,47 @@ const topFrames = ref([]);
 const worstFrame = ref(null);
 const canvases = ref({ top: [], worst: null });
 
-let analyzeWorkers = new Array(12);
+let unifiedAnalyzeWorkers = new Array((navigator && navigator.hardwareConcurrency) || 4);
+
+// Define bestFramesForStacking outside processImageFrames to persist state across calls/worker responses
+const bestFramesForStacking = []; // These will store {sharpness, blob}
+
+// Define rankFrame outside processImageFrames so it can be used by worker message listener
+function rankFrame(frame) {
+	// Update top 4 frames
+	if (topFrames.value.length < 4) {
+		topFrames.value.push(frame);
+		topFrames.value.sort((a, b) => b.sharpness - a.sharpness);
+	} else if (frame.sharpness > topFrames.value[3].sharpness) {
+		topFrames.value.pop();
+		topFrames.value.push(frame);
+		topFrames.value.sort((a, b) => b.sharpness - a.sharpness);
+	}
+
+	// Update worst frame
+	if (worstFrame.value === null || frame.sharpness < worstFrame.value.sharpness) {
+		worstFrame.value = frame;
+	}
+
+	// Keep track of best frames for stacking (bestFramesCapacity will be set inside processImageFrames)
+	if (bestFramesForStacking.length < bestFramesCapacity) {
+		bestFramesForStacking.push(frame);
+	} else {
+		let minSharpnessIndex = bestFramesForStacking.reduce((minIdx, currFrame, idx, arr) =>
+			(currFrame.sharpness < arr[minIdx].sharpness) ? idx : minIdx, 0);
+
+		if (frame.sharpness > bestFramesForStacking[minSharpnessIndex].sharpness) {
+			bestFramesForStacking[minSharpnessIndex] = frame;
+		}
+	}
+	bestFramesCount.value = bestFramesForStacking.length;
+}
+
 
 onMounted(() => {	
-	for (let i = 0; i < analyzeWorkers.length; i++) {
-		analyzeWorkers[i] = new Worker('/analyze_worker.js', {type: 'module'});
-		analyzeWorkers[i].onerror = (e) => { console.error(e); };
+	for (let i = 0; i < unifiedAnalyzeWorkers.length; i++) {
+		unifiedAnalyzeWorkers[i] = new Worker('/unified_analyze_worker.js', {type: 'module'});
+		unifiedAnalyzeWorkers[i].onerror = (e) => { console.error(e); };
 	}
 
 	if (props.frames && props.frames.length > 0) {
@@ -120,55 +155,34 @@ function drawImageOnCanvas(canvas, blob) {
     canvas.width = img.width / 2;
     canvas.height = img.height / 2;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  }).catch(error => {
+    console.error('Error drawing image to canvas:', error, 'Blob size:', blob.size, 'Blob type:', blob.type);
+    // Optionally, draw a placeholder or error message on the canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'red';
+    ctx.font = '10px Arial';
+    ctx.fillText('Error', 5, 15);
   });
 }
+
+let bestFramesCapacity; // Declare outside to be accessible by rankFrame
 
 async function processImageFrames(files) {
 	if (!files || files.length === 0) return;
 
 	emit('set-caption', 'Analyzing frames'); // LoadingIndicator will display this caption
 
-	const bestFramesCapacity = Math.floor(files.length * 0.3);
-	const bestFramesForStacking = [];
-	
+	bestFramesCapacity = Math.floor(files.length * 0.3); // Set here
+
+
 	const usedFFmpeg = typeof files[0] === 'string';
-
-	function rankFrame(frame) {
-		// Update top 4 frames
-		if (topFrames.value.length < 4) {
-			topFrames.value.push(frame);
-			topFrames.value.sort((a, b) => b.sharpness - a.sharpness);
-		} else if (frame.sharpness > topFrames.value[3].sharpness) {
-			topFrames.value.pop();
-			topFrames.value.push(frame);
-			topFrames.value.sort((a, b) => b.sharpness - a.sharpness);
-		}
-
-		// Update worst frame
-		if (worstFrame.value === null || frame.sharpness < worstFrame.value.sharpness) {
-			worstFrame.value = frame;
-		}
-
-		// Keep track of best frames for stacking
-		if (bestFramesForStacking.length < bestFramesCapacity) {
-			bestFramesForStacking.push(frame);
-		} else {
-			let minSharpnessIndex = bestFramesForStacking.reduce((minIdx, currFrame, idx, arr) =>
-				(currFrame.sharpness < arr[minIdx].sharpness) ? idx : minIdx, 0);
-
-			if (frame.sharpness > bestFramesForStacking[minSharpnessIndex].sharpness) {
-				bestFramesForStacking[minSharpnessIndex] = frame;
-			}
-		}
-		bestFramesCount.value = bestFramesForStacking.length;
-	}	
 
 	const resolveFunctions = new Array(files.length);
 	const rejectFunctions = new Array(files.length);
 	const filesMap = new Array(files.length); 
 
-	for (let i = 0; i < analyzeWorkers.length; i++) {
-		analyzeWorkers[i].addEventListener('message', (e) => {
+	for (let i = 0; i < unifiedAnalyzeWorkers.length; i++) {
+		unifiedAnalyzeWorkers[i].addEventListener('message', (e) => {
 			const index = e.data.index;
 			const pngFile = filesMap[index];
 
@@ -178,7 +192,8 @@ async function processImageFrames(files) {
 
 			if(e.data.frameData !== undefined) {
 				if(!e.data.frameData.is_cut_off) {
-					const currentFrame = {sharpness: e.data.frameData.sharpness, blob: new Blob(pngFile, { type: 'image/png' })};
+					console.log(`VideoFrameProcessor: Constructing Blob for rendering. pngFile[0] byteLength: ${pngFile[0]?.byteLength}`);
+					const currentFrame = {sharpness: e.data.frameData.sharpness, blob: new Blob([pngFile[0]], { type: 'image/png' })};
 					rankFrame(currentFrame);
 					if (index % 10 === 0 || index === files.length - 1) {
 						updateCanvases();
@@ -201,12 +216,15 @@ async function processImageFrames(files) {
 				let data;
 				if (usedFFmpeg) {
 					data = [$ffmpeg.FS('readFile', file)];
+					console.log(`VideoFrameProcessor: Read FFmpeg file ${file} (index ${index}). Data undefined: ${data[0] === undefined}, byteLength: ${data[0]?.byteLength}`);
 					$ffmpeg.FS('unlink', file);
 				} else {
 					data = [new Uint8Array(await file.arrayBuffer())];
 				}
 				filesMap[index] = data;
-				analyzeWorkers[index % 12].postMessage({analyze: filesMap[index], index: index});
+				// Post message to unified worker
+				const analyzeDataForWorker = filesMap[index][0].slice(); // Create a new Uint8Array copy
+				unifiedAnalyzeWorkers[index % unifiedAnalyzeWorkers.length].postMessage({ type: 'ffmpeg', analyze: analyzeDataForWorker, index: index }, [analyzeDataForWorker.buffer]);
 			}, 10);
 		});
 	});
