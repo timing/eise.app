@@ -218,10 +218,12 @@ export function useSerReader() {
                     addLog(`Processed frame ${result.index}/${frameCount}, sharpness: ${result.sharpness.toFixed(2)}`);
 
                     completedFrames++;
-                    emit('update-loading', (completedFrames / frameCount) * 100);
 
                     // Emit updated frames for preview (less frequently)
                     if (result.index % 10 === 0 || result.index === frameCount - 1) {
+
+                    	emit('update-loading', (completedFrames / frameCount) * 100);
+
                         const top4FrameBlobsPromise = Promise.all(top4Frames.map(f => renderFrameToBlob(previewCanvas, f.frameBuffer, header, bayerChoice)));
                         const worstFrameBlobPromise = worstFrame ? renderFrameToBlob(previewCanvas, worstFrame.frameBuffer, header, bayerChoice) : Promise.resolve(null);
                         

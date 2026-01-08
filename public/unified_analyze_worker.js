@@ -5,7 +5,7 @@ let ctx = null;
 
 self.addEventListener('message', async (e) => {
     const { type, index } = e.data;
-    console.log(`Worker: Received message - Type: ${type}, Index: ${index}`);
+    //console.log(`Worker: Received message - Type: ${type}, Index: ${index}`);
 
     try {
         let imageData;
@@ -13,9 +13,9 @@ self.addEventListener('message', async (e) => {
 
         if (type === 'ffmpeg') {
             const { analyze } = e.data;
-            console.log(`Worker: FFMPEG path - analyze data byteLength: ${analyze.byteLength}`);
+            //console.log(`Worker: FFMPEG path - analyze data byteLength: ${analyze.byteLength}`);
             const imageBlob = new Blob([analyze.buffer], { type: 'image/png' }); // Use analyze.buffer
-            console.log(`Worker: FFMPEG path - Created Blob size: ${imageBlob.size}`);
+            //console.log(`Worker: FFMPEG path - Created Blob size: ${imageBlob.size}`);
             const img = await createImageBitmap(imageBlob);
             imgWidth = img.width;
             imgHeight = img.height;
@@ -26,15 +26,15 @@ self.addEventListener('message', async (e) => {
             }
             ctx.drawImage(img, 0, 0);
             imageData = ctx.getImageData(0, 0, imgWidth, imgHeight);
-            console.log('Worker: FFMPEG path - ImageData obtained.');
+            //console.log('Worker: FFMPEG path - ImageData obtained.');
 
         } else if (type === 'ser') {
             const { frameBuffer, header, bayerChoice } = e.data;
-            console.log(`Worker: SER path - frameBuffer size: ${frameBuffer.byteLength}`);
+            //console.log(`Worker: SER path - frameBuffer size: ${frameBuffer.byteLength}`);
             imgWidth = header.width;
             imgHeight = header.height;
             imageData = convertSerFrameToImageData(frameBuffer, header, bayerChoice);
-            console.log('Worker: SER path - ImageData obtained.');
+            //console.log('Worker: SER path - ImageData obtained.');
 
         } else {
             throw new Error('Unknown analysis type');
@@ -46,7 +46,7 @@ self.addEventListener('message', async (e) => {
 
         const frameData = { sharpness, is_cut_off };
         
-        console.log(`Worker: Processing complete for index ${index}, sharpness: ${sharpness}`);
+        //console.log(`Worker: Processing complete for index ${index}, sharpness: ${sharpness}`);
         self.postMessage({ frameData: frameData, index: index });
 
     } catch (error) {
