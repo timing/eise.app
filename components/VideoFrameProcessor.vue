@@ -1,33 +1,26 @@
 <template>
 	<div>
-		<div v-if="processingStage === 'importing'">
-			<div class="card">
-				<h3>Importing video...</h3>
-				<LoadingIndicator />
-			</div>
-		</div>
-		<div v-if="processingStage === 'analyzing'">
-			<div class="card">
-				<h3>Analyzing frames..</h3>	
-				<LoadingIndicator />
+		<div class="card">
+			<LoadingIndicator />
 
-				<div class="separator"></div>
+			<div class="separator"></div>
 
+			<div v-if="processingStage === 'analyzing'">
 				<table>
 					<tr><td>Amount analyzed</td><td>{{ allFramesCount }}</td></tr>
 					<tr><td>Amount of best frames</td><td>{{ bestFramesCount }}</td></tr>
 				</table>
 			</div>
+		</div>
 
-			<div class="content">
-				<h4>Top 4 Sharpest Frames</h4>
-				<div class="frame-container">
-				  <canvas v-for="(frame, index) in topFrames" :key="'top-' + index" :ref="el => canvases.top[index] = el"></canvas>
-				</div>
-				<h4>Worst Frame</h4>
-				<div class="frame-container">
-				  <canvas v-if="worstFrame" :ref="el => canvases.worst = el"></canvas>
-				</div>
+		<div class="content" v-if="processingStage === 'analyzing'">
+			<h4>Top 4 Sharpest Frames</h4>
+			<div class="frame-container">
+			  <canvas v-for="(frame, index) in topFrames" :key="'top-' + index" :ref="el => canvases.top[index] = el"></canvas>
+			</div>
+			<h4>Worst Frame</h4>
+			<div class="frame-container">
+			  <canvas v-if="worstFrame" :ref="el => canvases.worst = el"></canvas>
 			</div>
 		</div>
 	</div>
@@ -49,7 +42,7 @@ const props = defineProps({
 
 const bestFramesCount = ref(0);
 const allFramesCount = ref(0);
-const processingStage = ref('importing');
+const processingStage = ref('importing'); // Will be 'importing' initially, then 'analyzing'
 
 const topFrames = ref([]);
 const worstFrame = ref(null);
@@ -118,7 +111,7 @@ function drawImageOnCanvas(canvas, blob) {
 async function processImageFrames(files) {
 	if (!files || files.length === 0) return;
 
-	emit('set-caption', 'Analyzing frames');
+	emit('set-caption', 'Analyzing frames'); // LoadingIndicator will display this caption
 
 	const bestFramesCapacity = Math.floor(files.length * 0.3);
 	const bestFramesForStacking = [];
