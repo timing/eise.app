@@ -74,7 +74,6 @@ const { addLog, emit: eventBusEmit } = useEventBus();
 async function onFileChanged(event){
 	eventBusEmit('start-loading');
 	await processVideo(event);
-	eventBusEmit('stop-loading');
 }
 
 async function processVideo(event) {
