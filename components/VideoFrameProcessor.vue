@@ -3,6 +3,10 @@
 		<div class="card">
 			<LoadingIndicator />
 
+			<div v-if="uploadError" class="error-message">
+				<p>Error: {{ uploadError }}</p>
+			</div>
+
 			<div class="separator"></div>
 
 			<div v-if="processingStage === 'analyzing'">
@@ -43,6 +47,7 @@ const props = defineProps({
 const bestFramesCount = ref(0);
 const allFramesCount = ref(0);
 const processingStage = ref('importing'); // Will be 'importing' initially, then 'analyzing'
+const uploadError = ref(null); // New ref for upload errors
 
 const topFrames = ref([]);
 const worstFrame = ref(null);
@@ -57,6 +62,7 @@ onMounted(() => {
 	}
 
 	if (props.frames && props.frames.length > 0) {
+		uploadError.value = null; // Reset error
 		processingStage.value = 'analyzing';
 		emit('set-caption', 'Analyzing frames');
 		processImageFrames(props.frames);
@@ -64,6 +70,7 @@ onMounted(() => {
 
 	on('ser-frames-updated', ({ top, worst }) => {
 		if (processingStage.value !== 'analyzing') {
+			uploadError.value = null; // Reset error
 			processingStage.value = 'analyzing';
 			emit('set-caption', 'Analyzing frames');
 		}
@@ -71,10 +78,16 @@ onMounted(() => {
 		worstFrame.value = worst;
 		updateCanvases();
   	});
+
+	on('upload-error', (message) => {
+		uploadError.value = message;
+		emit('stop-loading'); // Stop loading on error
+	});
 });
 
 watch(() => props.frames, (newVal) => {
 	if (newVal && newVal.length > 0) {
+		uploadError.value = null; // Reset error
 		processingStage.value = 'analyzing';
 		processImageFrames(newVal);
 	}
@@ -241,5 +254,13 @@ async function processImageFrames(files) {
 	table td:last-child {
 		min-width: 60px;
 		text-align: right;
+	}
+	.error-message {
+		background-color: #ffcccc;
+		color: #cc0000;
+		padding: 10px;
+		margin-top: 10px;
+		border-radius: 5px;
+		font-weight: bold;
 	}
 </style>

@@ -72,13 +72,16 @@ export function useUploader() {
                 addLog(error.message);
                 console.error('Error:', error);
                 emit('stop-loading');
+                emit('upload-error', error.message);
             }
         };
 
         xhr.onerror = function() {
-            addLog('Error during the upload process.');
-            console.error('Error during the upload process.');
+            const errorMessage = 'Error during the upload process.';
+            addLog(errorMessage);
+            console.error(errorMessage);
             emit('stop-loading');
+            emit('upload-error', errorMessage);
         };
 
         xhr.send(formData);
