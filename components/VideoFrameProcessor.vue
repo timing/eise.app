@@ -1,50 +1,59 @@
 <template>
 	<div>
-		<div class="card">
-			<h3>Analyzing frames..</h3>	
-			<LoadingIndicator />
-
-			<div class="separator"></div>
-
-			<table>
-				<tr><td>Amount analyzed</td><td>{{ allFramesCount }}</td></tr>
-				<tr><td>Amount of best frames</td><td>{{ bestFramesCount }}</td></tr>
-			</table>
+		<div v-if="processingStage === 'importing'">
+			<div class="card">
+				<h3>Importing video...</h3>
+				<LoadingIndicator />
+			</div>
 		</div>
+		<div v-if="processingStage === 'analyzing'">
+			<div class="card">
+				<h3>Analyzing frames..</h3>	
+				<LoadingIndicator />
 
-		<div class="content">
-			<div v-if="props.frames && props.frames.length === 0">
-				<h2>Nothing loaded yet</h2>
-				<p>To get started, please upload a video or bunch of files for analyzing and stacking.</p>
-			</div>
-			<div v-else>
-				<h4>Best frame</h4>
-				<p>This is the best frame from the data</p>
-			</div>
-			<canvas id="analyzeCanvas" ref="canvasRef"></canvas>
+				<div class="separator"></div>
 
+				<table>
+					<tr><td>Amount analyzed</td><td>{{ allFramesCount }}</td></tr>
+					<tr><td>Amount of best frames</td><td>{{ bestFramesCount }}</td></tr>
+				</table>
+			</div>
+
+			<div class="content">
+				<h4>Top 4 Sharpest Frames</h4>
+				<div class="frame-container">
+				  <canvas v-for="(frame, index) in topFrames" :key="'top-' + index" :ref="el => canvases.top[index] = el"></canvas>
+				</div>
+				<h4>Worst Frame</h4>
+				<div class="frame-container">
+				  <canvas v-if="worstFrame" :ref="el => canvases.worst = el"></canvas>
+				</div>
+			</div>
 		</div>
 	</div>
 </template>
 
 <script setup>
-import { onMounted, ref, watch, defineProps, defineEmits } from 'vue';
-import { calculateSharpness, isImageCutOff, calculateCenterOfGravity } from '@/utils/sobel.js'
-import { io } from "socket.io-client";
+import { onMounted, ref, watch, defineProps, onBeforeUpdate, nextTick } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
+import { useUploader } from '@/composables/useUploader';
 
-const { addLog } = useEventBus();
+const { on, addLog, emit } = useEventBus();
+const { uploadFrames } = useUploader();
 
-const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
-
-const emit = defineEmits(['postProcessing']);
+const { $ffmpeg } = useNuxtApp();
 
 const props = defineProps({
 	frames: Array
 });
-const canvasRef = ref(null);
+
 const bestFramesCount = ref(0);
 const allFramesCount = ref(0);
+const processingStage = ref('importing');
+
+const topFrames = ref([]);
+const worstFrame = ref(null);
+const canvases = ref({ top: [], worst: null });
 
 let analyzeWorkers = new Array(12);
 
@@ -54,220 +63,175 @@ onMounted(() => {
 		analyzeWorkers[i].onerror = (e) => { console.error(e); };
 	}
 
-	if (props.frames.length > 0) {
+	if (props.frames && props.frames.length > 0) {
+		processingStage.value = 'analyzing';
 		processImageFrames(props.frames);
 	}
 
+	on('ser-frames-updated', ({ top, worst }) => {
+		if (processingStage.value !== 'analyzing') {
+			processingStage.value = 'analyzing';
+		}
+		topFrames.value = top;
+		worstFrame.value = worst;
+		updateCanvases();
+  	});
 });
 
-
 watch(() => props.frames, (newVal) => {
-	if (newVal) {
+	if (newVal && newVal.length > 0) {
+		processingStage.value = 'analyzing';
 		processImageFrames(newVal);
 	}
 });
 
+onBeforeUpdate(() => {
+  canvases.value = { top: [], worst: null };
+});
+
+function updateCanvases() {
+  nextTick(() => {
+    topFrames.value.forEach((frame, index) => {
+      const canvas = canvases.value.top[index];
+      if (canvas) {
+        const blob = frame instanceof Blob ? frame : frame.blob;
+        drawImageOnCanvas(canvas, blob);
+      }
+    });
+
+    if (worstFrame.value && canvases.value.worst) {
+      const blob = worstFrame.value instanceof Blob ? worstFrame.value : worstFrame.value.blob;
+      drawImageOnCanvas(canvases.value.worst, blob);
+    }
+  });
+}
+
+function drawImageOnCanvas(canvas, blob) {
+  const ctx = canvas.getContext('2d');
+  createImageBitmap(blob).then(img => {
+    canvas.width = img.width / 2;
+    canvas.height = img.height / 2;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  });
+}
+
 async function processImageFrames(files) {
-	if (!canvasRef.value) return;
+	if (!files || files.length === 0) return;
 
-	useEventBus().emit('start-loading');
+	emit('set-caption', 'Analyzing frames');
 
-	const ctx = canvasRef.value.getContext('2d', {willReadFrequently: true});
+	const bestFramesCapacity = Math.floor(files.length * 0.3);
+	const bestFramesForStacking = [];
+	
+	const usedFFmpeg = typeof files[0] === 'string';
 
-	const frames = new Array(files.length).fill().map(() => ({}));
+	function rankFrame(frame) {
+		// Update top 4 frames
+		if (topFrames.value.length < 4) {
+			topFrames.value.push(frame);
+			topFrames.value.sort((a, b) => b.sharpness - a.sharpness);
+		} else if (frame.sharpness > topFrames.value[3].sharpness) {
+			topFrames.value.pop();
+			topFrames.value.push(frame);
+			topFrames.value.sort((a, b) => b.sharpness - a.sharpness);
+		}
 
-	const bestFramesCapacity = files.length * 0.3;
-	const bestFrames = [];
-	let highestSharpness = 0;
+		// Update worst frame
+		if (worstFrame.value === null || frame.sharpness < worstFrame.value.sharpness) {
+			worstFrame.value = frame;
+		}
 
-	function addFrameToBest(frame) {
-		if (bestFrames.length < bestFramesCapacity) {
-			if (frame.sharpness > highestSharpness) {
-				highestSharpness = frame.sharpness;
-				updateCanvasWithFrame(frame);
-			}
-			bestFrames.push(frame);
+		// Keep track of best frames for stacking
+		if (bestFramesForStacking.length < bestFramesCapacity) {
+			bestFramesForStacking.push(frame);
 		} else {
-			// Find the least sharp frame
-			let minSharpnessIndex = bestFrames.reduce((minIdx, currFrame, idx, arr) => 
+			let minSharpnessIndex = bestFramesForStacking.reduce((minIdx, currFrame, idx, arr) =>
 				(currFrame.sharpness < arr[minIdx].sharpness) ? idx : minIdx, 0);
-				
-			if (frame.sharpness > bestFrames[minSharpnessIndex].sharpness) {
-				bestFrames[minSharpnessIndex] = frame; 
-				if (frame.sharpness > highestSharpness) {
-					highestSharpness = frame.sharpness;
-					updateCanvasWithFrame(frame);
-				}
+
+			if (frame.sharpness > bestFramesForStacking[minSharpnessIndex].sharpness) {
+				bestFramesForStacking[minSharpnessIndex] = frame;
 			}
 		}
-		bestFramesCount.value = bestFrames.length;
+		bestFramesCount.value = bestFramesForStacking.length;
 	}	
 
-	function updateCanvasWithFrame(frame) {
-		createImageBitmap(new Blob(frame.pngFile, {type: 'image/png'})).then(img => {
-			canvasRef.value.width = img.width;
-			canvasRef.value.height = img.height;
-			ctx.drawImage(img, 0, 0);
-		});
-	}
-
-	// Initialize an array to hold the resolve functions
 	const resolveFunctions = new Array(files.length);
 	const rejectFunctions = new Array(files.length);
-	const filesMap = new Array(files.length); // Array to store blobs
-
-	addLog('Analyzing all frames for sharpness');
+	const filesMap = new Array(files.length); 
 
 	for (let i = 0; i < analyzeWorkers.length; i++) {
 		analyzeWorkers[i].addEventListener('message', (e) => {
-			const index = e.data.index; // Assuming the worker sends back the index
-			const pngFile = filesMap[index]; // Retrieve the blob using the index
+			const index = e.data.index;
+			const pngFile = filesMap[index];
 
 			allFramesCount.value++;
+            emit('update-loading', (allFramesCount.value / files.length) * 100);
+
 
 			if(e.data.frameData !== undefined) {
-				//console.log(index, e.data);
-				if(e.data.frameData.is_cut_off) {
-					//addLog(`Frame skipped (cut off) ${index}. Sharpness: ${e.data.frameData.sharpness}`);
-				} else {
-					addFrameToBest({sharpness: e.data.frameData.sharpness, pngFile: pngFile});
-					//addLog(`Frame ${index}. Sharpness: ${e.data.frameData.sharpness}`);
+				if(!e.data.frameData.is_cut_off) {
+					const currentFrame = {sharpness: e.data.frameData.sharpness, blob: new Blob(pngFile, { type: 'image/png' })};
+					rankFrame(currentFrame);
+					if (index % 10 === 0 || index === files.length - 1) {
+						updateCanvases();
+					}
 				}
-				//useEventBus().emit('update-loading', index / files.length * 100);
-				resolveFunctions[index](); // Resolve the promise for this index
+				resolveFunctions[index]();
 			} else {
 				addLog('Failed analyzing frame ' + index);
-				rejectFunctions[index](new Error("Processing failed.")); // Reject the promise for this index
+				rejectFunctions[index](new Error("Processing failed."));
 			}
 		});
 	}
 
 	const promises = files.map((file, index) => {
 		return new Promise((resolve, reject) => {
-			// Store the resolve and reject functions for later access
 			resolveFunctions[index] = resolve;
 			rejectFunctions[index] = reject;
 
-			// this is a timeout to give the UI some slack and be able to update. preferably we run this whole thing in another worker as well
-			setTimeout(() => {
-				filesMap[index] = [$ffmpeg.FS('readFile', file)];
+			setTimeout(async () => {
+				let data;
+				if (usedFFmpeg) {
+					data = [$ffmpeg.FS('readFile', file)];
+					$ffmpeg.FS('unlink', file);
+				} else {
+					data = [new Uint8Array(await file.arrayBuffer())];
+				}
+				filesMap[index] = data;
 				analyzeWorkers[index % 12].postMessage({analyze: filesMap[index], index: index});
-				//addLog('Cleaning up memory, deleting frame ' + index);
-				$ffmpeg.FS('unlink', file);
 			}, 10);
 		});
 	});
 
 	try {
-		await Promise.all(promises); // Wait for all the promises to resolve
+		await Promise.all(promises);
 	} catch(error){
 		console.log('One or more frames failed analyzing. Trying to continue.', error);
 		addLog('One or more frames failed analyzing. Trying to continue.');
 	}
 
 	addLog('Done analyzing frames. Cleaning up');
-	try {
-		$ffmpeg.exit();
-	} catch(e) {
-		
+	if (usedFFmpeg) {
+		try {
+			$ffmpeg.exit();
+		} catch(e) {}
 	}
 	addLog('Cleaning up done');
 
-
-	const formData = new FormData();
-
-	const imageIdentifier = Math.round(Math.random() * 10000);
-
-	if( bestFrames.length == 0 ){
-		addLog('No frames to stack.');
-		useEventBus().emit('stop-loading');
-		return false;
-	}
-
-	for( const s in bestFrames ){
-		formData.append('imageFiles', new Blob(bestFrames[s].pngFile, {type: 'image/png'}), `${imageIdentifier}-${s}.png`);
-	}
-
-	const host = 'https://stack.eise.app'
-	const jobId = crypto.randomUUID();
-	formData.append('job_id', jobId)
-
-	const wsUrl = host
-
-	const ws = io(wsUrl);
-
-	ws.on('connect', () => {
-		console.log('Connected to server');
-		// Join a room
-		ws.emit('join', {room: jobId});
-	});
-
-	ws.on('console_output', (data) => {
-		addLog(data.data);
-		console.log('Console output', data);
-	});
-
-	ws.on('finished', (data) => {
-		console.log('Processing finished, image URL:', data.image_url);
-	});
-
-	ws.on('image_data', (blob) => {
-		addLog('Server side stack finished, loading post processing.');
-		useEventBus().emit('stop-loading');
-		emit('postProcessing', new Blob([blob]));	
-	});
-
-	useEventBus().emit('start-loading');
-	
-	addLog('Uploading best frames to server, for stacking with Planetary System Stacker (see about)');
-
-	// Use XMLHttpRequest for uploads, because fetch does not allow progress bars
-	const xhr = new XMLHttpRequest();
-	xhr.open('POST', `${host}/upload`, true);
-
-	xhr.upload.onprogress = function(event) {
-		if( !event.lengthComputable ){
-			return;
-		}
-		useEventBus().emit('update-loading', Math.round(event.loaded / event.total * 100));
-	};
-
-	xhr.onload = function() {
-		if (xhr.status === 200 || xhr.status === 202 ) {
-			const data = JSON.parse(xhr.responseText);
-			useEventBus().emit('start-loading');
-			addLog(data.message);
-			console.log(data);
-		} else {
-			const error = JSON.parse(xhr.responseText);
-			addLog(error.message);
-			console.error('Error:', error);
-		}
-	};
-
-	xhr.onerror = function() {
-		addLog('Error during the upload process.');
-		console.error('Error during the upload process.');
-	};
-
-	xhr.send(formData);	
-
-
-	/*fetch(host + '/upload', {
-		method: 'POST',
-		body: formData
-	})
-	.then(response => response.json())
-	.then(data => { addLog(data.message); console.log(data)})
-	.catch(error => { addLog(error.message); console.error('Error:', error) });*/
+    await uploadFrames(bestFramesForStacking.map(f => ({ pngFile: [f.blob] })));
 }
-
 </script>
 
 <style scoped>
-	canvas#analyzeCanvas {
-		max-width: 100%;
-		border: 1px solid white;
+	.frame-container {
+	  display: flex;
+	  gap: 10px;
+	  margin-bottom: 20px;
+	  flex-wrap: wrap;
+	}
+	canvas {
+	  border: 1px solid #ccc;
+	  max-width: 100%;
 	}
 	table {
 		border-collapse: collapse;

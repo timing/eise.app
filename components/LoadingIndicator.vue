@@ -4,6 +4,7 @@
 			<div v-if="isIndeterminate" class="indeterminate"></div>
 			<div v-else class="determinate" :style="{ width: progress + '%' }"></div>
 		</div>
+		<div class="caption">{{ caption }}</div>
 	</div>
 </template>
 
@@ -11,15 +12,18 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useEventBus } from '@/composables/eventBus'; // Adjust the path to your eventBus
 
-const { on, emit, off } = useEventBus();
+const { on, emit, off, caption, setCaption } = useEventBus();
 const loading = ref(false);
 const isIndeterminate = ref(true);
 const progress = ref(0);
 
 onMounted(() => {
-	on('start-loading', () => {
+	on('start-loading', (newCaption) => {
 		loading.value = true;
 		isIndeterminate.value = true;
+		if (newCaption) {
+			setCaption(newCaption);
+		}
 	});
 	on('start-loading-determinate', (initialProgress) => {
 		loading.value = true;
@@ -32,6 +36,10 @@ onMounted(() => {
 	});
 	on('stop-loading', () => {
 		loading.value = false;
+		setCaption('');
+	});
+	on('set-caption', (newCaption) => {
+		setCaption(newCaption);
 	});
 });
 
@@ -40,6 +48,7 @@ onUnmounted(() => {
 	off('start-loading-determinate');
 	off('update-loading');
 	off('stop-loading');
+	off('set-caption');
 });
 </script>
 
@@ -50,8 +59,14 @@ onUnmounted(() => {
 	overflow: hidden;
 }
 .loading-wrapper {
-	height: 5px;
+	height: 25px;
 	margin-bottom: 5px;
+}
+.caption {
+	text-align: center;
+	margin-top: 5px;
+	font-size: 12px;
+	color: #333;
 }
 .determinate {
 	height: 100%;
