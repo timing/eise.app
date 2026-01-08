@@ -40,6 +40,7 @@
 	
 		<ul>
 			<li>Select one video file for stacking followed by post processing.</li>
+			<li>Using SER files is highly recommended, as it allows better memory management.</li>
 			<!-- <li>Coming soon: Select multiple image files for stacking and post processing.</li> -->
 			<li>Select one image file for post processing only.</li>
 		</ul>	
