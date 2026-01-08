@@ -58,12 +58,14 @@ onMounted(() => {
 
 	if (props.frames && props.frames.length > 0) {
 		processingStage.value = 'analyzing';
+		emit('set-caption', 'Analyzing frames');
 		processImageFrames(props.frames);
 	}
 
 	on('ser-frames-updated', ({ top, worst }) => {
 		if (processingStage.value !== 'analyzing') {
 			processingStage.value = 'analyzing';
+			emit('set-caption', 'Analyzing frames');
 		}
 		topFrames.value = top;
 		worstFrame.value = worst;
