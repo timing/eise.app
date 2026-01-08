@@ -49,6 +49,7 @@ export function useUploader() {
         });
 
         emit('set-caption', 'Uploading frames for stacking');
+        emit('update-loading', 0);
 
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `${host}/upload`, true);

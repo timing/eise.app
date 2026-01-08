@@ -25,11 +25,6 @@ onMounted(() => {
 			setCaption(newCaption);
 		}
 	});
-	on('start-loading-determinate', (initialProgress) => {
-		loading.value = true;
-		isIndeterminate.value = false;
-		progress.value = initialProgress;
-	});
 	on('update-loading', (newProgress) => {
 		isIndeterminate.value = false;
 		progress.value = Math.ceil(newProgress);

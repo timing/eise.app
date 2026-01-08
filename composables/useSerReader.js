@@ -124,6 +124,7 @@ export function useSerReader() {
 
     async function readSerFile(file, maxFrames = -1, bayerPattern = 'AUTO') {
         emit('start-loading', 'Importing and analyzing frames');
+        emit('update-loading', 0);
 
         const headerBuf = await file.slice(0, 178).arrayBuffer();
         const header = parseSerHeader(headerBuf);
