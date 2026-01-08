@@ -48,7 +48,9 @@ export function useUploader() {
             emit('postProcessing', new Blob([blob]));
         });
 
+        console.log('Uploader: Emitting set-caption for upload');
         emit('set-caption', 'Uploading frames for stacking');
+        console.log('Uploader: Emitting update-loading(0) for upload start');
         emit('update-loading', 0);
 
         const xhr = new XMLHttpRequest();
@@ -58,7 +60,9 @@ export function useUploader() {
             if (!event.lengthComputable) {
                 return;
             }
-            emit('update-loading', Math.round(event.loaded / event.total * 100));
+            const progress = Math.round(event.loaded / event.total * 100);
+            console.log('Uploader: Emitting update-loading', progress);
+            emit('update-loading', progress);
         };
 
         xhr.onload = function() {
