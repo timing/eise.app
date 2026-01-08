@@ -43,7 +43,7 @@ onMounted(() => {
 
 <style scoped>
 .logger {
-	background-color: rgba(0,0,0,.5);
+	background-color: rgba(0,0,0,1);
 	padding: 10px;
 	position: fixed;
 	bottom: 0;
