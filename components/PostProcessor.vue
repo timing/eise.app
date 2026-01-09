@@ -26,6 +26,11 @@
 				<input type="range" min="0" max="2" step="0.01" v-model="saturation" @input="applyProcessing"/>
 				<span>{{ saturation }}</span>
 			</div>
+			<div>
+				<label>Vibrance:</label>
+				<input type="range" min="-1" max="2" step="0.01" v-model="vibrance" @input="applyProcessing"/>
+				<span>{{ vibrance }}</span>
+			</div>
 
 			<div class="mode-toggle">
 				<label>
@@ -192,6 +197,7 @@ const gain = ref(1);
 const contrast = ref(1);
 const gamma = ref(1);
 const saturation = ref(1);
+const vibrance = ref(0);
 const preNoiseReduction = ref(0);
 const waveletsRadius = ref(0);
 const waveletsAmount = ref(0);
@@ -291,8 +297,8 @@ async function loadImage(file) {
 	img.src = URL.createObjectURL(file);
 }
 
-// Apply gain, contrast, gamma, and saturation in a single pass for efficiency
-function applyColorAdjustments(sourceData, width, height, gainVal, contrastVal, gammaVal, saturationVal) {
+// Apply gain, contrast, gamma, saturation, and vibrance in a single pass for efficiency
+function applyColorAdjustments(sourceData, width, height, gainVal, contrastVal, gammaVal, saturationVal, vibranceVal) {
 	const data = sourceData.data;
 	const newData = new Uint8ClampedArray(data.length);
 
@@ -335,6 +341,19 @@ function applyColorAdjustments(sourceData, width, height, gainVal, contrastVal, 
 		g = lum + saturationVal * (g - lum);
 		b = lum + saturationVal * (b - lum);
 
+		// Apply vibrance (saturation that affects less-saturated colors more)
+		if (vibranceVal !== 0) {
+			const maxC = Math.max(r, g, b);
+			const minC = Math.min(r, g, b);
+			const currentSat = maxC > 0 ? (maxC - minC) / maxC : 0;
+			// Less saturated colors get more boost
+			const vibranceAmount = vibranceVal * (1 - currentSat);
+			const lum2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+			r = r + (r - lum2) * vibranceAmount;
+			g = g + (g - lum2) * vibranceAmount;
+			b = b + (b - lum2) * vibranceAmount;
+		}
+
 		// Final clamp
 		newData[i] = Math.max(0, Math.min(255, r));
 		newData[i + 1] = Math.max(0, Math.min(255, g));
@@ -353,7 +372,8 @@ function doColorAdjustments(sourceData) {
 			gain.value,
 			contrast.value,
 			gamma.value,
-			saturation.value
+			saturation.value,
+			vibrance.value
 		);
 		if (webglResult) return webglResult;
 	}
@@ -365,7 +385,8 @@ function doColorAdjustments(sourceData) {
 		gain.value,
 		contrast.value,
 		gamma.value,
-		saturation.value
+		saturation.value,
+		vibrance.value
 	);
 }
 

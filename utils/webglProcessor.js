@@ -28,6 +28,7 @@ const fragmentShaderSource = `
 	uniform float u_contrast;
 	uniform float u_gamma;
 	uniform float u_saturation;
+	uniform float u_vibrance;
 
 	void main() {
 		vec4 color = texture2D(u_image, v_texCoord);
@@ -49,6 +50,14 @@ const fragmentShaderSource = `
 		// Luminance (Rec. 709)
 		float lum = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
 		rgb = vec3(lum) + u_saturation * (rgb - vec3(lum));
+
+		// Apply vibrance (boosts less-saturated colors more)
+		float maxC = max(max(rgb.r, rgb.g), rgb.b);
+		float minC = min(min(rgb.r, rgb.g), rgb.b);
+		float currentSat = maxC > 0.0 ? (maxC - minC) / maxC : 0.0;
+		float vibranceAmount = u_vibrance * (1.0 - currentSat);
+		float lum2 = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+		rgb = rgb + (rgb - vec3(lum2)) * vibranceAmount;
 
 		// Final clamp
 		rgb = clamp(rgb, 0.0, 1.0);
@@ -143,7 +152,7 @@ export function initWebGL(width, height) {
 	return true;
 }
 
-export function processWithWebGL(imageData, gain, contrast, gamma, saturation) {
+export function processWithWebGL(imageData, gain, contrast, gamma, saturation, vibrance) {
 	if (!initialized || !gl) {
 		return null;
 	}
@@ -182,6 +191,7 @@ export function processWithWebGL(imageData, gain, contrast, gamma, saturation) {
 	gl.uniform1f(gl.getUniformLocation(program, 'u_contrast'), contrast);
 	gl.uniform1f(gl.getUniformLocation(program, 'u_gamma'), gamma);
 	gl.uniform1f(gl.getUniformLocation(program, 'u_saturation'), saturation);
+	gl.uniform1f(gl.getUniformLocation(program, 'u_vibrance'), vibrance);
 
 	// Draw
 	gl.viewport(0, 0, width, height);
