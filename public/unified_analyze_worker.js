@@ -1,4 +1,5 @@
 // public/unified_analyze_worker.js
+console.log('unified_analyze_worker.js loaded (v2 - with detailed error handling)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
@@ -92,9 +93,13 @@ async function handleMessage(e) {
                     let cropX = Math.floor(centerX - halfSize);
                     let cropY = Math.floor(centerY - halfSize);
 
-                    // Ensure crop stays within frame bounds
-                    cropX = Math.max(0, Math.min(cropX, header.width - cropRegion.size));
-                    cropY = Math.max(0, Math.min(cropY, header.height - cropRegion.size));
+                    // Ensure even pixel alignment for Bayer pattern preservation
+                    cropX = cropX & ~1; // Round down to even
+                    cropY = cropY & ~1;
+
+                    // Ensure crop stays within frame bounds (keeping even alignment)
+                    cropX = Math.max(0, Math.min(cropX, (header.width - cropRegion.size) & ~1));
+                    cropY = Math.max(0, Math.min(cropY, (header.height - cropRegion.size) & ~1));
 
                     actualCropRegion = { x: cropX, y: cropY, size: cropRegion.size };
                 }
@@ -151,8 +156,15 @@ async function handleMessage(e) {
 
     } catch (error) {
         const errorMsg = error.message || String(error);
-        console.error(`Error in worker for index ${index}:`, errorMsg);
-        self.postMessage({ error: errorMsg, index: index });
+        // Only log first error per worker to avoid console flooding
+        if (!self.errorLogged) {
+            console.error(`Error in worker for index ${index}:`, errorMsg, error);
+            if (error.stack) console.error('Stack:', error.stack);
+            self.errorLogged = true;
+        }
+        // Include more context for debugging
+        const debugInfo = `${errorMsg} (type: ${e.data.type}, size: ${e.data.frameBuffer?.byteLength || 'N/A'})`;
+        self.postMessage({ error: debugInfo, index: index });
     }
 }
 
@@ -161,6 +173,11 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
     let rawMat, grayMat, rgbaMat, croppedRawMat;
 
     try {
+        // Log every 100th frame to track progress without flooding console
+        if (frameIndex !== undefined && frameIndex % 100 === 0) {
+            console.log(`Processing frame ${frameIndex}: ${width}x${height}, crop=${cropRegion ? 'yes' : 'no'}`);
+        }
+
         // --- Step 1: Create initial Mat from raw buffer ---
         if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER file
             const serDataType = pixelDepth > 8 ? _cv.CV_16UC1 : _cv.CV_8UC1;
@@ -220,14 +237,30 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
         // --- Step 3: Create RGBA Mat for PNG conversion ---
         rgbaMat = new _cv.Mat();
         if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER File
-             if (bayerChoice && bayerChoice !== "MONO" && _cv[bayerChoice]) {
+             if (bayerChoice && bayerChoice !== "MONO") {
+                // Validate Bayer constant exists
+                if (_cv[bayerChoice] === undefined) {
+                    throw new Error(`Invalid Bayer pattern: ${bayerChoice} not found in OpenCV. Available: COLOR_BayerBG2BGR, COLOR_BayerGB2BGR, COLOR_BayerRG2BGR, COLOR_BayerGR2BGR`);
+                }
                 const demosaiced = new _cv.Mat();
-                _cv.demosaicing(grayMat, demosaiced, _cv[bayerChoice]);
-                // cv.imshow uses RGB2RGBA internally, demosaic "2BGR" actually outputs RGB in OpenCV.js
-                _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_RGB2RGBA);
+                try {
+                    _cv.demosaicing(grayMat, demosaiced, _cv[bayerChoice]);
+                } catch (demosaicErr) {
+                    throw new Error(`Demosaicing failed (${actualWidth}x${actualHeight}, ${bayerChoice}=${_cv[bayerChoice]}): ${demosaicErr.message || demosaicErr}`);
+                }
+                try {
+                    _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_RGB2RGBA);
+                } catch (cvtErr) {
+                    demosaiced.delete();
+                    throw new Error(`cvtColor RGB2RGBA failed: ${cvtErr.message || cvtErr}`);
+                }
                 demosaiced.delete();
             } else {
-                _cv.cvtColor(grayMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
+                try {
+                    _cv.cvtColor(grayMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
+                } catch (cvtErr) {
+                    throw new Error(`cvtColor GRAY2RGBA failed: ${cvtErr.message || cvtErr}`);
+                }
             }
         } else { // AVI File (or RGBA from decoded PNG)
             if (fourCC === 'DIB ' || fourCC === 'RGB ') {
@@ -250,11 +283,20 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
         }
 
         // --- Step 4: Create PNG Blob ---
-        const tempOffscreenCanvas = new OffscreenCanvas(actualWidth, actualHeight);
-        const tempCtx = tempOffscreenCanvas.getContext('2d');
-        const imageData = new ImageData(new Uint8ClampedArray(rgbaMat.data), actualWidth, actualHeight);
-        tempCtx.putImageData(imageData, 0, 0);
-        const pngBlob = await tempOffscreenCanvas.convertToBlob({ type: 'image/png' });
+        let pngBlob;
+        try {
+            const tempOffscreenCanvas = new OffscreenCanvas(actualWidth, actualHeight);
+            const tempCtx = tempOffscreenCanvas.getContext('2d');
+            const expectedBytes = actualWidth * actualHeight * 4;
+            if (rgbaMat.data.length !== expectedBytes) {
+                throw new Error(`RGBA mat size mismatch: got ${rgbaMat.data.length}, expected ${expectedBytes}`);
+            }
+            const imageData = new ImageData(new Uint8ClampedArray(rgbaMat.data), actualWidth, actualHeight);
+            tempCtx.putImageData(imageData, 0, 0);
+            pngBlob = await tempOffscreenCanvas.convertToBlob({ type: 'image/png' });
+        } catch (pngErr) {
+            throw new Error(`PNG creation failed (${actualWidth}x${actualHeight}): ${pngErr.message || pngErr}`);
+        }
 
         // --- Step 5: Get cropped raw buffer for SER export (if cropping was applied) ---
         let croppedBuffer = null;
@@ -413,11 +455,12 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
             return { canCrop: false, reason: 'touches-edge' };
         }
 
-        // Calculate bounding box with margin (15% padding)
+        // Calculate bounding box with margin
+        // Use 50% padding to accommodate Saturn's rings and other extended features
         const boxWidth = maxX - minX;
         const boxHeight = maxY - minY;
-        const marginX = boxWidth * 0.15;
-        const marginY = boxHeight * 0.15;
+        const marginX = boxWidth * 0.5;
+        const marginY = boxHeight * 0.5;
 
         // Make it square (use larger dimension)
         const size = Math.max(boxWidth + marginX * 2, boxHeight + marginY * 2);
@@ -429,11 +472,16 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
         let cropY = Math.max(0, Math.floor(centerY - size / 2));
         let cropSize = Math.floor(size);
 
-        // Adjust if crop goes beyond frame
-        if (cropX + cropSize > width) cropX = width - cropSize;
-        if (cropY + cropSize > height) cropY = height - cropSize;
-        if (cropX < 0) { cropX = 0; cropSize = width; }
-        if (cropY < 0) { cropY = 0; cropSize = height; }
+        // Ensure even pixel alignment for Bayer pattern preservation
+        cropX = cropX & ~1;
+        cropY = cropY & ~1;
+        cropSize = cropSize & ~1; // Keep size even too
+
+        // Adjust if crop goes beyond frame (keeping even alignment)
+        if (cropX + cropSize > width) cropX = (width - cropSize) & ~1;
+        if (cropY + cropSize > height) cropY = (height - cropSize) & ~1;
+        if (cropX < 0) { cropX = 0; cropSize = width & ~1; }
+        if (cropY < 0) { cropY = 0; cropSize = height & ~1; }
 
         return {
             canCrop: true,

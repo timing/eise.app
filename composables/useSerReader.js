@@ -92,7 +92,8 @@ export function useSerReader() {
     const { uploadFrames } = useUploader();
 
     // Create a pool of workers
-    const numWorkers = navigator.hardwareConcurrency || 4;
+    // Limit workers to prevent OpenCV WASM memory exhaustion on large frames
+    const numWorkers = Math.min(navigator.hardwareConcurrency || 4, 4);
     const unifiedAnalyzeWorkers = [];
     let workersReady = false;
 
@@ -102,7 +103,7 @@ export function useSerReader() {
         addLog("Initializing analysis workers...");
 
         for (let i = 0; i < numWorkers; i++) {
-            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
+            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js?v=20260109'));
         }
 
         const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
@@ -370,13 +371,13 @@ export function useSerReader() {
         const workerPromises = [];
         let completedFrames = 0;
         let skippedFrames = 0;
-        let errorCount = 0;
-        const maxConsecutiveErrors = 10;
+        let totalErrors = 0;
+        const maxErrorsBeforeStopDispatching = 20; // Stop sending new frames after this many errors
+        let stopDispatching = false;
 
         for (let i = 0; i < frameCount; i++) {
-            // Stop if too many errors
-            if (errorCount >= maxConsecutiveErrors) {
-                addLog(`Stopping due to ${errorCount} consecutive errors. Check console for details.`);
+            // Stop dispatching new frames if too many errors (but continue collecting results)
+            if (stopDispatching) {
                 break;
             }
             const offset = 178 + (i * frameSize);
@@ -410,13 +411,13 @@ export function useSerReader() {
 
             const promise = processFrameWithWorker(worker, dataToWorker, [dataToWorker.frameBuffer])
                 .then(result => {
-                    errorCount = 0; // Reset on success
+                    // Always process successful results, even after we stopped dispatching new frames
 
                     // Skip frames that couldn't be cropped (when in crop mode)
                     if (result.skipped) {
                         skippedFrames++;
                         completedFrames++;
-                        if (result.index % 10 === 0) {
+                        if (completedFrames % 50 === 0) {
                             emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
                             emit('crop-stats-updated', { skipped: skippedFrames, total: completedFrames });
                         }
@@ -439,8 +440,13 @@ export function useSerReader() {
 
                     completedFrames++;
 
-                    // Emit updated frames for preview (less frequently)
-                    if (result.index % 10 === 0 || result.index === frameCount - 1) {
+                    // Log first successful frame to confirm processing works
+                    if (completedFrames === 1) {
+                        addLog(`First frame succeeded (index ${result.index}, sharpness ${result.sharpness?.toFixed(2)})`);
+                    }
+
+                    // Emit updated frames for preview (every 50 frames to reduce UI load)
+                    if (completedFrames % 50 === 0 || completedFrames === frameCount) {
                         emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
                         addLog(`Analyzed frame ${completedFrames}/${frameCount}`);
 
@@ -452,9 +458,18 @@ export function useSerReader() {
                     }
                 })
                 .catch(error => {
-                    errorCount++;
-                    addLog(`Error processing frame ${i}: ${error}`);
-                    console.error(`Error processing frame ${i}:`, error);
+                    totalErrors++;
+                    // Only log first few errors to avoid spam
+                    if (totalErrors <= 3) {
+                        addLog(`Error processing frame ${i}: ${error}`);
+                    } else if (totalErrors === 4) {
+                        addLog(`Further frame errors suppressed...`);
+                    }
+                    // Stop dispatching new frames if too many errors (but keep collecting good results)
+                    if (totalErrors >= maxErrorsBeforeStopDispatching && !stopDispatching) {
+                        stopDispatching = true;
+                        addLog(`Too many errors (${totalErrors}), stopped dispatching new frames. Waiting for remaining results...`);
+                    }
                 });
             workerPromises.push(promise);
         }
