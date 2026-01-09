@@ -14,16 +14,32 @@ export function useUploader() {
 
         const formData = new FormData();
         const imageIdentifier = Math.round(Math.random() * 10000);
-
-        for (const s in bestFrames) {
-            formData.append('imageFiles', new Blob(bestFrames[s].pngFile, { type: 'image/png' }), `${imageIdentifier}-${s}.png`);
-        }
-
         const host = 'https://stack.eise.app';
         const jobId = crypto.randomUUID();
         formData.append('job_id', jobId);
 
-        addLog(`FormData contains ${bestFrames.length} image files for upload.`);
+        let validFrames = 0;
+        let totalBytes = 0;
+        for (let i = 0; i < bestFrames.length; i++) {
+            const blob = bestFrames[i].pngFile?.[0];
+            if (!blob || blob.size === 0) {
+                console.warn(`Frame ${i}: Invalid or empty blob (type=${blob?.type}, size=${blob?.size})`);
+                continue;
+            }
+            console.log(`Frame ${i}: blob type=${blob.type}, size=${blob.size} bytes`);
+            totalBytes += blob.size;
+            // Use the blob directly instead of wrapping it
+            formData.append('imageFiles', blob, `${imageIdentifier}-${i}.png`);
+            validFrames++;
+        }
+
+        if (validFrames === 0) {
+            addLog('Error: No valid frame blobs to upload');
+            emit('stop-loading');
+            return false;
+        }
+
+        addLog(`Uploading ${validFrames} frames (${(totalBytes / 1024 / 1024).toFixed(1)} MB total)`);
 
         const wsUrl = host;
         const ws = io(wsUrl);

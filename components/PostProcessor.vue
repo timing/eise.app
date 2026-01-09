@@ -184,7 +184,7 @@ function initializeWorkers() {
 	console.log('Lazy-loading wavelet workers for post-processing');
 	waveletWorkers = new Array(8);
 	for (let i = 0; i < waveletWorkers.length; i++) {
-		waveletWorkers[i] = new Worker('/wavelet_worker.js');
+		waveletWorkers[i] = new Worker('/wavelet_worker.js?v=20260110');
 		waveletWorkers[i].onerror = (e) => { console.error(e); };
 	}
 }

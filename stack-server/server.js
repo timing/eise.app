@@ -10,16 +10,14 @@ const cors = require('cors');
 
 const app = express();
 const corsOptions = {
-	origin: ['http://localhost:3001', 'https://cloud-stacker.pages.dev', 'https://eise.app']
+	origin: ['http://localhost:3000', 'http://localhost:3001', 'https://cloud-stacker.pages.dev', 'https://eise.app']
 }
 
 app.use(cors(corsOptions));
 
 const server = http.createServer(app);
 const io = socketIo(server, {
-	cors: {
-		corsOptions
-	}
+	cors: corsOptions  // Fixed: was incorrectly nested as { cors: { corsOptions } }
 });
 const upload = multer({ dest: 'tmp/' });
 
@@ -109,8 +107,11 @@ app.post('/upload', upload.array('imageFiles'), (req, res) => {
 	fs.ensureDirSync(`uploads/${job_id}`);
 	req.files.forEach(file => {
 		try {
+			console.log(`Uploading file: ${file.originalname}, size=${file.size} bytes, mimetype=${file.mimetype}`);
 			fs.moveSync(file.path, `uploads/${job_id}/${file.originalname}`);
-			console.log(`File moved to uploads/${job_id}/${file.originalname}`);
+			// Verify file after move
+			const stats = fs.statSync(`uploads/${job_id}/${file.originalname}`);
+			console.log(`File moved to uploads/${job_id}/${file.originalname}, final size=${stats.size} bytes`);
 		} catch (error) {
 			console.error('Error moving file:', error);
 		}

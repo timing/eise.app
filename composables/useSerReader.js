@@ -103,7 +103,7 @@ export function useSerReader() {
         addLog("Initializing analysis workers...");
 
         for (let i = 0; i < numWorkers; i++) {
-            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js?v=20260109'));
+            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js?v=20260110'));
         }
 
         const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
@@ -340,6 +340,12 @@ export function useSerReader() {
         let worstFrame = null; // This will store {sharpness, blob}
 
         function rankFrame(frame) {
+            // Validate frame has valid blob
+            if (!frame.blob || !(frame.blob instanceof Blob) || frame.blob.size === 0) {
+                console.warn(`Skipping frame ${frame.index}: invalid blob (type=${frame.blob?.constructor?.name}, size=${frame.blob?.size})`);
+                return;
+            }
+
             // Update top 4 frames
             if (top4Frames.length < 4) {
                 top4Frames.push(frame);

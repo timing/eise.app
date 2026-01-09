@@ -69,7 +69,7 @@ async function initializeWorkers() {
 	if (workersInitialized) return;
 
 	for (let i = 0; i < unifiedAnalyzeWorkers.length; i++) {
-		unifiedAnalyzeWorkers[i] = new Worker('/unified_analyze_worker.js');
+		unifiedAnalyzeWorkers[i] = new Worker('/unified_analyze_worker.js?v=20260110');
 		unifiedAnalyzeWorkers[i].onerror = (e) => { console.error(e); };
 	}
 
