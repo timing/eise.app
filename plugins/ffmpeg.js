@@ -3,47 +3,70 @@ import { useEventBus } from '@/composables/eventBus';
 
 
 export default defineNuxtPlugin(nuxtApp => {
-	const ffmpeg = createFFmpeg({
-		log: true,
-		corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
-		// 0.12.6 is not compatible with the ffmpeg/ffmpeg include via npm install
-		//corePath: 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js'
-	});
+	let ffmpeg = null;
+	let isLoaded = false;
 
 	const { addLog } = useEventBus();
 
+	// Cleanup on page unload to help release WASM memory
+	if (typeof window !== 'undefined') {
+		window.addEventListener('beforeunload', () => {
+			if (ffmpeg && isLoaded) {
+				try {
+					ffmpeg.exit();
+				} catch (e) {
+					// Ignore errors during cleanup
+				}
+			}
+			ffmpeg = null;
+			isLoaded = false;
+		});
+	}
+
 	const loadFFmpeg = async () => {
-		if (!ffmpeg.isLoaded()) {
-			await ffmpeg.load();
-			addLog('Loading FFmpeg done');
+		if (isLoaded) return;
 
-			ffmpeg.setLogger(({ type, message }) => {
-				if (message && message.includes('frame=')) {
-					// some ffmpeg log is soo often that it slows things down
-					addLog(message);
-				}
-				return;
-
-				// Check memory usage and terminate if necessary
-				const usedJSHeapSize = performance.memory.usedJSHeapSize;
-				const jsHeapSizeLimit = performance.memory.jsHeapSizeLimit;
-				const usageLimit = 0.999 * jsHeapSizeLimit;
-
-				if (usedJSHeapSize > usageLimit) {
-					addLog('Memory limit approaching, stopping FFmpeg process.');
-					/*try {
-						ffmpeg.exit(); // Terminate FFmpeg process
-					} catch(err) {
-						console.log(err);
-						addLog('Forcefully exiting ffmpeg gave an (expected) error');
-					}*/
-				}
-
+		if (!ffmpeg) {
+			addLog('Initializing FFmpeg...');
+			ffmpeg = createFFmpeg({
+				log: true,
+				corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
 			});
 		}
+
+		try {
+			await ffmpeg.load();
+			isLoaded = true;
+		} catch (err) {
+			const errorMsg = err?.message || String(err);
+			console.error('FFmpeg load failed:', err);
+			addLog(`FFmpeg failed to load: ${errorMsg}`);
+			throw new Error(`Failed to load FFmpeg: ${errorMsg}`);
+		}
+		addLog('Loading FFmpeg done');
+
+		ffmpeg.setLogger(({ type, message }) => {
+			if (message && message.includes('frame=')) {
+				addLog(message);
+			}
+		});
 	};
 
-	nuxtApp.$ffmpeg = ffmpeg;
+	// Getter that ensures FFmpeg is created (but not necessarily loaded)
+	const getFFmpeg = () => {
+		if (!ffmpeg) {
+			ffmpeg = createFFmpeg({
+				log: true,
+				corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+			});
+		}
+		return ffmpeg;
+	};
+
+	// Use defineProperty so $ffmpeg access is lazy
+	Object.defineProperty(nuxtApp, '$ffmpeg', {
+		get: () => getFFmpeg()
+	});
 	nuxtApp.$loadFFmpeg = loadFFmpeg;
 });
 

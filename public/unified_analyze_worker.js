@@ -1,326 +1,453 @@
 // public/unified_analyze_worker.js
 
-let offscreen = null;
-let ctx = null;
+// Use _cv to avoid conflicts with global 'cv' from opencv-bindings
+let _cv = null;
+let isCvReady = false;
+const messageQueue = [];
 
-self.addEventListener('message', async (e) => {
+// Load OpenCV and signal readiness
+self.importScripts('https://cdn.jsdelivr.net/npm/opencv-bindings@4.5.5/index.min.js');
+
+self.addEventListener('message', (e) => {
+    if (e.data.type === 'init') {
+        if (!self.cv) {
+            console.error("Worker: self.cv is not available after importScripts. OpenCV might not have loaded correctly.");
+            self.postMessage({ type: 'error', message: 'OpenCV failed to load.' });
+            return;
+        }
+        _cv = self.cv; // Assign the global cv to our local _cv reference
+        isCvReady = true;
+        console.log('Worker: OpenCV loaded and initialized.');
+        self.postMessage({ type: 'ready' });
+
+        // Process any queued messages that arrived before init was complete
+        while (messageQueue.length > 0) {
+            handleMessage(messageQueue.shift());
+        }
+    } else {
+        // If cv is not ready, queue the message.
+        // If _cv is null, it implies init hasn't happened successfully.
+        if (!isCvReady || !_cv) {
+            messageQueue.push(e);
+        } else {
+            handleMessage(e);
+        }
+    }
+});
+
+
+async function handleMessage(e) {
     const { type, index } = e.data;
-    //console.log(`Worker: Received message - Type: ${type}, Index: ${index}`);
 
     try {
-        let imageData;
-        let imgWidth, imgHeight;
+        // Ensure _cv is defined here before using it
+        if (!_cv) {
+             throw new Error("OpenCV (_cv) is not initialized in worker.");
+        }
+
+        // Bounding box detection for first pass (crop detection)
+        if (type === 'detect-bounds') {
+            const { frameBuffer, header, bayerChoice } = e.data;
+            const bounds = await detectObjectBounds(frameBuffer, header, bayerChoice);
+            self.postMessage({ type: 'bounds', bounds, index });
+            return;
+        }
+
+        // Analyze with optional cropping - detects object center per-frame and applies fixed crop size
+        if (type === 'analyze-cropped') {
+            const { frameBuffer, header, bayerChoice, cropRegion } = e.data;
+
+            // Calculate expected size based on file type
+            let expectedSize;
+            if (header.fileId && header.fileId.startsWith('LUCAM-REC')) {
+                // SER file: single channel
+                expectedSize = header.width * header.height * (header.pixelDepth > 8 ? 2 : 1);
+            } else {
+                // AVI file (or RGBA from decoded PNG): use fourCC to determine channels
+                const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[header.fourCC] || 3;
+                expectedSize = header.width * header.height * bytesPerPixel;
+            }
+            if (frameBuffer.byteLength !== expectedSize) {
+                throw new Error(`Buffer size mismatch in analyze-cropped: got ${frameBuffer.byteLength}, expected ${expectedSize}`);
+            }
+
+            // First detect where the object is in this specific frame
+            let bounds;
+            try {
+                bounds = await detectObjectBounds(frameBuffer, header, bayerChoice);
+            } catch (boundsError) {
+                // Fall back to no cropping
+                bounds = { canCrop: false, reason: 'detection-error' };
+            }
+
+            let actualCropRegion = null;
+            if (bounds.canCrop && cropRegion && cropRegion.size) {
+                // Skip cropping if crop size exceeds frame dimensions
+                if (cropRegion.size <= header.width && cropRegion.size <= header.height) {
+                    // Calculate crop region centered on the detected object
+                    const centerX = bounds.x + bounds.size / 2;
+                    const centerY = bounds.y + bounds.size / 2;
+                    const halfSize = cropRegion.size / 2;
+
+                    let cropX = Math.floor(centerX - halfSize);
+                    let cropY = Math.floor(centerY - halfSize);
+
+                    // Ensure crop stays within frame bounds
+                    cropX = Math.max(0, Math.min(cropX, header.width - cropRegion.size));
+                    cropY = Math.max(0, Math.min(cropY, header.height - cropRegion.size));
+
+                    actualCropRegion = { x: cropX, y: cropY, size: cropRegion.size };
+                }
+            }
+
+            // If we're in crop mode but couldn't crop this frame, skip it entirely
+            if (cropRegion && !actualCropRegion) {
+                self.postMessage({ skipped: true, reason: bounds.reason || 'crop-failed', index });
+                return;
+            }
+
+            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index);
+            self.postMessage({ sharpness: result.sharpness, pngBlob: result.pngBlob, croppedBuffer: result.croppedBuffer, index });
+            return;
+        }
+
+        let sharpness, pngBlob;
 
         if (type === 'ffmpeg') {
             const { analyze } = e.data;
-            //console.log(`Worker: FFMPEG path - analyze data byteLength: ${analyze.byteLength}`);
-            const imageBlob = new Blob([analyze.buffer], { type: 'image/png' }); // Use analyze.buffer
-            //console.log(`Worker: FFMPEG path - Created Blob size: ${imageBlob.size}`);
-            const img = await createImageBitmap(imageBlob);
-            imgWidth = img.width;
-            imgHeight = img.height;
+            // opencv-bindings doesn't have imdecode, so decode PNG using browser APIs
+            const blob = new Blob([analyze.buffer], { type: 'image/png' });
+            const imageBitmap = await createImageBitmap(blob);
 
-            if (offscreen === null || offscreen.width !== imgWidth || offscreen.height !== imgHeight) {
-                offscreen = new OffscreenCanvas(imgWidth, imgHeight);
-                ctx = offscreen.getContext('2d', { willReadFrequently: true });
-            }
-            ctx.drawImage(img, 0, 0);
-            imageData = ctx.getImageData(0, 0, imgWidth, imgHeight);
-            //console.log('Worker: FFMPEG path - ImageData obtained.');
+            // Draw to OffscreenCanvas to get pixel data
+            const canvas = new OffscreenCanvas(imageBitmap.width, imageBitmap.height);
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(imageBitmap, 0, 0);
+            const imageData = ctx.getImageData(0, 0, imageBitmap.width, imageBitmap.height);
 
-        } else if (type === 'ser') {
-            const { frameBuffer, header, bayerChoice } = e.data;
-            //console.log(`Worker: SER path - frameBuffer size: ${frameBuffer.byteLength}`);
-            imgWidth = header.width;
-            imgHeight = header.height;
-            imageData = convertSerFrameToImageData(frameBuffer, header, bayerChoice);
-            //console.log('Worker: SER path - ImageData obtained.');
+            // Create OpenCV Mat from RGBA data
+            let imgMat = _cv.matFromImageData(imageData);
+            let grayMat = new _cv.Mat();
+            _cv.cvtColor(imgMat, grayMat, _cv.COLOR_RGBA2GRAY);
+            sharpness = calculateSharpnessFromMat(grayMat, index);
+            pngBlob = blob; // Reuse the blob we created
 
+            imgMat.delete();
+            grayMat.delete();
+            imageBitmap.close();
+        } else if (type === 'ser' || type === 'avi') {
+            const header = type === 'ser' ? e.data.header : e.data.aviHeader;
+            const { frameBuffer, bayerChoice } = e.data;
+
+            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, null, index);
+            sharpness = result.sharpness;
+            pngBlob = result.pngBlob;
+        
         } else {
             throw new Error('Unknown analysis type');
         }
 
-        const sharpness = calculateSharpness(imageData);
-        const { cog, boundingBox } = calculateCenterOfGravityAndBoundingBox(imageData);
-        const is_cut_off = isImageCutOff(cog, boundingBox, imgWidth, imgHeight);
-
-        const frameData = { sharpness, is_cut_off };
-        
-        //console.log(`Worker: Processing complete for index ${index}, sharpness: ${sharpness}`);
-        self.postMessage({ frameData: frameData, index: index });
+        self.postMessage({ sharpness, pngBlob, index });
 
     } catch (error) {
-        console.error('Error in unified_analyze_worker:', error);
-        self.postMessage({ error: error.message, index: index });
+        const errorMsg = error.message || String(error);
+        console.error(`Error in worker for index ${index}:`, errorMsg);
+        self.postMessage({ error: errorMsg, index: index });
     }
-});
+}
 
-// Sobel algo - Copied from analyze_worker.js
-function calculateSharpness(imageData) {
-    const width = imageData.width;
-    const height = imageData.height;
-    const grey = new Uint8ClampedArray(width * height);
-    const kernelX = [
-        [-1, 0, 1],
-        [-2, 0, 2],
-        [-1, 0, 1],
-    ];
-    const kernelY = [
-        [-1, -2, -1],
-        [0, 0, 0],
-        [1, 2, 1],
-    ];
+async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropRegion = null, frameIndex = undefined) {
+    const { width, height, pixelDepth, fourCC, bpp } = header;
+    let rawMat, grayMat, rgbaMat, croppedRawMat;
 
-    // Convert to greyscale
-    for (let i = 0; i < grey.length; i++) {
-        const offset = i * 4;
-        grey[i] = 0.3 * imageData.data[offset] + 0.59 * imageData.data[offset + 1] + 0.11 * imageData.data[offset + 2];
-    }
-
-    // Apply Sobel kernel
-    const gradX = new Float32Array(width * height);
-    const gradY = new Float32Array(width * height);
-    for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
-            let sumX = 0;
-            let sumY = 0;
-            for (let ky = -1; ky <= 1; ky++) {
-                for (let kx = -1; kx <= 1; kx++) {
-                    const pixel = grey[(y + ky) * width + (x + kx)];
-                    sumX += pixel * kernelX[ky + 1][kx + 1];
-                    sumY += pixel * kernelY[ky + 1][kx + 1];
-                }
+    try {
+        // --- Step 1: Create initial Mat from raw buffer ---
+        if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER file
+            const serDataType = pixelDepth > 8 ? _cv.CV_16UC1 : _cv.CV_8UC1;
+            const serData = pixelDepth > 8 ? new Uint16Array(frameBuffer) : new Uint8Array(frameBuffer);
+            const expectedSize = width * height;
+            if (serData.length !== expectedSize) {
+                throw new Error(`Buffer size mismatch: got ${serData.length}, expected ${expectedSize} (${width}x${height}, ${pixelDepth}-bit)`);
             }
-            gradX[y * width + x] = sumX;
-            gradY[y * width + x] = sumY;
+            rawMat = _cv.matFromArray(height, width, serDataType, serData);
+
+            // Apply cropping if specified
+            if (cropRegion) {
+                const rect = new _cv.Rect(cropRegion.x, cropRegion.y, cropRegion.size, cropRegion.size);
+                croppedRawMat = rawMat.roi(rect).clone();
+                rawMat.delete();
+                rawMat = croppedRawMat;
+            }
+
+            // Convert to 8-bit for processing
+            grayMat = new _cv.Mat();
+            const alpha = pixelDepth > 8 ? 1/256 : 1;
+            rawMat.convertTo(grayMat, _cv.CV_8U, alpha);
+
+        } else { // AVI file (or RGBA from decoded PNG)
+            const aviDataType = { 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[fourCC];
+            rawMat = new _cv.Mat(height, width, aviDataType);
+            rawMat.data.set(new Uint8Array(frameBuffer));
+
+            // Apply cropping if specified
+            if (cropRegion) {
+                const rect = new _cv.Rect(cropRegion.x, cropRegion.y, cropRegion.size, cropRegion.size);
+                croppedRawMat = rawMat.roi(rect).clone();
+                rawMat.delete();
+                rawMat = croppedRawMat;
+            }
+
+            grayMat = new _cv.Mat();
+            // Convert to grayscale for sharpness analysis
+            if (fourCC === 'DIB ' || fourCC === 'RGB ') {
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_BGR2GRAY);
+            } else if (fourCC === 'RGBA') {
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
+            } else if (fourCC === 'YUY2' || fourCC === 'UYVY') {
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_YUV2GRAY_YUY2);
+            } else { // Y800 is already grayscale
+                rawMat.copyTo(grayMat);
+            }
         }
-    }
 
-    // Calculate gradient magnitude
-    let sum = 0;
-    for (let i = 0; i < gradX.length; i++) {
-        sum += Math.sqrt(gradX[i] ** 2 + gradY[i] ** 2);
-    }
-    const avgGradient = sum / gradX.length;
+        // Get actual dimensions (may be cropped)
+        const actualWidth = rawMat.cols;
+        const actualHeight = rawMat.rows;
 
-    return avgGradient;
+        // --- Step 2: Calculate sharpness from the grayscale mat ---
+        const sharpness = calculateSharpnessFromMat(grayMat, frameIndex);
+
+        // --- Step 3: Create RGBA Mat for PNG conversion ---
+        rgbaMat = new _cv.Mat();
+        if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER File
+             if (bayerChoice && bayerChoice !== "MONO" && _cv[bayerChoice]) {
+                const demosaiced = new _cv.Mat();
+                _cv.demosaicing(grayMat, demosaiced, _cv[bayerChoice]);
+                // cv.imshow uses RGB2RGBA internally, demosaic "2BGR" actually outputs RGB in OpenCV.js
+                _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_RGB2RGBA);
+                demosaiced.delete();
+            } else {
+                _cv.cvtColor(grayMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
+            }
+        } else { // AVI File (or RGBA from decoded PNG)
+            if (fourCC === 'DIB ' || fourCC === 'RGB ') {
+                _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_BGR2RGBA);
+            } else if (fourCC === 'RGBA') {
+                // Already RGBA, just copy
+                rawMat.copyTo(rgbaMat);
+            } else if (fourCC === 'Y800') {
+                 if (bayerChoice && bayerChoice !== "MONO" && _cv[bayerChoice]) {
+                    const demosaiced = new _cv.Mat();
+                    _cv.demosaicing(rawMat, demosaiced, _cv[bayerChoice]);
+                    _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_BGR2RGBA);
+                    demosaiced.delete();
+                } else {
+                    _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
+                }
+            } else if (fourCC === 'YUY2' || fourCC === 'UYVY'){
+                _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_YUV2RGBA_YUY2);
+            }
+        }
+
+        // --- Step 4: Create PNG Blob ---
+        const tempOffscreenCanvas = new OffscreenCanvas(actualWidth, actualHeight);
+        const tempCtx = tempOffscreenCanvas.getContext('2d');
+        const imageData = new ImageData(new Uint8ClampedArray(rgbaMat.data), actualWidth, actualHeight);
+        tempCtx.putImageData(imageData, 0, 0);
+        const pngBlob = await tempOffscreenCanvas.convertToBlob({ type: 'image/png' });
+
+        // --- Step 5: Get cropped raw buffer for SER export (if cropping was applied) ---
+        let croppedBuffer = null;
+        if (cropRegion && header.fileId && header.fileId.startsWith('LUCAM-REC')) {
+            // Extract raw data from cropped mat for SER export
+            const bytesPerPixel = pixelDepth > 8 ? 2 : 1;
+            croppedBuffer = new ArrayBuffer(actualWidth * actualHeight * bytesPerPixel);
+            if (pixelDepth > 8) {
+                new Uint16Array(croppedBuffer).set(new Uint16Array(rawMat.data.buffer, rawMat.data.byteOffset, actualWidth * actualHeight));
+            } else {
+                new Uint8Array(croppedBuffer).set(new Uint8Array(rawMat.data.buffer, rawMat.data.byteOffset, actualWidth * actualHeight));
+            }
+        }
+
+        return { sharpness, pngBlob, croppedBuffer };
+
+    } finally {
+        if (rawMat) rawMat.delete();
+        if (grayMat) grayMat.delete();
+        if (rgbaMat) rgbaMat.delete();
+    }
 }
 
 
-function convertSerFrameToImageData(frameBuffer, header, bayerChoice) {
+function calculateSharpnessFromMat(grayMat, frameIndex) {
+    // Use Tenengrad (Sobel-based) sharpness metric - more robust than Laplacian variance
+    // Tenengrad = sum of squared Sobel gradients, normalized by image size
+
+    if (!_cv || !_cv.Mat) {
+        console.error('OpenCV not ready in calculateSharpnessFromMat');
+        return 0;
+    }
+
+    const sobelX = new _cv.Mat();
+    const sobelY = new _cv.Mat();
+
+    // Calculate Sobel gradients
+    _cv.Sobel(grayMat, sobelX, _cv.CV_64F, 1, 0, 3); // dx
+    _cv.Sobel(grayMat, sobelY, _cv.CV_64F, 0, 1, 3); // dy
+
+    // Square the gradients
+    const sobelX2 = new _cv.Mat();
+    const sobelY2 = new _cv.Mat();
+    _cv.multiply(sobelX, sobelX, sobelX2);
+    _cv.multiply(sobelY, sobelY, sobelY2);
+
+    // Sum of squared gradients
+    const gradientMagnitude = new _cv.Mat();
+    _cv.add(sobelX2, sobelY2, gradientMagnitude);
+
+    // Calculate mean (Tenengrad normalized by pixel count)
+    const meanVal = _cv.mean(gradientMagnitude);
+    const sharpness = meanVal[0]; // Mean of gradient magnitude squared
+
+    // Log first frame only for debugging
+    if (frameIndex === 0) {
+        console.log(`Frame analysis: ${grayMat.cols}x${grayMat.rows}, Tenengrad sharpness=${sharpness.toFixed(2)}`);
+    }
+
+    sobelX.delete();
+    sobelY.delete();
+    sobelX2.delete();
+    sobelY2.delete();
+    gradientMagnitude.delete();
+
+    return sharpness;
+}
+
+// Detect bounding box of bright objects (planet + moons) in frame
+async function detectObjectBounds(frameBuffer, header, bayerChoice) {
     const { width, height, pixelDepth } = header;
-    const is16Bit = pixelDepth > 8;
-    const frameData = is16Bit ? new Uint16Array(frameBuffer) : new Uint8Array(frameBuffer);
+    let grayMat = null;
+    let rawMat = null;
 
-    const imageData = new ImageData(width, height);
-    const outputData = imageData.data; // This is a Uint8ClampedArray (RGBA)
-
-    if (bayerChoice === "MONO") {
-        for (let i = 0; i < frameData.length; i++) {
-            const pixelValue = is16Bit ? Math.floor(frameData[i] / 256) : frameData[i]; // Scale 16-bit to 8-bit
-            const outputIndex = i * 4;
-            outputData[outputIndex] = pixelValue;     // R
-            outputData[outputIndex + 1] = pixelValue; // G
-            outputData[outputIndex + 2] = pixelValue; // B
-            outputData[outputIndex + 3] = 255;        // A
+    try {
+        // Create grayscale mat from frame buffer
+        if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER file
+            const serDataType = pixelDepth > 8 ? _cv.CV_16UC1 : _cv.CV_8UC1;
+            const serData = pixelDepth > 8 ? new Uint16Array(frameBuffer) : new Uint8Array(frameBuffer);
+            const expectedSize = width * height;
+            if (serData.length !== expectedSize) {
+                throw new Error(`detectObjectBounds: Buffer size mismatch: got ${serData.length}, expected ${expectedSize} (${width}x${height}, ${pixelDepth}-bit)`);
+            }
+            rawMat = _cv.matFromArray(height, width, serDataType, serData);
+            grayMat = new _cv.Mat();
+            const alpha = pixelDepth > 8 ? 1/256 : 1;
+            rawMat.convertTo(grayMat, _cv.CV_8U, alpha);
+        } else { // AVI file (or RGBA from decoded PNG)
+            const { fourCC } = header;
+            const aviDataType = { 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[fourCC];
+            rawMat = new _cv.Mat(height, width, aviDataType);
+            rawMat.data.set(new Uint8Array(frameBuffer));
+            grayMat = new _cv.Mat();
+            if (fourCC === 'DIB ' || fourCC === 'RGB ') {
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_BGR2GRAY);
+            } else if (fourCC === 'RGBA') {
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
+            } else if (fourCC === 'YUY2' || fourCC === 'UYVY') {
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_YUV2GRAY_YUY2);
+            } else {
+                rawMat.copyTo(grayMat);
+            }
         }
-    } else {
-        // Simple bilinear demosaicing (example for RGGB)
-        // This is a placeholder; a more advanced algorithm would be ideal.
-        // Assumes bayerChoice (e.g., COLOR_BayerRG2RGB) is a string, not a cv constant
-        // For simplicity and matching plain JS, we'll implement a basic one.
 
-        const getPixel = (x, y) => {
-            if (x < 0 || x >= width || y < 0 || y >= height) return 0;
-            return is16Bit ? Math.floor(frameData[y * width + x] / 256) : frameData[y * width + x];
+        // Apply Gaussian blur to reduce noise
+        const blurred = new _cv.Mat();
+        _cv.GaussianBlur(grayMat, blurred, new _cv.Size(5, 5), 0);
+
+        // Use a low threshold to catch faint features like Saturn's rings
+        // Otsu often sets threshold too high for faint details
+        // Using ~5% of max (threshold 12-15) catches rings while ignoring noise
+        const binary = new _cv.Mat();
+        _cv.threshold(blurred, binary, 12, 255, _cv.THRESH_BINARY);
+
+        // Find contours
+        const contours = new _cv.MatVector();
+        const hierarchy = new _cv.Mat();
+        _cv.findContours(binary, contours, hierarchy, _cv.RETR_EXTERNAL, _cv.CHAIN_APPROX_SIMPLE);
+
+        // Collect all bounding boxes
+        let minX = width, minY = height, maxX = 0, maxY = 0;
+        let hasObjects = false;
+        const minContourArea = (width * height) * 0.0001; // Ignore tiny noise
+
+        for (let i = 0; i < contours.size(); i++) {
+            const contour = contours.get(i);
+            const area = _cv.contourArea(contour);
+            if (area < minContourArea) continue;
+
+            hasObjects = true;
+            const rect = _cv.boundingRect(contour);
+            minX = Math.min(minX, rect.x);
+            minY = Math.min(minY, rect.y);
+            maxX = Math.max(maxX, rect.x + rect.width);
+            maxY = Math.max(maxY, rect.y + rect.height);
+        }
+
+        // Cleanup
+        blurred.delete();
+        binary.delete();
+        contours.delete();
+        hierarchy.delete();
+        if (rawMat) rawMat.delete();
+        if (grayMat) grayMat.delete();
+
+        if (!hasObjects) {
+            return { canCrop: false, reason: 'no-objects' };
+        }
+
+        // Check if objects touch the edges (within 2% margin)
+        const edgeMargin = Math.max(width, height) * 0.02;
+        const touchesEdge = minX < edgeMargin || minY < edgeMargin ||
+                           maxX > width - edgeMargin || maxY > height - edgeMargin;
+
+        if (touchesEdge) {
+            return { canCrop: false, reason: 'touches-edge' };
+        }
+
+        // Calculate bounding box with margin (15% padding)
+        const boxWidth = maxX - minX;
+        const boxHeight = maxY - minY;
+        const marginX = boxWidth * 0.15;
+        const marginY = boxHeight * 0.15;
+
+        // Make it square (use larger dimension)
+        const size = Math.max(boxWidth + marginX * 2, boxHeight + marginY * 2);
+        const centerX = (minX + maxX) / 2;
+        const centerY = (minY + maxY) / 2;
+
+        // Calculate crop region (ensure it's within frame bounds)
+        let cropX = Math.max(0, Math.floor(centerX - size / 2));
+        let cropY = Math.max(0, Math.floor(centerY - size / 2));
+        let cropSize = Math.floor(size);
+
+        // Adjust if crop goes beyond frame
+        if (cropX + cropSize > width) cropX = width - cropSize;
+        if (cropY + cropSize > height) cropY = height - cropSize;
+        if (cropX < 0) { cropX = 0; cropSize = width; }
+        if (cropY < 0) { cropY = 0; cropSize = height; }
+
+        return {
+            canCrop: true,
+            x: cropX,
+            y: cropY,
+            size: cropSize,
+            originalWidth: width,
+            originalHeight: height
         };
 
-        for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x++) {
-                const outputIndex = (y * width + x) * 4;
-                let r, g, b;
-
-                // Basic RGGB pattern
-                // G B
-                // R G
-                if ((y % 2 === 0 && x % 2 === 0)) { // G position in RGGB top-left
-                    g = getPixel(x, y);
-                    b = (getPixel(x, y - 1) + getPixel(x, y + 1) + getPixel(x - 1, y) + getPixel(x + 1, y)) / 4; // Average of adjacent R/B
-                    r = (getPixel(x - 1, y - 1) + getPixel(x - 1, y + 1) + getPixel(x + 1, y - 1) + getPixel(x + 1, y + 1)) / 4; // Average of diagonal G
-                } else if ((y % 2 === 0 && x % 2 === 1)) { // B position in RGGB top-right
-                    b = getPixel(x, y);
-                    g = (getPixel(x, y - 1) + getPixel(x, y + 1) + getPixel(x - 1, y) + getPixel(x + 1, y)) / 4;
-                    r = (getPixel(x - 1, y - 1) + getPixel(x + 1, y - 1)) / 2; // Average of horizontal R
-                } else if ((y % 2 === 1 && x % 2 === 0)) { // R position in RGGB bottom-left
-                    r = getPixel(x, y);
-                    g = (getPixel(x, y - 1) + getPixel(x, y + 1) + getPixel(x - 1, y) + getPixel(x + 1, y)) / 4;
-                    b = (getPixel(x - 1, y + 1) + getPixel(x + 1, y + 1)) / 2; // Average of vertical B
-                } else { // G position in RGGB bottom-right
-                    g = getPixel(x, y);
-                    b = (getPixel(x, y - 1) + getPixel(x, y + 1) + getPixel(x - 1, y) + getPixel(x + 1, y)) / 4;
-                    r = (getPixel(x - 1, y - 1) + getPixel(x - 1, y + 1) + getPixel(x + 1, y - 1) + getPixel(x + 1, y + 1)) / 4;
-                }
-                
-                outputData[outputIndex] = Math.min(255, Math.max(0, r));
-                outputData[outputIndex + 1] = Math.min(255, Math.max(0, g));
-                outputData[outputIndex + 2] = Math.min(255, Math.max(0, b));
-                outputData[outputIndex + 3] = 255;
-            }
-        }
+    } catch (error) {
+        if (rawMat) rawMat.delete();
+        if (grayMat) grayMat.delete();
+        console.error('Error detecting bounds:', error);
+        return { canCrop: false, reason: 'error', message: error.message };
     }
-    return imageData;
-}
-
-
-function calculateCenterOfGravity(imageData) {
-    let totalWeight = 0;
-    let xWeight = 0;
-    let yWeight = 0;
-    const width = imageData.width;
-    const height = imageData.height;
-    const data = gaussianBlur(imageData).data;
-
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const index = (y * width + x) * 4;
-            const brightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
-            totalWeight += brightness;
-            xWeight += x * brightness;
-            yWeight += y * brightness;
-        }
-    }
-
-    const cog = {
-        x: xWeight / totalWeight,
-        y: yWeight / totalWeight,
-    };
-
-    return cog;
-}
-
-function calculateCenterOfGravityAndBoundingBox(imageData) {
-    let totalWeight = 0;
-    let xWeight = 0;
-    let yWeight = 0;
-    let minX = Infinity;
-    let maxX = 0;
-    let minY = Infinity;
-    let maxY = 0;
-    const width = imageData.width;
-    const height = imageData.height;
-    const data = gaussianBlur(imageData).data;
-    const brightnessThreshold = 10; // Example threshold, adjust based on your image characteristics
-
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const index = (y * width + x) * 4;
-            const brightness = (data[index] + data[index + 1] + data[index + 2]) / 3;
-            if (brightness > brightnessThreshold) {
-                totalWeight += brightness;
-                xWeight += x * brightness;
-                yWeight += y * brightness;
-                minX = Math.min(minX, x);
-                maxX = Math.max(maxX, x);
-                minY = Math.min(minY, y);
-                maxY = Math.max(maxY, y);
-            }
-        }
-    }
-
-    const cog = {
-        x: xWeight / totalWeight,
-        y: yWeight / totalWeight,
-    };
-
-    const boundingBox = {
-        left: minX,
-        right: maxX,
-        top: minY,
-        bottom: maxY,
-        width: maxX - minX + 1,
-        height: maxY - minY + 1
-    };
-
-    return { cog, boundingBox };
-}
-
-function gaussianBlur(imageData) {
-    const kernel = [1 / 16, 1 / 4, 3 / 8, 1 / 4, 1 / 16];
-    const width = imageData.width;
-    const height = imageData.height;
-    const data = new Uint8ClampedArray(imageData.data);
-    const blurredData = new Uint8ClampedArray(data.length);
-
-    // Horizontal pass
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            let r = 0, g = 0, b = 0, a = 0;
-            for (let k = -2; k <= 2; k++) {
-                const xk = Math.max(0, Math.min(width - 1, x + k));
-                const i = (y * width + xk) * 4;
-                r += data[i] * kernel[k + 2];
-                g += data[i + 1] * kernel[k + 2];
-                b += data[i + 2] * kernel[k + 2];
-                a += data[i + 3] * kernel[k + 2];
-            }
-            const index = (y * width + x) * 4;
-            blurredData[index] = r;
-            blurredData[index + 1] = g;
-            blurredData[index + 2] = b;
-            blurredData[index + 3] = a;
-        }
-    }
-
-    // Vertical pass
-    for (let x = 0; x < width; x++) {
-        for (let y = 0; y < height; y++) {
-            let r = 0, g = 0, b = 0, a = 0;
-            for (let k = -2; k <= 2; k++) {
-                const yk = Math.max(0, Math.min(height - 1, y + k));
-                const i = (yk * width + x) * 4;
-                r += blurredData[i] * kernel[k + 2];
-                g += blurredData[i + 1] * kernel[k + 2];
-                b += blurredData[i + 2] * kernel[k + 2];
-                a += blurredData[i + 3] * kernel[k + 2];
-            }
-            const index = (y * width + x) * 4;
-            data[index] = r;
-            data[index + 1] = g;
-            data[index + 2] = b;
-            data[index + 3] = a;
-        }
-    }
-
-    return new ImageData(data, width, height);
-}
-
-
-function isImageCutOff(cog, boundingBox, imgWidth, imgHeight) {
-    const centerThreshold = 0.25;
-    const boundingBoxSizeThreshold = 0.5;
-
-    const imageCenterX = imgWidth / 2;
-    const imageCenterY = imgHeight / 2;
-
-    const distanceFromCenterX = Math.abs(cog.x - imageCenterX) / imageCenterX;
-    const distanceFromCenterY = Math.abs(cog.y - imageCenterY) / imageCenterY;
-
-    if (distanceFromCenterX < centerThreshold && distanceFromCenterY < centerThreshold) {
-        return false;
-    }
-
-    const boundingBoxWidthFraction = (boundingBox.right - boundingBox.left) / imgWidth;
-    const boundingBoxHeightFraction = (boundingBox.bottom - boundingBox.top) / imgHeight;
-
-    if (boundingBoxWidthFraction > boundingBoxSizeThreshold && boundingBoxHeightFraction > boundingBoxSizeThreshold) {
-        return false;
-    }
-
-    if ((distanceFromCenterX > centerThreshold || distanceFromCenterY > centerThreshold) &&
-        (boundingBox.left === 0 || boundingBox.right === imgWidth - 1 ||
-         boundingBox.top === 0 || boundingBox.bottom === imgHeight - 1)) {
-        return true;
-    }
-
-    return false;
 }

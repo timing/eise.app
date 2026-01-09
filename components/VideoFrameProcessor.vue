@@ -3,21 +3,24 @@
 		<div class="card">
 			<LoadingIndicator />
 
-			<div v-if="uploadError" class="error-message">
-				<p>Error: {{ uploadError }}</p>
+			<div class="action-buttons processing-actions">
+				<button class="cancel-button" @click="cancelProcessing">Cancel</button>
 			</div>
 
-			<div class="separator"></div>
+			<div v-if="skippedFrames > 0" class="skipped-info">
+				<p>{{ skippedFrames }} frames skipped (couldn't crop)</p>
+			</div>
 
-			<div v-if="processingStage === 'analyzing'">
-				<table>
-					<tr><td>Amount analyzed</td><td>{{ allFramesCount }}</td></tr>
-					<tr><td>Amount of best frames</td><td>{{ bestFramesCount }}</td></tr>
-				</table>
+			<div v-if="uploadError" class="error-message">
+				<p>Error: {{ uploadError }}</p>
 			</div>
 		</div>
 
 		<div class="content" v-if="processingStage === 'analyzing'">
+			<div v-if="croppedSerData" class="cropped-ser-download">
+				<button @click="downloadCroppedSer">Download Cropped SER ({{ croppedSerData.cropSize }}x{{ croppedSerData.cropSize }}, {{ croppedSerData.frameCount }} frames)</button>
+			</div>
+
 			<h4>Top 4 Sharpest Frames</h4>
 			<div class="frame-container">
 			  <canvas v-for="(frame, index) in topFrames" :key="'top-' + index" :ref="el => canvases.top[index] = el"></canvas>
@@ -52,11 +55,48 @@ const uploadError = ref(null); // New ref for upload errors
 const topFrames = ref([]);
 const worstFrame = ref(null);
 const canvases = ref({ top: [], worst: null });
+const croppedSerData = ref(null);
+const skippedFrames = ref(0);
 
 let unifiedAnalyzeWorkers = new Array((navigator && navigator.hardwareConcurrency) || 4);
+let workersInitialized = false;
 
 // Define bestFramesForStacking outside processImageFrames to persist state across calls/worker responses
 const bestFramesForStacking = []; // These will store {sharpness, blob}
+
+// Initialize workers and wait for OpenCV to be ready
+async function initializeWorkers() {
+	if (workersInitialized) return;
+
+	for (let i = 0; i < unifiedAnalyzeWorkers.length; i++) {
+		unifiedAnalyzeWorkers[i] = new Worker('/unified_analyze_worker.js');
+		unifiedAnalyzeWorkers[i].onerror = (e) => { console.error(e); };
+	}
+
+	const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
+		return new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 10000);
+			const handler = (e) => {
+				if (e.data.type === 'ready') {
+					clearTimeout(timeout);
+					worker.removeEventListener('message', handler);
+					resolve();
+				}
+			};
+			worker.addEventListener('message', handler);
+			worker.postMessage({ type: 'init' });
+		});
+	});
+
+	try {
+		await Promise.all(workerPromises);
+		workersInitialized = true;
+		addLog('Analysis workers initialized.');
+	} catch (error) {
+		console.error('Worker initialization failed:', error);
+		addLog(`Error: Could not initialize analysis workers. Reason: ${error.message}`);
+	}
+}
 
 // Define rankFrame outside processImageFrames so it can be used by worker message listener
 function rankFrame(frame) {
@@ -90,17 +130,12 @@ function rankFrame(frame) {
 }
 
 
-onMounted(() => {	
-	for (let i = 0; i < unifiedAnalyzeWorkers.length; i++) {
-		unifiedAnalyzeWorkers[i] = new Worker('/unified_analyze_worker.js', {type: 'module'});
-		unifiedAnalyzeWorkers[i].onerror = (e) => { console.error(e); };
-	}
-
+onMounted(async () => {
 	if (props.frames && props.frames.length > 0) {
 		uploadError.value = null; // Reset error
 		processingStage.value = 'analyzing';
 		emit('set-caption', 'Analyzing frames');
-		processImageFrames(props.frames);
+		await processImageFrames(props.frames);
 	}
 
 	on('ser-frames-updated', ({ top, worst }) => {
@@ -118,7 +153,33 @@ onMounted(() => {
 		uploadError.value = message;
 		emit('stop-loading'); // Stop loading on error
 	});
+
+	on('cropped-ser-ready', (data) => {
+		croppedSerData.value = data;
+	});
+
+	on('crop-stats-updated', (stats) => {
+		skippedFrames.value = stats.skipped;
+	});
 });
+
+function downloadCroppedSer() {
+	if (!croppedSerData.value) return;
+
+	const url = URL.createObjectURL(croppedSerData.value.blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = croppedSerData.value.filename;
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
+}
+
+function cancelProcessing() {
+	// Reload the page to reset everything
+	window.location.reload();
+}
 
 watch(() => props.frames, (newVal) => {
 	if (newVal && newVal.length > 0) {
@@ -136,15 +197,19 @@ function updateCanvases() {
   nextTick(() => {
     topFrames.value.forEach((frame, index) => {
       const canvas = canvases.value.top[index];
-      if (canvas) {
-        const blob = frame instanceof Blob ? frame : frame.blob;
-        drawImageOnCanvas(canvas, blob);
+      if (canvas && frame) {
+        const blob = frame instanceof Blob ? frame : frame?.blob;
+        if (blob) {
+          drawImageOnCanvas(canvas, blob);
+        }
       }
     });
 
     if (worstFrame.value && canvases.value.worst) {
-      const blob = worstFrame.value instanceof Blob ? worstFrame.value : worstFrame.value.blob;
-      drawImageOnCanvas(canvases.value.worst, blob);
+      const blob = worstFrame.value instanceof Blob ? worstFrame.value : worstFrame.value?.blob;
+      if (blob) {
+        drawImageOnCanvas(canvases.value.worst, blob);
+      }
     }
   });
 }
@@ -152,8 +217,17 @@ function updateCanvases() {
 function drawImageOnCanvas(canvas, blob) {
   const ctx = canvas.getContext('2d');
   createImageBitmap(blob).then(img => {
-    canvas.width = img.width / 2;
-    canvas.height = img.height / 2;
+    // Scale to half size, but ensure minimum 120px display
+    const minSize = 120;
+    let scale = 0.5;
+    if (img.width * scale < minSize || img.height * scale < minSize) {
+      // Scale up to meet minimum size
+      scale = Math.max(minSize / img.width, minSize / img.height);
+    }
+    canvas.width = Math.round(img.width * scale);
+    canvas.height = Math.round(img.height * scale);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   }).catch(error => {
     console.error('Error drawing image to canvas:', error, 'Blob size:', blob.size, 'Blob type:', blob.type);
@@ -170,36 +244,41 @@ let bestFramesCapacity; // Declare outside to be accessible by rankFrame
 async function processImageFrames(files) {
 	if (!files || files.length === 0) return;
 
+	await initializeWorkers();
+
+	if (!workersInitialized) {
+		addLog('Cannot process frames - workers failed to initialize.');
+		emit('stop-loading');
+		return;
+	}
+
 	emit('set-caption', 'Analyzing frames'); // LoadingIndicator will display this caption
 
 	bestFramesCapacity = Math.floor(files.length * 0.3); // Set here
-
 
 	const usedFFmpeg = typeof files[0] === 'string';
 
 	const resolveFunctions = new Array(files.length);
 	const rejectFunctions = new Array(files.length);
-	const filesMap = new Array(files.length); 
 
 	for (let i = 0; i < unifiedAnalyzeWorkers.length; i++) {
 		unifiedAnalyzeWorkers[i].addEventListener('message', (e) => {
 			const index = e.data.index;
-			const pngFile = filesMap[index];
 
 			allFramesCount.value++;
-            emit('update-loading', (allFramesCount.value / files.length) * 100);
+			emit('update-loading', { progress: (allFramesCount.value / files.length) * 100, current: allFramesCount.value, total: files.length });
 
-
-			if(e.data.frameData !== undefined) {
-				if(!e.data.frameData.is_cut_off) {
-					console.log(`VideoFrameProcessor: Constructing Blob for rendering. pngFile[0] byteLength: ${pngFile[0]?.byteLength}`);
-					const currentFrame = {sharpness: e.data.frameData.sharpness, blob: new Blob([pngFile[0]], { type: 'image/png' })};
-					rankFrame(currentFrame);
-					if (index % 10 === 0 || index === files.length - 1) {
-						updateCanvases();
-					}
+			// Worker returns { sharpness, pngBlob, index }
+			if (e.data.sharpness !== undefined && e.data.pngBlob) {
+				const currentFrame = { sharpness: e.data.sharpness, blob: e.data.pngBlob };
+				rankFrame(currentFrame);
+				if (index % 10 === 0 || index === files.length - 1) {
+					updateCanvases();
 				}
 				resolveFunctions[index]();
+			} else if (e.data.error) {
+				addLog('Failed analyzing frame ' + index + ': ' + e.data.error);
+				rejectFunctions[index](new Error(e.data.error));
 			} else {
 				addLog('Failed analyzing frame ' + index);
 				rejectFunctions[index](new Error("Processing failed."));
@@ -215,15 +294,13 @@ async function processImageFrames(files) {
 			setTimeout(async () => {
 				let data;
 				if (usedFFmpeg) {
-					data = [$ffmpeg.FS('readFile', file)];
-					console.log(`VideoFrameProcessor: Read FFmpeg file ${file} (index ${index}). Data undefined: ${data[0] === undefined}, byteLength: ${data[0]?.byteLength}`);
+					data = $ffmpeg.FS('readFile', file);
 					$ffmpeg.FS('unlink', file);
 				} else {
-					data = [new Uint8Array(await file.arrayBuffer())];
+					data = new Uint8Array(await file.arrayBuffer());
 				}
-				filesMap[index] = data;
-				// Post message to unified worker
-				const analyzeDataForWorker = filesMap[index][0].slice(); // Create a new Uint8Array copy
+				// Post message to unified worker - worker will return pngBlob directly
+				const analyzeDataForWorker = data.slice(); // Create a copy for transfer
 				unifiedAnalyzeWorkers[index % unifiedAnalyzeWorkers.length].postMessage({ type: 'ffmpeg', analyze: analyzeDataForWorker, index: index }, [analyzeDataForWorker.buffer]);
 			}, 10);
 		});
@@ -259,20 +336,6 @@ async function processImageFrames(files) {
 	  border: 1px solid #ccc;
 	  max-width: 100%;
 	}
-	table {
-		border-collapse: collapse;
-	}
-	table td {
-		border: 1px solid #eee;
-		padding: 5px;
-	}
-	table td:first-child {
-		padding-right: 10px;
-	}
-	table td:last-child {
-		min-width: 60px;
-		text-align: right;
-	}
 	.error-message {
 		background-color: #ffcccc;
 		color: #cc0000;
@@ -280,5 +343,56 @@ async function processImageFrames(files) {
 		margin-top: 10px;
 		border-radius: 5px;
 		font-weight: bold;
+	}
+	.skipped-info {
+		background-color: #fff3cd;
+		color: #856404;
+		padding: 8px 12px;
+		margin-top: 10px;
+		border-radius: 5px;
+		font-size: 12px;
+	}
+	.skipped-info p {
+		margin: 0;
+	}
+	.cropped-ser-download {
+		margin-bottom: 20px;
+		padding: 15px;
+		background-color: #e8f5e9;
+		border-radius: 5px;
+	}
+	.cropped-ser-download button {
+		background-color: #4CAF50;
+		color: white;
+		padding: 10px 20px;
+		border: none;
+		border-radius: 5px;
+		cursor: pointer;
+		font-size: 14px;
+	}
+	.cropped-ser-download button:hover {
+		background-color: #45a049;
+	}
+	.action-buttons {
+		display: flex;
+		gap: 10px;
+		margin-top: 10px;
+	}
+	.processing-actions {
+		justify-content: center;
+		margin-top: 20px;
+	}
+	.cancel-button {
+		background-color: #cc0000;
+		color: white;
+		padding: 10px 20px;
+		border: none;
+		border-radius: 5px;
+		cursor: pointer;
+		font-size: 14px;
+		font-weight: bold;
+	}
+	.cancel-button:hover {
+		background-color: #aa0000;
 	}
 </style>

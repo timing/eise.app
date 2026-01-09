@@ -21,7 +21,11 @@ const toggleExpand = () => {
 };
 
 onMounted(() => {
-	logContent.value.innerHTML += (new Date()).toLocaleString() + ': Welcome to eise.app! \n';
+	let welcomeMem = '';
+	if (performance && performance.memory && performance.memory.usedJSHeapSize) {
+		welcomeMem = ' Mem:' + (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(2) + 'MB';
+	}
+	logContent.value.innerHTML += (new Date()).toLocaleString() + ': Welcome to eise.app!' + welcomeMem + '\n';
 
 	onLogAdded((log) => {
 		let mem = '';

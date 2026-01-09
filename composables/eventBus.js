@@ -1,8 +1,26 @@
 import { ref } from 'vue';
 
+// Clear any stale data on module load
 const logs = ref([]);
 const eventCallbacks = {};
 const caption = ref('');
+
+// Global worker registry for cleanup on page unload
+const activeWorkers = new Set();
+
+// Cleanup all workers on page unload
+if (typeof window !== 'undefined') {
+	window.addEventListener('beforeunload', () => {
+		activeWorkers.forEach(worker => {
+			try {
+				worker.terminate();
+			} catch (e) {
+				// Ignore errors during cleanup
+			}
+		});
+		activeWorkers.clear();
+	});
+}
 
 export const useEventBus = () => {
 	const addLog = (log) => {
@@ -50,6 +68,15 @@ export const useEventBus = () => {
 		}
 	};
 
-	return { logs, addLog, onLogAdded, emit, on, off, caption, setCaption };
+	// Worker registration for cleanup
+	const registerWorker = (worker) => {
+		activeWorkers.add(worker);
+	};
+
+	const unregisterWorker = (worker) => {
+		activeWorkers.delete(worker);
+	};
+
+	return { logs, addLog, onLogAdded, emit, on, off, caption, setCaption, registerWorker, unregisterWorker };
 };
 

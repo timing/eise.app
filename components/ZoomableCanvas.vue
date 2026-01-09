@@ -15,7 +15,11 @@ import { defineEmits, ref, onMounted, nextTick, computed } from 'vue';
 const emit = defineEmits(['canvasReady']);
 
 const props = defineProps({
-	id: String
+	id: String,
+	disableDrag: {
+		type: Boolean,
+		default: false
+	}
 });
 
 const canvas = ref(null);
@@ -88,11 +92,12 @@ const canvasStyle = computed(() => {
 	return {
 		transform: `translate(${position.value.x}px, ${position.value.y}px) scale(${zoomLevel.value})`,
 		transformOrigin: 'top left',
-		cursor: isDragging.value ? 'grabbing' : 'grab'
+		cursor: props.disableDrag ? 'crosshair' : (isDragging.value ? 'grabbing' : 'grab')
 	};
 });
 
 const startDrag = (event) => {
+	if (props.disableDrag) return; // Skip drag when disabled (e.g., crop mode)
 	isDragging.value = true;
 	startPos.value = { x: event.clientX - position.value.x, y: event.clientY - position.value.y };
 	event.target.style.cursor = 'grabbing';

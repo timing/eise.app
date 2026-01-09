@@ -1,5 +1,5 @@
-/* 
-	this file is moved to public folder because Vite/Nuxt/Vue whatever tries 
+/*
+	this file is moved to public folder because Vite/Nuxt/Vue whatever tries
 	to optimize it by using globalThis.__publicAssetsURL, but then it breaks
 */
 
@@ -7,14 +7,23 @@ const workers = [];
 const channelDataResults = [null, null, null];
 let pendingResults = 3; // Expecting 3 results
 let globalWidth, globalHeight, globalTaskId;
+let workersInitialized = false;
 
-// Initialize workers
-for (let i = 0; i < 3; i++) {
-	workers[i] = new Worker('/sharpen_per_channel_worker.js', {type: 'module'});
-	workers[i].addEventListener('message', handleWorkerResponse(i));
+// Lazy-load sub-workers on first use
+function initializeSubWorkers() {
+	if (workersInitialized) return;
+	workersInitialized = true;
+
+	for (let i = 0; i < 3; i++) {
+		workers[i] = new Worker('/sharpen_per_channel_worker.js', {type: 'module'});
+		workers[i].addEventListener('message', handleWorkerResponse(i));
+	}
 }
 
 self.addEventListener('message', async (e) => {
+	// Lazy-load sub-workers on first message
+	initializeSubWorkers();
+
 	console.log('msg received', e.data);
 
 	const { imageData, width, height, amount, radius, taskId } = e.data;
@@ -39,8 +48,10 @@ function handleWorkerResponse(index) {
 
 		// When all channels are processed
 		if (pendingResults === 0) {
-			const imageData = new ImageData(new Uint8ClampedArray(mergeChannelsIntoImageData(channelDataResults)), globalWidth, globalHeight);
-			self.postMessage({ imageData, taskId: globalTaskId });
+			const mergedData = new Uint8ClampedArray(mergeChannelsIntoImageData(channelDataResults));
+			const imageData = new ImageData(mergedData, globalWidth, globalHeight);
+			// Transfer the buffer back for zero-copy
+			self.postMessage({ imageData, taskId: globalTaskId }, [mergedData.buffer]);
 			pendingResults = 3; // Reset for next image processing
 		}
 	};

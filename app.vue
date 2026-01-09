@@ -52,7 +52,8 @@
 		</div>
 	
 		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
-		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing" 
+		<ColorProfileSelector v-show="currentTab === 'FileUploader' && isSelectingColorProfile" />
+		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing && !isSelectingColorProfile"
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" />
 
@@ -67,6 +68,7 @@ import FileUploader from '~/components/FileUploader.vue';
 import VideoFrameProcessor from './components/VideoFrameProcessor.vue';
 import PostProcessor from './components/PostProcessor.vue';
 import Logger from './components/Logger.vue';
+import ColorProfileSelector from './components/ColorProfileSelector.vue';
 import { ref } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 
@@ -79,12 +81,19 @@ const selectedFile = ref(null);
 const currentTab = ref('FileUploader');
 const videoProcessorRef = ref(null);
 const isProcessing = ref(false);
+const isSelectingColorProfile = ref(false);
 
 const loadPixel = ref(false)
 
 onMounted(() => {
 	loadPixel.value = true;
 	on('postProcessing', handlePostProcessing);
+	on('show-color-profile-selector', () => {
+		isSelectingColorProfile.value = true;
+	});
+	on('color-profile-selected', () => {
+		isSelectingColorProfile.value = false;
+	});
 });
 
 async function handleFrames(data) {
