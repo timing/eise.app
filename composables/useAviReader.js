@@ -491,6 +491,7 @@ export function useAviReader() {
         const workerPromises = [];
         let completedFrames = 0;
         let skippedFrames = 0;
+        let cutOffFrames = 0;
         let errorCount = 0;
         const maxConsecutiveErrors = 10;
 
@@ -545,13 +546,17 @@ export function useAviReader() {
                 .then(async (result) => {
                     errorCount = 0; // Reset on success
 
-                    // Skip frames that couldn't be cropped (when in crop mode)
+                    // Skip frames that were cut-off or couldn't be cropped
                     if (result.skipped) {
-                        skippedFrames++;
+                        if (result.reason === 'cut-off') {
+                            cutOffFrames++;
+                        } else {
+                            skippedFrames++;
+                        }
                         completedFrames++;
                         if (result.index % 10 === 0) {
                             emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
-                            emit('crop-stats-updated', { skipped: skippedFrames, total: completedFrames });
+                            emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: completedFrames });
                         }
                         return;
                     }
@@ -586,9 +591,12 @@ export function useAviReader() {
 
         await Promise.all(workerPromises);
 
-        const skippedMsg = skippedFrames > 0 ? ` (${skippedFrames} skipped - couldn't crop)` : '';
+        const skipMsgs = [];
+        if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
+        if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} crop-failed`);
+        const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
         addLog(`Finished analyzing ${frameCount} AVI frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
-        emit('crop-stats-updated', { skipped: skippedFrames, total: frameCount, done: true });
+        emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
 
         unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
 
@@ -685,6 +693,7 @@ export function useAviReader() {
 
         let completedFrames = 0;
         let skippedFrames = 0;
+        let cutOffFrames = 0;
         let errorCount = 0;
         const maxConsecutiveErrors = 10;
 
@@ -740,7 +749,11 @@ export function useAviReader() {
                         errorCount = 0;
 
                         if (result.skipped) {
-                            skippedFrames++;
+                            if (result.reason === 'cut-off') {
+                                cutOffFrames++;
+                            } else {
+                                skippedFrames++;
+                            }
                             completedFrames++;
                             return;
                         }
@@ -765,7 +778,7 @@ export function useAviReader() {
             emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
             if (completedFrames % 50 === 0 || batchEnd === frameCount) {
                 addLog(`Analyzed frame ${completedFrames}/${frameCount}`);
-                emit('crop-stats-updated', { skipped: skippedFrames, total: completedFrames });
+                emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: completedFrames });
 
                 const top4FrameBlobs = top4Frames.filter(f => f && f.blob).map(f => f.blob);
                 const worstFrameBlob = worstFrame?.blob || null;
@@ -773,9 +786,12 @@ export function useAviReader() {
             }
         }
 
-        const skippedMsg = skippedFrames > 0 ? ` (${skippedFrames} skipped - couldn't crop)` : '';
+        const skipMsgs = [];
+        if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
+        if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} crop-failed`);
+        const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
         addLog(`Finished analyzing ${frameCount} frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
-        emit('crop-stats-updated', { skipped: skippedFrames, total: frameCount, done: true });
+        emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
 
 
         unifiedAnalyzeWorkers.forEach(worker => worker.terminate());

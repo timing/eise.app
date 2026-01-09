@@ -65,9 +65,9 @@ export function useUploader() {
         });
 
         console.log('Uploader: Emitting set-caption for upload');
-        emit('set-caption', 'Uploading frames for stacking');
-        console.log('Uploader: Emitting update-loading(0) for upload start');
-        emit('update-loading', 0);
+        emit('set-caption', `Uploading ${validFrames} best frames`);
+        // Reset progress and clear frame counter from previous step
+        emit('update-loading', { progress: 0, current: 0, total: 0 });
 
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `${host}/upload`, true);
@@ -77,8 +77,8 @@ export function useUploader() {
                 return;
             }
             const progress = Math.round(event.loaded / event.total * 100);
-            console.log('Uploader: Emitting update-loading', progress);
-            emit('update-loading', progress);
+            // Keep frame counter at 0 during upload (only show percentage bar)
+            emit('update-loading', { progress, current: 0, total: 0 });
         };
 
         xhr.onload = function() {

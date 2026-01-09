@@ -144,10 +144,17 @@ async function handleMessage(e) {
             const header = type === 'ser' ? e.data.header : e.data.aviHeader;
             const { frameBuffer, bayerChoice } = e.data;
 
+            // Check for cut-off even in non-crop mode
+            const bounds = await detectObjectBounds(frameBuffer, header, bayerChoice);
+            if (bounds.reason === 'cut-off' || bounds.reason === 'touches-edge') {
+                self.postMessage({ skipped: true, reason: 'cut-off', index });
+                return;
+            }
+
             const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, null, index);
             sharpness = result.sharpness;
             pngBlob = result.pngBlob;
-        
+
         } else {
             throw new Error('Unknown analysis type');
         }
@@ -446,13 +453,14 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
             return { canCrop: false, reason: 'no-objects' };
         }
 
-        // Check if objects touch the edges (within 2% margin)
-        const edgeMargin = Math.max(width, height) * 0.02;
-        const touchesEdge = minX < edgeMargin || minY < edgeMargin ||
-                           maxX > width - edgeMargin || maxY > height - edgeMargin;
+        // Check if object is cut off at the edges
+        // Use 1% margin - if the bright object's bounding box touches this close to edge, it's likely cut off
+        const edgeMargin = Math.max(width, height) * 0.01;
+        const isCutOff = minX < edgeMargin || minY < edgeMargin ||
+                         maxX > width - edgeMargin || maxY > height - edgeMargin;
 
-        if (touchesEdge) {
-            return { canCrop: false, reason: 'touches-edge' };
+        if (isCutOff) {
+            return { canCrop: false, reason: 'cut-off' };
         }
 
         // Calculate bounding box with margin

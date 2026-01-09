@@ -377,6 +377,7 @@ export function useSerReader() {
         const workerPromises = [];
         let completedFrames = 0;
         let skippedFrames = 0;
+        let cutOffFrames = 0;
         let totalErrors = 0;
         const maxErrorsBeforeStopDispatching = 20; // Stop sending new frames after this many errors
         let stopDispatching = false;
@@ -419,13 +420,17 @@ export function useSerReader() {
                 .then(result => {
                     // Always process successful results, even after we stopped dispatching new frames
 
-                    // Skip frames that couldn't be cropped (when in crop mode)
+                    // Skip frames that were cut-off or couldn't be cropped
                     if (result.skipped) {
-                        skippedFrames++;
+                        if (result.reason === 'cut-off') {
+                            cutOffFrames++;
+                        } else {
+                            skippedFrames++;
+                        }
                         completedFrames++;
                         if (completedFrames % 50 === 0) {
                             emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
-                            emit('crop-stats-updated', { skipped: skippedFrames, total: completedFrames });
+                            emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: completedFrames });
                         }
                         return;
                     }
@@ -483,9 +488,12 @@ export function useSerReader() {
         // Wait for all worker tasks to complete
         await Promise.all(workerPromises);
 
-        const skippedMsg = skippedFrames > 0 ? ` (${skippedFrames} skipped - couldn't crop)` : '';
+        const skipMsgs = [];
+        if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
+        if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} crop-failed`);
+        const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
         addLog(`Finished analyzing ${frameCount} frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
-        emit('crop-stats-updated', { skipped: skippedFrames, total: frameCount, done: true });
+        emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
 
         // Terminate workers after all tasks are done
         unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
