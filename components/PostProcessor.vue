@@ -2,6 +2,9 @@
 <div>
 	<div class="card">
 		<div class="controls">
+			<div class="processing-indicator" v-if="isProcessing">
+				<div class="spinner"></div>
+			</div>
 			<h4>Color Adjustments</h4>
 			<div>
 				<label>Gain:</label>
@@ -50,14 +53,15 @@
 
 			<div class="sharpening-subsection">
 				<h5>Deconvolution (Richardson-Lucy)</h5>
+				<p class="deconv-hint">Slow operation - applies when you release the slider</p>
 				<div>
 					<label>PSF Radius:</label>
-					<input type="range" min="0" max="10" step="0.1" v-model="deconvRadius" @input="applyProcessing"/>
+					<input type="range" min="0" max="10" step="0.1" v-model="deconvRadius" @change="applyProcessing"/>
 					<span>{{ deconvRadius }}</span>
 				</div>
 				<div>
 					<label>Iterations:</label>
-					<input type="range" min="0" max="50" step="1" v-model="deconvIterations" @input="applyProcessing"/>
+					<input type="range" min="0" max="50" step="1" v-model="deconvIterations" @change="applyProcessing"/>
 					<span>{{ deconvIterations }}</span>
 				</div>
 			</div>
@@ -175,7 +179,7 @@ function initializeWorkers() {
 	console.log('Lazy-loading wavelet workers for post-processing');
 	waveletWorkers = new Array(8);
 	for (let i = 0; i < waveletWorkers.length; i++) {
-		waveletWorkers[i] = new Worker('/wavelet_worker.js', {type: 'module'});
+		waveletWorkers[i] = new Worker('/wavelet_worker.js');
 		waveletWorkers[i].onerror = (e) => { console.error(e); };
 	}
 }
@@ -198,6 +202,7 @@ const bilateralRange = ref(50);
 const postNoiseReduction = ref(0);
 const fastColorMode = ref(true); // Default to fast mode
 const blueDown = ref(0);
+const isProcessing = ref(false);
 
 // Crop state
 const cropMode = ref(false);
@@ -367,6 +372,7 @@ function doColorAdjustments(sourceData) {
 // Debounced processing - waits for user to stop dragging before heavy processing
 const applyProcessingInternal = async() => {
 	console.log('applyProcessing', fastColorMode.value ? '(fast mode)' : '(quality mode)');
+	isProcessing.value = true;
 
 	// Start with original image
 	let workingImage = initCanvasImageData;
@@ -377,10 +383,16 @@ const applyProcessingInternal = async() => {
 		workingImage = doColorAdjustments(workingImage);
 	}
 
-	// STEP 2: Deconvolution (if enabled)
+	// STEP 2: Deconvolution (if enabled) - runs in worker
 	if (deconvRadius.value > 0 && deconvIterations.value > 0) {
 		console.log(`deconvolution (PSF=${deconvRadius.value}, iterations=${deconvIterations.value})`);
-		workingImage = richardsonLucy(workingImage, parseFloat(deconvRadius.value), parseInt(deconvIterations.value));
+		try {
+			workingImage = await deconvolveInWorker(workingImage, parseFloat(deconvRadius.value), parseInt(deconvIterations.value));
+		} catch (e) {
+			console.log('Deconvolution rejected (newer task running)');
+			isProcessing.value = false;
+			return;
+		}
 	}
 
 	// STEP 3: Wavelet sharpening (if enabled)
@@ -394,6 +406,7 @@ const applyProcessingInternal = async() => {
 			);
 		} catch (e) {
 			console.log('Recent sharpening rejected because newer task is doing work');
+			isProcessing.value = false;
 			return;
 		}
 	}
@@ -429,6 +442,8 @@ const applyProcessingInternal = async() => {
 
 	// Reapply chromatic aberration corrections
 	redoChromaticAberration();
+
+	isProcessing.value = false;
 };
 
 // Debounce: wait 50ms after last input before processing (prevents memory buildup)
@@ -440,125 +455,40 @@ function imageDataToMat(imageData) {
 	return mat;
 }
 
-// Richardson-Lucy Deconvolution
-function createGaussianPSF(radius) {
-	const size = Math.max(3, Math.ceil(radius * 6) | 1); // Ensure odd size
-	const psf = new cv.Mat(size, size, cv.CV_32F);
-	const center = Math.floor(size / 2);
-	const sigma = radius;
-	let sum = 0;
-
-	for (let y = 0; y < size; y++) {
-		for (let x = 0; x < size; x++) {
-			const dx = x - center;
-			const dy = y - center;
-			const value = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
-			psf.floatPtr(y, x)[0] = value;
-			sum += value;
-		}
-	}
-
-	// Normalize
-	for (let y = 0; y < size; y++) {
-		for (let x = 0; x < size; x++) {
-			psf.floatPtr(y, x)[0] /= sum;
-		}
-	}
-
-	return psf;
-}
-
-function richardsonLucy(imageData, psfRadius, iterations) {
-	if (psfRadius <= 0 || iterations <= 0) return imageData;
-
+// Deconvolution in worker (uses same wavelet workers, runs in background)
+let deconvTaskId = 0;
+function deconvolveInWorker(imageData, psfRadius, iterations) {
 	const width = imageData.width;
 	const height = imageData.height;
+	deconvTaskId++;
+	const workerId = deconvTaskId % waveletWorkers.length;
+	const currentTask = deconvTaskId;
 
-	// Convert to OpenCV Mat
-	const srcMat = imageDataToMat(imageData);
-	const rgbMat = new cv.Mat();
-	cv.cvtColor(srcMat, rgbMat, cv.COLOR_RGBA2RGB);
+	return new Promise((resolve, reject) => {
+		function handleWorkerMsg(e) {
+			if (e.data.type !== 'deconv') return; // Ignore wavelet responses
 
-	// Convert to float and normalize to 0-1
-	const floatMat = new cv.Mat();
-	rgbMat.convertTo(floatMat, cv.CV_32FC3, 1/255.0);
+			waveletWorkers[workerId].removeEventListener('message', handleWorkerMsg);
 
-	// Create PSF
-	const psf = createGaussianPSF(psfRadius);
-
-	// Create flipped PSF for correlation
-	const psfFlipped = new cv.Mat();
-	cv.flip(psf, psfFlipped, -1);
-
-	// Split into channels
-	const channels = new cv.MatVector();
-	cv.split(floatMat, channels);
-
-	// Process each channel
-	for (let c = 0; c < 3; c++) {
-		let estimate = channels.get(c).clone();
-
-		for (let i = 0; i < iterations; i++) {
-			// Convolve estimate with PSF
-			const blurred = new cv.Mat();
-			cv.filter2D(estimate, blurred, cv.CV_32F, psf);
-
-			// Add small epsilon to avoid division by zero
-			const epsilon = new cv.Mat(height, width, cv.CV_32F, new cv.Scalar(1e-10));
-			cv.add(blurred, epsilon, blurred);
-
-			// Divide observed by blurred
-			const ratio = new cv.Mat();
-			cv.divide(channels.get(c), blurred, ratio);
-
-			// Convolve ratio with flipped PSF
-			const correction = new cv.Mat();
-			cv.filter2D(ratio, correction, cv.CV_32F, psfFlipped);
-
-			// Multiply estimate by correction
-			cv.multiply(estimate, correction, estimate);
-
-			// Cleanup iteration mats
-			blurred.delete();
-			epsilon.delete();
-			ratio.delete();
-			correction.delete();
+			if (e.data.taskId === currentTask) {
+				if (e.data.error) {
+					console.error('Deconvolution worker error:', e.data.error);
+				}
+				resolve(e.data.imageData);
+			} else {
+				reject(new Error('Outdated deconv task'));
+			}
 		}
 
-		// Copy result back
-		estimate.copyTo(channels.get(c));
-		estimate.delete();
-	}
+		waveletWorkers[workerId].addEventListener('message', handleWorkerMsg);
 
-	// Merge channels
-	const resultFloat = new cv.Mat();
-	cv.merge(channels, resultFloat);
-
-	// Convert back to 8-bit
-	const resultMat = new cv.Mat();
-	resultFloat.convertTo(resultMat, cv.CV_8UC3, 255.0);
-
-	// Convert to RGBA
-	const resultRgba = new cv.Mat();
-	cv.cvtColor(resultMat, resultRgba, cv.COLOR_RGB2RGBA);
-
-	// Create output ImageData
-	const outputData = new Uint8ClampedArray(resultRgba.data);
-	const output = new ImageData(outputData, width, height);
-
-	// Cleanup
-	srcMat.delete();
-	rgbMat.delete();
-	floatMat.delete();
-	psf.delete();
-	psfFlipped.delete();
-	for (let i = 0; i < 3; i++) channels.get(i).delete();
-	channels.delete();
-	resultFloat.delete();
-	resultMat.delete();
-	resultRgba.delete();
-
-	return output;
+		// Create a copy for transfer
+		const dataCopy = new Uint8ClampedArray(imageData.data);
+		waveletWorkers[workerId].postMessage(
+			{ type: 'deconv', imageData: dataCopy, width, height, psfRadius, iterations, taskId: currentTask },
+			[dataCopy.buffer]
+		);
+	});
 }
 
 function logCopy(name, array){
@@ -601,6 +531,9 @@ function waveletSharpenInWorker(imageData, amount, radius){
 	return new Promise((resolve, reject) => {
 
 		function handleWorkerMsg(e){
+			// Ignore deconv responses - only process wavelet responses
+			if (e.data.type === 'deconv') return;
+
 			// Get the processed image data from the worker
 			const { imageData, taskId } = e.data;
 
@@ -972,6 +905,31 @@ canvas {
 	margin: 0 0 10px 0;
 	font-size: 13px;
 	color: #555;
+}
+.deconv-hint {
+	font-size: 11px;
+	color: #888;
+	margin: 0 0 8px 0;
+	font-style: italic;
+}
+.processing-indicator {
+	position: absolute;
+	top: 10px;
+	right: 10px;
+}
+.spinner {
+	width: 14px;
+	height: 14px;
+	border: 2px solid #1976d2;
+	border-top-color: transparent;
+	border-radius: 50%;
+	animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+	to { transform: rotate(360deg); }
+}
+.controls {
+	position: relative;
 }
 </style>
 
