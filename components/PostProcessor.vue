@@ -2,7 +2,7 @@
 <div>
 	<div class="card">
 		<div class="controls">
-			<h4>Wavelets sharpen</h4>
+			<h4>Color Adjustments</h4>
 			<div>
 				<label>Gain:</label>
 				<input type="range" min="0.5" max="2" step="0.01" v-model="gain" @input="applyProcessing"/>
@@ -23,36 +23,6 @@
 				<input type="range" min="0" max="2" step="0.01" v-model="saturation" @input="applyProcessing"/>
 				<span>{{ saturation }}</span>
 			</div>
-			<div style="display:none;">
-				<label>Pre Noise Reduction:</label>
-				<input type="range" min="-1" max="50" step="2" v-model="preNoiseReduction" @input="applyProcessing"/>
-				<span>{{ preNoiseReduction }}</span>
-			</div>
-			<div>
-				<label>Wavelets Radius:</label>
-				<input type="range" min="0" max="5" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
-				<span>{{ waveletsRadius }}</span>
-			</div>
-			<div>
-				<label>Wavelets Amount:</label>
-				<input type="range" min="0" max="100" step="0.01" v-model="waveletsAmount" @input="applyProcessing"/>
-				<span>{{ waveletsAmount }}</span>
-			</div>
-			<!--<div>
-				<label>Bilateral Fraction:</label>
-				<input type="range" min="0" max="1" step="0.01" v-model="bilateralFraction" @input="applyProcessing"/>
-				<span>{{ bilateralFraction }}</span>
-			</div>
-			<div>
-				<label>Bilateral Range:</label>
-				<input type="range" min="0" max="255" step="0.1" v-model="bilateralRange" @input="applyProcessing"/>
-				<span>{{ bilateralRange }}</span>
-			</div>-->
-			<div>
-				<label>Post Noise Reduction:</label>
-				<input type="range" min="-1" max="50" step="2" v-model="postNoiseReduction" @input="applyProcessing"/>
-				<span>{{ postNoiseReduction }}</span>
-			</div>
 
 			<div class="mode-toggle">
 				<label>
@@ -60,6 +30,45 @@
 					Fast color mode
 				</label>
 				<span class="mode-hint">{{ fastColorMode ? '(colors applied after sharpening - faster)' : '(colors applied before sharpening - higher quality)' }}</span>
+			</div>
+
+			<h4>Sharpening</h4>
+
+			<div class="sharpening-subsection">
+				<h5>Wavelets</h5>
+				<div>
+					<label>Radius:</label>
+					<input type="range" min="0" max="5" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
+					<span>{{ waveletsRadius }}</span>
+				</div>
+				<div>
+					<label>Amount:</label>
+					<input type="range" min="0" max="100" step="0.1" v-model="waveletsAmount" @input="applyProcessing"/>
+					<span>{{ waveletsAmount }}</span>
+				</div>
+			</div>
+
+			<div class="sharpening-subsection">
+				<h5>Deconvolution (Richardson-Lucy)</h5>
+				<div>
+					<label>PSF Radius:</label>
+					<input type="range" min="0" max="10" step="0.1" v-model="deconvRadius" @input="applyProcessing"/>
+					<span>{{ deconvRadius }}</span>
+				</div>
+				<div>
+					<label>Iterations:</label>
+					<input type="range" min="0" max="50" step="1" v-model="deconvIterations" @input="applyProcessing"/>
+					<span>{{ deconvIterations }}</span>
+				</div>
+			</div>
+
+			<div class="sharpening-subsection">
+				<h5>Noise Reduction</h5>
+				<div>
+					<label>Amount:</label>
+					<input type="range" min="0" max="50" step="1" v-model="postNoiseReduction" @input="applyProcessing"/>
+					<span>{{ postNoiseReduction > 0 ? postNoiseReduction : 'Off' }}</span>
+				</div>
 			</div>
 
 			<div class="color-alignment">
@@ -180,8 +189,10 @@ const contrast = ref(1);
 const gamma = ref(1);
 const saturation = ref(1);
 const preNoiseReduction = ref(0);
-const waveletsRadius = ref(0.42);
-const waveletsAmount = ref(4.2);
+const waveletsRadius = ref(0);
+const waveletsAmount = ref(0);
+const deconvRadius = ref(0);
+const deconvIterations = ref(0);
 const bilateralFraction = ref(0.5);
 const bilateralRange = ref(50);
 const postNoiseReduction = ref(0);
@@ -329,10 +340,6 @@ function applyColorAdjustments(sourceData, width, height, gainVal, contrastVal, 
 	return new ImageData(newData, width, height);
 }
 
-// Cache for fast color mode - stores the sharpened-only result
-let cachedSharpenedOriginal = null;
-let cachedWaveletParams = { amount: null, radius: null };
-
 // Apply color adjustments using WebGL or CPU
 function doColorAdjustments(sourceData) {
 	if (useWebGL) {
@@ -361,89 +368,66 @@ function doColorAdjustments(sourceData) {
 const applyProcessingInternal = async() => {
 	console.log('applyProcessing', fastColorMode.value ? '(fast mode)' : '(quality mode)');
 
-	let colorChanged = valueIsChanged('gain', gain.value) ||
-		valueIsChanged('contrast', contrast.value) ||
-		valueIsChanged('gamma', gamma.value) ||
-		valueIsChanged('saturation', saturation.value);
+	// Start with original image
+	let workingImage = initCanvasImageData;
 
-	let waveletsChanged = valueIsChanged('waveletsAmount', waveletsAmount.value) ||
-		valueIsChanged('waveletsRadius', waveletsRadius.value);
+	// STEP 1: Apply colors (in quality mode, colors come first)
+	if (!fastColorMode.value) {
+		console.log('color adjustments (quality)', useWebGL ? '(WebGL)' : '(CPU)');
+		workingImage = doColorAdjustments(workingImage);
+	}
 
-	let modeChanged = valueIsChanged('fastColorMode', fastColorMode.value);
+	// STEP 2: Deconvolution (if enabled)
+	if (deconvRadius.value > 0 && deconvIterations.value > 0) {
+		console.log(`deconvolution (PSF=${deconvRadius.value}, iterations=${deconvIterations.value})`);
+		workingImage = richardsonLucy(workingImage, parseFloat(deconvRadius.value), parseInt(deconvIterations.value));
+	}
 
+	// STEP 3: Wavelet sharpening (if enabled)
+	if (waveletsAmount.value > 0) {
+		console.log('wavelets');
+		try {
+			workingImage = await waveletSharpenInWorker(
+				workingImage,
+				parseFloat(waveletsAmount.value),
+				parseFloat(waveletsRadius.value)
+			);
+		} catch (e) {
+			console.log('Recent sharpening rejected because newer task is doing work');
+			return;
+		}
+	}
+
+	// STEP 4: Apply colors (in fast mode, colors come after sharpening)
 	if (fastColorMode.value) {
-		// FAST MODE: Sharpen original, then apply colors
-		// Only re-sharpen if wavelet params change or mode just switched
-		let needsSharpening = waveletsChanged || modeChanged ||
-			cachedSharpenedOriginal === null ||
-			cachedWaveletParams.amount !== waveletsAmount.value ||
-			cachedWaveletParams.radius !== waveletsRadius.value;
-
-		if (needsSharpening) {
-			console.log('wavelets (on original)');
-			try {
-				cachedSharpenedOriginal = await waveletSharpenInWorker(
-					initCanvasImageData,
-					parseFloat(waveletsAmount.value),
-					parseFloat(waveletsRadius.value)
-				);
-				cachedWaveletParams = { amount: waveletsAmount.value, radius: waveletsRadius.value };
-			} catch (e) {
-				console.log('Recent sharpening rejected because newer task is doing work');
-				return;
-			}
-		}
-
-		// Always apply colors to the cached sharpened result
-		if (cachedSharpenedOriginal) {
-			console.log('color adjustments (fast)', useWebGL ? '(WebGL)' : '(CPU)');
-			sharpenedImageData = doColorAdjustments(cachedSharpenedOriginal);
-			ctx.putImageData(sharpenedImageData, 0, 0);
-		}
-
-	} else {
-		// QUALITY MODE: Apply colors first, then sharpen
-		if (colorChanged || modeChanged) {
-			console.log('color adjustments (quality)', useWebGL ? '(WebGL)' : '(CPU)');
-			gainedImageData = doColorAdjustments(initCanvasImageData);
-			preNoiseReducedImageData = gainedImageData;
-		}
-
-		let doSharpening = colorChanged || waveletsChanged || modeChanged;
-		if (doSharpening) {
-			console.log('wavelets (on adjusted)');
-			try {
-				sharpenedImageData = await waveletSharpenInWorker(
-					preNoiseReducedImageData,
-					parseFloat(waveletsAmount.value),
-					parseFloat(waveletsRadius.value)
-				);
-			} catch (e) {
-				console.log('Recent sharpening rejected because newer task is doing work');
-				return;
-			}
-			ctx.putImageData(sharpenedImageData, 0, 0);
-		}
-	}
-		
-	if( postNoiseReduction.value == -1 ){
-		postNoiseReduction.value = 0;
+		console.log('color adjustments (fast)', useWebGL ? '(WebGL)' : '(CPU)');
+		workingImage = doColorAdjustments(workingImage);
 	}
 
-	// Handle post noise reduction
-	let doSharpening = colorChanged || waveletsChanged || modeChanged;
-	if( (doSharpening && postNoiseReduction.value >= 3) || valueIsChanged('postNoiseReduction', postNoiseReduction.value) && postNoiseReduction.value >= 3 ){
-		console.log('postNoise');
-		const srcMat = imageDataToMat(sharpenedImageData);
+	// STEP 5: Noise reduction (if enabled)
+	if (postNoiseReduction.value >= 3) {
+		console.log('noise reduction');
+		const srcMat = imageDataToMat(workingImage);
 		const dstMat = new cv.Mat();
 		cv.cvtColor(srcMat, srcMat, cv.COLOR_RGBA2RGB, 0);
-		cv.GaussianBlur(srcMat, dstMat, new cv.Size(parseInt(postNoiseReduction.value, 10), parseInt(postNoiseReduction.value, 10)), 0, 0, cv.BORDER_DEFAULT);
-		cv.imshow('postProcessCanvas', dstMat);
-		// Free OpenCV memory to prevent leaks
+		const ksize = parseInt(postNoiseReduction.value, 10) | 1; // Ensure odd
+		cv.GaussianBlur(srcMat, dstMat, new cv.Size(ksize, ksize), 0, 0, cv.BORDER_DEFAULT);
+
+		// Convert back to ImageData
+		const rgbaMat = new cv.Mat();
+		cv.cvtColor(dstMat, rgbaMat, cv.COLOR_RGB2RGBA);
+		workingImage = new ImageData(new Uint8ClampedArray(rgbaMat.data), workingImage.width, workingImage.height);
+
 		srcMat.delete();
 		dstMat.delete();
+		rgbaMat.delete();
 	}
 
+	// Store and display result
+	sharpenedImageData = workingImage;
+	ctx.putImageData(sharpenedImageData, 0, 0);
+
+	// Reapply chromatic aberration corrections
 	redoChromaticAberration();
 };
 
@@ -454,6 +438,127 @@ function imageDataToMat(imageData) {
 	let mat = new cv.Mat(imageData.height, imageData.width, cv.CV_8UC4);
 	mat.data.set(imageData.data);
 	return mat;
+}
+
+// Richardson-Lucy Deconvolution
+function createGaussianPSF(radius) {
+	const size = Math.max(3, Math.ceil(radius * 6) | 1); // Ensure odd size
+	const psf = new cv.Mat(size, size, cv.CV_32F);
+	const center = Math.floor(size / 2);
+	const sigma = radius;
+	let sum = 0;
+
+	for (let y = 0; y < size; y++) {
+		for (let x = 0; x < size; x++) {
+			const dx = x - center;
+			const dy = y - center;
+			const value = Math.exp(-(dx * dx + dy * dy) / (2 * sigma * sigma));
+			psf.floatPtr(y, x)[0] = value;
+			sum += value;
+		}
+	}
+
+	// Normalize
+	for (let y = 0; y < size; y++) {
+		for (let x = 0; x < size; x++) {
+			psf.floatPtr(y, x)[0] /= sum;
+		}
+	}
+
+	return psf;
+}
+
+function richardsonLucy(imageData, psfRadius, iterations) {
+	if (psfRadius <= 0 || iterations <= 0) return imageData;
+
+	const width = imageData.width;
+	const height = imageData.height;
+
+	// Convert to OpenCV Mat
+	const srcMat = imageDataToMat(imageData);
+	const rgbMat = new cv.Mat();
+	cv.cvtColor(srcMat, rgbMat, cv.COLOR_RGBA2RGB);
+
+	// Convert to float and normalize to 0-1
+	const floatMat = new cv.Mat();
+	rgbMat.convertTo(floatMat, cv.CV_32FC3, 1/255.0);
+
+	// Create PSF
+	const psf = createGaussianPSF(psfRadius);
+
+	// Create flipped PSF for correlation
+	const psfFlipped = new cv.Mat();
+	cv.flip(psf, psfFlipped, -1);
+
+	// Split into channels
+	const channels = new cv.MatVector();
+	cv.split(floatMat, channels);
+
+	// Process each channel
+	for (let c = 0; c < 3; c++) {
+		let estimate = channels.get(c).clone();
+
+		for (let i = 0; i < iterations; i++) {
+			// Convolve estimate with PSF
+			const blurred = new cv.Mat();
+			cv.filter2D(estimate, blurred, cv.CV_32F, psf);
+
+			// Add small epsilon to avoid division by zero
+			const epsilon = new cv.Mat(height, width, cv.CV_32F, new cv.Scalar(1e-10));
+			cv.add(blurred, epsilon, blurred);
+
+			// Divide observed by blurred
+			const ratio = new cv.Mat();
+			cv.divide(channels.get(c), blurred, ratio);
+
+			// Convolve ratio with flipped PSF
+			const correction = new cv.Mat();
+			cv.filter2D(ratio, correction, cv.CV_32F, psfFlipped);
+
+			// Multiply estimate by correction
+			cv.multiply(estimate, correction, estimate);
+
+			// Cleanup iteration mats
+			blurred.delete();
+			epsilon.delete();
+			ratio.delete();
+			correction.delete();
+		}
+
+		// Copy result back
+		estimate.copyTo(channels.get(c));
+		estimate.delete();
+	}
+
+	// Merge channels
+	const resultFloat = new cv.Mat();
+	cv.merge(channels, resultFloat);
+
+	// Convert back to 8-bit
+	const resultMat = new cv.Mat();
+	resultFloat.convertTo(resultMat, cv.CV_8UC3, 255.0);
+
+	// Convert to RGBA
+	const resultRgba = new cv.Mat();
+	cv.cvtColor(resultMat, resultRgba, cv.COLOR_RGB2RGBA);
+
+	// Create output ImageData
+	const outputData = new Uint8ClampedArray(resultRgba.data);
+	const output = new ImageData(outputData, width, height);
+
+	// Cleanup
+	srcMat.delete();
+	rgbMat.delete();
+	floatMat.delete();
+	psf.delete();
+	psfFlipped.delete();
+	for (let i = 0; i < 3; i++) channels.get(i).delete();
+	channels.delete();
+	resultFloat.delete();
+	resultMat.delete();
+	resultRgba.delete();
+
+	return output;
 }
 
 function logCopy(name, array){
@@ -675,8 +780,7 @@ function applyCrop() {
 	sharpenedImageData = new ImageData(sel.width, sel.height);
 
 	// Clear caches
-	cachedSharpenedOriginal = null;
-	prevValues = {};
+		prevValues = {};
 	fixedAberration = reactive({});
 
 	// Reinitialize WebGL for new dimensions
@@ -712,8 +816,7 @@ function undoCrop() {
 	sharpenedImageData = new ImageData(preCropImageData.width, preCropImageData.height);
 
 	// Clear only the sharpening cache (not settings)
-	cachedSharpenedOriginal = null;
-
+	
 	// Force reprocess by clearing only dimension-related cached values
 	delete prevValues.gain;
 	delete prevValues.contrast;
@@ -857,6 +960,18 @@ canvas {
 .crop-hint {
 	font-size: 12px;
 	color: #666;
+}
+.sharpening-subsection {
+	margin: 10px 0;
+	padding: 10px;
+	background-color: #f8f8f8;
+	border-radius: 5px;
+	border-left: 3px solid #ddd;
+}
+.sharpening-subsection h5 {
+	margin: 0 0 10px 0;
+	font-size: 13px;
+	color: #555;
 }
 </style>
 
