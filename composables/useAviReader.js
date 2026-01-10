@@ -2,6 +2,7 @@
 
 import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
+import { useStacker } from '@/composables/useStacker';
 
 /**
  * Determines if an AVI FourCC represents an "easy" (uncompressed/raw) format.
@@ -86,10 +87,12 @@ async function renderAviFrameToBlob(canvas, frameDataBuffer, aviHeader, fourCC, 
 export function useAviReader() {
     const { addLog, emit } = useEventBus();
     const { uploadFrames } = useUploader();
+    const { stackFramesLocally } = useStacker();
 
     const previewCanvas = document.createElement('canvas');
 
-    const numWorkers = navigator.hardwareConcurrency || 4;
+    // Limit workers to prevent OpenCV WASM memory exhaustion
+    const numWorkers = Math.min(navigator.hardwareConcurrency || 4, 4);
     const unifiedAnalyzeWorkers = [];
     let workersReady = false;
 
@@ -99,17 +102,22 @@ export function useAviReader() {
         addLog("Initializing analysis workers...");
 
         for (let i = 0; i < numWorkers; i++) {
-            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js?v=20260110'));
+            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
         }
 
         const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
             return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 10000);
+                // 30 second timeout - OpenCV WASM can take a while to initialize
+                const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 30000);
                 worker.onmessage = (e) => {
                     if (e.data.type === 'ready') {
                         clearTimeout(timeout);
-                        worker.onmessage = null; // Clear init listener
+                        worker.onmessage = null;
                         resolve();
+                    } else if (e.data.type === 'error') {
+                        clearTimeout(timeout);
+                        worker.onmessage = null;
+                        reject(new Error(e.data.message || 'Worker initialization error'));
                     }
                 };
                 worker.onerror = (e) => {
@@ -154,7 +162,14 @@ export function useAviReader() {
                     resolve({ skipped: true, reason: e.data.reason, index: e.data.index });
                 } else {
                     // Worker now returns sharpness and the processed pngBlob
-                    resolve({ sharpness: e.data.sharpness, pngBlob: e.data.pngBlob, index: e.data.index });
+                    resolve({
+                        sharpness: e.data.sharpness,
+                        pngBlob: e.data.pngBlob,
+                        rgbaBuffer: e.data.rgbaBuffer,
+                        width: e.data.width,
+                        height: e.data.height,
+                        index: e.data.index
+                    });
                 }
             };
             const errorHandler = (e) => {
@@ -184,6 +199,22 @@ export function useAviReader() {
 
         addLog(`Sampling ${sampleIndices.length} frames for crop detection...`);
 
+        // Concurrency control for bounds detection
+        const MAX_IN_FLIGHT = numWorkers * 2;
+        let inFlight = 0;
+        const waitQueue = [];
+
+        function releaseSlot() {
+            inFlight--;
+            if (waitQueue.length > 0) waitQueue.shift()();
+        }
+
+        async function acquireSlot() {
+            if (inFlight < MAX_IN_FLIGHT) { inFlight++; return; }
+            await new Promise(resolve => waitQueue.push(resolve));
+            inFlight++;
+        }
+
         let maxSize = 0;
         let canCropCount = 0;
         const boundsPromises = [];
@@ -195,7 +226,6 @@ export function useAviReader() {
             bpp: aviHeader.bpp
         };
 
-        // Calculate frame positions
         const frameChunkHeaderSize = 8;
         const frameDataLength = aviHeader.frameDataSize;
 
@@ -206,20 +236,33 @@ export function useAviReader() {
 
             if (frameDataStart + frameDataLength > file.size) break;
 
-            const frameBuffer = await file.slice(frameDataStart, frameDataStart + frameDataLength).arrayBuffer();
+            await acquireSlot();
 
+            let frameBuffer;
+            try {
+                frameBuffer = await file.slice(frameDataStart, frameDataStart + frameDataLength).arrayBuffer();
+            } catch (readError) {
+                releaseSlot();
+                console.error(`Crop detection: File read error at sample ${idx} (frame ${i}):`, readError);
+                continue; // Skip this sample
+            }
             const workerIndex = idx % numWorkers;
             const worker = unifiedAnalyzeWorkers[workerIndex];
+            if (!worker) {
+                releaseSlot();
+                console.error(`No worker available at index ${workerIndex}`);
+                continue;
+            }
 
             const dataToWorker = {
                 type: 'detect-bounds',
-                frameBuffer: frameBuffer.slice(0),
+                frameBuffer: frameBuffer,
                 header: headerForWorker,
                 bayerChoice: aviHeader.bayerChoice,
                 index: idx
             };
 
-            const promise = processFrameWithWorker(worker, dataToWorker, [dataToWorker.frameBuffer])
+            const promise = processFrameWithWorker(worker, dataToWorker, [frameBuffer])
                 .then(result => {
                     if (result.bounds && result.bounds.canCrop) {
                         canCropCount++;
@@ -229,7 +272,8 @@ export function useAviReader() {
                 })
                 .catch(error => {
                     console.error(`Error detecting bounds for sample ${idx}:`, error);
-                });
+                })
+                .finally(() => releaseSlot());
 
             boundsPromises.push(promise);
         }
@@ -398,7 +442,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, preloadedBuffer = null) {
+    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, preloadedBuffer = null) {
         emit('start-loading', 'Parsing AVI header...');
         emit('update-loading', 0);
 
@@ -488,6 +532,27 @@ export function useAviReader() {
             }
         }
 
+        // Concurrency control: limit frames in flight to prevent memory exhaustion
+        const MAX_IN_FLIGHT = numWorkers * 3;
+        let inFlight = 0;
+        const waitQueue = [];
+
+        function releaseSlot() {
+            inFlight--;
+            if (waitQueue.length > 0) {
+                waitQueue.shift()();
+            }
+        }
+
+        async function acquireSlot() {
+            if (inFlight < MAX_IN_FLIGHT) {
+                inFlight++;
+                return;
+            }
+            await new Promise(resolve => waitQueue.push(resolve));
+            inFlight++;
+        }
+
         const workerPromises = [];
         let completedFrames = 0;
         let skippedFrames = 0;
@@ -495,58 +560,66 @@ export function useAviReader() {
         let errorCount = 0;
         const maxConsecutiveErrors = 10;
 
+        const headerForWorker = {
+            width: aviHeader.width,
+            height: aviHeader.height,
+            fourCC: aviHeader.fourCC,
+            bpp: aviHeader.bpp
+        };
+
         // Loop through frames from moviListOffset
         let currentMoviOffset = aviHeader.moviListOffset;
+        const frameChunkHeaderSize = 8;
+        const frameDataLength = aviHeader.frameDataSize;
+
         for (let i = 0; i < frameCount; i++) {
-            // Stop if too many errors
             if (errorCount >= maxConsecutiveErrors) {
                 addLog(`Stopping due to ${errorCount} consecutive errors. Check console for details.`);
                 break;
             }
 
-            // In AVI, frames are often preceded by a 4-byte chunk type and 4-byte size.
-            // For uncompressed, the chunk type is usually '00dc' or '01wb'.
-            // For now, assume fixed frameDataSize, and skip chunk headers if present.
-            // A robust parser would read the chunk header for each frame.
-            const frameChunkHeaderSize = 8; // Assuming 4-byte type + 4-byte size for '00dc' or '01wb'
-            const frameOffset = currentMoviOffset; // This is the start of the 'xxdb' or 'xxwb' chunk
-            const frameDataStart = frameOffset + frameChunkHeaderSize; // Actual frame data starts after its chunk header
-            const frameDataLength = aviHeader.frameDataSize; // Assuming fixed size from header
+            const frameOffset = currentMoviOffset;
+            const frameDataStart = frameOffset + frameChunkHeaderSize;
 
             if (frameDataStart + frameDataLength > file.size) {
-                 addLog(`Stopping at frame ${i} due to reaching end of file.`);
-                 break;
+                addLog(`Stopping at frame ${i} due to reaching end of file.`);
+                break;
             }
 
-            // Read the data part of the frame chunk
-            const frameBuffer = await file.slice(frameDataStart, frameDataStart + frameDataLength).arrayBuffer();
+            // Wait for a slot before reading the frame (limits memory usage)
+            await acquireSlot();
 
+            let frameBuffer;
+            try {
+                frameBuffer = await file.slice(frameDataStart, frameDataStart + frameDataLength).arrayBuffer();
+            } catch (readError) {
+                releaseSlot();
+                addLog(`File read error at frame ${i}: ${readError.message}`);
+                throw readError; // Re-throw to stop processing
+            }
             const workerIndex = i % numWorkers;
             const worker = unifiedAnalyzeWorkers[workerIndex];
+            if (!worker) {
+                releaseSlot();
+                addLog(`No worker available at index ${workerIndex}`);
+                break;
+            }
 
-            const headerForWorker = {
-                width: aviHeader.width,
-                height: aviHeader.height,
-                fourCC: aviHeader.fourCC,
-                bpp: aviHeader.bpp
-            };
-
-            // Use analyze-cropped type if we have a crop region, otherwise regular avi type
             const dataToWorker = {
                 type: cropRegion ? 'analyze-cropped' : 'avi',
-                frameBuffer: frameBuffer.slice(0), // Copy for transfer
-                aviHeader: { ...aviHeader }, // Pass necessary header info (copy to be transferable)
-                header: headerForWorker, // For analyze-cropped compatibility
-                bayerChoice: aviHeader.bayerChoice, // For Y800 demosaicing
+                frameBuffer: frameBuffer,
+                aviHeader: { ...aviHeader },
+                header: headerForWorker,
+                bayerChoice: aviHeader.bayerChoice,
                 cropRegion: cropRegion,
+                clientSideStacking: clientSideStacking,
                 index: i
             };
 
-            const promise = processFrameWithWorker(worker, dataToWorker, [dataToWorker.frameBuffer])
+            const promise = processFrameWithWorker(worker, dataToWorker, [frameBuffer])
                 .then(async (result) => {
-                    errorCount = 0; // Reset on success
+                    errorCount = 0;
 
-                    // Skip frames that were cut-off or couldn't be cropped
                     if (result.skipped) {
                         if (result.reason === 'cut-off') {
                             cutOffFrames++;
@@ -561,8 +634,13 @@ export function useAviReader() {
                         return;
                     }
 
-                    // Worker returns pngBlob directly
-                    const currentFrame = { sharpness: result.sharpness, blob: result.pngBlob };
+                    const currentFrame = {
+                        sharpness: result.sharpness,
+                        blob: result.pngBlob,
+                        rgbaBuffer: result.rgbaBuffer,
+                        width: result.width,
+                        height: result.height
+                    };
                     rankFrame(currentFrame);
 
                     completedFrames++;
@@ -571,7 +649,6 @@ export function useAviReader() {
                         emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
                         addLog(`Analyzed frame ${completedFrames}/${frameCount}`);
 
-                        // Filter out any frames without valid blobs
                         const top4FrameBlobs = top4Frames.filter(f => f && f.blob).map(f => f.blob);
                         const worstFrameBlob = worstFrame?.blob || null;
 
@@ -580,13 +657,17 @@ export function useAviReader() {
                 })
                 .catch(error => {
                     errorCount++;
+                    completedFrames++;
                     addLog(`Error processing AVI frame ${i}: ${error}`);
                     console.error(`Error processing AVI frame ${i}:`, error);
+                })
+                .finally(() => {
+                    releaseSlot();
                 });
             workerPromises.push(promise);
 
-            currentMoviOffset += frameChunkHeaderSize + frameDataLength; // Move to next chunk
-            if (frameDataLength % 2 !== 0) currentMoviOffset++; // Pad if odd size
+            currentMoviOffset += frameChunkHeaderSize + frameDataLength;
+            if (frameDataLength % 2 !== 0) currentMoviOffset++;
         }
 
         await Promise.all(workerPromises);
@@ -598,16 +679,34 @@ export function useAviReader() {
         addLog(`Finished analyzing ${frameCount} AVI frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
         emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
 
+        if (clientSideStacking) {
+            // Client-side stacking: use one of the existing workers (before terminating them)
+            emit('set-caption', 'Stacking frames locally...');
+            addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
+
+            const stackingWorker = unifiedAnalyzeWorkers[0];
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker);
+
+            if (stackedBlob) {
+                addLog('Client-side stacking complete');
+                emit('stacked-image-ready', { blob: stackedBlob });
+            } else {
+                addLog('Client-side stacking failed - no valid frames');
+                emit('stop-loading');
+            }
+        } else {
+            emit('set-caption', 'Uploading best frames for stacking...');
+
+            const pngBlobsForUpload = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
+            await uploadFrames(pngBlobsForUpload);
+        }
+
+        // Terminate workers after all tasks are done (including stacking)
         unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
-
-        emit('set-caption', 'Uploading best frames for stacking...');
-
-        const pngBlobsForUpload = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
-        await uploadFrames(pngBlobsForUpload);
     }
 
     // Process FFmpeg-extracted PNG frames through the same pipeline as AVI
-    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false) {
+    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -741,6 +840,7 @@ export function useAviReader() {
                     header: header,
                     bayerChoice: 'MONO',
                     cropRegion: cropRegion,
+                    clientSideStacking: clientSideStacking,
                     index: i
                 };
 
@@ -758,7 +858,13 @@ export function useAviReader() {
                             return;
                         }
 
-                        const currentFrame = { sharpness: result.sharpness, blob: result.pngBlob };
+                        const currentFrame = {
+                            sharpness: result.sharpness,
+                            blob: result.pngBlob,
+                            rgbaBuffer: result.rgbaBuffer,
+                            width: result.width,
+                            height: result.height
+                        };
                         rankFrame(currentFrame, result.index);
 
                         completedFrames++;
@@ -793,13 +899,30 @@ export function useAviReader() {
         addLog(`Finished analyzing ${frameCount} frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
         emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
 
+        if (clientSideStacking) {
+            // Client-side stacking: use one of the existing workers (before terminating them)
+            emit('set-caption', 'Stacking frames locally...');
+            addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
+            const stackingWorker = unifiedAnalyzeWorkers[0];
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker);
+
+            if (stackedBlob) {
+                addLog('Client-side stacking complete');
+                emit('stacked-image-ready', { blob: stackedBlob });
+            } else {
+                addLog('Client-side stacking failed - no valid frames');
+                emit('stop-loading');
+            }
+        } else {
+            emit('set-caption', 'Uploading best frames for stacking...');
+
+            const pngBlobsForUpload = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
+            await uploadFrames(pngBlobsForUpload);
+        }
+
+        // Terminate workers after all tasks are done (including stacking)
         unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
-
-        emit('set-caption', 'Uploading best frames for stacking...');
-
-        const pngBlobsForUpload = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
-        await uploadFrames(pngBlobsForUpload);
     }
 
     // Detect crop region from PNG frames

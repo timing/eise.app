@@ -1,6 +1,7 @@
 
 import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
+import { useStacker } from '@/composables/useStacker';
 
 // These functions remain on the main thread as they are not performance bottlenecks
 function parseSerHeader(buffer) {
@@ -90,6 +91,7 @@ async function renderFrameToBlob(canvas, buffer, header, bayerChoice) {
 export function useSerReader() {
     const { addLog, emit } = useEventBus();
     const { uploadFrames } = useUploader();
+    const { stackFramesLocally } = useStacker();
 
     // Create a pool of workers
     // Limit workers to prevent OpenCV WASM memory exhaustion on large frames
@@ -103,17 +105,22 @@ export function useSerReader() {
         addLog("Initializing analysis workers...");
 
         for (let i = 0; i < numWorkers; i++) {
-            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js?v=20260110'));
+            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
         }
 
         const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
             return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 10000);
+                // 30 second timeout - OpenCV WASM can take a while to initialize
+                const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 30000);
                 worker.onmessage = (e) => {
                     if (e.data.type === 'ready') {
                         clearTimeout(timeout);
-                        worker.onmessage = null; // Clear init listener
+                        worker.onmessage = null;
                         resolve();
+                    } else if (e.data.type === 'error') {
+                        clearTimeout(timeout);
+                        worker.onmessage = null;
+                        reject(new Error(e.data.message || 'Worker initialization error'));
                     }
                 };
                 worker.onerror = (e) => {
@@ -126,6 +133,7 @@ export function useSerReader() {
 
         try {
             await Promise.all(workerPromises);
+            setupWorkerHandlers(); // Set up single message handler per worker
             workersReady = true;
             addLog("Analysis workers ready.");
         } catch (error) {
@@ -136,40 +144,55 @@ export function useSerReader() {
         }
     }
 
+    // Map of pending frame resolvers per worker: workerIndex -> { frameIndex -> {resolve, reject, timeout} }
+    const pendingFrames = new Map();
+
+    // Set up single message handler per worker (call after workers are created)
+    function setupWorkerHandlers() {
+        unifiedAnalyzeWorkers.forEach((worker, workerIndex) => {
+            pendingFrames.set(workerIndex, new Map());
+
+            worker.addEventListener('message', (e) => {
+                const frameIndex = e.data.index;
+                const pending = pendingFrames.get(workerIndex)?.get(frameIndex);
+                if (!pending) return; // Not a frame message or already handled
+
+                clearTimeout(pending.timeout);
+                pendingFrames.get(workerIndex).delete(frameIndex);
+
+                if (e.data.error) {
+                    pending.reject(e.data.error);
+                } else if (e.data.type === 'bounds') {
+                    pending.resolve({ type: 'bounds', bounds: e.data.bounds, index: e.data.index });
+                } else if (e.data.skipped) {
+                    pending.resolve({ skipped: true, reason: e.data.reason, index: e.data.index });
+                } else {
+                    pending.resolve({
+                        sharpness: e.data.sharpness,
+                        pngBlob: e.data.pngBlob,
+                        croppedBuffer: e.data.croppedBuffer,
+                        rgbaBuffer: e.data.rgbaBuffer,
+                        width: e.data.width,
+                        height: e.data.height,
+                        index: e.data.index
+                    });
+                }
+            });
+        });
+    }
+
     // Function to process a frame with a worker
-    function processFrameWithWorker(worker, data, transferables) {
+    function processFrameWithWorker(workerIndex, data, transferables) {
+        const worker = unifiedAnalyzeWorkers[workerIndex];
+        const frameIndex = data.index;
+
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
-                worker.removeEventListener('message', messageHandler);
-                worker.removeEventListener('error', errorHandler);
-                reject(new Error(`Worker timeout for frame ${data.index}`));
-            }, 30000); // 30 second timeout per frame
+                pendingFrames.get(workerIndex)?.delete(frameIndex);
+                reject(new Error(`Worker timeout for frame ${frameIndex}`));
+            }, 30000);
 
-            const messageHandler = (e) => {
-                clearTimeout(timeout);
-                worker.removeEventListener('message', messageHandler);
-                worker.removeEventListener('error', errorHandler);
-                if (e.data.error) {
-                    reject(e.data.error);
-                } else if (e.data.type === 'bounds') {
-                    resolve({ type: 'bounds', bounds: e.data.bounds, index: e.data.index });
-                } else if (e.data.skipped) {
-                    // Frame was skipped (e.g., couldn't crop)
-                    resolve({ skipped: true, reason: e.data.reason, index: e.data.index });
-                } else {
-                    resolve({ sharpness: e.data.sharpness, pngBlob: e.data.pngBlob, croppedBuffer: e.data.croppedBuffer, index: e.data.index });
-                }
-            };
-            const errorHandler = (e) => {
-                clearTimeout(timeout);
-                worker.removeEventListener('message', messageHandler);
-                worker.removeEventListener('error', errorHandler);
-                reject(e);
-            };
-
-            worker.addEventListener('message', messageHandler);
-            worker.addEventListener('error', errorHandler);
-
+            pendingFrames.get(workerIndex).set(frameIndex, { resolve, reject, timeout });
             worker.postMessage(data, transferables);
         });
     }
@@ -206,17 +229,16 @@ export function useSerReader() {
             const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
 
             const workerIndex = idx % numWorkers;
-            const worker = unifiedAnalyzeWorkers[workerIndex];
 
             const dataToWorker = {
                 type: 'detect-bounds',
-                frameBuffer: frameBuffer.slice(0),
+                frameBuffer: frameBuffer,  // Transfer directly, no copy needed
                 header: headerForWorker,
                 bayerChoice: bayerChoice,
                 index: idx
             };
 
-            const promise = processFrameWithWorker(worker, dataToWorker, [dataToWorker.frameBuffer])
+            const promise = processFrameWithWorker(workerIndex, dataToWorker, [frameBuffer])
                 .then(result => {
                     if (result.bounds && result.bounds.canCrop) {
                         canCropCount++;
@@ -256,7 +278,7 @@ export function useSerReader() {
         return { size: finalSize };
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false) {
+    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -374,16 +396,45 @@ export function useSerReader() {
             }
         }
 
+        // Concurrency control: limit frames in flight to prevent memory exhaustion
+        const MAX_IN_FLIGHT = numWorkers * 3;  // e.g., 12 frames for 4 workers
+        let inFlight = 0;
+        const waitQueue = [];  // Queue of resolvers waiting for a slot
+
+        function releaseSlot() {
+            inFlight--;
+            if (waitQueue.length > 0) {
+                waitQueue.shift()();  // Wake up next waiter
+            }
+        }
+
+        async function acquireSlot() {
+            if (inFlight < MAX_IN_FLIGHT) {
+                inFlight++;
+                return;
+            }
+            await new Promise(resolve => waitQueue.push(resolve));
+            inFlight++;
+        }
+
         const workerPromises = [];
         let completedFrames = 0;
+        let successfulFrames = 0;
         let skippedFrames = 0;
         let cutOffFrames = 0;
         let totalErrors = 0;
-        const maxErrorsBeforeStopDispatching = 20; // Stop sending new frames after this many errors
+        const maxErrorsBeforeStopDispatching = 20;
         let stopDispatching = false;
 
+        const headerForWorker = {
+            fileId: header.fileId,
+            width: header.width,
+            height: header.height,
+            pixelDepth: header.pixelDepth,
+            colorID: header.colorID
+        };
+
         for (let i = 0; i < frameCount; i++) {
-            // Stop dispatching new frames if too many errors (but continue collecting results)
             if (stopDispatching) {
                 break;
             }
@@ -393,34 +444,24 @@ export function useSerReader() {
                 break;
             }
 
+            // Wait for a slot before reading the frame (limits memory usage)
+            await acquireSlot();
+
             const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
-
             const workerIndex = i % numWorkers;
-            const worker = unifiedAnalyzeWorkers[workerIndex];
 
-            const headerForWorker = {
-                fileId: header.fileId,
-                width: header.width,
-                height: header.height,
-                pixelDepth: header.pixelDepth,
-                colorID: header.colorID
-            };
-
-            // Use analyze-cropped type if we have a crop region, otherwise regular ser type
             const dataToWorker = {
                 type: cropRegion ? 'analyze-cropped' : 'ser',
-                frameBuffer: frameBuffer.slice(0),
+                frameBuffer: frameBuffer,
                 header: headerForWorker,
                 bayerChoice: bayerChoice,
                 cropRegion: cropRegion,
+                clientSideStacking: clientSideStacking,
                 index: i
             };
 
-            const promise = processFrameWithWorker(worker, dataToWorker, [dataToWorker.frameBuffer])
+            const promise = processFrameWithWorker(workerIndex, dataToWorker, [frameBuffer])
                 .then(result => {
-                    // Always process successful results, even after we stopped dispatching new frames
-
-                    // Skip frames that were cut-off or couldn't be cropped
                     if (result.skipped) {
                         if (result.reason === 'cut-off') {
                             cutOffFrames++;
@@ -435,33 +476,33 @@ export function useSerReader() {
                         return;
                     }
 
-                    // Worker returns pngBlob directly, use it instead of re-rendering
                     const currentFrame = {
                         sharpness: result.sharpness,
                         blob: result.pngBlob,
                         croppedBuffer: result.croppedBuffer,
+                        rgbaBuffer: result.rgbaBuffer,
+                        width: result.width,
+                        height: result.height,
                         index: result.index
                     };
+
                     rankFrame(currentFrame);
 
-                    // Store cropped buffer for SER export if available
                     if (result.croppedBuffer) {
                         croppedFrameBuffers[result.index] = result.croppedBuffer;
                     }
 
+                    successfulFrames++;
                     completedFrames++;
 
-                    // Log first successful frame to confirm processing works
                     if (completedFrames === 1) {
                         addLog(`First frame succeeded (index ${result.index}, sharpness ${result.sharpness?.toFixed(2)})`);
                     }
 
-                    // Emit updated frames for preview (every 50 frames to reduce UI load)
                     if (completedFrames % 50 === 0 || completedFrames === frameCount) {
                         emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
                         addLog(`Analyzed frame ${completedFrames}/${frameCount}`);
 
-                        // Use blobs directly from ranked frames - filter out any without blobs
                         const top4FrameBlobs = top4Frames.filter(f => f && f.blob).map(f => f.blob);
                         const worstFrameBlob = worstFrame?.blob || null;
 
@@ -470,17 +511,19 @@ export function useSerReader() {
                 })
                 .catch(error => {
                     totalErrors++;
-                    // Only log first few errors to avoid spam
+                    completedFrames++;
                     if (totalErrors <= 3) {
                         addLog(`Error processing frame ${i}: ${error}`);
                     } else if (totalErrors === 4) {
                         addLog(`Further frame errors suppressed...`);
                     }
-                    // Stop dispatching new frames if too many errors (but keep collecting good results)
                     if (totalErrors >= maxErrorsBeforeStopDispatching && !stopDispatching) {
                         stopDispatching = true;
                         addLog(`Too many errors (${totalErrors}), stopped dispatching new frames. Waiting for remaining results...`);
                     }
+                })
+                .finally(() => {
+                    releaseSlot();  // Always release slot when done
                 });
             workerPromises.push(promise);
         }
@@ -491,12 +534,10 @@ export function useSerReader() {
         const skipMsgs = [];
         if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
         if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} crop-failed`);
+        if (totalErrors > 0) skipMsgs.push(`${totalErrors} errors`);
         const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
-        addLog(`Finished analyzing ${frameCount} frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
+        addLog(`Analyzed ${successfulFrames}/${frameCount} frames successfully. Kept ${bestFramesForStacking.length} best.${skippedMsg}`);
         emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
-
-        // Terminate workers after all tasks are done
-        unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
 
         // Offer cropped SER download if we did cropping - available immediately before upload
         if (cropRegion && croppedFrameBuffers.length > 0) {
@@ -512,12 +553,37 @@ export function useSerReader() {
             emit('set-caption', 'Cropped SER ready for download');
         }
 
-        emit('set-caption', 'Uploading best frames for stacking...');
+        if (clientSideStacking) {
+            // Client-side stacking: use one of the existing workers (before terminating them)
+            emit('set-caption', 'Stacking frames locally...');
+            addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
-        // Blobs are already available from worker processing, no need to re-render
-        const pngBlobs = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
+            // Use the first worker for stacking (it's already initialized with OpenCV)
+            const stackingWorker = unifiedAnalyzeWorkers[0];
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker);
 
-        await uploadFrames(pngBlobs);
+            if (stackedBlob) {
+                addLog('Client-side stacking complete');
+                emit('stacked-image-ready', { blob: stackedBlob });
+            } else {
+                addLog('Client-side stacking failed - no valid frames');
+                emit('stop-loading');
+            }
+        } else {
+            // Server-side stacking: upload PNGs
+            emit('set-caption', 'Uploading best frames for stacking...');
+
+            // Blobs are already available from worker processing, no need to re-render
+            const pngBlobs = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
+
+            await uploadFrames(pngBlobs);
+        }
+
+        // Terminate workers after all tasks are done (including stacking)
+        unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
+        unifiedAnalyzeWorkers.length = 0;
+        pendingFrames.clear();
+        workersReady = false;
     }
 
     // Create a SER file from cropped frame buffers

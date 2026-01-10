@@ -15,43 +15,56 @@
 				<img src="/public/EiseApp-NoCopyright-L.webp" width="260" />
 			</div>
 			<div class="content">
-			<h2>About eise.app - An open source Planetary Image Cloud Stacker</h2>
-			<h3>Perfect for beginners in Astrophotography</h3>
-			<p>eise.app is the first web-based online planetary image stacking tool available in the solar system. 
-			The name is an ode to Eise Eisinga, a Frisian amateur astronomer who built a planetarium in his house. 
-			The main reason for developing yet another application for stacking is because of recent frustrations I had getting software running on my ARM based macbook. 
-			AutoStakkert4! didn't work in Wine, Planetary System Stacker by Rolf Hempel had python dependency issues, Lynkeos was slow with a very wonky UI and crashed continuously.
+			<h2>About eise.app - Planetary Image Stacker</h2>
+			<h3>100% browser-based - no uploads, no installs</h3>
+			<p>eise.app is the first fully browser-based planetary image stacking tool.
+			Everything runs locally on your machine using WebAssembly and Web Workers - your data never leaves your computer.
 			</p>
 			<p>
-			As a web developer, I saw an opportunity to make something simpler that works directly in your browser, regardless of your operating system. 
-			Initially, I thought about doing all the processing on a server, but that would be expensive and not scalable.
-			Instead, eise.app does a chunk of the work in your browser using WebAssembly and WebWorkers, which turns out to be quite fast, and it just works (hopefully!) by navigating to this website!
+			The name is an ode to <a href="https://en.wikipedia.org/wiki/Eise_Eisinga" target="_blank">Eise Eisinga</a>, a Frisian amateur astronomer who built a planetarium in his living room.
+			The project started from frustrations getting existing software running on ARM-based Macs - AutoStakkert4! didn't work in Wine, PSS had dependency issues, Lynkeos crashed continuously.
 			</p>
-			<p>
-			Currently eise.app works as follows:
-			</p>
-			<ul>
-				<li>The astrophotographer selects a video file from their machine.</li>
-				<li>FFmpeg.js is used to extract frames from the video file.</li>
-				<li>eise.app starts ranking (up to 5k) frames of the video based on sharpness.</li>
-				<li>The best 30% of frames are uploaded to a VPS powered by 
-					<a target="_blank" href="https://m.do.co/c/5d8cf0a2f4b6" title="get $200 in credits if you use this link">Digital Ocean</a>.</li>
-				<li>On the server a slightly modified <a target="_blank" href="https://github.com/Rolf-Hempel/PlanetarySystemStacker">Planetary System Stacker</a> (by Rolf Hempel) is stacking all frames it receives.</li>
-				<li>The server returns the stacked image to the browser.</li>
-				<li>A very basic post processor is opened, providing Wavelets sharpening, some noise reduction and color alignment. 
-					Code is from OpenCV and a <a href="https://github.com/mrossini-ethz/gimp-wavelet-sharpen/blob/master/src/wavelet.c" target="_blank">GIMP plugin</a> compiled to WebAssembly using emscripten.</li>
-			</ul>
-			<p>In essence, eise.app is a blend of Planetary System Stacker's capabilities combined with browser-based frame ranking and (post) processing.</p>
-			<p>I hope this web-app will improve your astrophotography workflow, or helps beginners not giving up when trying to set-up their software.</p>
 
-			<h3>Do you have bugs or feature requests?</h3>
-			<p>Would love to hear your thoughts! Head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a> if you have any suggestions or bug reports.</p>
+			<h3>How it works</h3>
+			<ul>
+				<li><strong>File support:</strong> SER files (recommended), AVI (uncompressed), or any video format via FFmpeg.js</li>
+				<li><strong>Frame ranking:</strong> Laplacian variance calculates sharpness for each frame</li>
+				<li><strong>Auto-crop:</strong> Detects and centers the planet in each frame</li>
+				<li><strong>Local alignment:</strong> Alignment Points (APs) track motion across the frame using OpenCV's matchTemplate (normalized cross-correlation)</li>
+				<li><strong>De-warping:</strong> Displacement maps correct atmospheric wobble using inverse distance weighted interpolation and cv.remap()</li>
+				<li><strong>Stacking:</strong> Quality-weighted averaging of the best 30% of frames</li>
+				<li><strong>Post-processing:</strong> Wavelet sharpening (from a <a href="https://github.com/mrossini-ethz/gimp-wavelet-sharpen/blob/master/src/wavelet.c" target="_blank">GIMP plugin</a>), noise reduction, and color alignment</li>
+			</ul>
+
+			<h3>Acknowledgments</h3>
+			<p>
+			This project draws heavy inspiration from <a target="_blank" href="https://github.com/Rolf-Hempel/PlanetarySystemStacker">Planetary System Stacker</a> by Rolf Hempel.
+			The alignment point approach, local de-warping, and quality-weighted stacking concepts are all inspired by PSS's excellent implementation.
+			Thank you Rolf for making PSS open source and documenting the algorithms so well.
+			</p>
+
+			<h3>Technology</h3>
+			<p>Built with Nuxt/Vue, OpenCV.js (WebAssembly), Web Workers for parallel processing, and FFmpeg.js for video decoding.
+			All processing happens in your browser - works on any OS without installation.</p>
+
+			<h3>Alternative software</h3>
+			<p>eise.app is great for quick results without installing anything, but for more advanced features you might want to try:</p>
+			<ul>
+				<li><a href="https://www.autostakkert.com/" target="_blank">AutoStakkert!</a> - The gold standard for planetary stacking (Windows)</li>
+				<li><a href="https://github.com/Rolf-Hempel/PlanetarySystemStacker" target="_blank">Planetary System Stacker</a> - Excellent open-source alternative (Python, cross-platform)</li>
+				<li><a href="https://www.astronomie.be/registax/" target="_blank">Registax</a> - Classic stacking software with great wavelet sharpening (Windows)</li>
+				<li><a href="https://lynkeos.sourceforge.io/" target="_blank">Lynkeos</a> - Native macOS stacking application</li>
+				<li><a href="https://siril.org/" target="_blank">Siril</a> - Full-featured astrophotography suite (cross-platform)</li>
+			</ul>
+
+			<h3>Bugs or feature requests?</h3>
+			<p>Head over to <a href="https://github.com/timing/eise.app" target="_blank">eise.app on GitHub</a> for suggestions or bug reports.</p>
 
 			<p>Happy Stacking,<br/> Tijmen</p>
 			</div>
 		</div>
 	
-		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
+		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" @showAbout="currentTab = 'About'" />
 		<ColorProfileSelector v-show="currentTab === 'FileUploader' && isSelectingColorProfile" />
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing && !isSelectingColorProfile"
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
@@ -88,6 +101,7 @@ const loadPixel = ref(false)
 onMounted(() => {
 	loadPixel.value = true;
 	on('postProcessing', handlePostProcessing);
+	on('stacked-image-ready', handleStackedImageReady);
 	on('show-color-profile-selector', () => {
 		isSelectingColorProfile.value = true;
 	});
@@ -95,6 +109,14 @@ onMounted(() => {
 		isSelectingColorProfile.value = false;
 	});
 });
+
+async function handleStackedImageReady(data) {
+	console.log('handleStackedImageReady', data);
+	// Convert blob to format expected by PostProcessor
+	currentTab.value = 'PostProcessor';
+	selectedFile.value = data.blob;
+	isProcessing.value = false;
+}
 
 async function handleFrames(data) {
 	frames.value = data;

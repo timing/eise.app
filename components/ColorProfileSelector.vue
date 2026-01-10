@@ -8,7 +8,7 @@
 			<LoadingIndicator />
 		</div>
 		<div class="content">
-			<h2>Which image looks correct?</h2>
+			<h2>Select Bayer Pattern</h2>
 			<div class="thumbnails">
 				<div
 					v-for="profile in profiles"

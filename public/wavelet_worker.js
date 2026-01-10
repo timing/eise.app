@@ -21,7 +21,7 @@ function initializeSubWorkers() {
 	workersInitialized = true;
 
 	for (let i = 0; i < 3; i++) {
-		workers[i] = new Worker('/sharpen_per_channel_worker.js?v=20260110', {type: 'module'});
+		workers[i] = new Worker('/sharpen_per_channel_worker.js', {type: 'module'});
 		workers[i].addEventListener('message', handleWorkerResponse(i));
 	}
 }

@@ -1,33 +1,56 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v2 - with detailed error handling)');
+console.log('unified_analyze_worker.js loaded (v9 - callback-based OpenCV init)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
 let isCvReady = false;
 const messageQueue = [];
 
-// Load OpenCV and signal readiness
+// Load OpenCV
 self.importScripts('https://cdn.jsdelivr.net/npm/opencv-bindings@4.5.5/index.min.js');
+
+// Wait for OpenCV WASM and then call callback
+function waitForOpenCV(onReady, onError) {
+    // Check if already ready
+    if (self.cv && typeof self.cv.Mat === 'function') {
+        onReady(self.cv);
+        return;
+    }
+
+    // Poll for cv.Mat to become available
+    let attempts = 0;
+    const maxAttempts = 200; // 20 seconds max
+    const checkInterval = setInterval(() => {
+        attempts++;
+        if (self.cv && typeof self.cv.Mat === 'function') {
+            clearInterval(checkInterval);
+            onReady(self.cv);
+        } else if (attempts >= maxAttempts) {
+            clearInterval(checkInterval);
+            onError(new Error('OpenCV WASM initialization timeout'));
+        }
+    }, 100);
+}
 
 self.addEventListener('message', (e) => {
     if (e.data.type === 'init') {
-        if (!self.cv) {
-            console.error("Worker: self.cv is not available after importScripts. OpenCV might not have loaded correctly.");
-            self.postMessage({ type: 'error', message: 'OpenCV failed to load.' });
-            return;
-        }
-        _cv = self.cv; // Assign the global cv to our local _cv reference
-        isCvReady = true;
-        console.log('Worker: OpenCV loaded and initialized.');
-        self.postMessage({ type: 'ready' });
+        waitForOpenCV(
+            (cv) => {
+                _cv = cv;
+                isCvReady = true;
+                self.postMessage({ type: 'ready' });
 
-        // Process any queued messages that arrived before init was complete
-        while (messageQueue.length > 0) {
-            handleMessage(messageQueue.shift());
-        }
+                // Process any queued messages
+                while (messageQueue.length > 0) {
+                    handleMessage(messageQueue.shift());
+                }
+            },
+            (error) => {
+                console.error('Worker: OpenCV init failed:', error);
+                self.postMessage({ type: 'error', message: error.message });
+            }
+        );
     } else {
-        // If cv is not ready, queue the message.
-        // If _cv is null, it implies init hasn't happened successfully.
         if (!isCvReady || !_cv) {
             messageQueue.push(e);
         } else {
@@ -44,6 +67,19 @@ async function handleMessage(e) {
         // Ensure _cv is defined here before using it
         if (!_cv) {
              throw new Error("OpenCV (_cv) is not initialized in worker.");
+        }
+
+        // Frame stacking with local alignment
+        if (type === 'stack-frames') {
+            const { frames } = e.data; // Array of {rgbaBuffer, width, height, sharpness}
+            try {
+                const result = await stackFramesLocally(frames);
+                self.postMessage({ type: 'stack-complete', blob: result.blob, width: result.width, height: result.height });
+            } catch (stackError) {
+                console.error('Stacking error:', stackError);
+                self.postMessage({ type: 'stack-error', error: stackError.message || String(stackError) });
+            }
+            return;
         }
 
         // Bounding box detection for first pass (crop detection)
@@ -111,8 +147,25 @@ async function handleMessage(e) {
                 return;
             }
 
-            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index);
-            self.postMessage({ sharpness: result.sharpness, pngBlob: result.pngBlob, croppedBuffer: result.croppedBuffer, index });
+            const includeRgba = e.data.clientSideStacking === true;
+            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index, includeRgba);
+
+            const response = {
+                sharpness: result.sharpness,
+                pngBlob: result.pngBlob,
+                croppedBuffer: result.croppedBuffer,
+                index
+            };
+
+            // Only include RGBA data when client-side stacking is enabled
+            if (includeRgba && result.rgbaBuffer) {
+                response.rgbaBuffer = result.rgbaBuffer;
+                response.width = result.width;
+                response.height = result.height;
+                self.postMessage(response, [result.rgbaBuffer]); // Transfer for zero-copy
+            } else {
+                self.postMessage(response);
+            }
             return;
         }
 
@@ -151,9 +204,21 @@ async function handleMessage(e) {
                 return;
             }
 
-            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, null, index);
+            const includeRgba = e.data.clientSideStacking === true;
+            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, null, index, includeRgba);
             sharpness = result.sharpness;
             pngBlob = result.pngBlob;
+
+            // Return with rgbaBuffer if client-side stacking is enabled
+            if (includeRgba && result.rgbaBuffer) {
+                self.postMessage({
+                    sharpness, pngBlob, index,
+                    rgbaBuffer: result.rgbaBuffer,
+                    width: result.width,
+                    height: result.height
+                }, [result.rgbaBuffer]);
+                return;
+            }
 
         } else {
             throw new Error('Unknown analysis type');
@@ -162,12 +227,18 @@ async function handleMessage(e) {
         self.postMessage({ sharpness, pngBlob, index });
 
     } catch (error) {
-        const errorMsg = error.message || String(error);
-        // Only log first error per worker to avoid console flooding
-        if (!self.errorLogged) {
-            console.error(`Error in worker for index ${index}:`, errorMsg, error);
+        // OpenCV WASM can throw raw numbers as error codes
+        const errorMsg = typeof error === 'number'
+            ? `OpenCV error code: ${error}`
+            : (error.message || String(error));
+        // Only log first few errors per worker to avoid console flooding
+        if (!self.errorCount) self.errorCount = 0;
+        if (self.errorCount < 3) {
+            const header = e.data.header || e.data.aviHeader;
+            console.error(`Error in worker for index ${index}:`, errorMsg);
+            console.error(`  Buffer: ${e.data.frameBuffer?.byteLength || 'N/A'} bytes, Dimensions: ${header?.width}x${header?.height}`);
             if (error.stack) console.error('Stack:', error.stack);
-            self.errorLogged = true;
+            self.errorCount++;
         }
         // Include more context for debugging
         const debugInfo = `${errorMsg} (type: ${e.data.type}, size: ${e.data.frameBuffer?.byteLength || 'N/A'})`;
@@ -175,7 +246,7 @@ async function handleMessage(e) {
     }
 }
 
-async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropRegion = null, frameIndex = undefined) {
+async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropRegion = null, frameIndex = undefined, includeRgba = false) {
     const { width, height, pixelDepth, fourCC, bpp } = header;
     let rawMat, grayMat, rgbaMat, croppedRawMat;
 
@@ -318,7 +389,13 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             }
         }
 
-        return { sharpness, pngBlob, croppedBuffer };
+        // --- Step 6: Get RGBA buffer for client-side stacking (copy before mat is deleted) ---
+        let rgbaBuffer = null;
+        if (includeRgba) {
+            rgbaBuffer = new Uint8ClampedArray(rgbaMat.data).buffer;
+        }
+
+        return { sharpness, pngBlob, croppedBuffer, rgbaBuffer, width: actualWidth, height: actualHeight };
 
     } finally {
         if (rawMat) rawMat.delete();
@@ -393,6 +470,12 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
             rawMat.convertTo(grayMat, _cv.CV_8U, alpha);
         } else { // AVI file (or RGBA from decoded PNG)
             const { fourCC } = header;
+            const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[fourCC] || 3;
+            const expectedSize = width * height * bytesPerPixel;
+            if (frameBuffer.byteLength !== expectedSize) {
+                console.warn(`detectObjectBounds: AVI buffer size mismatch: got ${frameBuffer.byteLength}, expected ${expectedSize} (${width}x${height}, ${fourCC})`);
+                return { canCrop: false, reason: 'buffer-mismatch' };
+            }
             const aviDataType = { 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[fourCC];
             rawMat = new _cv.Mat(height, width, aviDataType);
             rawMat.data.set(new Uint8Array(frameBuffer));
@@ -501,9 +584,396 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
         };
 
     } catch (error) {
-        if (rawMat) rawMat.delete();
-        if (grayMat) grayMat.delete();
-        console.error('Error detecting bounds:', error);
-        return { canCrop: false, reason: 'error', message: error.message };
+        if (rawMat) try { rawMat.delete(); } catch(e) {}
+        if (grayMat) try { grayMat.delete(); } catch(e) {}
+        // OpenCV errors during bounds detection are non-fatal - frame will still be processed
+        // Only log first few to avoid spam
+        if (!self.boundsErrorCount) self.boundsErrorCount = 0;
+        if (self.boundsErrorCount < 3) {
+            const errorMsg = typeof error === 'number' ? `OpenCV error code: ${error}` : (error.message || String(error));
+            console.warn('Bounds detection failed (non-fatal):', errorMsg);
+            self.boundsErrorCount++;
+        }
+        return { canCrop: false, reason: 'error' };
     }
 }
+
+// =====================================================
+// FRAME STACKING WITH LOCAL ALIGNMENT
+// =====================================================
+
+/**
+ * Stack frames with local alignment using Alignment Points (APs)
+ */
+async function stackFramesLocally(frames) {
+    self.postMessage({ type: 'stack-progress', stage: 'Preparing frames...', progress: 0 });
+
+    // Filter frames that have valid rgbaBuffer and sharpness
+    const validFrames = frames.filter(f => f.rgbaBuffer && f.width && f.height && f.sharpness > 0);
+
+    if (validFrames.length === 0) {
+        throw new Error('No valid frames with RGBA data for stacking');
+    }
+
+    const { width, height } = validFrames[0];
+    const frameCount = validFrames.length;
+
+    console.log(`Stacking ${frameCount} frames (${width}x${height}) with local alignment`);
+
+    // Sort frames by sharpness and use best as reference
+    const sortedFrames = [...validFrames].sort((a, b) => b.sharpness - a.sharpness);
+    const referenceFrame = sortedFrames[0];
+    const refData = new Uint8ClampedArray(referenceFrame.rgbaBuffer);
+    console.log(`Reference frame: sharpness ${referenceFrame.sharpness.toFixed(2)}`);
+
+    // === Create Alignment Points Grid ===
+    const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height);
+    console.log(`Created ${alignmentPoints.length} alignment points (${patchSize}px patches, ${searchRadius}px search)`);
+
+    // === Find local shifts for each frame at each AP ===
+    console.log(`Finding alignments for ${frameCount} frames with ${alignmentPoints.length} APs each...`);
+    self.postMessage({ type: 'stack-progress', stage: `Aligning frame 1/${frameCount}...`, progress: 5 });
+    const frameShifts = []; // frameShifts[frameIdx][apIdx] = {dx, dy, quality}
+
+    // Create reference Mat once (reused for all frames)
+    const refMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+    refMat.data.set(refData);
+    const refGray = new _cv.Mat();
+    _cv.cvtColor(refMat, refGray, _cv.COLOR_RGBA2GRAY);
+
+    for (let f = 0; f < frameCount; f++) {
+        const frameData = new Uint8ClampedArray(validFrames[f].rgbaBuffer);
+
+        // Create frame Mat once per frame
+        const frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+        frameMat.data.set(frameData);
+        const frameGray = new _cv.Mat();
+        _cv.cvtColor(frameMat, frameGray, _cv.COLOR_RGBA2GRAY);
+
+        const shifts = [];
+
+        for (let a = 0; a < alignmentPoints.length; a++) {
+            const ap = alignmentPoints[a];
+            const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius);
+            shifts.push(shift);
+        }
+
+        frameGray.delete();
+        frameMat.delete();
+        frameShifts.push(shifts);
+
+        // Update progress every frame
+        const progress = 5 + (f / frameCount) * 45;
+        self.postMessage({
+            type: 'stack-progress',
+            stage: `Aligning frame ${f + 1}/${frameCount}...`,
+            progress: progress
+        });
+    }
+
+    refGray.delete();
+    refMat.delete();
+    console.log('Alignment complete');
+
+    // === Stack with LOCAL de-warping (true de-wobble) ===
+    self.postMessage({ type: 'stack-progress', stage: 'De-warping frames...', progress: 50 });
+
+    // Accumulator for final image (RGB + weight per pixel)
+    const accumR = new Float32Array(width * height);
+    const accumG = new Float32Array(width * height);
+    const accumB = new Float32Array(width * height);
+    const accumWeight = new Float32Array(width * height);
+
+    // Normalize sharpness for weighting
+    const totalSharpness = validFrames.reduce((sum, f) => sum + f.sharpness, 0);
+
+    // Create remap matrices once (reused for each frame)
+    const mapX = new _cv.Mat(height, width, _cv.CV_32FC1);
+    const mapY = new _cv.Mat(height, width, _cv.CV_32FC1);
+
+    for (let f = 0; f < frameCount; f++) {
+        const frameData = new Uint8ClampedArray(validFrames[f].rgbaBuffer);
+        const frameWeight = validFrames[f].sharpness / totalSharpness * frameCount;
+        const shifts = frameShifts[f];
+
+        // Build displacement maps by interpolating AP shifts
+        buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize);
+
+        // Create frame Mat and apply remap (de-warp)
+        const frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+        frameMat.data.set(frameData);
+
+        const warpedMat = new _cv.Mat();
+        _cv.remap(frameMat, warpedMat, mapX, mapY, _cv.INTER_LINEAR, _cv.BORDER_CONSTANT);
+
+        // Accumulate warped frame
+        const warpedData = warpedMat.data;
+        for (let i = 0; i < width * height; i++) {
+            const srcIdx = i * 4;
+            // Skip black pixels (border from remap)
+            if (warpedData[srcIdx] === 0 && warpedData[srcIdx + 1] === 0 && warpedData[srcIdx + 2] === 0) {
+                continue;
+            }
+            accumR[i] += warpedData[srcIdx] * frameWeight;
+            accumG[i] += warpedData[srcIdx + 1] * frameWeight;
+            accumB[i] += warpedData[srcIdx + 2] * frameWeight;
+            accumWeight[i] += frameWeight;
+        }
+
+        frameMat.delete();
+        warpedMat.delete();
+
+        // Update progress every frame
+        self.postMessage({
+            type: 'stack-progress',
+            stage: `De-warping frame ${f + 1}/${frameCount}...`,
+            progress: 50 + (f / frameCount) * 45 // 50-95%
+        });
+    }
+
+    mapX.delete();
+    mapY.delete();
+    console.log('De-warping complete');
+
+    // === Compute final result ===
+    self.postMessage({ type: 'stack-progress', stage: 'Finalizing...', progress: 95 });
+    const result = new Uint8ClampedArray(width * height * 4);
+
+    for (let i = 0; i < width * height; i++) {
+        const w = accumWeight[i];
+        if (w > 0) {
+            result[i * 4 + 0] = Math.round(accumR[i] / w);
+            result[i * 4 + 1] = Math.round(accumG[i] / w);
+            result[i * 4 + 2] = Math.round(accumB[i] / w);
+        } else {
+            // Fallback to reference frame if no data
+            result[i * 4 + 0] = refData[i * 4 + 0];
+            result[i * 4 + 1] = refData[i * 4 + 1];
+            result[i * 4 + 2] = refData[i * 4 + 2];
+        }
+        result[i * 4 + 3] = 255; // Alpha
+    }
+
+    // Create ImageData and convert to blob
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    const imageData = new ImageData(result, width, height);
+    ctx.putImageData(imageData, 0, 0);
+
+    const blob = await canvas.convertToBlob({ type: 'image/png' });
+    console.log(`Stacked image: ${width}x${height}, ${(blob.size / 1024).toFixed(1)} KB`);
+
+    self.postMessage({ type: 'stack-progress', stage: 'Stacking complete', progress: 100 });
+    return { blob, width, height };
+}
+
+/**
+ * Create a grid of alignment points
+ * Optimized: fewer points, smaller search radius for speed
+ */
+function createAPGrid(width, height) {
+    // Larger patches = fewer APs = faster
+    const patchSize = Math.max(48, Math.min(96, Math.floor(Math.min(width, height) / 4)));
+    // Smaller search radius - atmospheric wobble is usually only a few pixels
+    const searchRadius = Math.min(16, Math.floor(patchSize / 4));
+    // Larger spacing = fewer APs
+    const spacing = Math.floor(patchSize * 0.8);
+
+    const alignmentPoints = [];
+    const marginX = Math.floor((width % spacing) / 2) + patchSize / 2;
+    const marginY = Math.floor((height % spacing) / 2) + patchSize / 2;
+
+    for (let y = marginY; y < height - patchSize / 2; y += spacing) {
+        for (let x = marginX; x < width - patchSize / 2; x += spacing) {
+            alignmentPoints.push({ x, y });
+        }
+    }
+
+    return { alignmentPoints, patchSize, searchRadius };
+}
+
+/**
+ * Build displacement maps for cv.remap by interpolating AP shifts
+ * This creates a smooth warp field from sparse alignment point measurements
+ */
+function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize) {
+    const mapXData = mapX.data32F;
+    const mapYData = mapY.data32F;
+    const influenceRadius = patchSize * 2; // How far each AP influences
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const idx = y * width + x;
+
+            // Interpolate shift from nearby APs using inverse distance weighting
+            let totalWeight = 0;
+            let weightedDx = 0;
+            let weightedDy = 0;
+
+            for (let i = 0; i < alignmentPoints.length; i++) {
+                const ap = alignmentPoints[i];
+                const shift = shifts[i];
+                const dist = Math.sqrt((x - ap.x) ** 2 + (y - ap.y) ** 2);
+
+                if (dist < influenceRadius) {
+                    // Inverse distance weighting with quality factor
+                    const distWeight = 1 / (1 + (dist / patchSize) ** 2);
+                    const weight = distWeight * (0.5 + 0.5 * shift.quality);
+
+                    weightedDx += shift.dx * weight;
+                    weightedDy += shift.dy * weight;
+                    totalWeight += weight;
+                }
+            }
+
+            // remap uses source coordinates, so we ADD the shift
+            if (totalWeight > 0) {
+                mapXData[idx] = x + weightedDx / totalWeight;
+                mapYData[idx] = y + weightedDy / totalWeight;
+            } else {
+                // No nearby APs - identity mapping
+                mapXData[idx] = x;
+                mapYData[idx] = y;
+            }
+        }
+    }
+}
+
+/**
+ * Fast version that takes pre-converted grayscale Mats
+ */
+function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius) {
+    const halfPatch = Math.floor(patchSize / 2);
+
+    // Define template region (from reference) and search region (from frame)
+    const templateX = ap.x - halfPatch;
+    const templateY = ap.y - halfPatch;
+    const searchX = ap.x - halfPatch - searchRadius;
+    const searchY = ap.y - halfPatch - searchRadius;
+    const searchSize = patchSize + searchRadius * 2;
+
+    // Bounds check
+    if (templateX < 0 || templateY < 0 ||
+        templateX + patchSize > width || templateY + patchSize > height ||
+        searchX < 0 || searchY < 0 ||
+        searchX + searchSize > width || searchY + searchSize > height) {
+        return { dx: 0, dy: 0, quality: 0 };
+    }
+
+    let templateMat, searchMat, resultMat;
+
+    try {
+        // Extract template from reference (the patch we're looking for)
+        const templateRect = new _cv.Rect(templateX, templateY, patchSize, patchSize);
+        templateMat = refGray.roi(templateRect);
+
+        // Extract search region from frame (where we look for the template)
+        const searchRect = new _cv.Rect(searchX, searchY, searchSize, searchSize);
+        searchMat = frameGray.roi(searchRect);
+
+        // Run template matching
+        resultMat = new _cv.Mat();
+        _cv.matchTemplate(searchMat, templateMat, resultMat, _cv.TM_CCOEFF_NORMED);
+
+        // Find best match location
+        const minMax = _cv.minMaxLoc(resultMat);
+        const bestLoc = minMax.maxLoc;
+        const quality = minMax.maxVal;
+
+        // Calculate shift
+        const dx = bestLoc.x - searchRadius;
+        const dy = bestLoc.y - searchRadius;
+
+        // Cleanup (roi doesn't need delete, but resultMat does)
+        resultMat.delete();
+
+        return { dx, dy, quality: Math.max(0, quality) };
+
+    } catch (err) {
+        if (resultMat) try { resultMat.delete(); } catch(e) {}
+        return { dx: 0, dy: 0, quality: 0 };
+    }
+}
+
+/**
+ * Find local shift at an alignment point using OpenCV's matchTemplate
+ * This is the same approach PSS uses - optimized WASM correlation
+ */
+function findLocalShift(refData, frameData, width, height, ap, patchSize, searchRadius) {
+    const halfPatch = Math.floor(patchSize / 2);
+
+    // Define template region (from reference) and search region (from frame)
+    const templateX = ap.x - halfPatch;
+    const templateY = ap.y - halfPatch;
+    const searchX = ap.x - halfPatch - searchRadius;
+    const searchY = ap.y - halfPatch - searchRadius;
+    const searchSize = patchSize + searchRadius * 2;
+
+    // Bounds check
+    if (templateX < 0 || templateY < 0 ||
+        templateX + patchSize > width || templateY + patchSize > height ||
+        searchX < 0 || searchY < 0 ||
+        searchX + searchSize > width || searchY + searchSize > height) {
+        return { dx: 0, dy: 0, quality: 0 };
+    }
+
+    let templateMat, searchMat, resultMat, refMat, frameMat;
+
+    try {
+        // Create Mats from RGBA data
+        refMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+        refMat.data.set(refData);
+        frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+        frameMat.data.set(frameData);
+
+        // Extract template from reference (the patch we're looking for)
+        const templateRect = new _cv.Rect(templateX, templateY, patchSize, patchSize);
+        templateMat = refMat.roi(templateRect).clone();
+
+        // Extract search region from frame (where we look for the template)
+        const searchRect = new _cv.Rect(searchX, searchY, searchSize, searchSize);
+        searchMat = frameMat.roi(searchRect).clone();
+
+        // Convert to grayscale for matching
+        const templateGray = new _cv.Mat();
+        const searchGray = new _cv.Mat();
+        _cv.cvtColor(templateMat, templateGray, _cv.COLOR_RGBA2GRAY);
+        _cv.cvtColor(searchMat, searchGray, _cv.COLOR_RGBA2GRAY);
+
+        // Run template matching
+        resultMat = new _cv.Mat();
+        _cv.matchTemplate(searchGray, templateGray, resultMat, _cv.TM_CCOEFF_NORMED);
+
+        // Find best match location
+        const minMax = _cv.minMaxLoc(resultMat);
+        const bestLoc = minMax.maxLoc; // For TM_CCOEFF_NORMED, max is best
+        const quality = minMax.maxVal;
+
+        // Calculate shift (bestLoc is relative to search region, searchRadius is the offset)
+        const dx = bestLoc.x - searchRadius;
+        const dy = bestLoc.y - searchRadius;
+
+        // Cleanup
+        templateGray.delete();
+        searchGray.delete();
+        templateMat.delete();
+        searchMat.delete();
+        resultMat.delete();
+        refMat.delete();
+        frameMat.delete();
+
+        return { dx, dy, quality: Math.max(0, quality) };
+
+    } catch (err) {
+        // Cleanup on error
+        if (templateMat) try { templateMat.delete(); } catch(e) {}
+        if (searchMat) try { searchMat.delete(); } catch(e) {}
+        if (resultMat) try { resultMat.delete(); } catch(e) {}
+        if (refMat) try { refMat.delete(); } catch(e) {}
+        if (frameMat) try { frameMat.delete(); } catch(e) {}
+
+        console.warn('matchTemplate failed:', err);
+        return { dx: 0, dy: 0, quality: 0 };
+    }
+}
+

@@ -19,7 +19,7 @@ export function useImageReader() {
         addLog("Initializing analysis workers...");
 
         for (let i = 0; i < numWorkers; i++) {
-            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js?v=20260110'));
+            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
         }
 
         const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {

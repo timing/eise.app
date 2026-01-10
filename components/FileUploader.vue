@@ -30,23 +30,14 @@
 
 			<div class="separator"></div>
 
-			<h4>Auto-crop and center</h4>
-			<label>
-				<input type="checkbox" v-model="enableAutoCrop" />
-				Enable auto-crop and center planet
-			</label>
-			<p>Automatically detects and crops around the planet, centering it in each frame. Only applies when frames are larger than 300x300 and the planet is surrounded by dark sky. You can download the cropped SER file after processing.</p>
-
-			<div class="separator"></div>
-
-			<h4>Maximum number of frames to analyze</h4>
+			<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
 			<label>
 				<input type="checkbox" v-model="enableMaxFrames" />
-				Enable max frames to analyze
+				Limit frames
 			</label>
 			<input type="range" min="2" max="5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
-			{{ enableMaxFrames ? selectedMaxFrames : 'Unlimited' }}
-			<p>Memory issues? Lower the amount of frames imported from the video.</p>
+			{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
+			<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
 		</template>
 	</div>
 
@@ -54,19 +45,16 @@
 	<div class="content" v-if="!isProcessing">
 		<h2>Welcome to eise.app</h2>
 		<h3>An easy planetary image stacker for astrophotography</h3>
-		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image.</p>
-
+		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image using <em>lucky imaging</em>.</p>
 		<ul>
-			<li>Select one video file for stacking followed by post processing.</li>
-			<li>Using SER files is highly recommended, as it allows better memory management.</li>
+			<li>Select one video file for stacking followed by post processing.<br/>
+				Using SER files is highly recommended, as it allows better memory management.</li>
 			<li>Select multiple image files (TIFF, PNG, JPG, etc.) for stacking and post processing.</li>
 			<li>Select one image file for post processing only.</li>
 		</ul>
-
 		<p>When stacking, eise.app will first analyze all frames/images, and then use 30% of the best ones for stacking.</p>
-
 		<h3>More information, bugs and feature requests?</h3>
-		<p>Read more about Eise.app on the About page, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>.</p>
+		<p>Read more about Eise.app on the <a href="#" @click.prevent="showAbout">About page</a>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>.</p>
 	</div>
 </div>
 </template>
@@ -84,15 +72,20 @@ const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 const enableMaxFrames = ref(false);
 const selectedMaxFrames = ref(5000);
 
-const enableAutoCrop = ref(true);
+// Always enable auto-crop and client-side stacking
+const enableAutoCrop = true;
+const enableClientSideStacking = true;
 
 const errorMessage = ref(null);
+
+// Info toggle state
+const showMaxFramesInfo = ref(false);
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
 const fileInput = ref(null);
 
-const emit = defineEmits(['frames', 'postProcessing', 'processing-started']);
+const emit = defineEmits(['frames', 'postProcessing', 'processing-started', 'showAbout']);
 
 const selectedFilesDescription = computed(() => {
 	if (selectedFiles.value.length === 0) return '';
@@ -157,6 +150,10 @@ function clearSelection() {
 	errorMessage.value = null;
 }
 
+function showAbout() {
+	emit('showAbout');
+}
+
 async function processFiles(files) {
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser') || file.name.endsWith('.avi'));
 	const imageFiles = files.filter(file => file.type.startsWith('image/'));
@@ -191,7 +188,7 @@ async function processFiles(files) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
 			const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop.value);
+			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking);
 			return;
 		}
 
@@ -213,7 +210,7 @@ async function processFiles(files) {
 				// Can process directly - readAviFile will read frames as needed
 				emit('processing-started');
 				const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop.value);
+				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -291,7 +288,7 @@ async function processFiles(files) {
 
 		// Route FFmpeg frames through AVI reader for unified processing (including cropping)
 		const { processFFmpegFrames } = useAviReader();
-		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop.value);
+		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
@@ -408,5 +405,26 @@ async function processFiles(files) {
 .processing-actions {
 	justify-content: center;
 	margin-top: 20px;
+}
+.info-icon {
+	cursor: pointer;
+	color: #666;
+	font-size: 0.9em;
+	user-select: none;
+}
+.info-icon:hover {
+	color: #333;
+}
+.info-text {
+	font-size: 0.9em;
+	color: #555;
+	margin-top: 5px;
+	padding: 8px;
+	background: #f5f5f5;
+	border-radius: 4px;
+}
+.info-text ul {
+	margin: 0;
+	padding-left: 20px;
 }
 </style>
