@@ -38,6 +38,15 @@
 			<input type="range" min="2" max="5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
 			{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
 			<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
+
+			<div class="separator"></div>
+
+			<h4>Quality threshold</h4>
+			<label>
+				<input type="checkbox" v-model="autoStack" />
+				Just stack the best 30%, no manual selection
+			</label>
+			<p v-if="!autoStack" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack.</p>
 		</template>
 	</div>
 
@@ -80,6 +89,9 @@ const errorMessage = ref(null);
 
 // Info toggle state
 const showMaxFramesInfo = ref(false);
+
+// Auto-stack option (when checked, skip manual threshold selection)
+const autoStack = ref(false);
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
@@ -188,7 +200,7 @@ async function processFiles(files) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
 			const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking);
+			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value);
 			return;
 		}
 
@@ -210,7 +222,7 @@ async function processFiles(files) {
 				// Can process directly - readAviFile will read frames as needed
 				emit('processing-started');
 				const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking);
+				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -288,7 +300,7 @@ async function processFiles(files) {
 
 		// Route FFmpeg frames through AVI reader for unified processing (including cropping)
 		const { processFFmpegFrames } = useAviReader();
-		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking);
+		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, !autoStack.value);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
@@ -296,7 +308,7 @@ async function processFiles(files) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, !autoStack.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing

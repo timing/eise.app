@@ -442,7 +442,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, preloadedBuffer = null) {
+    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, preloadedBuffer = null) {
         emit('start-loading', 'Parsing AVI header...');
         emit('update-loading', 0);
 
@@ -504,8 +504,13 @@ export function useAviReader() {
         const bestFramesForStacking = []; // These will store {sharpness, blob} (8-bit PNG)
         let top4Frames = []; // These will store {sharpness, blob} (8-bit PNG)
         let worstFrame = null; // This will store {sharpness, blob} (8-bit PNG)
+        const allAnalyzedFrames = []; // For manual threshold selection
 
         function rankFrame(frame) { // frame is {sharpness, blob}
+            // Store all frames when manual threshold is enabled
+            if (manualThreshold) {
+                allAnalyzedFrames.push(frame);
+            }
             // Higher Tenengrad sharpness = better (sharper edges)
             if (top4Frames.length < 4) {
                 top4Frames.push(frame);
@@ -679,6 +684,17 @@ export function useAviReader() {
         addLog(`Finished analyzing ${frameCount} AVI frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
         emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
 
+        // Manual threshold: let user select frames instead of auto-stacking
+        if (manualThreshold) {
+            const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
+            addLog(`Manual threshold enabled: ${allFramesSorted.length} frames available for selection`);
+            emit('quality-selection-ready', {
+                frames: allFramesSorted,
+                workers: unifiedAnalyzeWorkers
+            });
+            return; // Don't terminate workers yet - they'll be used for stacking
+        }
+
         if (clientSideStacking) {
             // Client-side stacking: use one of the existing workers (before terminating them)
             emit('set-caption', 'Stacking frames locally...');
@@ -706,7 +722,7 @@ export function useAviReader() {
     }
 
     // Process FFmpeg-extracted PNG frames through the same pipeline as AVI
-    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false) {
+    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -759,10 +775,16 @@ export function useAviReader() {
         const bestFramesForStacking = [];
         let top4Frames = [];
         let worstFrame = null;
+        const allAnalyzedFrames = []; // For manual threshold selection
 
         function rankFrame(frame, frameIndex) {
             // Store the frame index on the frame object for tracking
             frame.frameIndex = frameIndex;
+
+            // Store all frames when manual threshold is enabled
+            if (manualThreshold) {
+                allAnalyzedFrames.push(frame);
+            }
 
             // Higher Tenengrad sharpness = better (sharper edges)
             if (top4Frames.length < 4) {
@@ -898,6 +920,17 @@ export function useAviReader() {
         const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
         addLog(`Finished analyzing ${frameCount} frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
         emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
+
+        // Manual threshold: let user select frames instead of auto-stacking
+        if (manualThreshold) {
+            const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
+            addLog(`Manual threshold enabled: ${allFramesSorted.length} frames available for selection`);
+            emit('quality-selection-ready', {
+                frames: allFramesSorted,
+                workers: unifiedAnalyzeWorkers
+            });
+            return; // Don't terminate workers yet - they'll be used for stacking
+        }
 
         if (clientSideStacking) {
             // Client-side stacking: use one of the existing workers (before terminating them)

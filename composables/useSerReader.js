@@ -278,7 +278,7 @@ export function useSerReader() {
         return { size: finalSize };
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false) {
+    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -358,6 +358,7 @@ export function useSerReader() {
 
         const bestFramesCapacity = Math.floor(frameCount * 0.3);
         const bestFramesForStacking = []; // These will store {sharpness, blob, croppedBuffer}
+        const allAnalyzedFrames = []; // Keep all frames when manual threshold is enabled
         let top4Frames = []; // These will store {sharpness, blob}
         let worstFrame = null; // This will store {sharpness, blob}
 
@@ -366,6 +367,11 @@ export function useSerReader() {
             if (!frame.blob || !(frame.blob instanceof Blob) || frame.blob.size === 0) {
                 console.warn(`Skipping frame ${frame.index}: invalid blob (type=${frame.blob?.constructor?.name}, size=${frame.blob?.size})`);
                 return;
+            }
+
+            // Keep all frames when manual threshold is enabled
+            if (manualThreshold) {
+                allAnalyzedFrames.push(frame);
             }
 
             // Update top 4 frames
@@ -383,7 +389,7 @@ export function useSerReader() {
                 worstFrame = frame;
             }
 
-            // Keep track of best frames for stacking
+            // Keep track of best frames for stacking (still needed for non-manual mode)
             if (bestFramesForStacking.length < bestFramesCapacity) {
                 bestFramesForStacking.push(frame);
             } else {
@@ -553,7 +559,17 @@ export function useSerReader() {
             emit('set-caption', 'Cropped SER ready for download');
         }
 
-        if (clientSideStacking) {
+        if (manualThreshold) {
+            // Manual threshold: emit all frames for the quality selector
+            const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
+            addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
+            emit('quality-selection-ready', {
+                frames: allFramesSorted,
+                workers: unifiedAnalyzeWorkers // Pass workers for later stacking
+            });
+            // Don't terminate workers yet - they'll be used for stacking after selection
+            return;
+        } else if (clientSideStacking) {
             // Client-side stacking: use one of the existing workers (before terminating them)
             emit('set-caption', 'Stacking frames locally...');
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);

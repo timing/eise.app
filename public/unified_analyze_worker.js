@@ -118,6 +118,7 @@ async function handleMessage(e) {
             }
 
             let actualCropRegion = null;
+            let cropClampedTooMuch = false;
             if (bounds.canCrop && cropRegion && cropRegion.size) {
                 // Skip cropping if crop size exceeds frame dimensions
                 if (cropRegion.size <= header.width && cropRegion.size <= header.height) {
@@ -126,24 +127,33 @@ async function handleMessage(e) {
                     const centerY = bounds.y + bounds.size / 2;
                     const halfSize = cropRegion.size / 2;
 
-                    let cropX = Math.floor(centerX - halfSize);
-                    let cropY = Math.floor(centerY - halfSize);
+                    let idealCropX = Math.floor(centerX - halfSize);
+                    let idealCropY = Math.floor(centerY - halfSize);
 
                     // Ensure even pixel alignment for Bayer pattern preservation
-                    cropX = cropX & ~1; // Round down to even
-                    cropY = cropY & ~1;
+                    idealCropX = idealCropX & ~1; // Round down to even
+                    idealCropY = idealCropY & ~1;
 
                     // Ensure crop stays within frame bounds (keeping even alignment)
-                    cropX = Math.max(0, Math.min(cropX, (header.width - cropRegion.size) & ~1));
-                    cropY = Math.max(0, Math.min(cropY, (header.height - cropRegion.size) & ~1));
+                    let cropX = Math.max(0, Math.min(idealCropX, (header.width - cropRegion.size) & ~1));
+                    let cropY = Math.max(0, Math.min(idealCropY, (header.height - cropRegion.size) & ~1));
 
-                    actualCropRegion = { x: cropX, y: cropY, size: cropRegion.size };
+                    // Check if crop was clamped significantly (planet near edge)
+                    const clampThreshold = cropRegion.size * 0.1; // 10% of crop size
+                    const clampedX = Math.abs(cropX - idealCropX);
+                    const clampedY = Math.abs(cropY - idealCropY);
+                    if (clampedX > clampThreshold || clampedY > clampThreshold) {
+                        cropClampedTooMuch = true;
+                    } else {
+                        actualCropRegion = { x: cropX, y: cropY, size: cropRegion.size };
+                    }
                 }
             }
 
             // If we're in crop mode but couldn't crop this frame, skip it entirely
             if (cropRegion && !actualCropRegion) {
-                self.postMessage({ skipped: true, reason: bounds.reason || 'crop-failed', index });
+                const reason = cropClampedTooMuch ? 'near-edge' : (bounds.reason || 'crop-failed');
+                self.postMessage({ skipped: true, reason, index });
                 return;
             }
 

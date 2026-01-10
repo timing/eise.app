@@ -137,7 +137,13 @@
 			<h2>Nothing loaded yet</h2>
 			<p>Please upload a video (or bunch of files) for analyzing and stacking frames. Upload one image file for direct post processing.</p>
 		</div>
-		<ZoomableCanvas v-else id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" />
+		<template v-else>
+			<div v-if="isLoadingImage" class="loading-overlay">
+				<div class="loading-spinner"></div>
+				<p>Loading image...</p>
+			</div>
+			<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" />
+		</template>
 	</div>
 
 </div>
@@ -229,6 +235,7 @@ const postNoiseReduction = ref(0);
 const fastColorMode = ref(true); // Default to fast mode
 const blueDown = ref(0);
 const isProcessing = ref(false);
+const isLoadingImage = ref(false);
 
 // Crop state
 const cropMode = ref(false);
@@ -278,6 +285,8 @@ function valueIsChanged(prop, value){
 }
 
 async function loadImage(file) {
+	isLoadingImage.value = true;
+
 	// Lazy-load workers when first image is loaded
 	initializeWorkers();
 
@@ -293,7 +302,8 @@ async function loadImage(file) {
 	img.onload = function() {
 		canvas.value.width = img.width;
 		canvas.value.height = img.height;
-		ctx = canvas.value.getContext('2d');
+		// Use willReadFrequently for better performance with getImageData
+		ctx = canvas.value.getContext('2d', { willReadFrequently: true });
 		ctx.drawImage(img, 0, 0);
 
 		initCanvas = canvas;
@@ -309,6 +319,8 @@ async function loadImage(file) {
 		} else {
 			console.log('Using CPU for color adjustments');
 		}
+
+		isLoadingImage.value = false;
 
 		// give a small processing improvement
 		applyProcessing();
@@ -980,6 +992,23 @@ button.download {
 }
 button.download:hover {
 	background-color: #45a049;
+}
+.loading-overlay {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 40px;
+	color: #666;
+}
+.loading-spinner {
+	width: 40px;
+	height: 40px;
+	border: 4px solid #ddd;
+	border-top-color: #1976d2;
+	border-radius: 50%;
+	animation: spin 0.8s linear infinite;
+	margin-bottom: 15px;
 }
 </style>
 

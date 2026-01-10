@@ -64,9 +64,10 @@
 			</div>
 		</div>
 	
-		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" @showAbout="currentTab = 'About'" />
+		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing && !isSelectingQuality" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" @showAbout="currentTab = 'About'" />
 		<ColorProfileSelector v-show="currentTab === 'FileUploader' && isSelectingColorProfile" />
-		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing && !isSelectingColorProfile"
+		<QualitySelector v-show="currentTab === 'FileUploader' && isSelectingQuality" :frames="qualityFrames" @threshold-selected="handleThresholdSelected" />
+		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing && !isSelectingColorProfile && !isSelectingQuality"
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" />
 
@@ -82,11 +83,13 @@ import VideoFrameProcessor from './components/VideoFrameProcessor.vue';
 import PostProcessor from './components/PostProcessor.vue';
 import Logger from './components/Logger.vue';
 import ColorProfileSelector from './components/ColorProfileSelector.vue';
+import QualitySelector from './components/QualitySelector.vue';
 import { ref } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
+import { useStacker } from '@/composables/useStacker';
 
-const { on } = useEventBus();
-
+const { on, emit: eventBusEmit, addLog } = useEventBus();
+const { stackFramesLocally } = useStacker();
 
 const frames = ref([]);
 const currentFrame = ref(null);
@@ -95,6 +98,9 @@ const currentTab = ref('FileUploader');
 const videoProcessorRef = ref(null);
 const isProcessing = ref(false);
 const isSelectingColorProfile = ref(false);
+const isSelectingQuality = ref(false);
+const qualityFrames = ref([]);
+const qualityWorkers = ref(null);
 
 const loadPixel = ref(false)
 
@@ -108,7 +114,46 @@ onMounted(() => {
 	on('color-profile-selected', () => {
 		isSelectingColorProfile.value = false;
 	});
+	on('quality-selection-ready', handleQualitySelectionReady);
 });
+
+function handleQualitySelectionReady(data) {
+	console.log('handleQualitySelectionReady', data);
+	qualityFrames.value = data.frames;
+	qualityWorkers.value = data.workers;
+	isSelectingQuality.value = true;
+	eventBusEmit('stop-loading');
+}
+
+async function handleThresholdSelected(data) {
+	console.log('handleThresholdSelected', data);
+	isSelectingQuality.value = false;
+
+	// Stack the selected frames
+	if (data.frames && data.frames.length > 0 && qualityWorkers.value && qualityWorkers.value.length > 0) {
+		eventBusEmit('start-loading', 'Stacking selected frames...');
+		addLog(`Stacking ${data.frames.length} frames (${Math.round(data.percentage * 100)}% threshold)`);
+
+		const stackingWorker = qualityWorkers.value[0];
+		const stackedBlob = await stackFramesLocally(data.frames, stackingWorker);
+
+		// Terminate workers after stacking
+		qualityWorkers.value.forEach(worker => worker.terminate());
+		qualityWorkers.value = null;
+
+		if (stackedBlob) {
+			addLog('Client-side stacking complete');
+			eventBusEmit('stacked-image-ready', { blob: stackedBlob });
+		} else {
+			addLog('Client-side stacking failed - no valid frames');
+			eventBusEmit('stop-loading');
+			isProcessing.value = false;
+		}
+	} else {
+		addLog('No frames selected for stacking');
+		isProcessing.value = false;
+	}
+}
 
 async function handleStackedImageReady(data) {
 	console.log('handleStackedImageReady', data);

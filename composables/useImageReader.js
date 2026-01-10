@@ -127,7 +127,7 @@ export function useImageReader() {
         return new Uint8Array(await blob.arrayBuffer());
     }
 
-    async function readImageFiles(files, ffmpeg, loadFFmpeg) {
+    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -146,8 +146,14 @@ export function useImageReader() {
         const bestFramesForStacking = [];
         let top4Frames = [];
         let worstFrame = null;
+        const allAnalyzedFrames = []; // For manual threshold selection
 
         function rankFrame(frame) {
+            // Store all frames when manual threshold is enabled
+            if (manualThreshold) {
+                allAnalyzedFrames.push(frame);
+            }
+
             if (top4Frames.length < 4) {
                 top4Frames.push(frame);
                 top4Frames.sort((a, b) => b.sharpness - a.sharpness);
@@ -247,6 +253,17 @@ export function useImageReader() {
             try {
                 ffmpeg.exit();
             } catch (e) {}
+        }
+
+        // Manual threshold: let user select frames instead of auto-stacking
+        if (manualThreshold) {
+            const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
+            addLog(`Manual threshold enabled: ${allFramesSorted.length} frames available for selection`);
+            emit('quality-selection-ready', {
+                frames: allFramesSorted,
+                workers: unifiedAnalyzeWorkers
+            });
+            return; // Don't terminate workers yet - they'll be used for stacking
         }
 
         // Stack frames locally using the first worker (already initialized with OpenCV)
