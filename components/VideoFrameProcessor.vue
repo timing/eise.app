@@ -18,7 +18,7 @@
 
 		<div class="content" v-if="processingStage === 'analyzing'">
 			<div v-if="croppedSerData" class="cropped-ser-download">
-				<button @click="downloadCroppedSer">Download Cropped SER ({{ croppedSerData.cropSize }}x{{ croppedSerData.cropSize }}, {{ croppedSerData.frameCount }} frames)</button>
+				<button @click="downloadCroppedSer">Download Cropped SER ({{ croppedSerData.cropSize }}x{{ croppedSerData.cropSize }}, all {{ croppedSerData.frameCount }} frames)</button>
 			</div>
 
 			<h4>Top 4 Sharpest Frames</h4>

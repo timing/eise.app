@@ -1,16 +1,16 @@
 // composables/useImageReader.js
 
 import { useEventBus } from '@/composables/eventBus';
-import { useUploader } from '@/composables/useUploader';
+import { useStacker } from '@/composables/useStacker';
 
 // Native image formats that browsers can decode directly
 const NATIVE_FORMATS = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'];
 
 export function useImageReader() {
     const { addLog, emit } = useEventBus();
-    const { uploadFrames } = useUploader();
+    const { stackFramesLocally } = useStacker();
 
-    const numWorkers = navigator.hardwareConcurrency || 4;
+    const numWorkers = Math.min(navigator.hardwareConcurrency || 4, 4);
     const unifiedAnalyzeWorkers = [];
     let workersReady = false;
 
@@ -24,7 +24,7 @@ export function useImageReader() {
 
         const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
             return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 10000);
+                const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 30000);
                 worker.onmessage = (e) => {
                     if (e.data.type === 'ready') {
                         clearTimeout(timeout);
@@ -59,7 +59,14 @@ export function useImageReader() {
                 if (e.data.error) {
                     reject(e.data.error);
                 } else {
-                    resolve({ sharpness: e.data.sharpness, pngBlob: e.data.pngBlob, index: e.data.index });
+                    resolve({
+                        sharpness: e.data.sharpness,
+                        pngBlob: e.data.pngBlob,
+                        index: e.data.index,
+                        rgbaBuffer: e.data.rgbaBuffer,
+                        width: e.data.width,
+                        height: e.data.height
+                    });
                 }
             };
             const errorHandler = (e) => {
@@ -197,12 +204,19 @@ export function useImageReader() {
             const dataToWorker = {
                 type: 'ffmpeg', // Use ffmpeg type since it's PNG data
                 analyze: pngData.slice(0),
-                index: i
+                index: i,
+                includeRgba: true // Request RGBA data for client-side stacking
             };
 
             const promise = processFrameWithWorker(worker, dataToWorker, [dataToWorker.analyze.buffer])
                 .then(result => {
-                    const currentFrame = { sharpness: result.sharpness, blob: result.pngBlob };
+                    const currentFrame = {
+                        sharpness: result.sharpness,
+                        blob: result.pngBlob,
+                        rgbaBuffer: result.rgbaBuffer,
+                        width: result.width,
+                        height: result.height
+                    };
                     rankFrame(currentFrame);
 
                     completedFrames++;
@@ -228,9 +242,6 @@ export function useImageReader() {
 
         addLog(`Finished analyzing ${frameCount} images. Kept ${bestFramesForStacking.length} best images.`);
 
-        // Terminate workers
-        unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
-
         // Clean up FFmpeg if it was used
         if (ffmpegLoaded) {
             try {
@@ -238,9 +249,22 @@ export function useImageReader() {
             } catch (e) {}
         }
 
-        // Upload best frames for stacking
-        const pngBlobs = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
-        await uploadFrames(pngBlobs);
+        // Stack frames locally using the first worker (already initialized with OpenCV)
+        const stackingWorker = unifiedAnalyzeWorkers[0];
+        const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker);
+
+        // Terminate workers after stacking
+        unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
+        unifiedAnalyzeWorkers.length = 0;
+        workersReady = false;
+
+        if (stackedBlob) {
+            addLog('Client-side stacking complete');
+            emit('stacked-image-ready', { blob: stackedBlob });
+        } else {
+            addLog('Client-side stacking failed - no valid frames');
+            emit('stop-loading');
+        }
     }
 
     return { readImageFiles };

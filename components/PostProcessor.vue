@@ -127,7 +127,8 @@
 
 			<h4>Save lossless image</h4>
 
-			<button class="download" @click="downloadCanvasAsPNG">Save / Download as PNG</button>
+			<button class="download" @click="downloadUnprocessedPNG">Download Unprocessed PNG</button>
+			<button class="download" @click="downloadCanvasAsPNG">Download Processed PNG</button>
 
 		</div>
 	</div>
@@ -167,7 +168,26 @@ const downloadCanvasAsPNG = () => {
 
 	const dataURL = canvas.value.toDataURL('image/png');
 	const link = document.createElement('a');
-	link.download = 'eise_app_stacked_pps.png';
+	link.download = 'eise_app_stacked_processed.png';
+	link.href = dataURL;
+	document.body.appendChild(link); // Required for Firefox
+	link.click();
+	document.body.removeChild(link);
+};
+
+const downloadUnprocessedPNG = () => {
+	if (!initCanvasImageData) return;
+
+	// Create a temporary canvas to convert ImageData to PNG
+	const tempCanvas = document.createElement('canvas');
+	tempCanvas.width = initCanvasImageData.width;
+	tempCanvas.height = initCanvasImageData.height;
+	const tempCtx = tempCanvas.getContext('2d');
+	tempCtx.putImageData(initCanvasImageData, 0, 0);
+
+	const dataURL = tempCanvas.toDataURL('image/png');
+	const link = document.createElement('a');
+	link.download = 'eise_app_stacked_unprocessed.png';
 	link.href = dataURL;
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
@@ -951,6 +971,15 @@ canvas {
 }
 .controls {
 	position: relative;
+}
+button.download {
+	display: block;
+	margin-bottom: 8px;
+	background-color: #4CAF50;
+	color: white;
+}
+button.download:hover {
+	background-color: #45a049;
 }
 </style>
 

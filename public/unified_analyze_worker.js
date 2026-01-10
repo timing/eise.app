@@ -172,7 +172,7 @@ async function handleMessage(e) {
         let sharpness, pngBlob;
 
         if (type === 'ffmpeg') {
-            const { analyze } = e.data;
+            const { analyze, includeRgba } = e.data;
             // opencv-bindings doesn't have imdecode, so decode PNG using browser APIs
             const blob = new Blob([analyze.buffer], { type: 'image/png' });
             const imageBitmap = await createImageBitmap(blob);
@@ -193,6 +193,18 @@ async function handleMessage(e) {
             imgMat.delete();
             grayMat.delete();
             imageBitmap.close();
+
+            // Return with rgbaBuffer if client-side stacking is enabled
+            if (includeRgba) {
+                const rgbaBuffer = imageData.data.buffer.slice(0); // Copy the buffer
+                self.postMessage({
+                    sharpness, pngBlob, index,
+                    rgbaBuffer: rgbaBuffer,
+                    width: imageData.width,
+                    height: imageData.height
+                }, [rgbaBuffer]);
+                return;
+            }
         } else if (type === 'ser' || type === 'avi') {
             const header = type === 'ser' ? e.data.header : e.data.aviHeader;
             const { frameBuffer, bayerChoice } = e.data;
@@ -642,25 +654,45 @@ async function stackFramesLocally(frames) {
     _cv.cvtColor(refMat, refGray, _cv.COLOR_RGBA2GRAY);
 
     for (let f = 0; f < frameCount; f++) {
-        const frameData = new Uint8ClampedArray(validFrames[f].rgbaBuffer);
+        const frame = validFrames[f];
 
-        // Create frame Mat once per frame
-        const frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
-        frameMat.data.set(frameData);
-        const frameGray = new _cv.Mat();
-        _cv.cvtColor(frameMat, frameGray, _cv.COLOR_RGBA2GRAY);
-
-        const shifts = [];
-
-        for (let a = 0; a < alignmentPoints.length; a++) {
-            const ap = alignmentPoints[a];
-            const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius);
-            shifts.push(shift);
+        // Validate frame data
+        if (!frame.rgbaBuffer || frame.rgbaBuffer.byteLength === 0) {
+            console.error(`Frame ${f}: Invalid or detached rgbaBuffer`);
+            throw new Error(`Frame ${f} has invalid RGBA buffer (byteLength: ${frame.rgbaBuffer?.byteLength || 0})`);
         }
 
-        frameGray.delete();
-        frameMat.delete();
-        frameShifts.push(shifts);
+        const expectedSize = width * height * 4;
+        if (frame.rgbaBuffer.byteLength !== expectedSize) {
+            console.error(`Frame ${f}: Buffer size mismatch. Expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
+            throw new Error(`Frame ${f} buffer size mismatch: expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
+        }
+
+        const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
+
+        // Create frame Mat once per frame
+        let frameMat = null, frameGray = null;
+        try {
+            frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+            frameMat.data.set(frameData);
+            frameGray = new _cv.Mat();
+            _cv.cvtColor(frameMat, frameGray, _cv.COLOR_RGBA2GRAY);
+
+            const shifts = [];
+            for (let a = 0; a < alignmentPoints.length; a++) {
+                const ap = alignmentPoints[a];
+                const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius);
+                shifts.push(shift);
+            }
+            frameShifts.push(shifts);
+        } catch (cvError) {
+            console.error(`Frame ${f}: OpenCV error during alignment:`, cvError);
+            throw new Error(`Frame ${f} OpenCV error: ${cvError.message || cvError}`);
+        } finally {
+            // Always clean up Mats
+            if (frameGray) frameGray.delete();
+            if (frameMat) frameMat.delete();
+        }
 
         // Update progress every frame
         const progress = 5 + (f / frameCount) * 45;
@@ -692,19 +724,33 @@ async function stackFramesLocally(frames) {
     const mapY = new _cv.Mat(height, width, _cv.CV_32FC1);
 
     for (let f = 0; f < frameCount; f++) {
-        const frameData = new Uint8ClampedArray(validFrames[f].rgbaBuffer);
-        const frameWeight = validFrames[f].sharpness / totalSharpness * frameCount;
+        const frame = validFrames[f];
+
+        // Re-validate buffer (should still be valid from alignment phase)
+        if (!frame.rgbaBuffer || frame.rgbaBuffer.byteLength === 0) {
+            console.error(`De-warp frame ${f}: Buffer became invalid`);
+            throw new Error(`Frame ${f} buffer invalid during de-warping`);
+        }
+
+        const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
+        const frameWeight = frame.sharpness / totalSharpness * frameCount;
         const shifts = frameShifts[f];
 
         // Build displacement maps by interpolating AP shifts
         buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize);
 
         // Create frame Mat and apply remap (de-warp)
-        const frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
-        frameMat.data.set(frameData);
+        let frameMat, warpedMat;
+        try {
+            frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+            frameMat.data.set(frameData);
 
-        const warpedMat = new _cv.Mat();
-        _cv.remap(frameMat, warpedMat, mapX, mapY, _cv.INTER_LINEAR, _cv.BORDER_CONSTANT);
+            warpedMat = new _cv.Mat();
+            _cv.remap(frameMat, warpedMat, mapX, mapY, _cv.INTER_LINEAR, _cv.BORDER_CONSTANT);
+        } catch (cvError) {
+            console.error(`De-warp frame ${f}: OpenCV error:`, cvError);
+            throw new Error(`Frame ${f} de-warp OpenCV error: ${cvError.message || cvError}`);
+        }
 
         // Accumulate warped frame
         const warpedData = warpedMat.data;
@@ -860,16 +906,14 @@ function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, se
         return { dx: 0, dy: 0, quality: 0 };
     }
 
-    let templateMat, searchMat, resultMat;
+    let templateMat = null, searchMat = null, resultMat = null;
 
     try {
         // Extract template from reference (the patch we're looking for)
-        const templateRect = new _cv.Rect(templateX, templateY, patchSize, patchSize);
-        templateMat = refGray.roi(templateRect);
+        templateMat = refGray.roi(new _cv.Rect(templateX, templateY, patchSize, patchSize));
 
         // Extract search region from frame (where we look for the template)
-        const searchRect = new _cv.Rect(searchX, searchY, searchSize, searchSize);
-        searchMat = frameGray.roi(searchRect);
+        searchMat = frameGray.roi(new _cv.Rect(searchX, searchY, searchSize, searchSize));
 
         // Run template matching
         resultMat = new _cv.Mat();
@@ -884,14 +928,15 @@ function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, se
         const dx = bestLoc.x - searchRadius;
         const dy = bestLoc.y - searchRadius;
 
-        // Cleanup (roi doesn't need delete, but resultMat does)
-        resultMat.delete();
-
         return { dx, dy, quality: Math.max(0, quality) };
 
     } catch (err) {
-        if (resultMat) try { resultMat.delete(); } catch(e) {}
         return { dx: 0, dy: 0, quality: 0 };
+    } finally {
+        // IMPORTANT: roi() Mats MUST be deleted in OpenCV.js
+        if (templateMat) try { templateMat.delete(); } catch(e) {}
+        if (searchMat) try { searchMat.delete(); } catch(e) {}
+        if (resultMat) try { resultMat.delete(); } catch(e) {}
     }
 }
 
