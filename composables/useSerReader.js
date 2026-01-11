@@ -215,6 +215,7 @@ export function useSerReader() {
         let canCropCount = 0;
         const boundsPromises = [];
         const detectedCenters = []; // Collect center positions for stable reference
+        const detectedSizes = []; // Collect sizes to calculate median for outlier detection
 
         const headerForWorker = {
             fileId: header.fileId,
@@ -247,6 +248,8 @@ export function useSerReader() {
                         maxSize = Math.max(maxSize, result.bounds.size);
                         // Use actual detected center (not derived from clamped crop coords)
                         detectedCenters.push({ x: result.bounds.centerX, y: result.bounds.centerY });
+                        // Collect sizes for median calculation (outlier detection)
+                        detectedSizes.push(result.bounds.size);
                     }
                     emit('update-loading', { progress: ((idx + 1) / sampleIndices.length) * 100, current: idx + 1, total: sampleIndices.length });
                 })
@@ -287,9 +290,13 @@ export function useSerReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+        // Calculate median size for outlier detection (reject doubled/smeared frames)
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
 
-        return { size: finalSize, referenceCenter: { x: medianX, y: medianY } };
+        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
     async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false) {
@@ -431,6 +438,7 @@ export function useSerReader() {
         let successfulFrames = 0;
         let skippedFrames = 0;
         let cutOffFrames = 0;
+        let oversizedFrames = 0;
         let totalErrors = 0;
         const maxErrorsBeforeStopDispatching = 20;
         let stopDispatching = false;
@@ -474,6 +482,8 @@ export function useSerReader() {
                     if (result.skipped) {
                         if (result.reason === 'cut-off') {
                             cutOffFrames++;
+                        } else if (result.reason === 'oversized') {
+                            oversizedFrames++;
                         } else {
                             skippedFrames++;
                         }
@@ -541,6 +551,7 @@ export function useSerReader() {
 
         const skipMsgs = [];
         if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
+        if (oversizedFrames > 0) skipMsgs.push(`${oversizedFrames} oversized`);
         if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} crop-failed`);
         if (totalErrors > 0) skipMsgs.push(`${totalErrors} errors`);
         const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';

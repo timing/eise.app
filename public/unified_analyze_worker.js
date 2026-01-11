@@ -154,6 +154,19 @@ async function handleMessage(e) {
                 return;
             }
 
+            // Skip frames where detected object is too large (doubled/smeared due to bad seeing or tracking)
+            // These frames often score high on sharpness but degrade the stack
+            if (bounds.canCrop && bounds.size && cropRegion && cropRegion.medianObjectSize) {
+                const sizeRatio = bounds.size / cropRegion.medianObjectSize;
+                if (sizeRatio > 1.1) {
+                    if (index < 10 || index % 100 === 0) {
+                        console.log(`Frame ${index}: skipping oversized object (${bounds.size} vs median ${cropRegion.medianObjectSize}, ratio ${sizeRatio.toFixed(2)})`);
+                    }
+                    self.postMessage({ skipped: true, reason: 'oversized', index });
+                    return;
+                }
+            }
+
             let actualCropRegion = null;
             if (cropRegion && cropRegion.size) {
                 // Always use per-frame detection for centering - this keeps the planet centered in every frame
@@ -896,6 +909,19 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
             rawMat.delete();
             grayMat.delete();
             return { skipped: true, reason: 'cut-off' };
+        }
+
+        // Skip frames where detected object is too large (doubled/smeared due to bad seeing or tracking)
+        if (bounds.canCrop && bounds.size && cropRegion && cropRegion.medianObjectSize) {
+            const sizeRatio = bounds.size / cropRegion.medianObjectSize;
+            if (sizeRatio > 1.1) {
+                if (frameIndex < 10 || frameIndex % 100 === 0) {
+                    console.log(`Frame ${frameIndex}: skipping oversized object (${bounds.size} vs median ${cropRegion.medianObjectSize}, ratio ${sizeRatio.toFixed(2)})`);
+                }
+                rawMat.delete();
+                grayMat.delete();
+                return { skipped: true, reason: 'oversized' };
+            }
         }
 
         // Calculate crop region - use per-frame detection for centering
