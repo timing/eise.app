@@ -8,7 +8,7 @@
 		<div class="threshold-controls">
 			<label>
 				<strong>Include top:</strong>
-				<input type="range" min="1" :max="totalFrames" v-model.number="selectedCount" @input="updateThreshold" />
+				<input type="range" min="1" :max="totalFrames" v-model.number="selectedCount" @input="updateThreshold" :key="'slider-' + totalFrames" />
 				<span class="threshold-value">{{ selectedCount }} / {{ totalFrames }} frames ({{ percentageText }})</span>
 			</label>
 		</div>
@@ -73,7 +73,7 @@ const emit = defineEmits(['threshold-selected']);
 
 const graphCanvas = ref(null);
 const previewCanvas = ref(null);
-const selectedCount = ref(1);
+const selectedCount = ref(1); // Will be recalculated to 30% in initializeFromFrames
 const totalFrames = ref(0);
 const sortedFrames = ref([]);
 const previewFrameIndex = ref(0);

@@ -17,10 +17,6 @@
 		</div>
 
 		<div class="content" v-if="processingStage === 'analyzing' || processingStage === 'stacking'">
-			<div v-if="croppedSerData" class="cropped-ser-download">
-				<button @click="downloadCroppedSer">Download Cropped SER ({{ croppedSerData.cropSize }}x{{ croppedSerData.cropSize }}, all {{ croppedSerData.frameCount }} frames)</button>
-			</div>
-
 			<div v-if="processingStage === 'analyzing' && bestFrame" class="preview-frame">
 				<h4>Best Frame So Far</h4>
 				<canvas ref="bestFrameCanvas"></canvas>
@@ -166,18 +162,6 @@ onMounted(async () => {
 	});
 });
 
-function downloadCroppedSer() {
-	if (!croppedSerData.value) return;
-
-	const url = URL.createObjectURL(croppedSerData.value.blob);
-	const a = document.createElement('a');
-	a.href = url;
-	a.download = croppedSerData.value.filename;
-	document.body.appendChild(a);
-	a.click();
-	document.body.removeChild(a);
-	URL.revokeObjectURL(url);
-}
 
 function cancelProcessing() {
 	// Reload the page to reset everything
@@ -359,24 +343,6 @@ async function processImageFrames(files) {
 	}
 	.skipped-info p {
 		margin: 0;
-	}
-	.cropped-ser-download {
-		margin-bottom: 20px;
-		padding: 15px;
-		background-color: #e8f5e9;
-		border-radius: 5px;
-	}
-	.cropped-ser-download button {
-		background-color: #8CCF7E;
-		color: #111;
-		padding: 10px 20px;
-		border: none;
-		border-radius: 5px;
-		cursor: pointer;
-		font-size: 14px;
-	}
-	.cropped-ser-download button:hover {
-		background-color: #7ABF6E;
 	}
 	.action-buttons {
 		display: flex;

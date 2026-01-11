@@ -564,7 +564,6 @@ export function useSerReader() {
             const croppedSerBlob = createCroppedSerFile(header, cropRegion, croppedFrameBuffers);
             emit('cropped-ser-ready', {
                 blob: croppedSerBlob,
-                filename: file.name.replace('.ser', '_cropped.ser'),
                 cropSize: cropRegion.size,
                 frameCount: validFrameCount
             });

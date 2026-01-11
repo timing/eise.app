@@ -121,6 +121,7 @@
 
 			<button class="download" @click="downloadUnprocessedPNG">Download Unprocessed PNG</button>
 			<button class="download" @click="downloadCanvasAsPNG">Download Processed PNG</button>
+			<button v-if="props.croppedSerData" class="download" @click="downloadCroppedSer">Download Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})</button>
 
 		</div>
 	</div>
@@ -147,6 +148,11 @@ import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import { initWebGL, processWithWebGL, isWebGLAvailable, disposeWebGL } from '@/utils/webglProcessor.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
+import { useTracking } from '@/composables/useTracking';
+import { useProcessingState } from '@/composables/useProcessingState';
+
+const { track } = useTracking();
+const { getOutputFilename } = useProcessingState();
 
 const { $loadOpenCV } = useNuxtApp();
 
@@ -164,9 +170,10 @@ const handleCanvasReady = (canvasRef) => {
 const downloadCanvasAsPNG = () => {
 	if (!canvas) return;
 
+	track('download_processed');
 	const dataURL = canvas.value.toDataURL('image/png');
 	const link = document.createElement('a');
-	link.download = 'eise_app_stacked_processed.png';
+	link.download = getOutputFilename('stacked_processed', 'png');
 	link.href = dataURL;
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
@@ -176,6 +183,7 @@ const downloadCanvasAsPNG = () => {
 const downloadUnprocessedPNG = () => {
 	if (!initCanvasImageData) return;
 
+	track('download_unprocessed');
 	// Create a temporary canvas to convert ImageData to PNG
 	const tempCanvas = document.createElement('canvas');
 	tempCanvas.width = initCanvasImageData.width;
@@ -185,11 +193,25 @@ const downloadUnprocessedPNG = () => {
 
 	const dataURL = tempCanvas.toDataURL('image/png');
 	const link = document.createElement('a');
-	link.download = 'eise_app_stacked_unprocessed.png';
+	link.download = getOutputFilename('stacked_unprocessed', 'png');
 	link.href = dataURL;
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
 	document.body.removeChild(link);
+};
+
+const downloadCroppedSer = () => {
+	if (!props.croppedSerData) return;
+
+	track('download_cropped_ser');
+	const url = URL.createObjectURL(props.croppedSerData.blob);
+	const a = document.createElement('a');
+	a.href = url;
+	a.download = getOutputFilename('cropped', 'ser');
+	document.body.appendChild(a);
+	a.click();
+	document.body.removeChild(a);
+	URL.revokeObjectURL(url);
 };
 
 let waveletWorkers = null;
@@ -208,7 +230,8 @@ function initializeWorkers() {
 }
 
 const props = defineProps({
-	file: Object
+	file: Object,
+	croppedSerData: Object
 });
 
 const gain = ref(1);

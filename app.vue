@@ -1,9 +1,8 @@
 <template>
 	<div>	
 		<nav class="tabs">
-			<button :class="{ active: currentTab === 'FileUploader' }" @click="currentTab = 'FileUploader'">📁 &nbsp; Upload File(s)</button>
-			<button :class="{ active: currentTab === 'PostProcessor' }" @click="currentTab = 'PostProcessor'">✨ &nbsp; Post Process</button>	
-			<button :class="{ active: currentTab === 'About' }" style="float:right;" @click="currentTab = 'About'">ℹ️  &nbsp; About</button>	
+			<button :class="{ active: currentTab === 'FileUploader' }" @click="currentTab = 'FileUploader'">✨ &nbsp; Stack & Process</button>
+			<button :class="{ active: currentTab === 'About' }" style="float:right;" @click="currentTab = 'About'">ℹ️  &nbsp; About</button>
 		</nav>
 
 		<header>
@@ -69,7 +68,7 @@
 		<QualitySelector v-show="currentTab === 'FileUploader' && isSelectingQuality" :frames="qualityFrames" @threshold-selected="handleThresholdSelected" />
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing && !isSelectingColorProfile && !isSelectingQuality"
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
-		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" />
+		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" :croppedSerData="croppedSerData" />
 
 		<Logger />
 
@@ -84,12 +83,14 @@ import PostProcessor from './components/PostProcessor.vue';
 import Logger from './components/Logger.vue';
 import ColorProfileSelector from './components/ColorProfileSelector.vue';
 import QualitySelector from './components/QualitySelector.vue';
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
+import { useTracking } from '@/composables/useTracking';
 
 const { on, emit: eventBusEmit, addLog } = useEventBus();
 const { stackFramesLocally } = useStacker();
+const { track } = useTracking();
 
 const frames = ref([]);
 const currentFrame = ref(null);
@@ -101,11 +102,13 @@ const isSelectingColorProfile = ref(false);
 const isSelectingQuality = ref(false);
 const qualityFrames = ref([]);
 const qualityWorkers = ref(null);
+const croppedSerData = ref(null);
 
 const loadPixel = ref(false)
 
 onMounted(() => {
 	loadPixel.value = true;
+	track('page_view');
 	on('postProcessing', handlePostProcessing);
 	on('stacked-image-ready', handleStackedImageReady);
 	on('show-color-profile-selector', () => {
@@ -115,6 +118,15 @@ onMounted(() => {
 		isSelectingColorProfile.value = false;
 	});
 	on('quality-selection-ready', handleQualitySelectionReady);
+	on('cropped-ser-ready', (data) => {
+		croppedSerData.value = data;
+	});
+});
+
+watch(currentTab, (newTab) => {
+	if (newTab === 'About') {
+		track('about');
+	}
 });
 
 function handleQualitySelectionReady(data) {
@@ -161,6 +173,7 @@ async function handleStackedImageReady(data) {
 	currentTab.value = 'PostProcessor';
 	selectedFile.value = data.blob;
 	isProcessing.value = false;
+	track('post_process');
 }
 
 async function handleFrames(data) {
@@ -171,6 +184,7 @@ async function handleFrames(data) {
 
 function handleProcessingStarted() {
 	isProcessing.value = true;
+	track('stack_start');
 }
 
 async function handlePostProcessing(data) {

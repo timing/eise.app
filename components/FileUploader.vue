@@ -74,6 +74,7 @@ import { useEventBus } from '@/composables/eventBus';
 import { useSerReader } from '@/composables/useSerReader';
 import { useAviReader } from '@/composables/useAviReader';
 import { useImageReader } from '@/composables/useImageReader';
+import { useProcessingState } from '@/composables/useProcessingState';
 
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
@@ -166,8 +167,16 @@ function showAbout() {
 }
 
 async function processFiles(files) {
+	const { setInputFilename } = useProcessingState();
+
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser') || file.name.endsWith('.avi'));
 	const imageFiles = files.filter(file => file.type.startsWith('image/'));
+
+	// Set the input filename for output file naming
+	const primaryFile = videoFiles[0] || imageFiles[0];
+	if (primaryFile) {
+		setInputFilename(primaryFile.name);
+	}
 
 	if (videoFiles.length > 1) {
 		alert('Please select only one video file.');
