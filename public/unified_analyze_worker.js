@@ -1150,10 +1150,8 @@ async function stackFramesLocally(frames) {
         // Normalize sharpness for weighting
         const totalSharpness = validFrames.reduce((sum, f) => sum + f.sharpness, 0);
 
-        // Local de-warping disabled for now - causes OpenCV errors after processing many frames
-        // The per-frame cropping already centers the planet, so simple averaging works well
-        // TODO: Re-enable once memory leaks in analysis are fixed
-        const useLocalDewarping = false;
+        // Local de-warping with improved Gaussian weighting to reduce grid artifacts
+        const useLocalDewarping = true;
 
         if (useLocalDewarping) {
             // Create remap matrices once (reused for each frame)
