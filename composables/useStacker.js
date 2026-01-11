@@ -20,6 +20,11 @@ export function useStacker() {
             return null;
         }
 
+        // Emit stacking-started with reference frame (best frame = first after sort)
+        const sortedFrames = [...validFrames].sort((a, b) => b.sharpness - a.sharpness);
+        const referenceFrame = sortedFrames[0];
+        emit('stacking-started', { referenceFrame });
+
         addLog(`Sending ${validFrames.length} frames to stacking worker`);
 
         return new Promise((resolve, reject) => {

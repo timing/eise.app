@@ -58,6 +58,10 @@ export function useImageReader() {
                 worker.removeEventListener('message', messageHandler);
                 if (e.data.error) {
                     reject(e.data.error);
+                } else if (e.data.type === 'bounds') {
+                    resolve({ type: 'bounds', bounds: e.data.bounds, index: e.data.index });
+                } else if (e.data.skipped) {
+                    resolve({ skipped: true, reason: e.data.reason, index: e.data.index });
                 } else {
                     resolve({
                         sharpness: e.data.sharpness,
@@ -79,6 +83,88 @@ export function useImageReader() {
 
             worker.postMessage(data, transferables);
         });
+    }
+
+    // Detect bounds for a sample of images to determine crop region
+    async function detectCropRegion(pngDataArray, frameWidth, frameHeight) {
+        emit('set-caption', 'Detecting planet position...');
+        emit('update-loading', { progress: 0, current: 0, total: pngDataArray.length });
+
+        // Sample every Nth frame for faster detection
+        const sampleInterval = Math.max(1, Math.floor(pngDataArray.length / 50));
+        const sampleIndices = [];
+        for (let i = 0; i < pngDataArray.length; i += sampleInterval) {
+            sampleIndices.push(i);
+        }
+
+        addLog(`Sampling ${sampleIndices.length} images for crop detection...`);
+
+        let maxSize = 0;
+        let canCropCount = 0;
+        const detectedCenters = [];
+        const boundsPromises = [];
+
+        for (let idx = 0; idx < sampleIndices.length; idx++) {
+            const i = sampleIndices[idx];
+            const pngData = pngDataArray[i];
+            const workerIndex = idx % numWorkers;
+            const worker = unifiedAnalyzeWorkers[workerIndex];
+
+            const dataToWorker = {
+                type: 'detect-bounds-png',
+                pngData: pngData.slice(0),
+                index: idx
+            };
+
+            const promise = processFrameWithWorker(worker, dataToWorker, [dataToWorker.pngData.buffer])
+                .then(result => {
+                    if (result.bounds && result.bounds.canCrop) {
+                        canCropCount++;
+                        maxSize = Math.max(maxSize, result.bounds.size);
+                        // Use actual detected center (not derived from clamped crop coords)
+                        detectedCenters.push({ x: result.bounds.centerX, y: result.bounds.centerY });
+                    }
+                    emit('update-loading', { progress: ((idx + 1) / sampleIndices.length) * 100, current: idx + 1, total: sampleIndices.length });
+                })
+                .catch(error => {
+                    console.error(`Error detecting bounds for sample ${idx}:`, error);
+                });
+
+            boundsPromises.push(promise);
+        }
+
+        await Promise.all(boundsPromises);
+
+        const cropThreshold = sampleIndices.length * 0.5;
+        if (canCropCount < cropThreshold) {
+            addLog(`Only ${canCropCount}/${sampleIndices.length} images can be cropped. Skipping auto-crop.`);
+            return null;
+        }
+
+        // Add 10% margin and round up to even number
+        let finalSize = Math.ceil(maxSize * 1.05 / 2) * 2;
+
+        // Limit to frame dimensions
+        const maxAllowedSize = Math.min(frameWidth, frameHeight);
+        if (finalSize > maxAllowedSize) {
+            addLog(`Crop size ${finalSize} exceeds frame size ${maxAllowedSize}, skipping auto-crop`);
+            return null;
+        }
+
+        // Calculate median center as fallback reference
+        if (detectedCenters.length === 0) {
+            addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} images croppable)`);
+            return { size: finalSize };
+        }
+
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} images croppable)`);
+
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY } };
     }
 
     // Convert an image file to PNG ArrayBuffer using FFmpeg
@@ -127,7 +213,7 @@ export function useImageReader() {
         return new Uint8Array(await blob.arrayBuffer());
     }
 
-    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false) {
+    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, enableAutoCrop = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -144,8 +230,7 @@ export function useImageReader() {
         const frameCount = files.length;
         const bestFramesCapacity = Math.max(1, Math.floor(frameCount * 0.3));
         const bestFramesForStacking = [];
-        let top4Frames = [];
-        let worstFrame = null;
+        let bestFrameSoFar = null; // Best frame found so far (for preview)
         const allAnalyzedFrames = []; // For manual threshold selection
 
         function rankFrame(frame) {
@@ -154,17 +239,9 @@ export function useImageReader() {
                 allAnalyzedFrames.push(frame);
             }
 
-            if (top4Frames.length < 4) {
-                top4Frames.push(frame);
-                top4Frames.sort((a, b) => b.sharpness - a.sharpness);
-            } else if (frame.sharpness > top4Frames[3].sharpness) {
-                top4Frames.pop();
-                top4Frames.push(frame);
-                top4Frames.sort((a, b) => b.sharpness - a.sharpness);
-            }
-
-            if (worstFrame === null || frame.sharpness < worstFrame.sharpness) {
-                worstFrame = frame;
+            // Update best frame for preview
+            if (bestFrameSoFar === null || frame.sharpness > bestFrameSoFar.sharpness) {
+                bestFrameSoFar = frame;
             }
 
             if (bestFramesForStacking.length < bestFramesCapacity) {
@@ -182,6 +259,12 @@ export function useImageReader() {
         const workerPromises = [];
         let completedFrames = 0;
         let ffmpegLoaded = false;
+        let skippedFrames = 0;
+        let cutOffFrames = 0;
+
+        // First pass: convert all files to PNG data
+        const pngDataArray = [];
+        let firstWidth = 0, firstHeight = 0;
 
         for (let i = 0; i < frameCount; i++) {
             const file = files[i];
@@ -199,23 +282,84 @@ export function useImageReader() {
                     }
                     pngData = await convertImageToPng(file, ffmpeg, loadFFmpeg);
                 }
+                pngDataArray.push(pngData);
+
+                // Get dimensions from first image for crop detection
+                if (i === 0 && enableAutoCrop) {
+                    const img = new Image();
+                    const blob = new Blob([pngData], { type: 'image/png' });
+                    const url = URL.createObjectURL(blob);
+                    await new Promise((resolve, reject) => {
+                        img.onload = resolve;
+                        img.onerror = reject;
+                        img.src = url;
+                    });
+                    URL.revokeObjectURL(url);
+                    firstWidth = img.width;
+                    firstHeight = img.height;
+                }
             } catch (error) {
                 addLog(`Error processing ${file.name}: ${error.message}`);
-                continue;
+                pngDataArray.push(null); // Placeholder for failed conversions
+            }
+        }
+
+        // Determine crop region if auto-crop is enabled
+        const MIN_SIZE_FOR_CROP = 300;
+        let cropRegion = null;
+
+        if (enableAutoCrop && firstWidth >= MIN_SIZE_FOR_CROP && firstHeight >= MIN_SIZE_FOR_CROP) {
+            addLog(`Frame size ${firstWidth}x${firstHeight} qualifies for auto-crop`);
+            const validPngData = pngDataArray.filter(d => d !== null);
+            cropRegion = await detectCropRegion(validPngData, firstWidth, firstHeight);
+
+            if (cropRegion) {
+                addLog(`Will crop images to ${cropRegion.size}x${cropRegion.size}`);
+            }
+        } else if (enableAutoCrop && firstWidth > 0) {
+            addLog(`Frame size ${firstWidth}x${firstHeight} too small for auto-crop (min ${MIN_SIZE_FOR_CROP}x${MIN_SIZE_FOR_CROP})`);
+        }
+
+        emit('set-caption', cropRegion ? 'Cropping and analyzing images' : 'Analyzing images');
+
+        // Second pass: analyze (and optionally crop) all images
+        for (let i = 0; i < frameCount; i++) {
+            const pngData = pngDataArray[i];
+            if (!pngData) {
+                completedFrames++;
+                continue; // Skip failed conversions
             }
 
             const workerIndex = i % numWorkers;
             const worker = unifiedAnalyzeWorkers[workerIndex];
 
-            const dataToWorker = {
+            const dataToWorker = cropRegion ? {
+                type: 'analyze-cropped-png',
+                pngData: pngData.slice(0),
+                cropRegion: cropRegion,
+                index: i,
+                includeRgba: true
+            } : {
                 type: 'ffmpeg', // Use ffmpeg type since it's PNG data
                 analyze: pngData.slice(0),
                 index: i,
                 includeRgba: true // Request RGBA data for client-side stacking
             };
 
-            const promise = processFrameWithWorker(worker, dataToWorker, [dataToWorker.analyze.buffer])
+            const transferables = cropRegion ? [dataToWorker.pngData.buffer] : [dataToWorker.analyze.buffer];
+
+            const promise = processFrameWithWorker(worker, dataToWorker, transferables)
                 .then(result => {
+                    if (result.skipped) {
+                        if (result.reason === 'cut-off') {
+                            cutOffFrames++;
+                        } else {
+                            skippedFrames++;
+                        }
+                        completedFrames++;
+                        return;
+                    }
+
                     const currentFrame = {
                         sharpness: result.sharpness,
                         blob: result.pngBlob,
@@ -227,18 +371,18 @@ export function useImageReader() {
 
                     completedFrames++;
 
-                    if (result.index % 5 === 0 || result.index === frameCount - 1) {
+                    if (i % 5 === 0 || i === frameCount - 1) {
                         emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
 
-                        const top4FrameBlobs = top4Frames.map(f => f.blob);
-                        const worstFrameBlob = worstFrame ? worstFrame.blob : null;
-
-                        emit('ser-frames-updated', { top: top4FrameBlobs, worst: worstFrameBlob });
+                        if (bestFrameSoFar) {
+                            emit('best-frame-updated', bestFrameSoFar);
+                        }
                     }
                 })
                 .catch(error => {
                     addLog(`Error analyzing image ${i}: ${error}`);
                     console.error(`Error analyzing image ${i}:`, error);
+                    completedFrames++;
                 });
 
             workerPromises.push(promise);
@@ -246,7 +390,11 @@ export function useImageReader() {
 
         await Promise.all(workerPromises);
 
-        addLog(`Finished analyzing ${frameCount} images. Kept ${bestFramesForStacking.length} best images.`);
+        const skipMsgs = [];
+        if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
+        if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} crop-failed`);
+        const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
+        addLog(`Finished analyzing ${frameCount} images. Kept ${bestFramesForStacking.length} best images.${skippedMsg}`);
 
         // Clean up FFmpeg if it was used
         if (ffmpegLoaded) {
@@ -255,10 +403,10 @@ export function useImageReader() {
             } catch (e) {}
         }
 
-        // Manual threshold: let user select frames instead of auto-stacking
+        // Manual threshold: let user select frames
         if (manualThreshold) {
             const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
-            addLog(`Manual threshold enabled: ${allFramesSorted.length} frames available for selection`);
+            addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: unifiedAnalyzeWorkers

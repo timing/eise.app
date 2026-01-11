@@ -1,5 +1,5 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v9 - callback-based OpenCV init)');
+console.log('unified_analyze_worker.js loaded (v19 - fix Size cleanup bug)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
@@ -90,7 +90,39 @@ async function handleMessage(e) {
             return;
         }
 
-        // Analyze with optional cropping - detects object center per-frame and applies fixed crop size
+        // Bounding box detection from PNG data (for image files)
+        if (type === 'detect-bounds-png') {
+            const { pngData } = e.data;
+            const bounds = await detectObjectBoundsFromPng(pngData);
+            self.postMessage({ type: 'bounds', bounds, index });
+            return;
+        }
+
+        // Analyze PNG with cropping (for image files)
+        if (type === 'analyze-cropped-png') {
+            const { pngData, cropRegion, includeRgba } = e.data;
+            const result = await analyzeAndCropPng(pngData, cropRegion, index, includeRgba);
+            if (result.skipped) {
+                self.postMessage({ skipped: true, reason: result.reason, index });
+                return;
+            }
+            const response = {
+                sharpness: result.sharpness,
+                pngBlob: result.pngBlob,
+                index
+            };
+            if (includeRgba && result.rgbaBuffer) {
+                response.rgbaBuffer = result.rgbaBuffer;
+                response.width = result.width;
+                response.height = result.height;
+                self.postMessage(response, [result.rgbaBuffer]);
+            } else {
+                self.postMessage(response);
+            }
+            return;
+        }
+
+        // Analyze with optional cropping - uses fixed reference center for stable positioning
         if (type === 'analyze-cropped') {
             const { frameBuffer, header, bayerChoice, cropRegion } = e.data;
 
@@ -108,52 +140,70 @@ async function handleMessage(e) {
                 throw new Error(`Buffer size mismatch in analyze-cropped: got ${frameBuffer.byteLength}, expected ${expectedSize}`);
             }
 
-            // First detect where the object is in this specific frame
+            // Check if object is cut-off (partially outside frame)
             let bounds;
             try {
                 bounds = await detectObjectBounds(frameBuffer, header, bayerChoice);
             } catch (boundsError) {
-                // Fall back to no cropping
                 bounds = { canCrop: false, reason: 'detection-error' };
             }
 
-            let actualCropRegion = null;
-            let cropClampedTooMuch = false;
-            if (bounds.canCrop && cropRegion && cropRegion.size) {
-                // Skip cropping if crop size exceeds frame dimensions
-                if (cropRegion.size <= header.width && cropRegion.size <= header.height) {
-                    // Calculate crop region centered on the detected object
-                    const centerX = bounds.x + bounds.size / 2;
-                    const centerY = bounds.y + bounds.size / 2;
-                    const halfSize = cropRegion.size / 2;
-
-                    let idealCropX = Math.floor(centerX - halfSize);
-                    let idealCropY = Math.floor(centerY - halfSize);
-
-                    // Ensure even pixel alignment for Bayer pattern preservation
-                    idealCropX = idealCropX & ~1; // Round down to even
-                    idealCropY = idealCropY & ~1;
-
-                    // Ensure crop stays within frame bounds (keeping even alignment)
-                    let cropX = Math.max(0, Math.min(idealCropX, (header.width - cropRegion.size) & ~1));
-                    let cropY = Math.max(0, Math.min(idealCropY, (header.height - cropRegion.size) & ~1));
-
-                    // Check if crop was clamped significantly (planet near edge)
-                    const clampThreshold = cropRegion.size * 0.1; // 10% of crop size
-                    const clampedX = Math.abs(cropX - idealCropX);
-                    const clampedY = Math.abs(cropY - idealCropY);
-                    if (clampedX > clampThreshold || clampedY > clampThreshold) {
-                        cropClampedTooMuch = true;
-                    } else {
-                        actualCropRegion = { x: cropX, y: cropY, size: cropRegion.size };
-                    }
-                }
+            // Skip frames where the object is cut-off (partially outside frame)
+            if (bounds.reason === 'cut-off') {
+                self.postMessage({ skipped: true, reason: 'cut-off', index });
+                return;
             }
 
-            // If we're in crop mode but couldn't crop this frame, skip it entirely
+            let actualCropRegion = null;
+            if (cropRegion && cropRegion.size) {
+                // Always use per-frame detection for centering - this keeps the planet centered in every frame
+                // The cropRegion.size is pre-calculated to be large enough to contain the planet with movement margin
+                let centerX, centerY;
+                if (bounds.canCrop && bounds.centerX !== undefined) {
+                    // Use actual detected center for this frame
+                    centerX = bounds.centerX;
+                    centerY = bounds.centerY;
+                } else if (cropRegion.referenceCenter) {
+                    // Fall back to reference center if detection failed for this frame
+                    centerX = cropRegion.referenceCenter.x;
+                    centerY = cropRegion.referenceCenter.y;
+                } else {
+                    // Can't determine center - skip frame
+                    self.postMessage({ skipped: true, reason: bounds.reason || 'no-center', index });
+                    return;
+                }
+
+                // Debug: log first few frames' crop positioning
+                if (index < 3) {
+                    console.log(`Crop debug frame ${index}: detected center=(${centerX.toFixed(1)}, ${centerY.toFixed(1)}), cropSize=${cropRegion.size}, frameSize=${header.width}x${header.height}`);
+                }
+
+                const halfSize = cropRegion.size / 2;
+
+                let idealCropX = Math.floor(centerX - halfSize);
+                let idealCropY = Math.floor(centerY - halfSize);
+
+                // Ensure even pixel alignment for Bayer pattern preservation
+                idealCropX = idealCropX & ~1; // Round down to even
+                idealCropY = idealCropY & ~1;
+
+                // Calculate padding needed on each side (negative values mean no padding needed)
+                const padLeft = Math.max(0, -idealCropX);
+                const padTop = Math.max(0, -idealCropY);
+                const padRight = Math.max(0, (idealCropX + cropRegion.size) - header.width);
+                const padBottom = Math.max(0, (idealCropY + cropRegion.size) - header.height);
+
+                actualCropRegion = {
+                    x: idealCropX,
+                    y: idealCropY,
+                    size: cropRegion.size,
+                    padding: { left: padLeft, top: padTop, right: padRight, bottom: padBottom }
+                };
+            }
+
+            // If we're in crop mode but couldn't create crop region, skip the frame
             if (cropRegion && !actualCropRegion) {
-                const reason = cropClampedTooMuch ? 'near-edge' : (bounds.reason || 'crop-failed');
-                self.postMessage({ skipped: true, reason, index });
+                self.postMessage({ skipped: true, reason: 'crop-failed', index });
                 return;
             }
 
@@ -275,7 +325,8 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
     try {
         // Log every 100th frame to track progress without flooding console
         if (frameIndex !== undefined && frameIndex % 100 === 0) {
-            console.log(`Processing frame ${frameIndex}: ${width}x${height}, crop=${cropRegion ? 'yes' : 'no'}`);
+            const cropInfo = cropRegion ? `${cropRegion.size}x${cropRegion.size}` : 'full';
+            console.log(`Processing frame ${frameIndex}: ${width}x${height} -> ${cropInfo}`);
         }
 
         // --- Step 1: Create initial Mat from raw buffer ---
@@ -288,12 +339,9 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             }
             rawMat = _cv.matFromArray(height, width, serDataType, serData);
 
-            // Apply cropping if specified
+            // Apply cropping with padding if specified
             if (cropRegion) {
-                const rect = new _cv.Rect(cropRegion.x, cropRegion.y, cropRegion.size, cropRegion.size);
-                croppedRawMat = rawMat.roi(rect).clone();
-                rawMat.delete();
-                rawMat = croppedRawMat;
+                rawMat = applyCropWithPadding(rawMat, cropRegion, width, height);
             }
 
             // Convert to 8-bit for processing
@@ -306,12 +354,9 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             rawMat = new _cv.Mat(height, width, aviDataType);
             rawMat.data.set(new Uint8Array(frameBuffer));
 
-            // Apply cropping if specified
+            // Apply cropping with padding if specified
             if (cropRegion) {
-                const rect = new _cv.Rect(cropRegion.x, cropRegion.y, cropRegion.size, cropRegion.size);
-                croppedRawMat = rawMat.roi(rect).clone();
-                rawMat.delete();
-                rawMat = croppedRawMat;
+                rawMat = applyCropWithPadding(rawMat, cropRegion, width, height);
             }
 
             grayMat = new _cv.Mat();
@@ -382,8 +427,8 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             }
         }
 
-        // --- Step 4: Create PNG Blob ---
-        let pngBlob;
+        // --- Step 4: Create PNG Blob (optional - may fail if memory is tight) ---
+        let pngBlob = null;
         try {
             const tempOffscreenCanvas = new OffscreenCanvas(actualWidth, actualHeight);
             const tempCtx = tempOffscreenCanvas.getContext('2d');
@@ -395,7 +440,11 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             tempCtx.putImageData(imageData, 0, 0);
             pngBlob = await tempOffscreenCanvas.convertToBlob({ type: 'image/png' });
         } catch (pngErr) {
-            throw new Error(`PNG creation failed (${actualWidth}x${actualHeight}): ${pngErr.message || pngErr}`);
+            // PNG creation failed (likely out of memory) - continue without it
+            // The rgbaBuffer can still be used for stacking and preview generation
+            if (frameIndex !== undefined && frameIndex % 500 === 0) {
+                console.warn(`PNG creation skipped for frame ${frameIndex} (memory): ${pngErr.message || pngErr}`);
+            }
         }
 
         // --- Step 5: Get cropped raw buffer for SER export (if cropping was applied) ---
@@ -427,6 +476,51 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
 }
 
 
+/**
+ * Apply crop with padding using BORDER_REPLICATE for edges that extend outside frame
+ * This keeps the object perfectly centered even when near frame edges
+ */
+function applyCropWithPadding(srcMat, cropRegion, frameWidth, frameHeight) {
+    const { x, y, size, padding } = cropRegion;
+
+    // If no padding needed, use simple roi crop
+    if (!padding || (padding.left === 0 && padding.top === 0 && padding.right === 0 && padding.bottom === 0)) {
+        const rect = new _cv.Rect(x, y, size, size);
+        const cropped = srcMat.roi(rect).clone();
+        srcMat.delete();
+        return cropped;
+    }
+
+    // Calculate the valid region within the source frame
+    const validX = Math.max(0, x);
+    const validY = Math.max(0, y);
+    const validRight = Math.min(frameWidth, x + size);
+    const validBottom = Math.min(frameHeight, y + size);
+    const validWidth = validRight - validX;
+    const validHeight = validBottom - validY;
+
+    // Extract the valid portion from source
+    const validRect = new _cv.Rect(validX, validY, validWidth, validHeight);
+    const validPortion = srcMat.roi(validRect).clone();
+    srcMat.delete();
+
+    // Apply padding using BORDER_REPLICATE (extends edge pixels)
+    const paddedMat = new _cv.Mat();
+    _cv.copyMakeBorder(
+        validPortion,
+        paddedMat,
+        padding.top,
+        padding.bottom,
+        padding.left,
+        padding.right,
+        _cv.BORDER_REPLICATE
+    );
+    validPortion.delete();
+
+    return paddedMat;
+}
+
+
 function calculateSharpnessFromMat(grayMat, frameIndex) {
     // Use Tenengrad (Sobel-based) sharpness metric - more robust than Laplacian variance
     // Tenengrad = sum of squared Sobel gradients, normalized by image size
@@ -436,39 +530,47 @@ function calculateSharpnessFromMat(grayMat, frameIndex) {
         return 0;
     }
 
-    const sobelX = new _cv.Mat();
-    const sobelY = new _cv.Mat();
+    let sobelX = null, sobelY = null, sobelX2 = null, sobelY2 = null, gradientMagnitude = null;
 
-    // Calculate Sobel gradients
-    _cv.Sobel(grayMat, sobelX, _cv.CV_64F, 1, 0, 3); // dx
-    _cv.Sobel(grayMat, sobelY, _cv.CV_64F, 0, 1, 3); // dy
+    try {
+        sobelX = new _cv.Mat();
+        sobelY = new _cv.Mat();
 
-    // Square the gradients
-    const sobelX2 = new _cv.Mat();
-    const sobelY2 = new _cv.Mat();
-    _cv.multiply(sobelX, sobelX, sobelX2);
-    _cv.multiply(sobelY, sobelY, sobelY2);
+        // Calculate Sobel gradients
+        _cv.Sobel(grayMat, sobelX, _cv.CV_64F, 1, 0, 3); // dx
+        _cv.Sobel(grayMat, sobelY, _cv.CV_64F, 0, 1, 3); // dy
 
-    // Sum of squared gradients
-    const gradientMagnitude = new _cv.Mat();
-    _cv.add(sobelX2, sobelY2, gradientMagnitude);
+        // Square the gradients
+        sobelX2 = new _cv.Mat();
+        sobelY2 = new _cv.Mat();
+        _cv.multiply(sobelX, sobelX, sobelX2);
+        _cv.multiply(sobelY, sobelY, sobelY2);
 
-    // Calculate mean (Tenengrad normalized by pixel count)
-    const meanVal = _cv.mean(gradientMagnitude);
-    const sharpness = meanVal[0]; // Mean of gradient magnitude squared
+        // Sum of squared gradients
+        gradientMagnitude = new _cv.Mat();
+        _cv.add(sobelX2, sobelY2, gradientMagnitude);
 
-    // Log first frame only for debugging
-    if (frameIndex === 0) {
-        console.log(`Frame analysis: ${grayMat.cols}x${grayMat.rows}, Tenengrad sharpness=${sharpness.toFixed(2)}`);
+        // Calculate mean (Tenengrad normalized by pixel count)
+        const meanVal = _cv.mean(gradientMagnitude);
+        const sharpness = meanVal[0]; // Mean of gradient magnitude squared
+
+        // Log first frame only for debugging
+        if (frameIndex === 0) {
+            console.log(`Frame analysis: ${grayMat.cols}x${grayMat.rows}, Tenengrad sharpness=${sharpness.toFixed(2)}`);
+        }
+
+        return sharpness;
+    } catch (error) {
+        const errMsg = typeof error === 'number' ? `OpenCV error ${error}` : (error.message || String(error));
+        console.warn(`Sharpness calculation failed for frame ${frameIndex}: ${errMsg}`);
+        return 0;
+    } finally {
+        if (sobelX) try { sobelX.delete(); } catch(e) {}
+        if (sobelY) try { sobelY.delete(); } catch(e) {}
+        if (sobelX2) try { sobelX2.delete(); } catch(e) {}
+        if (sobelY2) try { sobelY2.delete(); } catch(e) {}
+        if (gradientMagnitude) try { gradientMagnitude.delete(); } catch(e) {}
     }
-
-    sobelX.delete();
-    sobelY.delete();
-    sobelX2.delete();
-    sobelY2.delete();
-    gradientMagnitude.delete();
-
-    return sharpness;
 }
 
 // Detect bounding box of bright objects (planet + moons) in frame
@@ -476,6 +578,10 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
     const { width, height, pixelDepth } = header;
     let grayMat = null;
     let rawMat = null;
+    let blurred = null;
+    let binary = null;
+    let contours = null;
+    let hierarchy = null;
 
     try {
         // Create grayscale mat from frame buffer
@@ -514,18 +620,19 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
         }
 
         // Apply Gaussian blur to reduce noise
-        const blurred = new _cv.Mat();
+        blurred = new _cv.Mat();
+        // Note: cv.Size() returns a plain JS object {width, height}, not a WASM object, so no .delete() needed
         _cv.GaussianBlur(grayMat, blurred, new _cv.Size(5, 5), 0);
 
         // Use a low threshold to catch faint features like Saturn's rings
         // Otsu often sets threshold too high for faint details
         // Using ~5% of max (threshold 12-15) catches rings while ignoring noise
-        const binary = new _cv.Mat();
+        binary = new _cv.Mat();
         _cv.threshold(blurred, binary, 12, 255, _cv.THRESH_BINARY);
 
         // Find contours
-        const contours = new _cv.MatVector();
-        const hierarchy = new _cv.Mat();
+        contours = new _cv.MatVector();
+        hierarchy = new _cv.Mat();
         _cv.findContours(binary, contours, hierarchy, _cv.RETR_EXTERNAL, _cv.CHAIN_APPROX_SIMPLE);
 
         // Collect all bounding boxes
@@ -546,13 +653,11 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
             maxY = Math.max(maxY, rect.y + rect.height);
         }
 
-        // Cleanup
-        blurred.delete();
-        binary.delete();
-        contours.delete();
-        hierarchy.delete();
-        if (rawMat) rawMat.delete();
-        if (grayMat) grayMat.delete();
+        // Cleanup intermediate Mats (raw/gray cleaned in finally)
+        if (blurred) { blurred.delete(); blurred = null; }
+        if (binary) { binary.delete(); binary = null; }
+        if (contours) { contours.delete(); contours = null; }
+        if (hierarchy) { hierarchy.delete(); hierarchy = null; }
 
         if (!hasObjects) {
             return { canCrop: false, reason: 'no-objects' };
@@ -569,11 +674,11 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
         }
 
         // Calculate bounding box with margin
-        // Use 50% padding to accommodate Saturn's rings and other extended features
+        // Use 20% padding - enough for Saturn's rings while keeping crop small
         const boxWidth = maxX - minX;
         const boxHeight = maxY - minY;
-        const marginX = boxWidth * 0.5;
-        const marginY = boxHeight * 0.5;
+        const marginX = boxWidth * 0.2;
+        const marginY = boxHeight * 0.2;
 
         // Make it square (use larger dimension)
         const size = Math.max(boxWidth + marginX * 2, boxHeight + marginY * 2);
@@ -601,13 +706,13 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
             x: cropX,
             y: cropY,
             size: cropSize,
+            centerX: centerX,  // Actual detected object center (not affected by clamping)
+            centerY: centerY,  // Actual detected object center (not affected by clamping)
             originalWidth: width,
             originalHeight: height
         };
 
     } catch (error) {
-        if (rawMat) try { rawMat.delete(); } catch(e) {}
-        if (grayMat) try { grayMat.delete(); } catch(e) {}
         // OpenCV errors during bounds detection are non-fatal - frame will still be processed
         // Only log first few to avoid spam
         if (!self.boundsErrorCount) self.boundsErrorCount = 0;
@@ -617,6 +722,265 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
             self.boundsErrorCount++;
         }
         return { canCrop: false, reason: 'error' };
+    } finally {
+        // Clean up ALL OpenCV resources
+        if (blurred) try { blurred.delete(); } catch(e) {}
+        if (binary) try { binary.delete(); } catch(e) {}
+        if (contours) try { contours.delete(); } catch(e) {}
+        if (hierarchy) try { hierarchy.delete(); } catch(e) {}
+        if (rawMat) try { rawMat.delete(); } catch(e) {}
+        if (grayMat) try { grayMat.delete(); } catch(e) {}
+    }
+}
+
+// =====================================================
+// PNG-BASED DETECTION AND CROPPING (for image files)
+// =====================================================
+
+/**
+ * Detect object bounds from PNG data
+ */
+async function detectObjectBoundsFromPng(pngData) {
+    let rawMat = null, grayMat = null;
+    let blurred = null, binary = null, contours = null, hierarchy = null;
+
+    try {
+        // Decode PNG using browser APIs
+        const blob = new Blob([pngData.buffer], { type: 'image/png' });
+        const imageBitmap = await createImageBitmap(blob);
+        const { width, height } = imageBitmap;
+
+        // Draw to OffscreenCanvas to get pixel data
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(imageBitmap, 0, 0);
+        const imageData = ctx.getImageData(0, 0, width, height);
+        imageBitmap.close();
+
+        // Create OpenCV Mat from RGBA data
+        rawMat = _cv.matFromImageData(imageData);
+        grayMat = new _cv.Mat();
+        _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
+
+        // Apply Gaussian blur to reduce noise
+        blurred = new _cv.Mat();
+        // Note: cv.Size() returns a plain JS object {width, height}, not a WASM object, so no .delete() needed
+        _cv.GaussianBlur(grayMat, blurred, new _cv.Size(5, 5), 0);
+
+        // Use low threshold to catch faint features
+        binary = new _cv.Mat();
+        _cv.threshold(blurred, binary, 12, 255, _cv.THRESH_BINARY);
+
+        // Find contours
+        contours = new _cv.MatVector();
+        hierarchy = new _cv.Mat();
+        _cv.findContours(binary, contours, hierarchy, _cv.RETR_EXTERNAL, _cv.CHAIN_APPROX_SIMPLE);
+
+        // Collect all bounding boxes
+        let minX = width, minY = height, maxX = 0, maxY = 0;
+        let hasObjects = false;
+        const minContourArea = (width * height) * 0.0001;
+
+        for (let i = 0; i < contours.size(); i++) {
+            const contour = contours.get(i);
+            const area = _cv.contourArea(contour);
+            if (area < minContourArea) continue;
+
+            hasObjects = true;
+            const rect = _cv.boundingRect(contour);
+            minX = Math.min(minX, rect.x);
+            minY = Math.min(minY, rect.y);
+            maxX = Math.max(maxX, rect.x + rect.width);
+            maxY = Math.max(maxY, rect.y + rect.height);
+        }
+
+        // Cleanup intermediate Mats (raw/gray cleaned in finally)
+        if (blurred) { blurred.delete(); blurred = null; }
+        if (binary) { binary.delete(); binary = null; }
+        if (contours) { contours.delete(); contours = null; }
+        if (hierarchy) { hierarchy.delete(); hierarchy = null; }
+
+        if (!hasObjects) {
+            return { canCrop: false, reason: 'no-objects' };
+        }
+
+        // Check if object is cut off at edges
+        const edgeMargin = Math.max(width, height) * 0.01;
+        const isCutOff = minX < edgeMargin || minY < edgeMargin ||
+                         maxX > width - edgeMargin || maxY > height - edgeMargin;
+
+        if (isCutOff) {
+            return { canCrop: false, reason: 'cut-off' };
+        }
+
+        // Calculate bounding box with margin
+        // Use 20% padding - enough for Saturn's rings while keeping crop small
+        const boxWidth = maxX - minX;
+        const boxHeight = maxY - minY;
+        const marginX = boxWidth * 0.2;
+        const marginY = boxHeight * 0.2;
+
+        // Make it square
+        const size = Math.max(boxWidth + marginX * 2, boxHeight + marginY * 2);
+        const centerX = (minX + maxX) / 2;
+        const centerY = (minY + maxY) / 2;
+
+        let cropX = Math.max(0, Math.floor(centerX - size / 2));
+        let cropY = Math.max(0, Math.floor(centerY - size / 2));
+        let cropSize = Math.floor(size);
+
+        // Ensure even pixel alignment
+        cropX = cropX & ~1;
+        cropY = cropY & ~1;
+        cropSize = cropSize & ~1;
+
+        // Adjust if crop goes beyond frame
+        if (cropX + cropSize > width) cropX = (width - cropSize) & ~1;
+        if (cropY + cropSize > height) cropY = (height - cropSize) & ~1;
+        if (cropX < 0) { cropX = 0; cropSize = width & ~1; }
+        if (cropY < 0) { cropY = 0; cropSize = height & ~1; }
+
+        return {
+            canCrop: true,
+            x: cropX,
+            y: cropY,
+            size: cropSize,
+            centerX: centerX,  // Actual detected object center (not affected by clamping)
+            centerY: centerY,  // Actual detected object center (not affected by clamping)
+            originalWidth: width,
+            originalHeight: height
+        };
+
+    } catch (error) {
+        console.warn('PNG bounds detection failed:', error.message || error);
+        return { canCrop: false, reason: 'error' };
+    } finally {
+        // Clean up ALL OpenCV resources
+        if (blurred) try { blurred.delete(); } catch(e) {}
+        if (binary) try { binary.delete(); } catch(e) {}
+        if (contours) try { contours.delete(); } catch(e) {}
+        if (hierarchy) try { hierarchy.delete(); } catch(e) {}
+        if (rawMat) try { rawMat.delete(); } catch(e) {}
+        if (grayMat) try { grayMat.delete(); } catch(e) {}
+    }
+}
+
+/**
+ * Analyze and crop PNG data
+ */
+async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
+    let rawMat = null, grayMat = null, rgbaMat = null;
+
+    try {
+        // Decode PNG using browser APIs
+        const blob = new Blob([pngData.buffer], { type: 'image/png' });
+        const imageBitmap = await createImageBitmap(blob);
+        const { width, height } = imageBitmap;
+
+        // Draw to OffscreenCanvas to get pixel data
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(imageBitmap, 0, 0);
+        const imageData = ctx.getImageData(0, 0, width, height);
+        imageBitmap.close();
+
+        // Create OpenCV Mat from RGBA data
+        rawMat = _cv.matFromImageData(imageData);
+
+        // Check if object is cut-off
+        grayMat = new _cv.Mat();
+        _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
+
+        const bounds = await detectObjectBoundsFromPng(pngData);
+        if (bounds.reason === 'cut-off') {
+            rawMat.delete();
+            grayMat.delete();
+            return { skipped: true, reason: 'cut-off' };
+        }
+
+        // Calculate crop region - use per-frame detection for centering
+        let actualCropRegion = null;
+        if (cropRegion && cropRegion.size) {
+            let centerX, centerY;
+            if (bounds.canCrop && bounds.centerX !== undefined) {
+                // Use actual detected center for this frame
+                centerX = bounds.centerX;
+                centerY = bounds.centerY;
+            } else if (cropRegion.referenceCenter) {
+                // Fall back to reference center if detection failed
+                centerX = cropRegion.referenceCenter.x;
+                centerY = cropRegion.referenceCenter.y;
+            } else {
+                rawMat.delete();
+                grayMat.delete();
+                return { skipped: true, reason: bounds.reason || 'no-center' };
+            }
+
+            const halfSize = cropRegion.size / 2;
+            let idealCropX = Math.floor(centerX - halfSize);
+            let idealCropY = Math.floor(centerY - halfSize);
+
+            // Ensure even pixel alignment
+            idealCropX = idealCropX & ~1;
+            idealCropY = idealCropY & ~1;
+
+            // Calculate padding needed
+            const padLeft = Math.max(0, -idealCropX);
+            const padTop = Math.max(0, -idealCropY);
+            const padRight = Math.max(0, (idealCropX + cropRegion.size) - width);
+            const padBottom = Math.max(0, (idealCropY + cropRegion.size) - height);
+
+            actualCropRegion = {
+                x: idealCropX,
+                y: idealCropY,
+                size: cropRegion.size,
+                padding: { left: padLeft, top: padTop, right: padRight, bottom: padBottom }
+            };
+        }
+
+        if (cropRegion && !actualCropRegion) {
+            rawMat.delete();
+            grayMat.delete();
+            return { skipped: true, reason: 'crop-failed' };
+        }
+
+        // Apply cropping if needed
+        if (actualCropRegion) {
+            rawMat = applyCropWithPadding(rawMat, actualCropRegion, width, height);
+            grayMat.delete();
+            grayMat = new _cv.Mat();
+            _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
+        }
+
+        // Get actual dimensions (may be cropped)
+        const actualWidth = rawMat.cols;
+        const actualHeight = rawMat.rows;
+
+        // Calculate sharpness
+        const sharpness = calculateSharpnessFromMat(grayMat, frameIndex);
+
+        // Create PNG blob from (cropped) RGBA data
+        const outputCanvas = new OffscreenCanvas(actualWidth, actualHeight);
+        const outputCtx = outputCanvas.getContext('2d');
+        const outputImageData = new ImageData(new Uint8ClampedArray(rawMat.data), actualWidth, actualHeight);
+        outputCtx.putImageData(outputImageData, 0, 0);
+        const pngBlob = await outputCanvas.convertToBlob({ type: 'image/png' });
+
+        // Get RGBA buffer if needed
+        let rgbaBuffer = null;
+        if (includeRgba) {
+            rgbaBuffer = new Uint8ClampedArray(rawMat.data).buffer;
+        }
+
+        rawMat.delete();
+        grayMat.delete();
+
+        return { sharpness, pngBlob, rgbaBuffer, width: actualWidth, height: actualHeight };
+
+    } catch (error) {
+        if (rawMat) try { rawMat.delete(); } catch(e) {}
+        if (grayMat) try { grayMat.delete(); } catch(e) {}
+        throw error;
     }
 }
 
@@ -628,199 +992,297 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
  * Stack frames with local alignment using Alignment Points (APs)
  */
 async function stackFramesLocally(frames) {
-    self.postMessage({ type: 'stack-progress', stage: 'Preparing frames...', progress: 0 });
+    // Track resources for cleanup on error
+    let refMat = null, refGray = null, mapX = null, mapY = null;
 
-    // Filter frames that have valid rgbaBuffer and sharpness
-    const validFrames = frames.filter(f => f.rgbaBuffer && f.width && f.height && f.sharpness > 0);
+    try {
+        self.postMessage({ type: 'stack-progress', stage: 'Preparing frames...', progress: 0 });
 
-    if (validFrames.length === 0) {
-        throw new Error('No valid frames with RGBA data for stacking');
-    }
+        // Filter frames that have valid rgbaBuffer and sharpness
+        const validFrames = frames.filter(f => f.rgbaBuffer && f.width && f.height && f.sharpness > 0);
 
-    const { width, height } = validFrames[0];
-    const frameCount = validFrames.length;
-
-    console.log(`Stacking ${frameCount} frames (${width}x${height}) with local alignment`);
-
-    // Sort frames by sharpness and use best as reference
-    const sortedFrames = [...validFrames].sort((a, b) => b.sharpness - a.sharpness);
-    const referenceFrame = sortedFrames[0];
-    const refData = new Uint8ClampedArray(referenceFrame.rgbaBuffer);
-    console.log(`Reference frame: sharpness ${referenceFrame.sharpness.toFixed(2)}`);
-
-    // === Create Alignment Points Grid ===
-    const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height);
-    console.log(`Created ${alignmentPoints.length} alignment points (${patchSize}px patches, ${searchRadius}px search)`);
-
-    // === Find local shifts for each frame at each AP ===
-    console.log(`Finding alignments for ${frameCount} frames with ${alignmentPoints.length} APs each...`);
-    self.postMessage({ type: 'stack-progress', stage: `Aligning frame 1/${frameCount}...`, progress: 5 });
-    const frameShifts = []; // frameShifts[frameIdx][apIdx] = {dx, dy, quality}
-
-    // Create reference Mat once (reused for all frames)
-    const refMat = new _cv.Mat(height, width, _cv.CV_8UC4);
-    refMat.data.set(refData);
-    const refGray = new _cv.Mat();
-    _cv.cvtColor(refMat, refGray, _cv.COLOR_RGBA2GRAY);
-
-    for (let f = 0; f < frameCount; f++) {
-        const frame = validFrames[f];
-
-        // Validate frame data
-        if (!frame.rgbaBuffer || frame.rgbaBuffer.byteLength === 0) {
-            console.error(`Frame ${f}: Invalid or detached rgbaBuffer`);
-            throw new Error(`Frame ${f} has invalid RGBA buffer (byteLength: ${frame.rgbaBuffer?.byteLength || 0})`);
+        if (validFrames.length === 0) {
+            throw new Error('No valid frames with RGBA data for stacking');
         }
 
-        const expectedSize = width * height * 4;
-        if (frame.rgbaBuffer.byteLength !== expectedSize) {
-            console.error(`Frame ${f}: Buffer size mismatch. Expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
-            throw new Error(`Frame ${f} buffer size mismatch: expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
-        }
+        const { width, height } = validFrames[0];
+        const frameCount = validFrames.length;
 
-        const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
-
-        // Create frame Mat once per frame
-        let frameMat = null, frameGray = null;
-        try {
-            frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
-            frameMat.data.set(frameData);
-            frameGray = new _cv.Mat();
-            _cv.cvtColor(frameMat, frameGray, _cv.COLOR_RGBA2GRAY);
-
-            const shifts = [];
-            for (let a = 0; a < alignmentPoints.length; a++) {
-                const ap = alignmentPoints[a];
-                const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius);
-                shifts.push(shift);
+        // Validate all frames have consistent dimensions
+        for (let i = 0; i < validFrames.length; i++) {
+            const f = validFrames[i];
+            if (f.width !== width || f.height !== height) {
+                throw new Error(`Frame ${i} has dimensions ${f.width}x${f.height}, expected ${width}x${height}`);
             }
-            frameShifts.push(shifts);
-        } catch (cvError) {
-            console.error(`Frame ${f}: OpenCV error during alignment:`, cvError);
-            throw new Error(`Frame ${f} OpenCV error: ${cvError.message || cvError}`);
-        } finally {
-            // Always clean up Mats
-            if (frameGray) frameGray.delete();
-            if (frameMat) frameMat.delete();
-        }
-
-        // Update progress every frame
-        const progress = 5 + (f / frameCount) * 45;
-        self.postMessage({
-            type: 'stack-progress',
-            stage: `Aligning frame ${f + 1}/${frameCount}...`,
-            progress: progress
-        });
-    }
-
-    refGray.delete();
-    refMat.delete();
-    console.log('Alignment complete');
-
-    // === Stack with LOCAL de-warping (true de-wobble) ===
-    self.postMessage({ type: 'stack-progress', stage: 'De-warping frames...', progress: 50 });
-
-    // Accumulator for final image (RGB + weight per pixel)
-    const accumR = new Float32Array(width * height);
-    const accumG = new Float32Array(width * height);
-    const accumB = new Float32Array(width * height);
-    const accumWeight = new Float32Array(width * height);
-
-    // Normalize sharpness for weighting
-    const totalSharpness = validFrames.reduce((sum, f) => sum + f.sharpness, 0);
-
-    // Create remap matrices once (reused for each frame)
-    const mapX = new _cv.Mat(height, width, _cv.CV_32FC1);
-    const mapY = new _cv.Mat(height, width, _cv.CV_32FC1);
-
-    for (let f = 0; f < frameCount; f++) {
-        const frame = validFrames[f];
-
-        // Re-validate buffer (should still be valid from alignment phase)
-        if (!frame.rgbaBuffer || frame.rgbaBuffer.byteLength === 0) {
-            console.error(`De-warp frame ${f}: Buffer became invalid`);
-            throw new Error(`Frame ${f} buffer invalid during de-warping`);
-        }
-
-        const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
-        const frameWeight = frame.sharpness / totalSharpness * frameCount;
-        const shifts = frameShifts[f];
-
-        // Build displacement maps by interpolating AP shifts
-        buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize);
-
-        // Create frame Mat and apply remap (de-warp)
-        let frameMat, warpedMat;
-        try {
-            frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
-            frameMat.data.set(frameData);
-
-            warpedMat = new _cv.Mat();
-            _cv.remap(frameMat, warpedMat, mapX, mapY, _cv.INTER_LINEAR, _cv.BORDER_CONSTANT);
-        } catch (cvError) {
-            console.error(`De-warp frame ${f}: OpenCV error:`, cvError);
-            throw new Error(`Frame ${f} de-warp OpenCV error: ${cvError.message || cvError}`);
-        }
-
-        // Accumulate warped frame
-        const warpedData = warpedMat.data;
-        for (let i = 0; i < width * height; i++) {
-            const srcIdx = i * 4;
-            // Skip black pixels (border from remap)
-            if (warpedData[srcIdx] === 0 && warpedData[srcIdx + 1] === 0 && warpedData[srcIdx + 2] === 0) {
-                continue;
+            const expectedBytes = f.width * f.height * 4;
+            if (!f.rgbaBuffer || f.rgbaBuffer.byteLength !== expectedBytes) {
+                throw new Error(`Frame ${i} buffer mismatch: got ${f.rgbaBuffer?.byteLength || 0} bytes, expected ${expectedBytes} (${f.width}x${f.height})`);
             }
-            accumR[i] += warpedData[srcIdx] * frameWeight;
-            accumG[i] += warpedData[srcIdx + 1] * frameWeight;
-            accumB[i] += warpedData[srcIdx + 2] * frameWeight;
-            accumWeight[i] += frameWeight;
         }
 
-        frameMat.delete();
-        warpedMat.delete();
+        console.log(`Stacking ${frameCount} frames (${width}x${height}) with local alignment`);
 
-        // Update progress every frame
-        self.postMessage({
-            type: 'stack-progress',
-            stage: `De-warping frame ${f + 1}/${frameCount}...`,
-            progress: 50 + (f / frameCount) * 45 // 50-95%
-        });
-    }
+        // Sort frames by sharpness and use best as reference
+        const sortedFrames = [...validFrames].sort((a, b) => b.sharpness - a.sharpness);
+        const referenceFrame = sortedFrames[0];
+        const refData = new Uint8ClampedArray(referenceFrame.rgbaBuffer);
+        console.log(`Reference frame: sharpness ${referenceFrame.sharpness.toFixed(2)}`);
 
-    mapX.delete();
-    mapY.delete();
-    console.log('De-warping complete');
+        // === Create Alignment Points Grid ===
+        const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height);
+        console.log(`Created ${alignmentPoints.length} alignment points (${patchSize}px patches, ${searchRadius}px search)`);
 
-    // === Compute final result ===
-    self.postMessage({ type: 'stack-progress', stage: 'Finalizing...', progress: 95 });
-    const result = new Uint8ClampedArray(width * height * 4);
+        // === Find local shifts for each frame at each AP ===
+        console.log(`Finding alignments for ${frameCount} frames with ${alignmentPoints.length} APs each...`);
+        self.postMessage({ type: 'stack-progress', stage: `Aligning frame 1/${frameCount}...`, progress: 5 });
+        const frameShifts = []; // frameShifts[frameIdx][apIdx] = {dx, dy, quality}
 
-    for (let i = 0; i < width * height; i++) {
-        const w = accumWeight[i];
-        if (w > 0) {
-            result[i * 4 + 0] = Math.round(accumR[i] / w);
-            result[i * 4 + 1] = Math.round(accumG[i] / w);
-            result[i * 4 + 2] = Math.round(accumB[i] / w);
+        // Create reference Mat once (reused for all frames)
+        // Sometimes OpenCV WASM fails intermittently - retry a few times
+        console.log('Creating reference Mat...');
+        console.log(`  Reference buffer: ${referenceFrame.rgbaBuffer?.byteLength || 'DETACHED'} bytes, expected ${width * height * 4}`);
+
+        if (!referenceFrame.rgbaBuffer || referenceFrame.rgbaBuffer.byteLength === 0) {
+            throw new Error(`Reference frame buffer is detached or empty`);
+        }
+
+        const maxRetries = 3;
+        let lastError = null;
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                // Clean up any previous failed attempts
+                if (refMat) { try { refMat.delete(); } catch(e) {} refMat = null; }
+                if (refGray) { try { refGray.delete(); } catch(e) {} refGray = null; }
+
+                refMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+                refMat.data.set(refData);
+                refGray = new _cv.Mat();
+                _cv.cvtColor(refMat, refGray, _cv.COLOR_RGBA2GRAY);
+
+                console.log(`  Reference Mat created successfully (attempt ${attempt})`);
+                lastError = null;
+                break; // Success!
+            } catch (e) {
+                lastError = typeof e === 'number' ? `OpenCV error ${e}` : (e.message || String(e));
+                console.warn(`  Attempt ${attempt}/${maxRetries} failed: ${lastError}`);
+
+                // Clean up failed attempt
+                if (refMat) { try { refMat.delete(); } catch(e) {} refMat = null; }
+                if (refGray) { try { refGray.delete(); } catch(e) {} refGray = null; }
+
+                if (attempt < maxRetries) {
+                    // Small delay before retry
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+            }
+        }
+
+        if (lastError) {
+            throw new Error(`Failed to create reference Mat after ${maxRetries} attempts: ${lastError}`);
+        }
+
+        for (let f = 0; f < frameCount; f++) {
+            const frame = validFrames[f];
+
+            // Validate frame data
+            if (!frame.rgbaBuffer || frame.rgbaBuffer.byteLength === 0) {
+                console.error(`Frame ${f}: Invalid or detached rgbaBuffer`);
+                throw new Error(`Frame ${f} has invalid RGBA buffer (byteLength: ${frame.rgbaBuffer?.byteLength || 0})`);
+            }
+
+            const expectedSize = width * height * 4;
+            if (frame.rgbaBuffer.byteLength !== expectedSize) {
+                console.error(`Frame ${f}: Buffer size mismatch. Expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
+                throw new Error(`Frame ${f} buffer size mismatch: expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
+            }
+
+            const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
+
+            // Create frame Mat once per frame
+            let frameMat = null, frameGray = null;
+            try {
+                frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+                frameMat.data.set(frameData);
+                frameGray = new _cv.Mat();
+                _cv.cvtColor(frameMat, frameGray, _cv.COLOR_RGBA2GRAY);
+
+                const shifts = [];
+                for (let a = 0; a < alignmentPoints.length; a++) {
+                    const ap = alignmentPoints[a];
+                    const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius);
+                    shifts.push(shift);
+                }
+                frameShifts.push(shifts);
+            } catch (cvError) {
+                const errMsg = typeof cvError === 'number' ? `OpenCV error code: ${cvError}` : (cvError.message || String(cvError));
+                console.error(`Frame ${f}: OpenCV error during alignment:`, errMsg);
+                throw new Error(`Frame ${f} alignment error: ${errMsg}`);
+            } finally {
+                // Always clean up Mats
+                if (frameGray) try { frameGray.delete(); } catch(e) {}
+                if (frameMat) try { frameMat.delete(); } catch(e) {}
+            }
+
+            // Update progress every frame
+            const progress = 5 + (f / frameCount) * 45;
+            self.postMessage({
+                type: 'stack-progress',
+                stage: `Aligning frame ${f + 1}/${frameCount}...`,
+                progress: progress
+            });
+        }
+
+        // Clean up reference Mats after alignment phase
+        if (refGray) { refGray.delete(); refGray = null; }
+        if (refMat) { refMat.delete(); refMat = null; }
+        console.log('Alignment complete');
+
+        // === Stack with LOCAL de-warping ===
+        self.postMessage({ type: 'stack-progress', stage: 'De-warping frames...', progress: 50 });
+
+        // Accumulator for final image (RGB + weight per pixel)
+        const accumR = new Float32Array(width * height);
+        const accumG = new Float32Array(width * height);
+        const accumB = new Float32Array(width * height);
+        const accumWeight = new Float32Array(width * height);
+
+        // Normalize sharpness for weighting
+        const totalSharpness = validFrames.reduce((sum, f) => sum + f.sharpness, 0);
+
+        // Local de-warping disabled for now - causes OpenCV errors after processing many frames
+        // The per-frame cropping already centers the planet, so simple averaging works well
+        // TODO: Re-enable once memory leaks in analysis are fixed
+        const useLocalDewarping = false;
+
+        if (useLocalDewarping) {
+            // Create remap matrices once (reused for each frame)
+            console.log('Creating remap matrices...');
+            mapX = new _cv.Mat(height, width, _cv.CV_32FC1);
+            mapY = new _cv.Mat(height, width, _cv.CV_32FC1);
+            console.log('Remap matrices created successfully');
         } else {
-            // Fallback to reference frame if no data
-            result[i * 4 + 0] = refData[i * 4 + 0];
-            result[i * 4 + 1] = refData[i * 4 + 1];
-            result[i * 4 + 2] = refData[i * 4 + 2];
+            console.log('Using simple weighted averaging (no local de-warping)');
         }
-        result[i * 4 + 3] = 255; // Alpha
+
+        for (let f = 0; f < frameCount; f++) {
+            const frame = validFrames[f];
+
+            // Re-validate buffer (should still be valid from alignment phase)
+            if (!frame.rgbaBuffer || frame.rgbaBuffer.byteLength === 0) {
+                console.error(`Stack frame ${f}: Buffer became invalid`);
+                throw new Error(`Frame ${f} buffer invalid during stacking`);
+            }
+
+            const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
+            const frameWeight = frame.sharpness / totalSharpness * frameCount;
+
+            if (useLocalDewarping) {
+                const shifts = frameShifts[f];
+
+                // Create frame Mat
+                let frameMat = null, warpedMat = null;
+                try {
+                    frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+                    frameMat.data.set(frameData);
+
+                    // Build displacement maps from shifts (local atmospheric wobble)
+                    buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize);
+
+                    // Apply local de-warping via remap
+                    warpedMat = new _cv.Mat();
+                    _cv.remap(frameMat, warpedMat, mapX, mapY, _cv.INTER_LINEAR, _cv.BORDER_CONSTANT);
+
+                    // Accumulate warped frame
+                    const warpedData = warpedMat.data;
+                    for (let i = 0; i < width * height; i++) {
+                        const srcIdx = i * 4;
+                        // Skip black pixels (border from remap)
+                        if (warpedData[srcIdx] === 0 && warpedData[srcIdx + 1] === 0 && warpedData[srcIdx + 2] === 0) {
+                            continue;
+                        }
+                        accumR[i] += warpedData[srcIdx] * frameWeight;
+                        accumG[i] += warpedData[srcIdx + 1] * frameWeight;
+                        accumB[i] += warpedData[srcIdx + 2] * frameWeight;
+                        accumWeight[i] += frameWeight;
+                    }
+                } catch (cvError) {
+                    const errMsg = typeof cvError === 'number' ? `OpenCV error code: ${cvError}` : (cvError.message || String(cvError));
+                    console.error(`De-warp frame ${f}: OpenCV error:`, errMsg);
+                    throw new Error(`Frame ${f} de-warp error: ${errMsg}`);
+                } finally {
+                    if (warpedMat) try { warpedMat.delete(); } catch(e) {}
+                    if (frameMat) try { frameMat.delete(); } catch(e) {}
+                }
+            } else {
+                // Simple weighted averaging without de-warping
+                for (let i = 0; i < width * height; i++) {
+                    const srcIdx = i * 4;
+                    accumR[i] += frameData[srcIdx] * frameWeight;
+                    accumG[i] += frameData[srcIdx + 1] * frameWeight;
+                    accumB[i] += frameData[srcIdx + 2] * frameWeight;
+                    accumWeight[i] += frameWeight;
+                }
+            }
+
+            // Update progress every frame
+            self.postMessage({
+                type: 'stack-progress',
+                stage: `Stacking frame ${f + 1}/${frameCount}...`,
+                progress: 50 + (f / frameCount) * 45 // 50-95%
+            });
+        }
+
+        // Clean up remap matrices if used
+        if (mapX) { mapX.delete(); mapX = null; }
+        if (mapY) { mapY.delete(); mapY = null; }
+        console.log('Stacking complete');
+
+        // === Compute final result ===
+        self.postMessage({ type: 'stack-progress', stage: 'Finalizing...', progress: 95 });
+        const result = new Uint8ClampedArray(width * height * 4);
+
+        for (let i = 0; i < width * height; i++) {
+            const w = accumWeight[i];
+            if (w > 0) {
+                result[i * 4 + 0] = Math.round(accumR[i] / w);
+                result[i * 4 + 1] = Math.round(accumG[i] / w);
+                result[i * 4 + 2] = Math.round(accumB[i] / w);
+            } else {
+                // Fallback to reference frame if no data
+                result[i * 4 + 0] = refData[i * 4 + 0];
+                result[i * 4 + 1] = refData[i * 4 + 1];
+                result[i * 4 + 2] = refData[i * 4 + 2];
+            }
+            result[i * 4 + 3] = 255; // Alpha
+        }
+
+        // Create ImageData and convert to blob
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        const imageData = new ImageData(result, width, height);
+        ctx.putImageData(imageData, 0, 0);
+
+        const blob = await canvas.convertToBlob({ type: 'image/png' });
+        console.log(`Stacked image: ${width}x${height}, ${(blob.size / 1024).toFixed(1)} KB`);
+
+        self.postMessage({ type: 'stack-progress', stage: 'Stacking complete', progress: 100 });
+        return { blob, width, height };
+
+    } catch (error) {
+        // Convert OpenCV error codes to meaningful messages
+        const errorMsg = typeof error === 'number'
+            ? `OpenCV error code: ${error}`
+            : (error.message || String(error));
+        console.error('Stacking failed:', errorMsg);
+        throw new Error(errorMsg);
+    } finally {
+        // Clean up any remaining OpenCV resources
+        if (refGray) try { refGray.delete(); } catch(e) {}
+        if (refMat) try { refMat.delete(); } catch(e) {}
+        if (mapX) try { mapX.delete(); } catch(e) {}
+        if (mapY) try { mapY.delete(); } catch(e) {}
     }
-
-    // Create ImageData and convert to blob
-    const canvas = new OffscreenCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-    const imageData = new ImageData(result, width, height);
-    ctx.putImageData(imageData, 0, 0);
-
-    const blob = await canvas.convertToBlob({ type: 'image/png' });
-    console.log(`Stacked image: ${width}x${height}, ${(blob.size / 1024).toFixed(1)} KB`);
-
-    self.postMessage({ type: 'stack-progress', stage: 'Stacking complete', progress: 100 });
-    return { blob, width, height };
 }
 
 /**
@@ -851,17 +1313,26 @@ function createAPGrid(width, height) {
 /**
  * Build displacement maps for cv.remap by interpolating AP shifts
  * This creates a smooth warp field from sparse alignment point measurements
+ * Uses Gaussian weighting for smooth transitions between AP regions
  */
 function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize) {
     const mapXData = mapX.data32F;
     const mapYData = mapY.data32F;
-    const influenceRadius = patchSize * 2; // How far each AP influences
+
+    // Larger influence radius for smoother blending (was patchSize * 2)
+    const influenceRadius = patchSize * 4;
+    // Gaussian sigma - controls falloff smoothness
+    const sigma = patchSize * 1.5;
+    const sigma2 = sigma * sigma * 2;
+
+    // Minimum quality threshold - ignore poor matches
+    const minQuality = 0.3;
 
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
             const idx = y * width + x;
 
-            // Interpolate shift from nearby APs using inverse distance weighting
+            // Interpolate shift from nearby APs using Gaussian weighting
             let totalWeight = 0;
             let weightedDx = 0;
             let weightedDy = 0;
@@ -869,12 +1340,19 @@ function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shift
             for (let i = 0; i < alignmentPoints.length; i++) {
                 const ap = alignmentPoints[i];
                 const shift = shifts[i];
-                const dist = Math.sqrt((x - ap.x) ** 2 + (y - ap.y) ** 2);
 
-                if (dist < influenceRadius) {
-                    // Inverse distance weighting with quality factor
-                    const distWeight = 1 / (1 + (dist / patchSize) ** 2);
-                    const weight = distWeight * (0.5 + 0.5 * shift.quality);
+                // Skip low-quality matches - they add noise
+                if (shift.quality < minQuality) continue;
+
+                const dx = x - ap.x;
+                const dy = y - ap.y;
+                const dist2 = dx * dx + dy * dy;
+
+                if (dist2 < influenceRadius * influenceRadius) {
+                    // Gaussian weighting for smooth falloff (no sharp boundaries)
+                    const gaussWeight = Math.exp(-dist2 / sigma2);
+                    // Scale by match quality
+                    const weight = gaussWeight * shift.quality;
 
                     weightedDx += shift.dx * weight;
                     weightedDy += shift.dy * weight;
@@ -1031,4 +1509,5 @@ function findLocalShift(refData, frameData, width, height, ap, patchSize, search
         return { dx: 0, dy: 0, quality: 0 };
     }
 }
+
 

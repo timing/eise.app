@@ -32,14 +32,6 @@
 				<span>{{ vibrance }}</span>
 			</div>
 
-			<div class="mode-toggle">
-				<label>
-					<input type="checkbox" v-model="fastColorMode" @change="applyProcessing"/>
-					Fast color mode
-				</label>
-				<span class="mode-hint">{{ fastColorMode ? '(colors applied after sharpening - faster)' : '(colors applied before sharpening - higher quality)' }}</span>
-			</div>
-
 			<h4>Sharpening</h4>
 
 			<div class="sharpening-subsection">
@@ -232,7 +224,6 @@ const deconvIterations = ref(0);
 const bilateralFraction = ref(0.5);
 const bilateralRange = ref(50);
 const postNoiseReduction = ref(0);
-const fastColorMode = ref(true); // Default to fast mode
 const blueDown = ref(0);
 const isProcessing = ref(false);
 const isLoadingImage = ref(false);
@@ -424,19 +415,13 @@ function doColorAdjustments(sourceData) {
 
 // Debounced processing - waits for user to stop dragging before heavy processing
 const applyProcessingInternal = async() => {
-	console.log('applyProcessing', fastColorMode.value ? '(fast mode)' : '(quality mode)');
+	console.log('applyProcessing');
 	isProcessing.value = true;
 
 	// Start with original image
 	let workingImage = initCanvasImageData;
 
-	// STEP 1: Apply colors (in quality mode, colors come first)
-	if (!fastColorMode.value) {
-		console.log('color adjustments (quality)', useWebGL ? '(WebGL)' : '(CPU)');
-		workingImage = doColorAdjustments(workingImage);
-	}
-
-	// STEP 2: Deconvolution (if enabled) - runs in worker
+	// STEP 1: Deconvolution (if enabled) - runs in worker
 	if (deconvRadius.value > 0 && deconvIterations.value > 0) {
 		console.log(`deconvolution (PSF=${deconvRadius.value}, iterations=${deconvIterations.value})`);
 		try {
@@ -448,7 +433,7 @@ const applyProcessingInternal = async() => {
 		}
 	}
 
-	// STEP 3: Wavelet sharpening (if enabled)
+	// STEP 2: Wavelet sharpening (if enabled)
 	if (waveletsAmount.value > 0) {
 		console.log('wavelets');
 		try {
@@ -464,13 +449,11 @@ const applyProcessingInternal = async() => {
 		}
 	}
 
-	// STEP 4: Apply colors (in fast mode, colors come after sharpening)
-	if (fastColorMode.value) {
-		console.log('color adjustments (fast)', useWebGL ? '(WebGL)' : '(CPU)');
-		workingImage = doColorAdjustments(workingImage);
-	}
+	// STEP 3: Apply color adjustments
+	console.log('color adjustments', useWebGL ? '(WebGL)' : '(CPU)');
+	workingImage = doColorAdjustments(workingImage);
 
-	// STEP 5: Noise reduction (if enabled)
+	// STEP 4: Noise reduction (if enabled)
 	if (postNoiseReduction.value >= 3) {
 		console.log('noise reduction');
 		const srcMat = imageDataToMat(workingImage);
@@ -899,22 +882,6 @@ canvas {
 	margin-right: 2px;
 	min-width: 66px;
 }
-.mode-toggle {
-	margin: 15px 0;
-	padding: 10px;
-	background-color: #f5f5f5;
-	border-radius: 5px;
-}
-.mode-toggle label {
-	font-weight: bold;
-	cursor: pointer;
-}
-.mode-hint {
-	display: block;
-	font-size: 11px;
-	color: #666;
-	margin-top: 4px;
-}
 .crop-controls {
 	display: flex;
 	gap: 10px;
@@ -928,8 +895,8 @@ canvas {
 	cursor: pointer;
 }
 .crop-controls .apply-crop {
-	background-color: #4CAF50;
-	color: white;
+	background-color: #8CCF7E;
+	color: #111;
 }
 .crop-controls .apply-crop:disabled {
 	background-color: #ccc;
@@ -973,7 +940,7 @@ canvas {
 .spinner {
 	width: 14px;
 	height: 14px;
-	border: 2px solid #1976d2;
+	border: 2px solid #27587c;
 	border-top-color: transparent;
 	border-radius: 50%;
 	animation: spin 0.8s linear infinite;
@@ -987,11 +954,11 @@ canvas {
 button.download {
 	display: block;
 	margin-bottom: 8px;
-	background-color: #4CAF50;
-	color: white;
+	background-color: #8CCF7E;
+	color: #111;
 }
 button.download:hover {
-	background-color: #45a049;
+	background-color: #7ABF6E;
 }
 .loading-overlay {
 	display: flex;
@@ -1005,7 +972,7 @@ button.download:hover {
 	width: 40px;
 	height: 40px;
 	border: 4px solid #ddd;
-	border-top-color: #1976d2;
+	border-top-color: #27587c;
 	border-radius: 50%;
 	animation: spin 0.8s linear infinite;
 	margin-bottom: 15px;

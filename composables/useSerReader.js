@@ -211,9 +211,10 @@ export function useSerReader() {
 
         addLog(`Sampling ${sampleIndices.length} frames for crop detection...`);
 
-        let maxX = 0, maxY = 0, maxSize = 0;
+        let maxSize = 0;
         let canCropCount = 0;
         const boundsPromises = [];
+        const detectedCenters = []; // Collect center positions for stable reference
 
         const headerForWorker = {
             fileId: header.fileId,
@@ -244,6 +245,8 @@ export function useSerReader() {
                         canCropCount++;
                         // Track the maximum crop region needed
                         maxSize = Math.max(maxSize, result.bounds.size);
+                        // Use actual detected center (not derived from clamped crop coords)
+                        detectedCenters.push({ x: result.bounds.centerX, y: result.bounds.centerY });
                     }
                     emit('update-loading', { progress: ((idx + 1) / sampleIndices.length) * 100, current: idx + 1, total: sampleIndices.length });
                 })
@@ -264,7 +267,7 @@ export function useSerReader() {
         }
 
         // Add 10% margin to the max size and round up to even number
-        let finalSize = Math.ceil(maxSize * 1.1 / 2) * 2;
+        let finalSize = Math.ceil(maxSize * 1.05 / 2) * 2;
 
         // Limit crop size to frame dimensions
         const maxAllowedSize = Math.min(header.width, header.height);
@@ -273,9 +276,20 @@ export function useSerReader() {
             return null;
         }
 
+        // Calculate median center as fallback reference
+        if (detectedCenters.length === 0) {
+            addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+            return { size: finalSize };
+        }
+
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
         addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
-        return { size: finalSize };
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY } };
     }
 
     async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false) {
@@ -359,8 +373,7 @@ export function useSerReader() {
         const bestFramesCapacity = Math.floor(frameCount * 0.3);
         const bestFramesForStacking = []; // These will store {sharpness, blob, croppedBuffer}
         const allAnalyzedFrames = []; // Keep all frames when manual threshold is enabled
-        let top4Frames = []; // These will store {sharpness, blob}
-        let worstFrame = null; // This will store {sharpness, blob}
+        let bestFrameSoFar = null; // Best frame found so far (for preview)
 
         function rankFrame(frame) {
             // Validate frame has valid blob
@@ -374,19 +387,9 @@ export function useSerReader() {
                 allAnalyzedFrames.push(frame);
             }
 
-            // Update top 4 frames
-            if (top4Frames.length < 4) {
-                top4Frames.push(frame);
-                top4Frames.sort((a, b) => b.sharpness - a.sharpness);
-            } else if (frame.sharpness > top4Frames[3].sharpness) {
-                top4Frames.pop();
-                top4Frames.push(frame);
-                top4Frames.sort((a, b) => b.sharpness - a.sharpness);
-            }
-
-            // Update worst frame
-            if (worstFrame === null || frame.sharpness < worstFrame.sharpness) {
-                worstFrame = frame;
+            // Update best frame for preview
+            if (bestFrameSoFar === null || frame.sharpness > bestFrameSoFar.sharpness) {
+                bestFrameSoFar = frame;
             }
 
             // Keep track of best frames for stacking (still needed for non-manual mode)
@@ -509,10 +512,9 @@ export function useSerReader() {
                         emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
                         addLog(`Analyzed frame ${completedFrames}/${frameCount}`);
 
-                        const top4FrameBlobs = top4Frames.filter(f => f && f.blob).map(f => f.blob);
-                        const worstFrameBlob = worstFrame?.blob || null;
-
-                        emit('ser-frames-updated', { top: top4FrameBlobs, worst: worstFrameBlob });
+                        if (bestFrameSoFar) {
+                            emit('best-frame-updated', bestFrameSoFar);
+                        }
                     }
                 })
                 .catch(error => {
@@ -560,7 +562,7 @@ export function useSerReader() {
         }
 
         if (manualThreshold) {
-            // Manual threshold: emit all frames for the quality selector
+            // Manual threshold: emit frames for quality selector
             const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
             addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
             emit('quality-selection-ready', {

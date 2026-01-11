@@ -56,8 +56,7 @@
 		<h3>An easy planetary image stacker for astrophotography</h3>
 		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image using <em>lucky imaging</em>.</p>
 		<ul>
-			<li>Select one video file for stacking followed by post processing.<br/>
-				Using SER files is highly recommended, as it allows better memory management.</li>
+			<li>Select one video file for stacking followed by post processing. (SER files recommended for better memory management)</li>
 			<li>Select multiple image files (TIFF, PNG, JPG, etc.) for stacking and post processing.</li>
 			<li>Select one image file for post processing only.</li>
 		</ul>
@@ -344,7 +343,7 @@ async function processFiles(files) {
 <style>
 .error-message {
 	background-color: #ffcccc;
-	color: #cc0000;
+	color: #D9534F;
 	padding: 10px;
 	margin-top: 10px;
 	border-radius: 5px;
@@ -377,8 +376,8 @@ async function processFiles(files) {
 	margin-top: 10px;
 }
 .start-button {
-	background-color: #4CAF50;
-	color: white;
+	background-color: #8CCF7E;
+	color: #111;
 	padding: 10px 20px;
 	border: none;
 	border-radius: 5px;
@@ -387,7 +386,7 @@ async function processFiles(files) {
 	font-weight: bold;
 }
 .start-button:hover {
-	background-color: #45a049;
+	background-color: #7ABF6E;
 }
 .clear-button {
 	background-color: #888;
@@ -402,7 +401,7 @@ async function processFiles(files) {
 	background-color: #666;
 }
 .cancel-button {
-	background-color: #cc0000;
+	background-color: #D9534F;
 	color: white;
 	padding: 10px 20px;
 	border: none;
@@ -412,7 +411,7 @@ async function processFiles(files) {
 	font-weight: bold;
 }
 .cancel-button:hover {
-	background-color: #aa0000;
+	background-color: #C9302C;
 }
 .processing-actions {
 	justify-content: center;

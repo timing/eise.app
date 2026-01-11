@@ -160,13 +160,13 @@ onMounted(() => {
 }
 
 .thumbnail-wrapper:hover {
-	border-color: #4CAF50;
+	border-color: #8CCF7E;
 	transform: scale(1.02);
 	background: #e8f5e9;
 }
 
 .thumbnail-wrapper.autodetected {
-	border-color: #2196F3;
+	border-color: #27587c;
 	border-style: dashed;
 }
 
@@ -184,7 +184,7 @@ onMounted(() => {
 }
 
 .auto-badge {
-	background: #2196F3;
+	background: #27587c;
 	color: white;
 	font-size: 10px;
 	padding: 2px 6px;

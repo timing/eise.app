@@ -16,18 +16,20 @@
 			</div>
 		</div>
 
-		<div class="content" v-if="processingStage === 'analyzing'">
+		<div class="content" v-if="processingStage === 'analyzing' || processingStage === 'stacking'">
 			<div v-if="croppedSerData" class="cropped-ser-download">
 				<button @click="downloadCroppedSer">Download Cropped SER ({{ croppedSerData.cropSize }}x{{ croppedSerData.cropSize }}, all {{ croppedSerData.frameCount }} frames)</button>
 			</div>
 
-			<h4>Top 4 Sharpest Frames</h4>
-			<div class="frame-container">
-			  <canvas v-for="(frame, index) in topFrames" :key="'top-' + index" :ref="el => canvases.top[index] = el"></canvas>
+			<div v-if="processingStage === 'analyzing' && bestFrame" class="preview-frame">
+				<h4>Best Frame So Far</h4>
+				<canvas ref="bestFrameCanvas"></canvas>
+				<p class="sharpness-label">Sharpness: {{ bestFrame.sharpness?.toFixed(2) }}</p>
 			</div>
-			<h4>Worst Frame</h4>
-			<div class="frame-container">
-			  <canvas v-if="worstFrame" :ref="el => canvases.worst = el"></canvas>
+
+			<div v-if="processingStage === 'stacking' && referenceFrame" class="preview-frame">
+				<h4>Reference Frame for Alignment</h4>
+				<canvas ref="referenceFrameCanvas"></canvas>
 			</div>
 		</div>
 	</div>
@@ -49,12 +51,13 @@ const props = defineProps({
 
 const bestFramesCount = ref(0);
 const allFramesCount = ref(0);
-const processingStage = ref('importing'); // Will be 'importing' initially, then 'analyzing'
+const processingStage = ref('importing'); // Will be 'importing' initially, then 'analyzing', then 'stacking'
 const uploadError = ref(null); // New ref for upload errors
 
-const topFrames = ref([]);
-const worstFrame = ref(null);
-const canvases = ref({ top: [], worst: null });
+const bestFrame = ref(null);
+const referenceFrame = ref(null);
+const bestFrameCanvas = ref(null);
+const referenceFrameCanvas = ref(null);
 const croppedSerData = ref(null);
 const skippedFrames = ref(0);
 
@@ -100,19 +103,10 @@ async function initializeWorkers() {
 
 // Define rankFrame outside processImageFrames so it can be used by worker message listener
 function rankFrame(frame) {
-	// Update top 4 frames
-	if (topFrames.value.length < 4) {
-		topFrames.value.push(frame);
-		topFrames.value.sort((a, b) => b.sharpness - a.sharpness);
-	} else if (frame.sharpness > topFrames.value[3].sharpness) {
-		topFrames.value.pop();
-		topFrames.value.push(frame);
-		topFrames.value.sort((a, b) => b.sharpness - a.sharpness);
-	}
-
-	// Update worst frame
-	if (worstFrame.value === null || frame.sharpness < worstFrame.value.sharpness) {
-		worstFrame.value = frame;
+	// Update best frame if this one is sharper
+	if (bestFrame.value === null || frame.sharpness > bestFrame.value.sharpness) {
+		bestFrame.value = frame;
+		updateBestFrameCanvas();
 	}
 
 	// Keep track of best frames for stacking (bestFramesCapacity will be set inside processImageFrames)
@@ -138,16 +132,25 @@ onMounted(async () => {
 		await processImageFrames(props.frames);
 	}
 
-	on('ser-frames-updated', ({ top, worst }) => {
+	on('best-frame-updated', (frame) => {
 		if (processingStage.value !== 'analyzing') {
 			uploadError.value = null; // Reset error
 			processingStage.value = 'analyzing';
-			emit('set-caption', 'Analyzing frames');
 		}
-		topFrames.value = top;
-		worstFrame.value = worst;
-		updateCanvases();
-  	});
+		// Only update if this frame is sharper than current best
+		if (!bestFrame.value || frame.sharpness > bestFrame.value.sharpness) {
+			bestFrame.value = frame;
+			updateBestFrameCanvas();
+		}
+	});
+
+	on('stacking-started', (data) => {
+		processingStage.value = 'stacking';
+		if (data && data.referenceFrame) {
+			referenceFrame.value = data.referenceFrame;
+			updateReferenceFrameCanvas();
+		}
+	});
 
 	on('upload-error', (message) => {
 		uploadError.value = message;
@@ -189,29 +192,26 @@ watch(() => props.frames, (newVal) => {
 	}
 });
 
-onBeforeUpdate(() => {
-  canvases.value = { top: [], worst: null };
-});
+function updateBestFrameCanvas() {
+	nextTick(() => {
+		if (bestFrame.value && bestFrameCanvas.value) {
+			const blob = bestFrame.value instanceof Blob ? bestFrame.value : bestFrame.value?.blob;
+			if (blob) {
+				drawImageOnCanvas(bestFrameCanvas.value, blob);
+			}
+		}
+	});
+}
 
-function updateCanvases() {
-  nextTick(() => {
-    topFrames.value.forEach((frame, index) => {
-      const canvas = canvases.value.top[index];
-      if (canvas && frame) {
-        const blob = frame instanceof Blob ? frame : frame?.blob;
-        if (blob) {
-          drawImageOnCanvas(canvas, blob);
-        }
-      }
-    });
-
-    if (worstFrame.value && canvases.value.worst) {
-      const blob = worstFrame.value instanceof Blob ? worstFrame.value : worstFrame.value?.blob;
-      if (blob) {
-        drawImageOnCanvas(canvases.value.worst, blob);
-      }
-    }
-  });
+function updateReferenceFrameCanvas() {
+	nextTick(() => {
+		if (referenceFrame.value && referenceFrameCanvas.value) {
+			const blob = referenceFrame.value instanceof Blob ? referenceFrame.value : referenceFrame.value?.blob;
+			if (blob) {
+				drawImageOnCanvas(referenceFrameCanvas.value, blob);
+			}
+		}
+	});
 }
 
 function drawImageOnCanvas(canvas, blob) {
@@ -272,9 +272,6 @@ async function processImageFrames(files) {
 			if (e.data.sharpness !== undefined && e.data.pngBlob) {
 				const currentFrame = { sharpness: e.data.sharpness, blob: e.data.pngBlob };
 				rankFrame(currentFrame);
-				if (index % 10 === 0 || index === files.length - 1) {
-					updateCanvases();
-				}
 				resolveFunctions[index]();
 			} else if (e.data.error) {
 				addLog('Failed analyzing frame ' + index + ': ' + e.data.error);
@@ -326,19 +323,27 @@ async function processImageFrames(files) {
 </script>
 
 <style scoped>
-	.frame-container {
-	  display: flex;
-	  gap: 10px;
-	  margin-bottom: 20px;
-	  flex-wrap: wrap;
+	.preview-frame {
+		text-align: center;
+		margin-bottom: 20px;
 	}
-	canvas {
-	  border: 1px solid #ccc;
-	  max-width: 100%;
+	.preview-frame h4 {
+		margin: 0 0 10px 0;
+		color: #c6fffd;
+	}
+	.preview-frame canvas {
+		border: 1px solid #ccc;
+		border-radius: 5px;
+		max-width: 100%;
+	}
+	.sharpness-label {
+		margin: 8px 0 0 0;
+		font-size: 13px;
+		color: #c6fffd;
 	}
 	.error-message {
 		background-color: #ffcccc;
-		color: #cc0000;
+		color: #D9534F;
 		padding: 10px;
 		margin-top: 10px;
 		border-radius: 5px;
@@ -362,8 +367,8 @@ async function processImageFrames(files) {
 		border-radius: 5px;
 	}
 	.cropped-ser-download button {
-		background-color: #4CAF50;
-		color: white;
+		background-color: #8CCF7E;
+		color: #111;
 		padding: 10px 20px;
 		border: none;
 		border-radius: 5px;
@@ -371,7 +376,7 @@ async function processImageFrames(files) {
 		font-size: 14px;
 	}
 	.cropped-ser-download button:hover {
-		background-color: #45a049;
+		background-color: #7ABF6E;
 	}
 	.action-buttons {
 		display: flex;
@@ -383,7 +388,7 @@ async function processImageFrames(files) {
 		margin-top: 20px;
 	}
 	.cancel-button {
-		background-color: #cc0000;
+		background-color: #D9534F;
 		color: white;
 		padding: 10px 20px;
 		border: none;
@@ -393,6 +398,6 @@ async function processImageFrames(files) {
 		font-weight: bold;
 	}
 	.cancel-button:hover {
-		background-color: #aa0000;
+		background-color: #C9302C;
 	}
 </style>

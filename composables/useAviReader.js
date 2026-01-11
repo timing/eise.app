@@ -218,6 +218,7 @@ export function useAviReader() {
         let maxSize = 0;
         let canCropCount = 0;
         const boundsPromises = [];
+        const detectedCenters = []; // Collect center positions for stable reference
 
         const headerForWorker = {
             width: aviHeader.width,
@@ -267,6 +268,8 @@ export function useAviReader() {
                     if (result.bounds && result.bounds.canCrop) {
                         canCropCount++;
                         maxSize = Math.max(maxSize, result.bounds.size);
+                        // Use actual detected center (not derived from clamped crop coords)
+                        detectedCenters.push({ x: result.bounds.centerX, y: result.bounds.centerY });
                     }
                     emit('update-loading', { progress: ((idx + 1) / sampleIndices.length) * 100, current: idx + 1, total: sampleIndices.length });
                 })
@@ -288,7 +291,13 @@ export function useAviReader() {
         }
 
         // Add 10% margin to the max size and round up to even number
-        let finalSize = Math.ceil(maxSize * 1.1 / 2) * 2;
+        let finalSize = Math.ceil(maxSize * 1.05 / 2) * 2;
+
+        // Calculate median center position as fallback reference
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
         // Limit crop size to frame dimensions
         const maxAllowedSize = Math.min(aviHeader.width, aviHeader.height);
@@ -299,7 +308,7 @@ export function useAviReader() {
 
         addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
-        return { size: finalSize };
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY } };
     }
 
     // Robust AVI header parser
@@ -502,8 +511,7 @@ export function useAviReader() {
 
         const bestFramesCapacity = Math.floor(frameCount * 0.3);
         const bestFramesForStacking = []; // These will store {sharpness, blob} (8-bit PNG)
-        let top4Frames = []; // These will store {sharpness, blob} (8-bit PNG)
-        let worstFrame = null; // This will store {sharpness, blob} (8-bit PNG)
+        let bestFrameSoFar = null; // Best frame found so far (for preview)
         const allAnalyzedFrames = []; // For manual threshold selection
 
         function rankFrame(frame) { // frame is {sharpness, blob}
@@ -511,18 +519,10 @@ export function useAviReader() {
             if (manualThreshold) {
                 allAnalyzedFrames.push(frame);
             }
-            // Higher Tenengrad sharpness = better (sharper edges)
-            if (top4Frames.length < 4) {
-                top4Frames.push(frame);
-                top4Frames.sort((a, b) => b.sharpness - a.sharpness); // Descending: highest first
-            } else if (frame.sharpness > top4Frames[3].sharpness) {
-                top4Frames.pop();
-                top4Frames.push(frame);
-                top4Frames.sort((a, b) => b.sharpness - a.sharpness);
-            }
 
-            if (worstFrame === null || frame.sharpness < worstFrame.sharpness) {
-                worstFrame = frame;
+            // Update best frame for preview
+            if (bestFrameSoFar === null || frame.sharpness > bestFrameSoFar.sharpness) {
+                bestFrameSoFar = frame;
             }
 
             if (bestFramesForStacking.length < bestFramesCapacity) {
@@ -654,10 +654,9 @@ export function useAviReader() {
                         emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
                         addLog(`Analyzed frame ${completedFrames}/${frameCount}`);
 
-                        const top4FrameBlobs = top4Frames.filter(f => f && f.blob).map(f => f.blob);
-                        const worstFrameBlob = worstFrame?.blob || null;
-
-                        emit('ser-frames-updated', { top: top4FrameBlobs, worst: worstFrameBlob });
+                        if (bestFrameSoFar) {
+                            emit('best-frame-updated', bestFrameSoFar);
+                        }
                     }
                 })
                 .catch(error => {
@@ -684,10 +683,10 @@ export function useAviReader() {
         addLog(`Finished analyzing ${frameCount} AVI frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
         emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
 
-        // Manual threshold: let user select frames instead of auto-stacking
+        // Manual threshold: let user select frames
         if (manualThreshold) {
             const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
-            addLog(`Manual threshold enabled: ${allFramesSorted.length} frames available for selection`);
+            addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: unifiedAnalyzeWorkers
@@ -773,8 +772,7 @@ export function useAviReader() {
 
         const bestFramesCapacity = Math.floor(frameCount * 0.3);
         const bestFramesForStacking = [];
-        let top4Frames = [];
-        let worstFrame = null;
+        let bestFrameSoFar = null; // Best frame found so far (for preview)
         const allAnalyzedFrames = []; // For manual threshold selection
 
         function rankFrame(frame, frameIndex) {
@@ -786,18 +784,9 @@ export function useAviReader() {
                 allAnalyzedFrames.push(frame);
             }
 
-            // Higher Tenengrad sharpness = better (sharper edges)
-            if (top4Frames.length < 4) {
-                top4Frames.push(frame);
-                top4Frames.sort((a, b) => b.sharpness - a.sharpness); // Descending: highest first
-            } else if (frame.sharpness > top4Frames[3].sharpness) {
-                top4Frames.pop();
-                top4Frames.push(frame);
-                top4Frames.sort((a, b) => b.sharpness - a.sharpness);
-            }
-
-            if (worstFrame === null || frame.sharpness < worstFrame.sharpness) {
-                worstFrame = frame;
+            // Update best frame for preview
+            if (bestFrameSoFar === null || frame.sharpness > bestFrameSoFar.sharpness) {
+                bestFrameSoFar = frame;
             }
 
             if (bestFramesForStacking.length < bestFramesCapacity) {
@@ -908,9 +897,9 @@ export function useAviReader() {
                 addLog(`Analyzed frame ${completedFrames}/${frameCount}`);
                 emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: completedFrames });
 
-                const top4FrameBlobs = top4Frames.filter(f => f && f.blob).map(f => f.blob);
-                const worstFrameBlob = worstFrame?.blob || null;
-                emit('ser-frames-updated', { top: top4FrameBlobs, worst: worstFrameBlob });
+                if (bestFrameSoFar) {
+                    emit('best-frame-updated', bestFrameSoFar);
+                }
             }
         }
 
@@ -921,10 +910,10 @@ export function useAviReader() {
         addLog(`Finished analyzing ${frameCount} frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
         emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
 
-        // Manual threshold: let user select frames instead of auto-stacking
+        // Manual threshold: let user select frames
         if (manualThreshold) {
             const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
-            addLog(`Manual threshold enabled: ${allFramesSorted.length} frames available for selection`);
+            addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: unifiedAnalyzeWorkers
@@ -981,6 +970,7 @@ export function useAviReader() {
 
         let maxSize = 0;
         let canCropCount = 0;
+        const detectedCenters = []; // Collect center positions for stable reference
 
         // Process sequentially to limit memory usage
         for (let idx = 0; idx < sampleIndices.length; idx++) {
@@ -1014,6 +1004,8 @@ export function useAviReader() {
                 if (result.bounds && result.bounds.canCrop) {
                     canCropCount++;
                     maxSize = Math.max(maxSize, result.bounds.size);
+                    // Use actual detected center (not derived from clamped crop coords)
+                    detectedCenters.push({ x: result.bounds.centerX, y: result.bounds.centerY });
                 } else if (result.bounds) {
                     console.log(`Frame ${i} can't crop: ${result.bounds.reason || 'unknown'}`);
                 }
@@ -1035,7 +1027,7 @@ export function useAviReader() {
             return null;
         }
 
-        let finalSize = Math.ceil(maxSize * 1.1 / 2) * 2;
+        let finalSize = Math.ceil(maxSize * 1.05 / 2) * 2;
 
         const maxAllowedSize = Math.min(header.width, header.height);
         if (finalSize > maxAllowedSize) {
@@ -1043,9 +1035,15 @@ export function useAviReader() {
             return null;
         }
 
+        // Calculate median center position as fallback reference
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
         addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
-        return { size: finalSize };
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY } };
     }
 
     // Quick format check - only parses header, doesn't initialize workers

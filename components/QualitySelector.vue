@@ -39,15 +39,18 @@
 				</span>
 			</h4>
 			<canvas ref="previewCanvas" class="preview-canvas"></canvas>
+			<div class="frame-slider">
+				<input type="range" min="0" :max="totalFrames - 1" v-model.number="previewFrameIndex" @input="onFrameSliderChange" />
+				<span class="frame-position">{{ previewFrameIndex + 1 }} / {{ totalFrames }}</span>
+			</div>
 			<div class="playback-controls">
 				<button class="play-button" @click="togglePlayback">
-					{{ isPlaying ? '⏹ Stop' : '▶ Play All Frames' }}
+					{{ isPlaying ? '⏸ Pause' : '▶ Play' }}
 				</button>
-				<span v-if="isPlaying" class="play-status">Frame {{ playIndex + 1 }} / {{ totalFrames }}</span>
 			</div>
 		</div>
 		<div v-else class="no-preview">
-			<p>Click on the graph or press Play to preview frames</p>
+			<p>Use the slider or press Play to preview frames</p>
 		</div>
 	</div>
 </div>
@@ -163,7 +166,7 @@ function drawGraph() {
 
 		// Color based on whether included in selection
 		if (i < selectedCount.value) {
-			ctx.fillStyle = '#4CAF50'; // Green for included
+			ctx.fillStyle = '#8CCF7E'; // Green for included
 		} else {
 			ctx.fillStyle = '#ccc'; // Gray for excluded
 		}
@@ -193,10 +196,10 @@ function drawGraph() {
 		ctx.stroke();
 	}
 
-	// Draw preview position indicator (blue, when not playing)
+	// Draw preview position indicator (cyan, when not playing)
 	if (!isPlaying.value) {
 		const previewX = padding.left + ((previewFrameIndex.value + 0.5) / sortedFrames.value.length) * graphWidth;
-		ctx.strokeStyle = '#2196F3';
+		ctx.strokeStyle = '#c6fffd';
 		ctx.lineWidth = 2;
 		ctx.beginPath();
 		ctx.moveTo(previewX, padding.top);
@@ -207,31 +210,62 @@ function drawGraph() {
 
 async function drawPreview() {
 	const canvas = previewCanvas.value;
-	if (!canvas || !previewFrame.value || !previewFrame.value.blob) return;
+	if (!canvas || !previewFrame.value) return;
 
 	const ctx = canvas.getContext('2d');
+	const frame = previewFrame.value;
 
 	try {
-		const img = new Image();
-		const url = URL.createObjectURL(previewFrame.value.blob);
+		let img;
+		let url = null;
 
-		await new Promise((resolve, reject) => {
-			img.onload = resolve;
-			img.onerror = reject;
-			img.src = url;
-		});
+		if (frame.blob) {
+			// Use blob if available
+			img = new Image();
+			url = URL.createObjectURL(frame.blob);
+			await new Promise((resolve, reject) => {
+				img.onload = resolve;
+				img.onerror = reject;
+				img.src = url;
+			});
+		} else if (frame.rgbaBuffer && frame.width && frame.height) {
+			// Fall back to rgbaBuffer if no blob (memory-constrained mode)
+			const tempCanvas = document.createElement('canvas');
+			tempCanvas.width = frame.width;
+			tempCanvas.height = frame.height;
+			const tempCtx = tempCanvas.getContext('2d');
+			const imageData = new ImageData(
+				new Uint8ClampedArray(frame.rgbaBuffer),
+				frame.width,
+				frame.height
+			);
+			tempCtx.putImageData(imageData, 0, 0);
+			img = tempCanvas;
+		} else {
+			// No preview data available
+			canvas.width = 200;
+			canvas.height = 50;
+			ctx.fillStyle = '#333';
+			ctx.fillRect(0, 0, 200, 50);
+			ctx.fillStyle = '#999';
+			ctx.font = '12px sans-serif';
+			ctx.fillText('Preview not available', 20, 30);
+			return;
+		}
 
 		// Scale to fit max 500px while maintaining aspect ratio
 		const maxSize = 500;
-		const scale = Math.min(maxSize / img.width, maxSize / img.height, 1);
-		const drawWidth = img.width * scale;
-		const drawHeight = img.height * scale;
+		const imgWidth = img.width || frame.width;
+		const imgHeight = img.height || frame.height;
+		const scale = Math.min(maxSize / imgWidth, maxSize / imgHeight, 1);
+		const drawWidth = imgWidth * scale;
+		const drawHeight = imgHeight * scale;
 
 		canvas.width = drawWidth;
 		canvas.height = drawHeight;
 		ctx.drawImage(img, 0, 0, drawWidth, drawHeight);
 
-		URL.revokeObjectURL(url);
+		if (url) URL.revokeObjectURL(url);
 	} catch (e) {
 		console.error('Error drawing preview:', e);
 	}
@@ -242,11 +276,6 @@ function updateThreshold() {
 }
 
 function onGraphClick(e) {
-	// Stop playback if clicking on graph
-	if (isPlaying.value) {
-		stopPlayback();
-	}
-
 	const canvas = graphCanvas.value;
 	const rect = canvas.getBoundingClientRect();
 	const x = e.clientX - rect.left;
@@ -256,18 +285,26 @@ function onGraphClick(e) {
 	const graphWidth = width - padding.left - padding.right;
 
 	const clickPosition = (x - padding.left) / graphWidth;
-	const frameIndex = Math.floor(clickPosition * sortedFrames.value.length);
+	const newThreshold = Math.max(1, Math.min(Math.round(clickPosition * sortedFrames.value.length), sortedFrames.value.length));
 
-	if (frameIndex >= 0 && frameIndex < sortedFrames.value.length) {
-		previewFrameIndex.value = frameIndex;
-		previewFrame.value = sortedFrames.value[frameIndex];
-		drawGraph();
-		drawPreview();
-	}
+	// Update threshold (how many frames to include)
+	selectedCount.value = newThreshold;
+	drawGraph();
 }
 
 function onGraphHover(e) {
 	// Could add hover effects here
+}
+
+function onFrameSliderChange() {
+	// Stop playback when manually changing frame
+	if (isPlaying.value) {
+		stopPlayback();
+	}
+
+	previewFrame.value = sortedFrames.value[previewFrameIndex.value];
+	drawGraph();
+	drawPreview();
 }
 
 function togglePlayback() {
@@ -280,13 +317,10 @@ function togglePlayback() {
 
 function startPlayback() {
 	isPlaying.value = true;
-	playIndex.value = 0;
+	// Continue from current position (don't reset to 0)
+	playIndex.value = previewFrameIndex.value;
 
-	// Show first frame
-	previewFrameIndex.value = 0;
-	previewFrame.value = sortedFrames.value[0];
 	drawGraph();
-	drawPreview();
 
 	// Play at ~10 fps (100ms per frame)
 	playInterval = setInterval(() => {
@@ -340,7 +374,7 @@ function proceedWithStacking() {
 
 .threshold-value {
 	font-weight: bold;
-	color: #4CAF50;
+	color: #8CCF7E;
 }
 
 .graph-container {
@@ -373,7 +407,7 @@ function proceedWithStacking() {
 }
 
 .play-button {
-	background-color: #2196F3;
+	background-color: #27587c;
 	color: white;
 	padding: 8px 16px;
 	border: none;
@@ -383,7 +417,7 @@ function proceedWithStacking() {
 }
 
 .play-button:hover {
-	background-color: #1976D2;
+	background-color: #1D4A66;
 }
 
 .play-status {
@@ -408,6 +442,7 @@ function proceedWithStacking() {
 	align-items: center;
 	gap: 10px;
 	flex-wrap: wrap;
+	color: #c6fffd;
 }
 
 .sharpness-badge {
@@ -431,10 +466,29 @@ function proceedWithStacking() {
 	max-width: 100%;
 }
 
+.frame-slider {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	margin-top: 15px;
+}
+
+.frame-slider input[type="range"] {
+	width: 300px;
+	max-width: 80%;
+}
+
+.frame-position {
+	font-size: 13px;
+	color: #c6fffd;
+	min-width: 70px;
+}
+
 .no-preview {
 	padding: 40px;
 	text-align: center;
-	color: #999;
+	color: #c6fffd;
 }
 
 .action-buttons {
@@ -443,8 +497,8 @@ function proceedWithStacking() {
 }
 
 .stack-button {
-	background-color: #4CAF50;
-	color: white;
+	background-color: #8CCF7E;
+	color: #111;
 	padding: 12px 30px;
 	border: none;
 	border-radius: 5px;
@@ -454,6 +508,6 @@ function proceedWithStacking() {
 }
 
 .stack-button:hover {
-	background-color: #45a049;
+	background-color: #7ABF6E;
 }
 </style>
