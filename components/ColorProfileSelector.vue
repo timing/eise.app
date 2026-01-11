@@ -9,7 +9,10 @@
 		</div>
 		<div class="content">
 			<h2>Select Bayer Pattern</h2>
-			<div class="thumbnails">
+			<div v-if="!thumbnailsReady" class="loading-thumbnails">
+				<p>Rendering previews...</p>
+			</div>
+			<div class="thumbnails" :class="{ hidden: !thumbnailsReady }">
 				<div
 					v-for="profile in profiles"
 					:key="profile.id"
@@ -44,6 +47,7 @@ const canvasRefs = ref({});
 const currentResolve = ref(null);
 const frameData = ref(null);
 const headerData = ref(null);
+const thumbnailsReady = ref(false);
 
 const profiles = [
 	{ id: 'COLOR_BayerRG2BGR', label: 'RGGB' },
@@ -64,6 +68,7 @@ function confirmProfile(profileId) {
 
 async function renderThumbnails() {
 	await nextTick();
+	thumbnailsReady.value = false;
 
 	// Lazy-load OpenCV for thumbnail rendering
 	if (!opencvLoaded) {
@@ -126,6 +131,8 @@ async function renderThumbnails() {
 			console.error(`Error rendering ${profile.id}:`, error);
 		}
 	}
+
+	thumbnailsReady.value = true;
 }
 
 onMounted(() => {
@@ -191,5 +198,15 @@ onMounted(() => {
 	border-radius: 10px;
 	margin-left: 5px;
 	font-weight: normal;
+}
+
+.thumbnails.hidden {
+	display: none;
+}
+
+.loading-thumbnails {
+	text-align: center;
+	padding: 40px;
+	color: #666;
 }
 </style>

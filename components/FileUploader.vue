@@ -41,12 +41,20 @@
 
 			<div class="separator"></div>
 
+			<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
+			<input type="range" min="5" max="50" step="5" v-model="cropMarginPercent" />
+			{{ cropMarginPercent }}%
+			<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
+
+			<div class="separator"></div>
+
 			<h4>Quality threshold</h4>
 			<label>
 				<input type="checkbox" v-model="autoStack" />
 				Just stack the best 30%, no manual selection
 			</label>
-			<p v-if="!autoStack" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack.</p>
+			<p v-if="!autoStack" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack. Note: this keeps all frames in memory.</p>
+			<p v-if="autoStack" class="info-text">Recommended for large files or multiple SER files. Only keeps the best frames in memory.</p>
 		</template>
 	</div>
 
@@ -56,7 +64,8 @@
 		<h3>An easy planetary image stacker for astrophotography</h3>
 		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image using <em>lucky imaging</em>.</p>
 		<ul>
-			<li>Select one video file for stacking followed by post processing. (SER files recommended for better memory management)</li>
+			<li>Select one or more SER files for stacking followed by post processing. (Multiple SER files will be combined)</li>
+			<li>Select one video file (AVI, MP4, etc.) for stacking followed by post processing.</li>
 			<li>Select multiple image files (TIFF, PNG, JPG, etc.) for stacking and post processing.</li>
 			<li>Select one image file for post processing only.</li>
 		</ul>
@@ -89,6 +98,10 @@ const errorMessage = ref(null);
 
 // Info toggle state
 const showMaxFramesInfo = ref(false);
+const showCropMarginInfo = ref(false);
+
+// Crop margin setting (percentage of detected object size to add as margin)
+const cropMarginPercent = ref(10);
 
 // Auto-stack option (when checked, skip manual threshold selection)
 const autoStack = ref(false);
@@ -178,17 +191,39 @@ async function processFiles(files) {
 		setInputFilename(primaryFile.name);
 	}
 
-	if (videoFiles.length > 1) {
-		alert('Please select only one video file.');
+	// Multiple SER files are allowed - they'll be combined for stacking
+	// But mixing video types or mixing videos with images is not allowed
+	const serFiles = videoFiles.filter(f => f.name.endsWith('.ser'));
+	const nonSerVideos = videoFiles.filter(f => !f.name.endsWith('.ser'));
+
+	if (serFiles.length > 0 && nonSerVideos.length > 0) {
+		alert('Please select either SER files or other video files, not both.');
 		isProcessing.value = false;
 		eventBusEmit('stop-loading');
 		return;
 	}
 
-	if (videoFiles.length === 1 && imageFiles.length > 0) {
+	if (nonSerVideos.length > 1) {
+		alert('Please select only one video file (multiple SER files are supported).');
+		isProcessing.value = false;
+		eventBusEmit('stop-loading');
+		return;
+	}
+
+	if (videoFiles.length >= 1 && imageFiles.length > 0) {
 		alert('Please select either a video file or image files, not both.');
 		isProcessing.value = false;
 		eventBusEmit('stop-loading');
+		return;
+	}
+
+	// Handle multiple SER files (combined stacking)
+	if (serFiles.length > 1) {
+		emit('processing-started');
+		const { readSerFiles } = useSerReader();
+		const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
+		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
+		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value, cropMarginPercent.value);
 		return;
 	}
 
@@ -208,7 +243,7 @@ async function processFiles(files) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
 			const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value);
+			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value, cropMarginPercent.value);
 			return;
 		}
 

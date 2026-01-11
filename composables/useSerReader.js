@@ -198,7 +198,7 @@ export function useSerReader() {
     }
 
     // Detect bounds for a sample of frames to determine crop region
-    async function detectCropRegion(file, header, frameSize, frameCount, bayerChoice) {
+    async function detectCropRegion(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent = 10) {
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: frameCount });
 
@@ -269,8 +269,9 @@ export function useSerReader() {
             return null;
         }
 
-        // Add 10% margin to the max size and round up to even number
-        let finalSize = Math.ceil(maxSize * 1.05 / 2) * 2;
+        // Add margin to the max size and round up to even number
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        let finalSize = Math.ceil(maxSize * marginMultiplier / 2) * 2;
 
         // Limit crop size to frame dimensions
         const maxAllowedSize = Math.min(header.width, header.height);
@@ -299,7 +300,7 @@ export function useSerReader() {
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false) {
+    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -338,16 +339,79 @@ export function useSerReader() {
             autoDetectedProfile = "COLOR_BayerRG2BGR";
         }
 
-        // Show color profile selector with thumbnails of first frame
+        // Read first frame for color profile selector
         const firstFrameBuffer = await file.slice(178, 178 + frameSize).arrayBuffer();
+
+        // Try to crop the first frame for better preview in color selector
+        // Use MONO mode for bounds detection (works on raw luminance)
+        let previewBuffer = firstFrameBuffer;
+        let previewHeader = header;
+        const MIN_SIZE_FOR_CROP = 300;
+
+        if (enableAutoCrop && header.width >= MIN_SIZE_FOR_CROP && header.height >= MIN_SIZE_FOR_CROP) {
+            emit('set-caption', 'Detecting planet for preview...');
+            try {
+                const headerForWorker = {
+                    fileId: header.fileId,
+                    width: header.width,
+                    height: header.height,
+                    pixelDepth: header.pixelDepth,
+                    colorID: header.colorID
+                };
+                // Need a copy since we transfer the buffer
+                const bufferCopy = firstFrameBuffer.slice(0);
+                const boundsResult = await processFrameWithWorker(0, {
+                    type: 'detect-bounds',
+                    frameBuffer: bufferCopy,
+                    header: headerForWorker,
+                    bayerChoice: 'MONO',
+                    index: 0
+                }, [bufferCopy]);
+
+                if (boundsResult.bounds && boundsResult.bounds.canCrop) {
+                    const { centerX, centerY, size } = boundsResult.bounds;
+                    const previewMargin = 1 + (cropMarginPercent / 100);
+                    const cropSize = Math.ceil(size * previewMargin / 2) * 2;
+                    const maxCropSize = Math.min(header.width, header.height);
+
+                    if (cropSize < maxCropSize) {
+                        // Crop the raw buffer for preview
+                        const bpp = header.pixelDepth > 8 ? 2 : 1;
+                        const halfSize = Math.floor(cropSize / 2);
+                        // Ensure even start coordinates to preserve Bayer pattern alignment
+                        let startX = Math.max(0, Math.min(header.width - cropSize, Math.round(centerX) - halfSize));
+                        let startY = Math.max(0, Math.min(header.height - cropSize, Math.round(centerY) - halfSize));
+                        startX = Math.floor(startX / 2) * 2;
+                        startY = Math.floor(startY / 2) * 2;
+
+                        const croppedBuffer = new ArrayBuffer(cropSize * cropSize * bpp);
+                        const srcView = header.pixelDepth > 8 ? new Uint16Array(firstFrameBuffer) : new Uint8Array(firstFrameBuffer);
+                        const dstView = header.pixelDepth > 8 ? new Uint16Array(croppedBuffer) : new Uint8Array(croppedBuffer);
+
+                        for (let y = 0; y < cropSize; y++) {
+                            const srcOffset = (startY + y) * header.width + startX;
+                            const dstOffset = y * cropSize;
+                            dstView.set(srcView.subarray(srcOffset, srcOffset + cropSize), dstOffset);
+                        }
+
+                        previewBuffer = croppedBuffer;
+                        previewHeader = { ...header, width: cropSize, height: cropSize };
+                        addLog(`Cropped preview to ${cropSize}x${cropSize} for color selector`);
+                    }
+                }
+            } catch (error) {
+                addLog(`Could not crop preview: ${error.message}`);
+                // Fall back to uncropped preview
+            }
+        }
 
         emit('set-caption', 'Select color profile');
 
         // Wait for user to select a color profile
         const bayerChoice = await new Promise((resolve) => {
             emit('show-color-profile-selector', {
-                frameBuffer: firstFrameBuffer,
-                header: header,
+                frameBuffer: previewBuffer,
+                header: previewHeader,
                 autoDetectedProfile: autoDetectedProfile,
                 resolve: resolve
             });
@@ -360,13 +424,13 @@ export function useSerReader() {
         const frameCount = (maxFrames === -1) ? header.frameCount : Math.min(header.frameCount, maxFrames);
 
         // Determine if we should auto-crop (only for frames larger than minimum)
-        const MIN_SIZE_FOR_CROP = 300;
+        // MIN_SIZE_FOR_CROP already defined above for preview cropping
         let cropRegion = null;
         let croppedFrameBuffers = []; // Store cropped raw data for SER export
 
         if (enableAutoCrop && header.width >= MIN_SIZE_FOR_CROP && header.height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${header.width}x${header.height} qualifies for auto-crop`);
-            cropRegion = await detectCropRegion(file, header, frameSize, frameCount, bayerChoice);
+            cropRegion = await detectCropRegion(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
@@ -671,5 +735,535 @@ export function useSerReader() {
         return new Blob([buffer], { type: 'application/octet-stream' });
     }
 
-    return { readSerFile };
+    // Detect crop region across multiple files
+    // Samples frames proportionally from each file based on frame count
+    async function detectCropRegionMultiFile(fileInfos, bayerChoice, cropMarginPercent = 10) {
+        emit('set-caption', 'Detecting planet position across files...');
+
+        const totalFrames = fileInfos.reduce((sum, info) => sum + info.frameCount, 0);
+        const targetSamples = 50; // Total samples across all files
+
+        emit('update-loading', { progress: 0, current: 0, total: targetSamples });
+
+        let maxSize = 0;
+        let canCropCount = 0;
+        const detectedCenters = [];
+        const detectedSizes = [];
+        const boundsPromises = [];
+        let sampleIndex = 0;
+
+        for (const info of fileInfos) {
+            const { file, header, frameSize, frameCount } = info;
+
+            // Sample proportionally based on this file's contribution to total
+            const samplesForThisFile = Math.max(1, Math.round((frameCount / totalFrames) * targetSamples));
+            const sampleInterval = Math.max(1, Math.floor(frameCount / samplesForThisFile));
+
+            const headerForWorker = {
+                fileId: header.fileId,
+                width: header.width,
+                height: header.height,
+                pixelDepth: header.pixelDepth,
+                colorID: header.colorID
+            };
+
+            for (let i = 0; i < frameCount; i += sampleInterval) {
+                const offset = 178 + (i * frameSize);
+                if (offset + frameSize > file.size) break;
+
+                const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+                const workerIndex = sampleIndex % numWorkers;
+
+                const dataToWorker = {
+                    type: 'detect-bounds',
+                    frameBuffer: frameBuffer,
+                    header: headerForWorker,
+                    bayerChoice: bayerChoice,
+                    index: sampleIndex
+                };
+
+                const currentSampleIndex = sampleIndex;
+                const promise = processFrameWithWorker(workerIndex, dataToWorker, [frameBuffer])
+                    .then(result => {
+                        if (result.bounds && result.bounds.canCrop) {
+                            canCropCount++;
+                            maxSize = Math.max(maxSize, result.bounds.size);
+                            detectedCenters.push({ x: result.bounds.centerX, y: result.bounds.centerY });
+                            detectedSizes.push(result.bounds.size);
+                        }
+                        emit('update-loading', {
+                            progress: ((currentSampleIndex + 1) / targetSamples) * 100,
+                            current: currentSampleIndex + 1,
+                            total: targetSamples
+                        });
+                    })
+                    .catch(error => {
+                        console.error(`Error detecting bounds for sample ${currentSampleIndex}:`, error);
+                    });
+
+                boundsPromises.push(promise);
+                sampleIndex++;
+            }
+        }
+
+        await Promise.all(boundsPromises);
+
+        const actualSamples = sampleIndex;
+        const cropThreshold = actualSamples * 0.5;
+        if (canCropCount < cropThreshold) {
+            addLog(`Only ${canCropCount}/${actualSamples} frames can be cropped across files. Skipping auto-crop.`);
+            return null;
+        }
+
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        let finalSize = Math.ceil(maxSize * marginMultiplier / 2) * 2;
+
+        // Use the smallest frame dimensions across all files as limit
+        const maxAllowedSize = Math.min(...fileInfos.map(info => Math.min(info.header.width, info.header.height)));
+        if (finalSize > maxAllowedSize) {
+            addLog(`Crop size ${finalSize} exceeds smallest frame size ${maxAllowedSize}, skipping auto-crop`);
+            return null;
+        }
+
+        if (detectedCenters.length === 0) {
+            addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${actualSamples} frames croppable)`);
+            return { size: finalSize };
+        }
+
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
+
+        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${actualSamples} frames croppable across ${fileInfos.length} files)`);
+
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+    }
+
+    // Process multiple SER files and combine their frames for stacking
+    // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
+    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10) {
+        await initializeWorkers();
+
+        if (!workersReady) {
+            addLog("Stopping SER processing due to worker initialization failure.");
+            emit('stop-loading');
+            return;
+        }
+
+        emit('start-loading', 'Reading file headers...');
+        emit('update-loading', 0);
+
+        // PHASE 1: Parse all headers and validate
+        addLog(`Parsing headers for ${files.length} SER files...`);
+        const fileInfos = [];
+
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            try {
+                const headerBuf = await file.slice(0, 178).arrayBuffer();
+                const header = parseSerHeader(headerBuf);
+
+                const bpp = header.pixelDepth > 8 ? 2 : 1;
+                const frameSize = header.width * header.height * bpp;
+
+                // Validate frame count against file size
+                const actualFrameCount = Math.floor((file.size - 178) / frameSize);
+                if (actualFrameCount !== header.frameCount) {
+                    addLog(`${file.name}: Header says ${header.frameCount} frames, file size suggests ${actualFrameCount}. Using calculated value.`);
+                    header.frameCount = actualFrameCount;
+                }
+
+                fileInfos.push({
+                    file,
+                    header,
+                    frameSize,
+                    frameCount: header.frameCount,
+                    filename: file.name
+                });
+
+                addLog(`${file.name}: ${header.width}x${header.height}, ${header.frameCount} frames, ${header.pixelDepth}-bit, colorID=${header.colorID}`);
+            } catch (error) {
+                addLog(`Error reading ${file.name}: ${error.message}. Skipping this file.`);
+                // Continue with other files
+            }
+        }
+
+        if (fileInfos.length === 0) {
+            addLog("No valid SER files to process.");
+            emit('stop-loading');
+            return;
+        }
+
+        // PHASE 2: Validate colorIDs match
+        const colorIDs = [...new Set(fileInfos.map(info => info.header.colorID))];
+        if (colorIDs.length > 1) {
+            addLog(`Error: Files have different color formats (colorIDs: ${colorIDs.join(', ')}). All files must use the same color format.`);
+            emit('upload-error', 'Selected SER files have different color formats. Please select files with matching formats.');
+            emit('stop-loading');
+            return;
+        }
+
+        const totalFramesAvailable = fileInfos.reduce((sum, info) => sum + info.frameCount, 0);
+        addLog(`Total frames across ${fileInfos.length} files: ${totalFramesAvailable}`);
+
+        // Apply global max frames limit
+        let totalFramesToProcess = totalFramesAvailable;
+        if (maxFrames > 0 && totalFramesAvailable > maxFrames) {
+            totalFramesToProcess = maxFrames;
+            addLog(`Limiting to ${maxFrames} frames total (global limit)`);
+        }
+
+        // PHASE 3: Color profile selection (using first file's header)
+        const firstHeader = fileInfos[0].header;
+        const firstFrameSize = fileInfos[0].frameSize;
+        const bayerMap = { 0: "MONO", 8: "COLOR_BayerRG2BGR", 9: "COLOR_BayerGR2BGR", 10: "COLOR_BayerGB2BGR", 11: "COLOR_BayerBG2BGR" };
+        let autoDetectedProfile = bayerMap[firstHeader.colorID] || "COLOR_BayerRG2BGR";
+
+        const firstFrameBuffer = await fileInfos[0].file.slice(178, 178 + firstFrameSize).arrayBuffer();
+
+        // Try to crop the first frame for better preview in color selector
+        let previewBuffer = firstFrameBuffer;
+        let previewHeader = firstHeader;
+        const MIN_SIZE_FOR_CROP = 300;
+
+        if (enableAutoCrop && firstHeader.width >= MIN_SIZE_FOR_CROP && firstHeader.height >= MIN_SIZE_FOR_CROP) {
+            emit('set-caption', 'Detecting planet for preview...');
+            try {
+                const headerForWorker = {
+                    fileId: firstHeader.fileId,
+                    width: firstHeader.width,
+                    height: firstHeader.height,
+                    pixelDepth: firstHeader.pixelDepth,
+                    colorID: firstHeader.colorID
+                };
+                const bufferCopy = firstFrameBuffer.slice(0);
+                const boundsResult = await processFrameWithWorker(0, {
+                    type: 'detect-bounds',
+                    frameBuffer: bufferCopy,
+                    header: headerForWorker,
+                    bayerChoice: 'MONO',
+                    index: 0
+                }, [bufferCopy]);
+
+                if (boundsResult.bounds && boundsResult.bounds.canCrop) {
+                    const { centerX, centerY, size } = boundsResult.bounds;
+                    const previewMargin = 1 + (cropMarginPercent / 100);
+                    const cropSize = Math.ceil(size * previewMargin / 2) * 2;
+                    const maxCropSize = Math.min(firstHeader.width, firstHeader.height);
+
+                    if (cropSize < maxCropSize) {
+                        const bpp = firstHeader.pixelDepth > 8 ? 2 : 1;
+                        const halfSize = Math.floor(cropSize / 2);
+                        // Ensure even start coordinates to preserve Bayer pattern alignment
+                        let startX = Math.max(0, Math.min(firstHeader.width - cropSize, Math.round(centerX) - halfSize));
+                        let startY = Math.max(0, Math.min(firstHeader.height - cropSize, Math.round(centerY) - halfSize));
+                        startX = Math.floor(startX / 2) * 2;
+                        startY = Math.floor(startY / 2) * 2;
+
+                        const croppedBuffer = new ArrayBuffer(cropSize * cropSize * bpp);
+                        const srcView = firstHeader.pixelDepth > 8 ? new Uint16Array(firstFrameBuffer) : new Uint8Array(firstFrameBuffer);
+                        const dstView = firstHeader.pixelDepth > 8 ? new Uint16Array(croppedBuffer) : new Uint8Array(croppedBuffer);
+
+                        for (let y = 0; y < cropSize; y++) {
+                            const srcOffset = (startY + y) * firstHeader.width + startX;
+                            const dstOffset = y * cropSize;
+                            dstView.set(srcView.subarray(srcOffset, srcOffset + cropSize), dstOffset);
+                        }
+
+                        previewBuffer = croppedBuffer;
+                        previewHeader = { ...firstHeader, width: cropSize, height: cropSize };
+                        addLog(`Cropped preview to ${cropSize}x${cropSize} for color selector`);
+                    }
+                }
+            } catch (error) {
+                addLog(`Could not crop preview: ${error.message}`);
+            }
+        }
+
+        emit('set-caption', 'Select color profile');
+
+        const bayerChoice = await new Promise((resolve) => {
+            emit('show-color-profile-selector', {
+                frameBuffer: previewBuffer,
+                header: previewHeader,
+                autoDetectedProfile: autoDetectedProfile,
+                resolve: resolve
+            });
+        });
+
+        addLog(`User selected color profile: ${bayerChoice}`);
+
+        // PHASE 4: Detect crop region across all files
+        // MIN_SIZE_FOR_CROP already defined above
+        let cropRegion = null;
+
+        // Check if all files qualify for cropping
+        const allQualifyForCrop = fileInfos.every(info =>
+            info.header.width >= MIN_SIZE_FOR_CROP && info.header.height >= MIN_SIZE_FOR_CROP
+        );
+
+        if (enableAutoCrop && allQualifyForCrop) {
+            addLog(`All files qualify for auto-crop (min ${MIN_SIZE_FOR_CROP}x${MIN_SIZE_FOR_CROP})`);
+            cropRegion = await detectCropRegionMultiFile(fileInfos, bayerChoice, cropMarginPercent);
+
+            if (cropRegion) {
+                addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
+            }
+        } else if (enableAutoCrop) {
+            addLog(`Some files too small for auto-crop, skipping crop detection`);
+        }
+
+        emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
+
+        // PHASE 5: Analyze all frames from all files
+        // Use streaming ranking - only keep best 30% in memory to avoid crashes
+        const bestFramesCapacity = Math.max(1, Math.floor(totalFramesToProcess * 0.3));
+        const bestFramesForStacking = [];
+        const allAnalyzedFrames = []; // Only used when manualThreshold is true
+        let bestFrameSoFar = null;
+
+        // Streaming rank function - keeps only top N frames in memory
+        function rankFrame(frame) {
+            // For manual threshold, we need all frames (may still crash on large sets)
+            if (manualThreshold) {
+                allAnalyzedFrames.push(frame);
+            }
+
+            // Track best frame for preview
+            if (bestFrameSoFar === null || frame.sharpness > bestFrameSoFar.sharpness) {
+                bestFrameSoFar = frame;
+            }
+
+            // Streaming top-N: only keep best frames
+            if (bestFramesForStacking.length < bestFramesCapacity) {
+                bestFramesForStacking.push(frame);
+            } else {
+                // Find the worst frame in our current best set
+                let minSharpnessIndex = 0;
+                for (let i = 1; i < bestFramesForStacking.length; i++) {
+                    if (bestFramesForStacking[i].sharpness < bestFramesForStacking[minSharpnessIndex].sharpness) {
+                        minSharpnessIndex = i;
+                    }
+                }
+
+                // Replace if current frame is better
+                if (frame.sharpness > bestFramesForStacking[minSharpnessIndex].sharpness) {
+                    bestFramesForStacking[minSharpnessIndex] = frame;
+                }
+                // Otherwise frame is discarded (not kept in memory)
+            }
+        }
+
+        // Concurrency control
+        const MAX_IN_FLIGHT = numWorkers * 3;
+        let inFlight = 0;
+        const waitQueue = [];
+
+        function releaseSlot() {
+            inFlight--;
+            if (waitQueue.length > 0) {
+                waitQueue.shift()();
+            }
+        }
+
+        async function acquireSlot() {
+            if (inFlight < MAX_IN_FLIGHT) {
+                inFlight++;
+                return;
+            }
+            await new Promise(resolve => waitQueue.push(resolve));
+            inFlight++;
+        }
+
+        let globalFrameIndex = 0;
+        let completedFrames = 0;
+        let successfulFrames = 0;
+        let skippedFrames = 0;
+        let cutOffFrames = 0;
+        let oversizedFrames = 0;
+        let totalErrors = 0;
+        const maxErrorsBeforeStopDispatching = 20;
+        let stopDispatching = false;
+
+        const workerPromises = [];
+
+        // Process each file
+        for (let fileIndex = 0; fileIndex < fileInfos.length; fileIndex++) {
+            if (stopDispatching) break;
+
+            const { file, header, frameSize, frameCount, filename } = fileInfos[fileIndex];
+
+            // Calculate how many frames to take from this file (proportional to global limit)
+            let framesToProcessFromFile = frameCount;
+            if (maxFrames > 0) {
+                const proportion = frameCount / totalFramesAvailable;
+                framesToProcessFromFile = Math.ceil(proportion * totalFramesToProcess);
+            }
+
+            addLog(`Processing ${filename}: ${framesToProcessFromFile} frames`);
+
+            const headerForWorker = {
+                fileId: header.fileId,
+                width: header.width,
+                height: header.height,
+                pixelDepth: header.pixelDepth,
+                colorID: header.colorID
+            };
+
+            for (let i = 0; i < framesToProcessFromFile && i < frameCount; i++) {
+                if (stopDispatching) break;
+
+                const offset = 178 + (i * frameSize);
+                if (offset + frameSize > file.size) {
+                    addLog(`${filename}: Stopping at frame ${i} due to reaching end of file.`);
+                    break;
+                }
+
+                await acquireSlot();
+
+                const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+                const workerIndex = globalFrameIndex % numWorkers;
+                const currentGlobalIndex = globalFrameIndex;
+
+                const dataToWorker = {
+                    type: cropRegion ? 'analyze-cropped' : 'ser',
+                    frameBuffer: frameBuffer,
+                    header: headerForWorker,
+                    bayerChoice: bayerChoice,
+                    cropRegion: cropRegion,
+                    clientSideStacking: clientSideStacking,
+                    index: currentGlobalIndex
+                };
+
+                const promise = processFrameWithWorker(workerIndex, dataToWorker, [frameBuffer])
+                    .then(result => {
+                        if (result.skipped) {
+                            if (result.reason === 'cut-off') {
+                                cutOffFrames++;
+                            } else if (result.reason === 'oversized') {
+                                oversizedFrames++;
+                            } else {
+                                skippedFrames++;
+                            }
+                            completedFrames++;
+                            return;
+                        }
+
+                        const currentFrame = {
+                            sharpness: result.sharpness,
+                            blob: result.pngBlob,
+                            croppedBuffer: result.croppedBuffer,
+                            rgbaBuffer: result.rgbaBuffer,
+                            width: result.width,
+                            height: result.height,
+                            index: result.index,
+                            sourceFile: filename
+                        };
+
+                        // Validate frame has valid blob and rank it (streaming)
+                        if (currentFrame.blob && currentFrame.blob instanceof Blob && currentFrame.blob.size > 0) {
+                            rankFrame(currentFrame);
+                            successfulFrames++;
+                        }
+
+                        completedFrames++;
+
+                        if (completedFrames % 50 === 0 || completedFrames === totalFramesToProcess) {
+                            emit('update-loading', {
+                                progress: (completedFrames / totalFramesToProcess) * 100,
+                                current: completedFrames,
+                                total: totalFramesToProcess
+                            });
+                            addLog(`Analyzed frame ${completedFrames}/${totalFramesToProcess} (file ${fileIndex + 1}/${fileInfos.length})`);
+
+                            // Update preview with best frame so far
+                            if (bestFrameSoFar) {
+                                emit('best-frame-updated', bestFrameSoFar);
+                            }
+                        }
+                    })
+                    .catch(error => {
+                        totalErrors++;
+                        completedFrames++;
+                        if (totalErrors <= 3) {
+                            addLog(`Error processing frame ${currentGlobalIndex} from ${filename}: ${error}`);
+                        } else if (totalErrors === 4) {
+                            addLog(`Further frame errors suppressed...`);
+                        }
+                        if (totalErrors >= maxErrorsBeforeStopDispatching && !stopDispatching) {
+                            stopDispatching = true;
+                            addLog(`Too many errors (${totalErrors}), stopped dispatching new frames.`);
+                        }
+                    })
+                    .finally(() => {
+                        releaseSlot();
+                    });
+
+                workerPromises.push(promise);
+                globalFrameIndex++;
+            }
+        }
+
+        // Wait for all worker tasks to complete
+        await Promise.all(workerPromises);
+
+        // PHASE 6: Ranking already done via streaming rankFrame()
+        // bestFramesForStacking already contains the best 30%
+
+        const skipMsgs = [];
+        if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
+        if (oversizedFrames > 0) skipMsgs.push(`${oversizedFrames} oversized`);
+        if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} crop-failed`);
+        if (totalErrors > 0) skipMsgs.push(`${totalErrors} errors`);
+        const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
+
+        addLog(`Analyzed ${successfulFrames} frames across ${fileInfos.length} files. Selected best ${bestFramesForStacking.length} for stacking.${skippedMsg}`);
+
+        // Log distribution of selected frames across files
+        const fileDistribution = {};
+        bestFramesForStacking.forEach(frame => {
+            fileDistribution[frame.sourceFile] = (fileDistribution[frame.sourceFile] || 0) + 1;
+        });
+        addLog(`Frame distribution: ${Object.entries(fileDistribution).map(([file, count]) => `${file}: ${count}`).join(', ')}`);
+
+        emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: globalFrameIndex, done: true });
+
+        // PHASE 7: Stack or manual selection
+        if (manualThreshold) {
+            // Sort frames by sharpness for manual selection UI
+            allAnalyzedFrames.sort((a, b) => b.sharpness - a.sharpness);
+            addLog(`Ready for manual threshold selection with ${allAnalyzedFrames.length} frames`);
+            emit('quality-selection-ready', {
+                frames: allAnalyzedFrames,
+                workers: unifiedAnalyzeWorkers
+            });
+            return;
+        } else if (clientSideStacking) {
+            emit('set-caption', 'Stacking frames locally...');
+            addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
+
+            const stackingWorker = unifiedAnalyzeWorkers[0];
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker);
+
+            if (stackedBlob) {
+                addLog('Client-side stacking complete');
+                emit('stacked-image-ready', { blob: stackedBlob });
+            } else {
+                addLog('Client-side stacking failed - no valid frames');
+                emit('stop-loading');
+            }
+        }
+
+        // Terminate workers after all tasks are done
+        unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
+        unifiedAnalyzeWorkers.length = 0;
+        pendingFrames.clear();
+        workersReady = false;
+    }
+
+    return { readSerFile, readSerFiles };
 }
