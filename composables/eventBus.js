@@ -8,6 +8,48 @@ const caption = ref('');
 // Global worker registry for cleanup on page unload
 const activeWorkers = new Set();
 
+// Debug: store frames for inspection
+let debugFrames = [];
+
+// Debug utility to download a specific frame
+if (typeof window !== 'undefined') {
+	window.debugSaveFrame = async (index) => {
+		if (!debugFrames || debugFrames.length === 0) {
+			console.log('No frames available. Load a SER/AVI file first.');
+			return;
+		}
+		if (index < 0 || index >= debugFrames.length) {
+			console.log(`Invalid index. Available frames: 0 to ${debugFrames.length - 1}`);
+			return;
+		}
+		const frame = debugFrames[index];
+		if (!frame.blob) {
+			console.log(`Frame ${index} has no blob`);
+			return;
+		}
+		const url = URL.createObjectURL(frame.blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = `debug_frame_${index}_sharpness_${frame.sharpness?.toFixed(2) || 'unknown'}.png`;
+		a.click();
+		URL.revokeObjectURL(url);
+		console.log(`Downloaded frame ${index} (sharpness: ${frame.sharpness?.toFixed(2)})`);
+	};
+
+	window.debugListFrames = () => {
+		if (!debugFrames || debugFrames.length === 0) {
+			console.log('No frames available. Load a SER/AVI file first.');
+			return;
+		}
+		console.log(`${debugFrames.length} frames available:`);
+		console.log('Top 10 by sharpness:');
+		debugFrames.slice(0, 10).forEach((f, i) => {
+			console.log(`  [${f.originalIndex ?? i}] sharpness: ${f.sharpness?.toFixed(2)}`);
+		});
+		console.log('Use window.debugSaveFrame(index) to download a frame');
+	};
+}
+
 // Cleanup all workers on page unload
 if (typeof window !== 'undefined') {
 	window.addEventListener('beforeunload', () => {
@@ -46,6 +88,11 @@ export const useEventBus = () => {
 	const emit = (event, payload) => {
 		if (event === 'set-caption') {
 			setCaption(payload);
+		}
+		// Capture frames for debug export
+		if ((event === 'quality-selection-ready' || event === 'debug-frames-available') && payload?.frames) {
+			debugFrames = payload.frames;
+			console.log(`Debug: ${debugFrames.length} frames available. Use window.debugListFrames() or window.debugSaveFrame(index)`);
 		}
 		if (eventCallbacks[event]) {
 			eventCallbacks[event].forEach(cb => cb(payload));

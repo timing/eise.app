@@ -72,7 +72,8 @@ export function useStacker() {
                 rgbaBuffer: f.rgbaBuffer,
                 width: f.width,
                 height: f.height,
-                sharpness: f.sharpness
+                sharpness: f.sharpness,
+                subPixelOffset: f.subPixelOffset || { x: 0, y: 0 }
             }));
 
             // Collect unique buffers for transfer (avoid duplicates)

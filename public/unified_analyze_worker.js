@@ -1,5 +1,5 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v25 - crop first, 16-bit demosaic)');
+console.log('unified_analyze_worker.js loaded (v26 - global alignment from sub-pixel crop offsets)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
@@ -188,10 +188,7 @@ async function handleMessage(e) {
                     return;
                 }
 
-                // Debug: log first few frames' crop positioning
-                if (index < 3) {
-                    console.log(`Crop debug frame ${index}: detected center=(${centerX.toFixed(1)}, ${centerY.toFixed(1)}), cropSize=${cropRegion.size}, frameSize=${header.width}x${header.height}`);
-                }
+                // Debug: log first few frames' crop positioning (moved after subPixelOffset calculation)
 
                 const halfSize = cropRegion.size / 2;
 
@@ -208,11 +205,24 @@ async function handleMessage(e) {
                 const padRight = Math.max(0, (idealCropX + cropRegion.size) - header.width);
                 const padBottom = Math.max(0, (idealCropY + cropRegion.size) - header.height);
 
+                // Calculate sub-pixel offset: how much the detected center differs from crop center
+                // This is used for global alignment during stacking
+                const cropCenterX = idealCropX + cropRegion.size / 2;
+                const cropCenterY = idealCropY + cropRegion.size / 2;
+                const subPixelOffsetX = centerX - cropCenterX;
+                const subPixelOffsetY = centerY - cropCenterY;
+
+                // Debug: log first few frames' crop positioning with subPixelOffset
+                if (index < 5) {
+                    console.log(`Crop frame ${index}: center=(${centerX.toFixed(2)}, ${centerY.toFixed(2)}), cropAt=(${idealCropX}, ${idealCropY}), subPixelOffset=(${subPixelOffsetX.toFixed(3)}, ${subPixelOffsetY.toFixed(3)})`);
+                }
+
                 actualCropRegion = {
                     x: idealCropX,
                     y: idealCropY,
                     size: cropRegion.size,
-                    padding: { left: padLeft, top: padTop, right: padRight, bottom: padBottom }
+                    padding: { left: padLeft, top: padTop, right: padRight, bottom: padBottom },
+                    subPixelOffset: { x: subPixelOffsetX, y: subPixelOffsetY }
                 };
             }
 
@@ -229,6 +239,7 @@ async function handleMessage(e) {
                 sharpness: result.sharpness,
                 pngBlob: result.pngBlob,
                 croppedBuffer: result.croppedBuffer,
+                subPixelOffset: actualCropRegion?.subPixelOffset || { x: 0, y: 0 },
                 index
             };
 
@@ -1086,7 +1097,8 @@ async function stackFramesLocally(frames) {
         const sortedFrames = [...validFrames].sort((a, b) => b.sharpness - a.sharpness);
         const referenceFrame = sortedFrames[0];
         const refData = new Uint8ClampedArray(referenceFrame.rgbaBuffer);
-        console.log(`Reference frame: sharpness ${referenceFrame.sharpness.toFixed(2)}`);
+        const refSubPixelOffset = referenceFrame.subPixelOffset || { x: 0, y: 0 };
+        console.log(`Reference frame: sharpness ${referenceFrame.sharpness.toFixed(2)}, subPixelOffset=(${refSubPixelOffset.x.toFixed(3)}, ${refSubPixelOffset.y.toFixed(3)})`);
 
         // === Create Alignment Points Grid ===
         const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height);
@@ -1238,14 +1250,28 @@ async function stackFramesLocally(frames) {
             if (useLocalDewarping) {
                 const shifts = frameShifts[f];
 
+                // Compute global offset: how much to shift this frame to align with reference
+                // The subPixelOffset tells us how much the planet center differs from crop center
+                // If frame's planet is MORE to the right than ref's planet, we shift frame LEFT
+                // In remap, shifting LEFT means sampling from further RIGHT (positive offset)
+                // So globalOffset = frameOffset - refOffset
+                const frameSubPixelOffset = frame.subPixelOffset || { x: 0, y: 0 };
+                const globalOffsetX = frameSubPixelOffset.x - refSubPixelOffset.x;
+                const globalOffsetY = frameSubPixelOffset.y - refSubPixelOffset.y;
+
+                // Log first few frames' global offsets for debugging
+                if (f < 3) {
+                    console.log(`Frame ${f}: subPixelOffset=(${frameSubPixelOffset.x.toFixed(3)}, ${frameSubPixelOffset.y.toFixed(3)}), globalOffset=(${globalOffsetX.toFixed(3)}, ${globalOffsetY.toFixed(3)})`);
+                }
+
                 // Create frame Mat
                 let frameMat = null, warpedMat = null;
                 try {
                     frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
                     frameMat.data.set(frameData);
 
-                    // Build displacement maps from shifts (local atmospheric wobble)
-                    buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize);
+                    // Build displacement maps from shifts (local atmospheric wobble) plus global offset
+                    buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize, globalOffsetX, globalOffsetY);
 
                     // Apply local de-warping via remap
                     warpedMat = new _cv.Mat();
@@ -1372,8 +1398,11 @@ function createAPGrid(width, height) {
  * Build displacement maps for cv.remap by interpolating AP shifts
  * This creates a smooth warp field from sparse alignment point measurements
  * Uses Gaussian weighting for smooth transitions between AP regions
+ *
+ * @param globalOffsetX - Global X offset to align frame with reference (from sub-pixel crop centering)
+ * @param globalOffsetY - Global Y offset to align frame with reference (from sub-pixel crop centering)
  */
-function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize) {
+function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize, globalOffsetX = 0, globalOffsetY = 0) {
     const mapXData = mapX.data32F;
     const mapYData = mapY.data32F;
 
@@ -1419,13 +1448,15 @@ function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shift
             }
 
             // remap uses source coordinates, so we ADD the shift
+            // Global offset aligns frame to reference (compensates for per-frame crop centering)
+            // Local shift (from APs) corrects for atmospheric wobble
             if (totalWeight > 0) {
-                mapXData[idx] = x + weightedDx / totalWeight;
-                mapYData[idx] = y + weightedDy / totalWeight;
+                mapXData[idx] = x + globalOffsetX + weightedDx / totalWeight;
+                mapYData[idx] = y + globalOffsetY + weightedDy / totalWeight;
             } else {
-                // No nearby APs - identity mapping
-                mapXData[idx] = x;
-                mapYData[idx] = y;
+                // No nearby APs - apply global offset only
+                mapXData[idx] = x + globalOffsetX;
+                mapYData[idx] = y + globalOffsetY;
             }
         }
     }

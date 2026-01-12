@@ -174,7 +174,8 @@ export function useSerReader() {
                         rgbaBuffer: e.data.rgbaBuffer,
                         width: e.data.width,
                         height: e.data.height,
-                        index: e.data.index
+                        index: e.data.index,
+                        subPixelOffset: e.data.subPixelOffset
                     });
                 }
             });
@@ -566,7 +567,8 @@ export function useSerReader() {
                         rgbaBuffer: result.rgbaBuffer,
                         width: result.width,
                         height: result.height,
-                        index: result.index
+                        index: result.index,
+                        subPixelOffset: result.subPixelOffset || { x: 0, y: 0 }
                     };
 
                     rankFrame(currentFrame);
@@ -649,6 +651,9 @@ export function useSerReader() {
             // Client-side stacking: use one of the existing workers (before terminating them)
             emit('set-caption', 'Stacking frames locally...');
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
+
+            // Emit for debug frame access
+            emit('debug-frames-available', { frames: bestFramesForStacking });
 
             // Use the first worker for stacking (it's already initialized with OpenCV)
             const stackingWorker = unifiedAnalyzeWorkers[0];
@@ -1161,7 +1166,8 @@ export function useSerReader() {
                             width: result.width,
                             height: result.height,
                             index: result.index,
-                            sourceFile: filename
+                            sourceFile: filename,
+                            subPixelOffset: result.subPixelOffset || { x: 0, y: 0 }
                         };
 
                         // Validate frame has valid blob and rank it (streaming)
