@@ -85,6 +85,21 @@ export function useStacker() {
             });
             const transferables = Array.from(uniqueBuffers);
 
+            // Emit frame data for AVI export BEFORE transfer (buffers will be detached after)
+            // Clone buffers so they remain accessible after transfer
+            const aviFrameData = frameData.map(f => ({
+                rgbaBuffer: f.rgbaBuffer.slice(0), // Clone the buffer
+                width: f.width,
+                height: f.height
+            }));
+            emit('cropped-avi-ready', {
+                frames: aviFrameData,
+                width: frameData[0].width,
+                height: frameData[0].height,
+                frameCount: aviFrameData.length
+            });
+            addLog(`AVI export data ready: ${aviFrameData.length} frames`);
+
             // Send stacking request - worker is already initialized
             worker.postMessage({
                 type: 'stack-frames',

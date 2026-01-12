@@ -334,7 +334,7 @@ export function useSerReader() {
 
         // Determine initial bayer choice from header for auto-detection hint
         // Using BGR output variants because we later convert BGR->RGBA
-        const bayerMap = { 0: "MONO", 8: "COLOR_BayerRG2BGR", 9: "COLOR_BayerGR2BGR", 10: "COLOR_BayerGB2BGR", 11: "COLOR_BayerBG2BGR" };
+        const bayerMap = { 0: "MONO", 8: "COLOR_BayerBG2RGB", 9: "COLOR_BayerGB2RGB", 10: "COLOR_BayerGR2RGB", 11: "COLOR_BayerRG2RGB" };
         let autoDetectedProfile = bayerMap[header.colorID];
         if (!autoDetectedProfile) {
             autoDetectedProfile = "COLOR_BayerRG2BGR";
@@ -925,7 +925,7 @@ export function useSerReader() {
         // PHASE 3: Color profile selection (using first file's header)
         const firstHeader = fileInfos[0].header;
         const firstFrameSize = fileInfos[0].frameSize;
-        const bayerMap = { 0: "MONO", 8: "COLOR_BayerRG2BGR", 9: "COLOR_BayerGR2BGR", 10: "COLOR_BayerGB2BGR", 11: "COLOR_BayerBG2BGR" };
+        const bayerMap = { 0: "MONO", 8: "COLOR_BayerBG2RGB", 9: "COLOR_BayerGB2RGB", 10: "COLOR_BayerGR2RGB", 11: "COLOR_BayerRG2RGB" };
         let autoDetectedProfile = bayerMap[firstHeader.colorID] || "COLOR_BayerRG2BGR";
 
         const firstFrameBuffer = await fileInfos[0].file.slice(178, 178 + firstFrameSize).arrayBuffer();

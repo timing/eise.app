@@ -43,7 +43,8 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 **WebWorker Frame Analysis**: Workers use Tenengrad (Sobel-based) sharpness calculation. Pool size based on `navigator.hardwareConcurrency` (max 4 to prevent memory issues). Workers handle both FFmpeg-extracted PNG frames and raw SER/AVI frames.
 
 **Client-Side Stacking**: The `stackFramesLocally()` function in `unified_analyze_worker.js` implements:
-- Alignment point grid creation
+- Alignment point grid creation (PSS-like parameters: 20px patches, 8px search, 50% overlap)
+- AP quality filtering by minimum structure (0.02) and brightness (5)
 - Template matching for local shift detection (`cv.matchTemplate`)
 - Gaussian-weighted displacement map interpolation
 - De-warping via `cv.remap()` with bilinear interpolation
@@ -59,6 +60,8 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 - AVI: Direct parsing with FourCC detection
 - Images: PNG, JPG, WebP, AVIF (direct), others (FFmpeg converted)
 
+**AVI Export**: `utils/aviEncoder.js` can export cropped/debayered frames as uncompressed AVI (DIB format). Used for debugging moiré issues - allows re-importing processed frames to compare stacking results.
+
 **Event Bus Pattern**: Cross-component communication via `composables/eventBus.js`. Key events: `set-caption`, `update-loading`, `stop-loading`, `upload-error`, `postProcessing`, `stacking-started`, `stacked-image-ready`.
 
 **SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`.
@@ -67,3 +70,43 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 
 - Max file size: 2GB (larger files can be trimmed)
 - Max frames: 5000 configurable
+
+## Known Issues & Investigation Notes
+
+**Moiré Pattern in SER Stacking (UNSOLVED)**:
+SER files produce moiré artifacts when stacked, but exporting debayered frames to AVI and re-importing produces less moiré (though still some). Both paths stack the same 1500 frames with the same reference frame selected.
+
+**Ruled out as causes:**
+- Per-frame crop centering - AVI frames ARE the per-frame centered frames
+- subPixelOffset / globalOffset correction - disabling didn't help
+- Padding (BORDER_REPLICATE) - AVI frames have same padding baked in
+- cv.remap() interpolation - moiré happens even with simple averaging (no de-warping)
+- VNG vs bilinear demosaic - both produce moiré
+- Color channel handling (BGR/RGB conversions) - fixed but moiré remains
+- AP grid parameters - PSS-like parameters (20px, 8px search) didn't fix it
+- Original frame dimensions affecting cropped frames - verified dimensions are correct
+
+**Key observations:**
+- Frames are pixel-identical when compared in GIMP (verified by color picking)
+- Same reference frame selected in both paths
+- Same number of frames (1500) stacked
+- AVI has LESS moiré but still SOME - suggesting base moiré from demosaic, extra from SER path
+- When AVI is re-imported at <300px, no auto-crop runs - frames go straight to stacking
+
+**Remaining suspects:**
+- Something in fresh demosaic vs pre-demosaiced AVI data
+- Subtle floating-point differences in accumulation
+- Buffer handling differences (Uint8ClampedArray vs Uint8Array)
+- The RGBA→BGR→RGBA round-trip in AVI somehow reduces artifacts
+
+**OpenCV Bayer Naming Convention Issue (IMPORTANT)**:
+OpenCV's Bayer pattern naming differs from the rest of the industry (camera manufacturers, MATLAB, etc.). According to [OpenCV issue #19629](https://github.com/opencv/opencv/issues/19629):
+- OpenCV uses the 2x2 sub-matrix starting at row 2, column 2 of the CFA
+- What the world calls "RGGB", OpenCV calls "BGGR"
+- This means if a camera is configured to produce "RGGB" images, using `COLOR_BayerRG2BGR` may give unexpected results
+
+**COLOR_RGB2RGBA vs COLOR_BGR2RGBA** (FIXED):
+- The Bayer pattern mapping was corrected to use OpenCV's naming convention
+- Now using RGB output variants (COLOR_BayerXX2RGB) instead of BGR
+- Mapping: SER RGGB (colorID 8) → OpenCV BG, SER BGGR (colorID 11) → OpenCV RG, etc.
+- Files updated: useSerReader.js (bayerMap), ColorProfileSelector.vue (profiles), useAviReader.js (default)

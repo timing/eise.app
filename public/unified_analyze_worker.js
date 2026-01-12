@@ -1,5 +1,5 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v26 - global alignment from sub-pixel crop offsets)');
+console.log('unified_analyze_worker.js loaded (v27 - debayer-then-crop to fix moiré)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
@@ -171,15 +171,15 @@ async function handleMessage(e) {
 
             let actualCropRegion = null;
             if (cropRegion && cropRegion.size) {
-                // Always use per-frame detection for centering - this keeps the planet centered in every frame
-                // The cropRegion.size is pre-calculated to be large enough to contain the planet with movement margin
+                // Use per-frame detection for centering - keeps planet centered in every frame
+                // The cropRegion.size is pre-calculated to be large enough for planet movement
                 let centerX, centerY;
                 if (bounds.canCrop && bounds.centerX !== undefined) {
                     // Use actual detected center for this frame
                     centerX = bounds.centerX;
                     centerY = bounds.centerY;
                 } else if (cropRegion.referenceCenter) {
-                    // Fall back to reference center if detection failed for this frame
+                    // Fall back to reference center if detection failed
                     centerX = cropRegion.referenceCenter.x;
                     centerY = cropRegion.referenceCenter.y;
                 } else {
@@ -213,8 +213,9 @@ async function handleMessage(e) {
                 const subPixelOffsetY = centerY - cropCenterY;
 
                 // Debug: log first few frames' crop positioning with subPixelOffset
-                if (index < 5) {
-                    console.log(`Crop frame ${index}: center=(${centerX.toFixed(2)}, ${centerY.toFixed(2)}), cropAt=(${idealCropX}, ${idealCropY}), subPixelOffset=(${subPixelOffsetX.toFixed(3)}, ${subPixelOffsetY.toFixed(3)})`);
+                const needsPadding = padLeft > 0 || padTop > 0 || padRight > 0 || padBottom > 0;
+                if (index < 5 || needsPadding) {
+                    console.log(`Crop frame ${index}: center=(${centerX.toFixed(2)}, ${centerY.toFixed(2)}), cropAt=(${idealCropX}, ${idealCropY}), subPixelOffset=(${subPixelOffsetX.toFixed(3)}, ${subPixelOffsetY.toFixed(3)})${needsPadding ? ` PADDING: L=${padLeft} T=${padTop} R=${padRight} B=${padBottom}` : ''}`);
                 }
 
                 actualCropRegion = {
@@ -239,7 +240,8 @@ async function handleMessage(e) {
                 sharpness: result.sharpness,
                 pngBlob: result.pngBlob,
                 croppedBuffer: result.croppedBuffer,
-                subPixelOffset: actualCropRegion?.subPixelOffset || { x: 0, y: 0 },
+                // Force subPixelOffset to 0 - testing if this causes moiré
+                subPixelOffset: { x: 0, y: 0 },
                 index
             };
 
@@ -356,7 +358,7 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             console.log(`Processing frame ${frameIndex}: ${width}x${height} -> ${cropInfo}`);
         }
 
-        // --- Step 1: Create Mat, CROP first, then DEMOSAIC at native bit depth ---
+        // --- Step 1: DEMOSAIC full frame first, then CROP (fixes moiré from crop-then-demosaic) ---
         if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER file
             const serDataType = pixelDepth > 8 ? _cv.CV_16UC1 : _cv.CV_8UC1;
             const serData = pixelDepth > 8 ? new Uint16Array(frameBuffer) : new Uint8Array(frameBuffer);
@@ -366,19 +368,54 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             }
             rawMat = _cv.matFromArray(height, width, serDataType, serData);
 
-            // Crop raw Bayer data first (saves memory for large frames)
+            // Extract cropped raw buffer for SER export BEFORE we process further
+            // Note: We do a manual ROI crop here to NOT delete rawMat (we need it for demosaicing)
             if (cropRegion) {
-                rawMat = applyCropWithPadding(rawMat, cropRegion, width, height);
+                let croppedRaw = null;
+                try {
+                    // Manual crop using ROI + clone (doesn't delete source like applyCropWithPadding does)
+                    const { x, y, size, padding } = cropRegion;
+                    if (!padding || (padding.left === 0 && padding.top === 0 && padding.right === 0 && padding.bottom === 0)) {
+                        // Simple ROI crop
+                        const rect = new _cv.Rect(x, y, size, size);
+                        croppedRaw = rawMat.roi(rect).clone();
+                    } else {
+                        // Need padding - calculate valid region and use copyMakeBorder
+                        const validX = Math.max(0, x);
+                        const validY = Math.max(0, y);
+                        const validRight = Math.min(width, x + size);
+                        const validBottom = Math.min(height, y + size);
+                        const validWidth = validRight - validX;
+                        const validHeight = validBottom - validY;
+                        const validRect = new _cv.Rect(validX, validY, validWidth, validHeight);
+                        const validPortion = rawMat.roi(validRect).clone();
+                        croppedRaw = new _cv.Mat();
+                        _cv.copyMakeBorder(validPortion, croppedRaw, padding.top, padding.bottom, padding.left, padding.right, _cv.BORDER_REPLICATE);
+                        validPortion.delete();
+                    }
+
+                    const croppedWidth = croppedRaw.cols;
+                    const croppedHeight = croppedRaw.rows;
+                    const bytesPerPixel = pixelDepth > 8 ? 2 : 1;
+                    croppedBuffer = new ArrayBuffer(croppedWidth * croppedHeight * bytesPerPixel);
+                    if (pixelDepth > 8) {
+                        new Uint16Array(croppedBuffer).set(new Uint16Array(croppedRaw.data.buffer, croppedRaw.data.byteOffset, croppedWidth * croppedHeight));
+                    } else {
+                        new Uint8Array(croppedBuffer).set(new Uint8Array(croppedRaw.data.buffer, croppedRaw.data.byteOffset, croppedWidth * croppedHeight));
+                    }
+                } finally {
+                    if (croppedRaw) croppedRaw.delete();
+                }
             }
 
-            // Demosaic at NATIVE BIT DEPTH (16-bit for better quality)
+            // Demosaic FULL frame at native bit depth
             rgbaMat = new _cv.Mat();
             if (bayerChoice && bayerChoice !== "MONO") {
                 const vngChoice = bayerChoice + '_VNG';
                 const demosaicMethod = _cv[vngChoice] !== undefined ? vngChoice : bayerChoice;
 
                 if (!loggedDemosaicMethod) {
-                    console.log(`Using demosaicing method: ${demosaicMethod} at ${pixelDepth}-bit`);
+                    console.log(`Using demosaicing method: ${demosaicMethod} at ${pixelDepth}-bit (debayer-then-crop)`);
                     loggedDemosaicMethod = true;
                 }
 
@@ -388,45 +425,57 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
 
                 let demosaiced = null;
                 let demosaiced8 = null;
+                let rgbFull = null;
                 try {
                     demosaiced = new _cv.Mat();
                     _cv.demosaicing(rawMat, demosaiced, _cv[demosaicMethod]);
 
-                    // Convert to 8-bit RGBA after demosaicing
+                    // Convert to 8-bit RGB after demosaicing
                     if (pixelDepth > 8) {
                         demosaiced8 = new _cv.Mat();
                         demosaiced.convertTo(demosaiced8, _cv.CV_8UC3, 1/256);
-                        _cv.cvtColor(demosaiced8, rgbaMat, _cv.COLOR_RGB2RGBA);
+                        rgbFull = demosaiced8;
+                        demosaiced8 = null; // Don't delete, we're using it
                     } else {
-                        _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_RGB2RGBA);
+                        rgbFull = demosaiced;
+                        demosaiced = null; // Don't delete, we're using it
+                    }
+
+                    // Now crop the demosaiced frame, then convert to RGBA
+                    if (cropRegion) {
+                        // Note: applyCropWithPadding deletes rgbFull internally
+                        const croppedRgb = applyCropWithPadding(rgbFull, cropRegion, width, height);
+                        rgbFull = null; // Already deleted by applyCropWithPadding
+                        _cv.cvtColor(croppedRgb, rgbaMat, _cv.COLOR_RGB2RGBA);
+                        croppedRgb.delete();
+                    } else {
+                        _cv.cvtColor(rgbFull, rgbaMat, _cv.COLOR_RGB2RGBA);
                     }
                 } finally {
                     if (demosaiced8) demosaiced8.delete();
                     if (demosaiced) demosaiced.delete();
+                    if (rgbFull) rgbFull.delete();
                 }
             } else {
-                // Mono - convert to 8-bit first, then to RGBA
+                // Mono - convert to 8-bit first, then crop, then to RGBA
                 grayMat = new _cv.Mat();
                 if (pixelDepth > 8) {
                     rawMat.convertTo(grayMat, _cv.CV_8U, 1/256);
                 } else {
                     rawMat.copyTo(grayMat);
                 }
-                _cv.cvtColor(grayMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
-                grayMat.delete();
-                grayMat = null;
-            }
-            // Extract cropped raw buffer for SER export before deleting rawMat
-            if (cropRegion) {
-                const croppedWidth = rawMat.cols;
-                const croppedHeight = rawMat.rows;
-                const bytesPerPixel = pixelDepth > 8 ? 2 : 1;
-                croppedBuffer = new ArrayBuffer(croppedWidth * croppedHeight * bytesPerPixel);
-                if (pixelDepth > 8) {
-                    new Uint16Array(croppedBuffer).set(new Uint16Array(rawMat.data.buffer, rawMat.data.byteOffset, croppedWidth * croppedHeight));
+
+                if (cropRegion) {
+                    // Note: applyCropWithPadding deletes grayMat internally
+                    const croppedGray = applyCropWithPadding(grayMat, cropRegion, width, height);
+                    _cv.cvtColor(croppedGray, rgbaMat, _cv.COLOR_GRAY2RGBA);
+                    croppedGray.delete();
+                    // grayMat already deleted by applyCropWithPadding
                 } else {
-                    new Uint8Array(croppedBuffer).set(new Uint8Array(rawMat.data.buffer, rawMat.data.byteOffset, croppedWidth * croppedHeight));
+                    _cv.cvtColor(grayMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
+                    grayMat.delete();
                 }
+                grayMat = null;
             }
 
             rawMat.delete();
@@ -522,6 +571,14 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
         let rgbaBuffer = null;
         if (includeRgba) {
             rgbaBuffer = new Uint8ClampedArray(rgbaMat.data).buffer;
+
+            // DEBUG: Log checksum of first frame to compare SER vs AVI paths
+            if (frameIndex === 0) {
+                const data = new Uint8Array(rgbaBuffer);
+                let sum = 0;
+                for (let i = 0; i < data.length; i += 100) sum += data[i]; // Sample every 100th byte
+                console.log(`FRAME 0 CHECKSUM: ${sum}, size=${data.length}, first16=[${Array.from(data.slice(0,16)).join(',')}]`);
+            }
         }
 
         return { sharpness, pngBlob, croppedBuffer, rgbaBuffer, width: actualWidth, height: actualHeight };
@@ -1154,6 +1211,13 @@ async function stackFramesLocally(frames) {
             throw new Error(`Failed to create reference Mat after ${maxRetries} attempts: ${lastError}`);
         }
 
+        // Filter APs by structure and brightness (PSS defaults: 0.02, 5)
+        const filteredAPs = filterAPsByQuality(alignmentPoints, refGray, width, height, patchSize, 0.02, 5);
+        console.log(`Filtered APs: ${filteredAPs.length}/${alignmentPoints.length} passed quality threshold`);
+
+        // Use filtered APs for alignment
+        const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
+
         for (let f = 0; f < frameCount; f++) {
             const frame = validFrames[f];
 
@@ -1180,8 +1244,8 @@ async function stackFramesLocally(frames) {
                 _cv.cvtColor(frameMat, frameGray, _cv.COLOR_RGBA2GRAY);
 
                 const shifts = [];
-                for (let a = 0; a < alignmentPoints.length; a++) {
-                    const ap = alignmentPoints[a];
+                for (let a = 0; a < activeAPs.length; a++) {
+                    const ap = activeAPs[a];
                     const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius);
                     shifts.push(shift);
                 }
@@ -1251,13 +1315,16 @@ async function stackFramesLocally(frames) {
                 const shifts = frameShifts[f];
 
                 // Compute global offset: how much to shift this frame to align with reference
+                // DISABLED: Testing if global offset causes moiré via interpolation artifacts
                 // The subPixelOffset tells us how much the planet center differs from crop center
                 // If frame's planet is MORE to the right than ref's planet, we shift frame LEFT
                 // In remap, shifting LEFT means sampling from further RIGHT (positive offset)
                 // So globalOffset = frameOffset - refOffset
                 const frameSubPixelOffset = frame.subPixelOffset || { x: 0, y: 0 };
-                const globalOffsetX = frameSubPixelOffset.x - refSubPixelOffset.x;
-                const globalOffsetY = frameSubPixelOffset.y - refSubPixelOffset.y;
+                // const globalOffsetX = frameSubPixelOffset.x - refSubPixelOffset.x;
+                // const globalOffsetY = frameSubPixelOffset.y - refSubPixelOffset.y;
+                const globalOffsetX = 0; // Disabled for testing
+                const globalOffsetY = 0;
 
                 // Log first few frames' global offsets for debugging
                 if (f < 3) {
@@ -1271,7 +1338,7 @@ async function stackFramesLocally(frames) {
                     frameMat.data.set(frameData);
 
                     // Build displacement maps from shifts (local atmospheric wobble) plus global offset
-                    buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize, globalOffsetX, globalOffsetY);
+                    buildDisplacementMaps(mapX, mapY, width, height, activeAPs, shifts, patchSize, globalOffsetX, globalOffsetY);
 
                     // Apply local de-warping via remap
                     warpedMat = new _cv.Mat();
@@ -1371,15 +1438,15 @@ async function stackFramesLocally(frames) {
 
 /**
  * Create a grid of alignment points
- * Optimized: fewer points, smaller search radius for speed
+ * Parameters matched to PSS (Planetary System Stacker) defaults
  */
 function createAPGrid(width, height) {
-    // Larger patches = fewer APs = faster
-    const patchSize = Math.max(48, Math.min(96, Math.floor(Math.min(width, height) / 4)));
-    // Smaller search radius - atmospheric wobble is usually only a few pixels
-    const searchRadius = Math.min(16, Math.floor(patchSize / 4));
-    // Larger spacing = fewer APs
-    const spacing = Math.floor(patchSize * 0.8);
+    // PSS default: alignment box width = 20px
+    const patchSize = 20;
+    // PSS default: max alignment search width = 8px
+    const searchRadius = 8;
+    // Spacing with 50% overlap for denser coverage (like PSS)
+    const spacing = Math.floor(patchSize / 2); // 10px spacing = 50% overlap
 
     const alignmentPoints = [];
     const marginX = Math.floor((width % spacing) / 2) + patchSize / 2;
@@ -1392,6 +1459,52 @@ function createAPGrid(width, height) {
     }
 
     return { alignmentPoints, patchSize, searchRadius };
+}
+
+/**
+ * Filter alignment points by structure (local contrast) and brightness
+ * PSS defaults: minStructure=0.02, minBrightness=5
+ */
+function filterAPsByQuality(alignmentPoints, refGray, width, height, patchSize, minStructure = 0.02, minBrightness = 5) {
+    const halfPatch = Math.floor(patchSize / 2);
+    const refData = refGray.data;
+    const filtered = [];
+
+    for (const ap of alignmentPoints) {
+        const x0 = ap.x - halfPatch;
+        const y0 = ap.y - halfPatch;
+
+        // Bounds check
+        if (x0 < 0 || y0 < 0 || x0 + patchSize > width || y0 + patchSize > height) {
+            continue;
+        }
+
+        // Calculate mean brightness and structure (std dev) of patch
+        let sum = 0;
+        let sumSq = 0;
+        const n = patchSize * patchSize;
+
+        for (let py = 0; py < patchSize; py++) {
+            for (let px = 0; px < patchSize; px++) {
+                const val = refData[(y0 + py) * width + (x0 + px)];
+                sum += val;
+                sumSq += val * val;
+            }
+        }
+
+        const mean = sum / n;
+        const variance = (sumSq / n) - (mean * mean);
+        const stdDev = Math.sqrt(Math.max(0, variance));
+        // Structure is normalized std dev (0-1 range)
+        const structure = stdDev / 255;
+
+        // Filter by PSS criteria
+        if (mean >= minBrightness && structure >= minStructure) {
+            filtered.push(ap);
+        }
+    }
+
+    return filtered;
 }
 
 /**

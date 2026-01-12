@@ -50,10 +50,10 @@ const headerData = ref(null);
 const thumbnailsReady = ref(false);
 
 const profiles = [
-	{ id: 'COLOR_BayerRG2BGR', label: 'RGGB' },
-	{ id: 'COLOR_BayerBG2BGR', label: 'BGGR' },
-	{ id: 'COLOR_BayerGB2BGR', label: 'GBRG' },
-	{ id: 'COLOR_BayerGR2BGR', label: 'GRBG' },
+	{ id: 'COLOR_BayerBG2RGB', label: 'RGGB' },
+	{ id: 'COLOR_BayerRG2RGB', label: 'BGGR' },
+	{ id: 'COLOR_BayerGR2RGB', label: 'GBRG' },
+	{ id: 'COLOR_BayerGB2RGB', label: 'GRBG' },
 	{ id: 'MONO', label: 'Mono' }
 ];
 

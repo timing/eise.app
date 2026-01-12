@@ -68,7 +68,7 @@
 		<QualitySelector v-show="currentTab === 'FileUploader' && isSelectingQuality" :frames="qualityFrames" @threshold-selected="handleThresholdSelected" />
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing && !isSelectingColorProfile && !isSelectingQuality"
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
-		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" :croppedSerData="croppedSerData" />
+		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" :croppedSerData="croppedSerData" :croppedAviData="croppedAviData" />
 
 		<Logger />
 
@@ -103,6 +103,7 @@ const isSelectingQuality = ref(false);
 const qualityFrames = ref([]);
 const qualityWorkers = ref(null);
 const croppedSerData = ref(null);
+const croppedAviData = ref(null);
 
 const loadPixel = ref(false)
 
@@ -120,6 +121,9 @@ onMounted(() => {
 	on('quality-selection-ready', handleQualitySelectionReady);
 	on('cropped-ser-ready', (data) => {
 		croppedSerData.value = data;
+	});
+	on('cropped-avi-ready', (data) => {
+		croppedAviData.value = data;
 	});
 });
 

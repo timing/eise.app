@@ -122,6 +122,7 @@
 			<button class="download" @click="downloadUnprocessedPNG">Download Unprocessed PNG</button>
 			<button class="download" @click="downloadCanvasAsPNG">Download Processed PNG</button>
 			<button v-if="props.croppedSerData" class="download" @click="downloadCroppedSer">Download Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})</button>
+			<button v-if="props.croppedAviData" class="download" @click="downloadCroppedAvi">Download Cropped AVI ({{ props.croppedAviData.frameCount }} frames)</button>
 
 		</div>
 	</div>
@@ -146,6 +147,7 @@
 import { ref, onMounted, watch, defineProps, reactive, onUnmounted } from 'vue';
 import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
+import { encodeAvi } from '@/utils/aviEncoder.js'
 import { initWebGL, processWithWebGL, isWebGLAvailable, disposeWebGL } from '@/utils/webglProcessor.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 import { useTracking } from '@/composables/useTracking';
@@ -214,6 +216,25 @@ const downloadCroppedSer = () => {
 	URL.revokeObjectURL(url);
 };
 
+const downloadCroppedAvi = () => {
+	if (!props.croppedAviData) return;
+
+	track('download_cropped_avi');
+	try {
+		const aviBlob = encodeAvi(props.croppedAviData.frames, 25);
+		const url = URL.createObjectURL(aviBlob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = getOutputFilename('cropped_debayered', 'avi');
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+		URL.revokeObjectURL(url);
+	} catch (e) {
+		console.error('AVI encoding error:', e);
+	}
+};
+
 let waveletWorkers = null;
 let workersInitialized = false;
 
@@ -231,7 +252,8 @@ function initializeWorkers() {
 
 const props = defineProps({
 	file: Object,
-	croppedSerData: Object
+	croppedSerData: Object,
+	croppedAviData: Object
 });
 
 const gain = ref(1);

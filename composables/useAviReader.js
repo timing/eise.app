@@ -443,7 +443,8 @@ export function useAviReader() {
 
             let bayerChoice = "MONO";
             if (fourCC === 'Y800' && (width % 2 === 0 && height % 2 === 0)) {
-                bayerChoice = 'COLOR_BayerRG2RGB';
+                // Default to RGGB (world convention) = BG (OpenCV convention)
+                bayerChoice = 'COLOR_BayerBG2RGB';
             }
 
             const result = { width, height, frameCount, fourCC, frameDataSize, bpp, bayerChoice, moviListOffset, moviListSize };
