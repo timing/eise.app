@@ -22,11 +22,13 @@ export function useTracking() {
             // Remove all listeners after first interaction
             window.removeEventListener('scroll', onInteraction);
             window.removeEventListener('mousemove', onInteraction);
+            window.removeEventListener('mousedown', onInteraction);
             window.removeEventListener('touchstart', onInteraction);
         };
 
         window.addEventListener('scroll', onInteraction, { once: true, passive: true });
         window.addEventListener('mousemove', onInteraction, { once: true, passive: true });
+        window.addEventListener('mousedown', onInteraction, { once: true, passive: true });
         window.addEventListener('touchstart', onInteraction, { once: true, passive: true });
     }
 
