@@ -1,5 +1,5 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v20 - VNG demosaicing)');
+console.log('unified_analyze_worker.js loaded (v25 - crop first, 16-bit demosaic)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
@@ -335,7 +335,8 @@ async function handleMessage(e) {
 
 async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropRegion = null, frameIndex = undefined, includeRgba = false) {
     const { width, height, pixelDepth, fourCC, bpp } = header;
-    let rawMat, grayMat, rgbaMat, croppedRawMat;
+    let rawMat, grayMat, rgbaMat;
+    let croppedBuffer = null;
 
     try {
         // Log every 100th frame to track progress without flooding console
@@ -344,7 +345,7 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             console.log(`Processing frame ${frameIndex}: ${width}x${height} -> ${cropInfo}`);
         }
 
-        // --- Step 1: Create initial Mat from raw buffer ---
+        // --- Step 1: Create Mat, CROP first, then DEMOSAIC at native bit depth ---
         if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER file
             const serDataType = pixelDepth > 8 ? _cv.CV_16UC1 : _cv.CV_8UC1;
             const serData = pixelDepth > 8 ? new Uint16Array(frameBuffer) : new Uint8Array(frameBuffer);
@@ -354,104 +355,137 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             }
             rawMat = _cv.matFromArray(height, width, serDataType, serData);
 
-            // Apply cropping with padding if specified
+            // Crop raw Bayer data first (saves memory for large frames)
             if (cropRegion) {
                 rawMat = applyCropWithPadding(rawMat, cropRegion, width, height);
             }
 
-            // Convert to 8-bit for processing
+            // Demosaic at NATIVE BIT DEPTH (16-bit for better quality)
+            rgbaMat = new _cv.Mat();
+            if (bayerChoice && bayerChoice !== "MONO") {
+                const vngChoice = bayerChoice + '_VNG';
+                const demosaicMethod = _cv[vngChoice] !== undefined ? vngChoice : bayerChoice;
+
+                if (!loggedDemosaicMethod) {
+                    console.log(`Using demosaicing method: ${demosaicMethod} at ${pixelDepth}-bit`);
+                    loggedDemosaicMethod = true;
+                }
+
+                if (_cv[demosaicMethod] === undefined) {
+                    throw new Error(`Invalid Bayer pattern: ${bayerChoice} not found in OpenCV.`);
+                }
+
+                let demosaiced = null;
+                let demosaiced8 = null;
+                try {
+                    demosaiced = new _cv.Mat();
+                    _cv.demosaicing(rawMat, demosaiced, _cv[demosaicMethod]);
+
+                    // Convert to 8-bit RGBA after demosaicing
+                    if (pixelDepth > 8) {
+                        demosaiced8 = new _cv.Mat();
+                        demosaiced.convertTo(demosaiced8, _cv.CV_8UC3, 1/256);
+                        _cv.cvtColor(demosaiced8, rgbaMat, _cv.COLOR_RGB2RGBA);
+                    } else {
+                        _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_RGB2RGBA);
+                    }
+                } finally {
+                    if (demosaiced8) demosaiced8.delete();
+                    if (demosaiced) demosaiced.delete();
+                }
+            } else {
+                // Mono - convert to 8-bit first, then to RGBA
+                grayMat = new _cv.Mat();
+                if (pixelDepth > 8) {
+                    rawMat.convertTo(grayMat, _cv.CV_8U, 1/256);
+                } else {
+                    rawMat.copyTo(grayMat);
+                }
+                _cv.cvtColor(grayMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
+                grayMat.delete();
+                grayMat = null;
+            }
+            // Extract cropped raw buffer for SER export before deleting rawMat
+            if (cropRegion) {
+                const croppedWidth = rawMat.cols;
+                const croppedHeight = rawMat.rows;
+                const bytesPerPixel = pixelDepth > 8 ? 2 : 1;
+                croppedBuffer = new ArrayBuffer(croppedWidth * croppedHeight * bytesPerPixel);
+                if (pixelDepth > 8) {
+                    new Uint16Array(croppedBuffer).set(new Uint16Array(rawMat.data.buffer, rawMat.data.byteOffset, croppedWidth * croppedHeight));
+                } else {
+                    new Uint8Array(croppedBuffer).set(new Uint8Array(rawMat.data.buffer, rawMat.data.byteOffset, croppedWidth * croppedHeight));
+                }
+            }
+
+            rawMat.delete();
+            rawMat = null;
+
+            // Create grayscale from RGBA for sharpness
             grayMat = new _cv.Mat();
-            const alpha = pixelDepth > 8 ? 1/256 : 1;
-            rawMat.convertTo(grayMat, _cv.CV_8U, alpha);
+            _cv.cvtColor(rgbaMat, grayMat, _cv.COLOR_RGBA2GRAY);
 
         } else { // AVI file (or RGBA from decoded PNG)
             const aviDataType = { 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[fourCC];
             rawMat = new _cv.Mat(height, width, aviDataType);
             rawMat.data.set(new Uint8Array(frameBuffer));
 
-            // Apply cropping with padding if specified
-            if (cropRegion) {
-                rawMat = applyCropWithPadding(rawMat, cropRegion, width, height);
-            }
+            // For AVI with Bayer (Y800), demosaic first then crop
+            if (fourCC === 'Y800' && bayerChoice && bayerChoice !== "MONO" && _cv[bayerChoice]) {
+                const vngChoice = bayerChoice + '_VNG';
+                const demosaicMethod = _cv[vngChoice] !== undefined ? vngChoice : bayerChoice;
+                const demosaiced = new _cv.Mat();
+                _cv.demosaicing(rawMat, demosaiced, _cv[demosaicMethod]);
+                rgbaMat = new _cv.Mat();
+                _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_BGR2RGBA);
+                demosaiced.delete();
+                rawMat.delete();
+                rawMat = null;
 
-            grayMat = new _cv.Mat();
-            // Convert to grayscale for sharpness analysis
-            if (fourCC === 'DIB ' || fourCC === 'RGB ') {
-                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_BGR2GRAY);
-            } else if (fourCC === 'RGBA') {
-                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
-            } else if (fourCC === 'YUY2' || fourCC === 'UYVY') {
-                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_YUV2GRAY_YUY2);
-            } else { // Y800 is already grayscale
-                rawMat.copyTo(grayMat);
+                // Crop after demosaicing
+                if (cropRegion) {
+                    rgbaMat = applyCropWithPadding(rgbaMat, cropRegion, width, height);
+                }
+
+                grayMat = new _cv.Mat();
+                _cv.cvtColor(rgbaMat, grayMat, _cv.COLOR_RGBA2GRAY);
+            } else {
+                // Non-Bayer AVI: crop first is fine (no Bayer phase issues)
+                if (cropRegion) {
+                    rawMat = applyCropWithPadding(rawMat, cropRegion, width, height);
+                }
+
+                grayMat = new _cv.Mat();
+                if (fourCC === 'DIB ' || fourCC === 'RGB ') {
+                    _cv.cvtColor(rawMat, grayMat, _cv.COLOR_BGR2GRAY);
+                } else if (fourCC === 'RGBA') {
+                    _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
+                } else if (fourCC === 'YUY2' || fourCC === 'UYVY') {
+                    _cv.cvtColor(rawMat, grayMat, _cv.COLOR_YUV2GRAY_YUY2);
+                } else {
+                    rawMat.copyTo(grayMat);
+                }
+
+                // Convert to RGBA
+                rgbaMat = new _cv.Mat();
+                if (fourCC === 'DIB ' || fourCC === 'RGB ') {
+                    _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_BGR2RGBA);
+                } else if (fourCC === 'RGBA') {
+                    rawMat.copyTo(rgbaMat);
+                } else if (fourCC === 'Y800') {
+                    _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
+                } else if (fourCC === 'YUY2' || fourCC === 'UYVY') {
+                    _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_YUV2RGBA_YUY2);
+                }
             }
         }
 
         // Get actual dimensions (may be cropped)
-        const actualWidth = rawMat.cols;
-        const actualHeight = rawMat.rows;
+        const actualWidth = rgbaMat.cols;
+        const actualHeight = rgbaMat.rows;
 
         // --- Step 2: Calculate sharpness from the grayscale mat ---
         const sharpness = calculateSharpnessFromMat(grayMat, frameIndex);
-
-        // --- Step 3: Create RGBA Mat for PNG conversion ---
-        rgbaMat = new _cv.Mat();
-        if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER File
-             if (bayerChoice && bayerChoice !== "MONO") {
-                // Prefer VNG demosaicing for better quality (less moiré on fine detail)
-                const vngChoice = bayerChoice + '_VNG';
-                const demosaicMethod = _cv[vngChoice] !== undefined ? vngChoice : bayerChoice;
-
-                if (!loggedDemosaicMethod) {
-                    console.log(`Using demosaicing method: ${demosaicMethod}`);
-                    loggedDemosaicMethod = true;
-                }
-
-                if (_cv[demosaicMethod] === undefined) {
-                    throw new Error(`Invalid Bayer pattern: ${bayerChoice} not found in OpenCV. Available: COLOR_BayerBG2BGR, COLOR_BayerGB2BGR, COLOR_BayerRG2BGR, COLOR_BayerGR2BGR`);
-                }
-                const demosaiced = new _cv.Mat();
-                try {
-                    _cv.demosaicing(grayMat, demosaiced, _cv[demosaicMethod]);
-                } catch (demosaicErr) {
-                    throw new Error(`Demosaicing failed (${actualWidth}x${actualHeight}, ${demosaicMethod}=${_cv[demosaicMethod]}): ${demosaicErr.message || demosaicErr}`);
-                }
-                try {
-                    _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_RGB2RGBA);
-                } catch (cvtErr) {
-                    demosaiced.delete();
-                    throw new Error(`cvtColor RGB2RGBA failed: ${cvtErr.message || cvtErr}`);
-                }
-                demosaiced.delete();
-            } else {
-                try {
-                    _cv.cvtColor(grayMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
-                } catch (cvtErr) {
-                    throw new Error(`cvtColor GRAY2RGBA failed: ${cvtErr.message || cvtErr}`);
-                }
-            }
-        } else { // AVI File (or RGBA from decoded PNG)
-            if (fourCC === 'DIB ' || fourCC === 'RGB ') {
-                _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_BGR2RGBA);
-            } else if (fourCC === 'RGBA') {
-                // Already RGBA, just copy
-                rawMat.copyTo(rgbaMat);
-            } else if (fourCC === 'Y800') {
-                 if (bayerChoice && bayerChoice !== "MONO" && _cv[bayerChoice]) {
-                    // Prefer VNG demosaicing for better quality
-                    const vngChoice = bayerChoice + '_VNG';
-                    const demosaicMethod = _cv[vngChoice] !== undefined ? vngChoice : bayerChoice;
-                    const demosaiced = new _cv.Mat();
-                    _cv.demosaicing(rawMat, demosaiced, _cv[demosaicMethod]);
-                    _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_BGR2RGBA);
-                    demosaiced.delete();
-                } else {
-                    _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
-                }
-            } else if (fourCC === 'YUY2' || fourCC === 'UYVY'){
-                _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_YUV2RGBA_YUY2);
-            }
-        }
 
         // --- Step 4: Create PNG Blob (optional - may fail if memory is tight) ---
         let pngBlob = null;
@@ -473,20 +507,7 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             }
         }
 
-        // --- Step 5: Get cropped raw buffer for SER export (if cropping was applied) ---
-        let croppedBuffer = null;
-        if (cropRegion && header.fileId && header.fileId.startsWith('LUCAM-REC')) {
-            // Extract raw data from cropped mat for SER export
-            const bytesPerPixel = pixelDepth > 8 ? 2 : 1;
-            croppedBuffer = new ArrayBuffer(actualWidth * actualHeight * bytesPerPixel);
-            if (pixelDepth > 8) {
-                new Uint16Array(croppedBuffer).set(new Uint16Array(rawMat.data.buffer, rawMat.data.byteOffset, actualWidth * actualHeight));
-            } else {
-                new Uint8Array(croppedBuffer).set(new Uint8Array(rawMat.data.buffer, rawMat.data.byteOffset, actualWidth * actualHeight));
-            }
-        }
-
-        // --- Step 6: Get RGBA buffer for client-side stacking (copy before mat is deleted) ---
+        // --- Step 5: Get RGBA buffer for client-side stacking (copy before mat is deleted) ---
         let rgbaBuffer = null;
         if (includeRgba) {
             rgbaBuffer = new Uint8ClampedArray(rgbaMat.data).buffer;

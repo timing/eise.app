@@ -823,7 +823,7 @@ export function useAviReader() {
         const decodeCanvas = document.createElement('canvas');
         decodeCanvas.width = width;
         decodeCanvas.height = height;
-        const decodeCtx = decodeCanvas.getContext('2d');
+        const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
 
         // Process in batches to limit memory usage
         const batchSize = numWorkers;
@@ -981,7 +981,7 @@ export function useAviReader() {
         const decodeCanvas = document.createElement('canvas');
         decodeCanvas.width = header.width;
         decodeCanvas.height = header.height;
-        const decodeCtx = decodeCanvas.getContext('2d');
+        const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
 
         let maxSize = 0;
         let canCropCount = 0;
