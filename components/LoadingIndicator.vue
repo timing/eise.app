@@ -1,10 +1,16 @@
 <template>
-	<div class="loading-wrapper" v-if="loading">
-		<div class="caption">{{ caption }}</div>
-		<div class="frame-counter" v-if="currentFrame > 0">{{ currentFrame }} / {{ totalFrames }}</div>
-		<div class="loading-indicator">
-			<div v-if="isIndeterminate" class="indeterminate"></div>
-			<div v-else class="determinate" :style="{ width: progress + '%' }"></div>
+	<div class="loading-wrapper" v-if="loading || hasError">
+		<div v-if="hasError" class="error-state">
+			<div class="error-title">Something went wrong</div>
+			<div class="error-subtitle">Check the logs below for details</div>
+		</div>
+		<div v-else class="loading-content">
+			<div class="caption" v-if="caption">{{ caption }}</div>
+			<div class="frame-counter" v-if="currentFrame > 0">{{ currentFrame }} / {{ totalFrames }}</div>
+			<div class="loading-indicator">
+				<div v-if="isIndeterminate" class="indeterminate"></div>
+				<div v-else class="determinate" :style="{ width: progress + '%' }"></div>
+			</div>
 		</div>
 	</div>
 </template>
@@ -19,16 +25,22 @@ const isIndeterminate = ref(true);
 const progress = ref(0);
 const currentFrame = ref(0);
 const totalFrames = ref(0);
+const hasError = ref(false);
 
 onMounted(() => {
 	on('start-loading', (newCaption) => {
 		loading.value = true;
+		hasError.value = false;
 		isIndeterminate.value = true;
 		currentFrame.value = 0;
 		totalFrames.value = 0;
 		if (newCaption) {
 			setCaption(newCaption);
 		}
+	});
+	on('show-error', () => {
+		loading.value = false;
+		hasError.value = true;
 	});
 	on('update-loading', (data) => {
 		// Support both simple percentage and object with frame counts
@@ -49,6 +61,7 @@ onMounted(() => {
 	});
 	on('stop-loading', () => {
 		loading.value = false;
+		hasError.value = false;
 		setCaption('');
 		currentFrame.value = 0;
 		totalFrames.value = 0;
@@ -64,6 +77,7 @@ onUnmounted(() => {
 	off('update-loading');
 	off('stop-loading');
 	off('set-caption');
+	off('show-error');
 });
 </script>
 
@@ -119,6 +133,20 @@ onUnmounted(() => {
 	100% {
 		left: 100%;
 	}
+}
+.error-state {
+	text-align: center;
+	padding: 20px 10px;
+}
+.error-title {
+	font-size: 18px;
+	font-weight: bold;
+	color: #e74c3c;
+	margin-bottom: 8px;
+}
+.error-subtitle {
+	font-size: 14px;
+	color: #666;
 }
 </style>
 

@@ -1221,6 +1221,11 @@ async function stackFramesLocally(frames) {
         for (let f = 0; f < frameCount; f++) {
             const frame = validFrames[f];
 
+            // Check reference Mat is still valid
+            if (f < 3) {
+                console.log(`Frame ${f}: refGray valid=${refGray && !refGray.isDeleted()}, rows=${refGray?.rows}, cols=${refGray?.cols}`);
+            }
+
             // Validate frame data
             if (!frame.rgbaBuffer || frame.rgbaBuffer.byteLength === 0) {
                 console.error(`Frame ${f}: Invalid or detached rgbaBuffer`);
@@ -1233,15 +1238,48 @@ async function stackFramesLocally(frames) {
                 throw new Error(`Frame ${f} buffer size mismatch: expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
             }
 
+            // Debug: log first few frames' data
+            if (f < 3) {
+                console.log(`Frame ${f}: ${frame.width}x${frame.height}, buffer=${frame.rgbaBuffer.byteLength}, sharpness=${frame.sharpness?.toFixed(2)}`);
+                // Check first few bytes to verify data is valid
+                const preview = new Uint8ClampedArray(frame.rgbaBuffer.slice(0, 16));
+                console.log(`Frame ${f}: first 16 bytes: [${preview.join(', ')}]`);
+            }
+
             const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
+
+            // Verify data isn't all zeros (would indicate detached/invalid buffer)
+            if (f < 3) {
+                let nonZeroCount = 0;
+                for (let i = 0; i < Math.min(1000, frameData.length); i++) {
+                    if (frameData[i] !== 0) nonZeroCount++;
+                }
+                console.log(`Frame ${f}: ${nonZeroCount}/1000 non-zero bytes in first 1000`);
+            }
 
             // Create frame Mat once per frame
             let frameMat = null, frameGray = null;
             try {
-                frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
-                frameMat.data.set(frameData);
+                if (f < 3) console.log(`Frame ${f}: Creating Mat(${height}, ${width}, CV_8UC4)...`);
+
+                // Try to create Mat with explicit error isolation
+                try {
+                    frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+                } catch (matErr) {
+                    console.error(`Frame ${f}: Mat constructor failed:`, matErr);
+                    // Try alternative construction
+                    console.log(`Frame ${f}: Trying matFromArray...`);
+                    frameMat = _cv.matFromArray(height, width, _cv.CV_8UC4, frameData);
+                }
+
+                if (f < 3) console.log(`Frame ${f}: Setting ${frameData.length} bytes of data...`);
+                if (frameMat.data) {
+                    frameMat.data.set(frameData);
+                }
+                if (f < 3) console.log(`Frame ${f}: Converting to grayscale...`);
                 frameGray = new _cv.Mat();
                 _cv.cvtColor(frameMat, frameGray, _cv.COLOR_RGBA2GRAY);
+                if (f < 3) console.log(`Frame ${f}: Mat creation successful`);
 
                 const shifts = [];
                 for (let a = 0; a < activeAPs.length; a++) {
@@ -1286,6 +1324,28 @@ async function stackFramesLocally(frames) {
         // Normalize sharpness for weighting
         const totalSharpness = validFrames.reduce((sum, f) => sum + f.sharpness, 0);
 
+        // === Brightness normalization (PSS-like, black cutoff = 4) ===
+        const blackCutoff = 4;
+
+        // Calculate mean brightness of reference frame
+        function calcMeanBrightness(rgbaBuffer, blackCutoff) {
+            const data = new Uint8ClampedArray(rgbaBuffer);
+            let sum = 0;
+            let count = 0;
+            for (let i = 0; i < data.length; i += 4) {
+                // Grayscale approximation: (R + G + B) / 3
+                const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+                if (brightness > blackCutoff) {
+                    sum += brightness;
+                    count++;
+                }
+            }
+            return count > 0 ? sum / count : 1;
+        }
+
+        const refBrightness = calcMeanBrightness(referenceFrame.rgbaBuffer, blackCutoff);
+        console.log(`Reference frame brightness: ${refBrightness.toFixed(2)} (black cutoff: ${blackCutoff})`);
+
         // Local de-warping with improved Gaussian weighting to reduce grid artifacts
         const useLocalDewarping = true;
 
@@ -1310,6 +1370,13 @@ async function stackFramesLocally(frames) {
 
             const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
             const frameWeight = frame.sharpness / totalSharpness * frameCount;
+
+            // Calculate brightness normalization factor for this frame
+            const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, blackCutoff);
+            const brightnessScale = refBrightness / frameBrightness;
+            if (f < 3) {
+                console.log(`Frame ${f}: brightness=${frameBrightness.toFixed(2)}, scale=${brightnessScale.toFixed(4)}`);
+            }
 
             if (useLocalDewarping) {
                 const shifts = frameShifts[f];
@@ -1344,7 +1411,7 @@ async function stackFramesLocally(frames) {
                     warpedMat = new _cv.Mat();
                     _cv.remap(frameMat, warpedMat, mapX, mapY, _cv.INTER_LINEAR, _cv.BORDER_CONSTANT);
 
-                    // Accumulate warped frame
+                    // Accumulate warped frame with brightness normalization
                     const warpedData = warpedMat.data;
                     for (let i = 0; i < width * height; i++) {
                         const srcIdx = i * 4;
@@ -1352,9 +1419,10 @@ async function stackFramesLocally(frames) {
                         if (warpedData[srcIdx] === 0 && warpedData[srcIdx + 1] === 0 && warpedData[srcIdx + 2] === 0) {
                             continue;
                         }
-                        accumR[i] += warpedData[srcIdx] * frameWeight;
-                        accumG[i] += warpedData[srcIdx + 1] * frameWeight;
-                        accumB[i] += warpedData[srcIdx + 2] * frameWeight;
+                        // Apply brightness normalization
+                        accumR[i] += warpedData[srcIdx] * brightnessScale * frameWeight;
+                        accumG[i] += warpedData[srcIdx + 1] * brightnessScale * frameWeight;
+                        accumB[i] += warpedData[srcIdx + 2] * brightnessScale * frameWeight;
                         accumWeight[i] += frameWeight;
                     }
                 } catch (cvError) {
@@ -1366,12 +1434,12 @@ async function stackFramesLocally(frames) {
                     if (frameMat) try { frameMat.delete(); } catch(e) {}
                 }
             } else {
-                // Simple weighted averaging without de-warping
+                // Simple weighted averaging without de-warping (with brightness normalization)
                 for (let i = 0; i < width * height; i++) {
                     const srcIdx = i * 4;
-                    accumR[i] += frameData[srcIdx] * frameWeight;
-                    accumG[i] += frameData[srcIdx + 1] * frameWeight;
-                    accumB[i] += frameData[srcIdx + 2] * frameWeight;
+                    accumR[i] += frameData[srcIdx] * brightnessScale * frameWeight;
+                    accumG[i] += frameData[srcIdx + 1] * brightnessScale * frameWeight;
+                    accumB[i] += frameData[srcIdx + 2] * brightnessScale * frameWeight;
                     accumWeight[i] += frameWeight;
                 }
             }

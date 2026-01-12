@@ -90,7 +90,7 @@ import { useTracking } from '@/composables/useTracking';
 
 const { on, emit: eventBusEmit, addLog } = useEventBus();
 const { stackFramesLocally } = useStacker();
-const { track } = useTracking();
+const { track, trackHumanInteraction } = useTracking();
 
 const frames = ref([]);
 const currentFrame = ref(null);
@@ -110,6 +110,7 @@ const loadPixel = ref(false)
 onMounted(() => {
 	loadPixel.value = true;
 	track('page_view');
+	trackHumanInteraction();
 	on('postProcessing', handlePostProcessing);
 	on('stacked-image-ready', handleStackedImageReady);
 	on('show-color-profile-selector', () => {

@@ -150,7 +150,7 @@ onMounted(async () => {
 
 	on('upload-error', (message) => {
 		uploadError.value = message;
-		emit('stop-loading'); // Stop loading on error
+		emit('show-error'); // Show error state in LoadingIndicator
 	});
 
 	on('cropped-ser-ready', (data) => {

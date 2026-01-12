@@ -2,6 +2,8 @@
 
 const PIXEL_URL = 'https://analytics.tijmentiming.workers.dev/pixel.gif';
 
+let humanInteractionTracked = false;
+
 export function useTracking() {
     function track(event) {
         if (typeof window === 'undefined') return;
@@ -10,5 +12,23 @@ export function useTracking() {
         img.src = `${PIXEL_URL}?e=${encodeURIComponent(event)}`;
     }
 
-    return { track };
+    function trackHumanInteraction() {
+        if (typeof window === 'undefined' || humanInteractionTracked) return;
+
+        const onInteraction = () => {
+            if (humanInteractionTracked) return;
+            humanInteractionTracked = true;
+            track('human_interaction');
+            // Remove all listeners after first interaction
+            window.removeEventListener('scroll', onInteraction);
+            window.removeEventListener('mousemove', onInteraction);
+            window.removeEventListener('touchstart', onInteraction);
+        };
+
+        window.addEventListener('scroll', onInteraction, { once: true, passive: true });
+        window.addEventListener('mousemove', onInteraction, { once: true, passive: true });
+        window.addEventListener('touchstart', onInteraction, { once: true, passive: true });
+    }
+
+    return { track, trackHumanInteraction };
 }

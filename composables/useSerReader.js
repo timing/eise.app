@@ -306,7 +306,7 @@ export function useSerReader() {
 
         if (!workersReady) {
             addLog("Stopping SER processing due to worker initialization failure.");
-            emit('stop-loading');
+            emit('show-error');
             return;
         }
 
@@ -855,7 +855,7 @@ export function useSerReader() {
 
         if (!workersReady) {
             addLog("Stopping SER processing due to worker initialization failure.");
-            emit('stop-loading');
+            emit('show-error');
             return;
         }
 

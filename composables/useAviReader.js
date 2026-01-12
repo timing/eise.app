@@ -477,7 +477,7 @@ export function useAviReader() {
         if (!aviHeader) {
             addLog(`Failed to parse AVI header for ${file.name}.`);
             emit('upload-error', `Failed to parse AVI header for ${file.name}. File may be corrupt.`);
-            emit('stop-loading');
+            emit('show-error');
             return; // Stop processing
         }
 
@@ -492,7 +492,7 @@ export function useAviReader() {
 
         if (!workersReady) {
             addLog("Stopping AVI processing due to worker initialization failure.");
-            emit('stop-loading');
+            emit('show-error');
             return;
         }
 

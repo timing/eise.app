@@ -67,19 +67,45 @@ export function useStacker() {
 
             worker.addEventListener('message', messageHandler);
 
-            // Prepare frame data for transfer
-            const frameData = validFrames.map(f => ({
-                rgbaBuffer: f.rgbaBuffer,
-                width: f.width,
-                height: f.height,
-                sharpness: f.sharpness,
-                subPixelOffset: f.subPixelOffset || { x: 0, y: 0 }
-            }));
+            // Prepare frame data for transfer - only include cloneable/transferable properties
+            const frameData = [];
+            for (let i = 0; i < validFrames.length; i++) {
+                const f = validFrames[i];
+                // Ensure rgbaBuffer is an ArrayBuffer (not typed array)
+                let buffer = f.rgbaBuffer;
+                if (buffer && !(buffer instanceof ArrayBuffer)) {
+                    // If it's a typed array, get its buffer
+                    if (buffer.buffer instanceof ArrayBuffer) {
+                        buffer = buffer.buffer;
+                    } else {
+                        console.warn(`Frame ${i}: rgbaBuffer is not an ArrayBuffer, skipping`);
+                        continue;
+                    }
+                }
+                if (!buffer || buffer.byteLength === 0) {
+                    console.warn(`Frame ${i}: rgbaBuffer is empty or detached, skipping`);
+                    continue;
+                }
+                frameData.push({
+                    rgbaBuffer: buffer,
+                    width: f.width,
+                    height: f.height,
+                    sharpness: f.sharpness,
+                    subPixelOffset: { x: f.subPixelOffset?.x || 0, y: f.subPixelOffset?.y || 0 }
+                });
+            }
+
+            if (frameData.length === 0) {
+                addLog('Error: No valid frame buffers for stacking');
+                reject(new Error('No valid frame buffers'));
+                return;
+            }
+            addLog(`Prepared ${frameData.length} frames for stacking worker`);
 
             // Collect unique buffers for transfer (avoid duplicates)
             const uniqueBuffers = new Set();
             frameData.forEach(f => {
-                if (f.rgbaBuffer instanceof ArrayBuffer) {
+                if (f.rgbaBuffer instanceof ArrayBuffer && f.rgbaBuffer.byteLength > 0) {
                     uniqueBuffers.add(f.rgbaBuffer);
                 }
             });
@@ -88,10 +114,10 @@ export function useStacker() {
             // Emit frame data for AVI export BEFORE transfer (buffers will be detached after)
             // Clone buffers so they remain accessible after transfer
             const aviFrameData = frameData.map(f => ({
-                rgbaBuffer: f.rgbaBuffer.slice(0), // Clone the buffer
+                rgbaBuffer: f.rgbaBuffer instanceof ArrayBuffer ? f.rgbaBuffer.slice(0) : null,
                 width: f.width,
                 height: f.height
-            }));
+            })).filter(f => f.rgbaBuffer !== null);
             emit('cropped-avi-ready', {
                 frames: aviFrameData,
                 width: frameData[0].width,

@@ -28,6 +28,13 @@
 				<p>{{ errorMessage }}</p>
 			</div>
 
+			<div v-if="hasSerFiles" class="ser-option">
+				<label>
+					<input type="checkbox" v-model="serThroughFfmpeg" />
+					Run SER through FFmpeg first (debug)
+				</label>
+			</div>
+
 			<div class="separator"></div>
 
 			<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
@@ -106,6 +113,9 @@ const cropMarginPercent = ref(10);
 // Auto-stack option (when checked, skip manual threshold selection)
 const autoStack = ref(false);
 
+// Debug option: route SER through FFmpeg instead of direct reader
+const serThroughFfmpeg = ref(false);
+
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
 const fileInput = ref(null);
@@ -116,6 +126,11 @@ const selectedFilesDescription = computed(() => {
 	if (selectedFiles.value.length === 0) return '';
 	if (selectedFiles.value.length === 1) return selectedFiles.value[0].name;
 	return `${selectedFiles.value.length} files`;
+});
+
+// Check if any selected files are SER files
+const hasSerFiles = computed(() => {
+	return selectedFiles.value.some(f => f.name.endsWith('.ser'));
 });
 
 const startButtonText = computed(() => {
@@ -152,7 +167,7 @@ async function startProcessing() {
 		console.error('Processing error:', error);
 		errorMessage.value = error.message || 'An error occurred during processing';
 		isProcessing.value = false;
-		eventBusEmit('stop-loading');
+		eventBusEmit('show-error');
 	}
 }
 
@@ -217,13 +232,21 @@ async function processFiles(files) {
 		return;
 	}
 
-	// Handle multiple SER files (combined stacking)
-	if (serFiles.length > 1) {
+	// Handle multiple SER files (combined stacking) - only when NOT routing through FFmpeg
+	if (serFiles.length > 1 && !serThroughFfmpeg.value) {
 		emit('processing-started');
 		const { readSerFiles } = useSerReader();
 		const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
 		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value, cropMarginPercent.value);
+		return;
+	}
+
+	// When routing SER through FFmpeg, only allow single file
+	if (serFiles.length > 1 && serThroughFfmpeg.value) {
+		alert('Multiple SER files not supported when routing through FFmpeg. Please select a single SER file.');
+		isProcessing.value = false;
+		eventBusEmit('stop-loading');
 		return;
 	}
 
@@ -239,13 +262,15 @@ async function processFiles(files) {
 			}
 		}
 
-		if (fileToProcess.name.endsWith('.ser')) {
+		// Handle SER files - either direct reader or through FFmpeg based on checkbox
+		if (fileToProcess.name.endsWith('.ser') && !serThroughFfmpeg.value) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
 			const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value, cropMarginPercent.value);
 			return;
 		}
+		// When serThroughFfmpeg is true, SER falls through to FFmpeg processing below
 
 		let needsFfmpeg = !fileToProcess.name.endsWith('.avi'); // Non-AVI always needs FFmpeg
 		let expectedFrameCount = null; // From AVI header if available
@@ -281,7 +306,7 @@ async function processFiles(files) {
 			await $loadFFmpeg();
 		} catch (err) {
 			eventBusEmit('upload-error', err.message || 'Failed to load FFmpeg. Please refresh and try again.');
-			eventBusEmit('stop-loading');
+			eventBusEmit('show-error');
 			return;
 		}
 
@@ -294,7 +319,7 @@ async function processFiles(files) {
 			console.error('FFmpeg writeFile error:', err);
 			addLog(`ffmpeg: Storing video in memory failed: ${err.message || err}`);
 			eventBusEmit('upload-error', 'Failed to load video into memory. The file may be too large. Try using a SER file instead, or enable frame limiting.');
-			eventBusEmit('stop-loading');
+			eventBusEmit('show-error');
 			return;
 		}
 		addLog('Storing video in memory done');
@@ -392,6 +417,13 @@ async function processFiles(files) {
 	margin-top: 10px;
 	border-radius: 5px;
 	font-weight: bold;
+}
+.ser-option {
+	margin-top: 10px;
+	padding: 8px;
+	background-color: #fff8e0;
+	border-radius: 5px;
+	font-size: 12px;
 }
 .file-upload-wrapper {
 	display: block;
