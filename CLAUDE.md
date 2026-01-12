@@ -34,7 +34,7 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 
 ### Stacking Pipeline (all in browser)
 1. **Frame Analysis**: Raw SER/AVI frames → sharpness scoring → keep best 30%
-2. **Demosaicing**: Raw Bayer data → RGB using OpenCV `cv.demosaicing()` (bilinear)
+2. **Demosaicing**: Raw Bayer data → RGB using OpenCV `cv.demosaicing()` (VNG - Variable Number of Gradients)
 3. **Stacking**: Alignment points grid → local shift detection via template matching → weighted de-warping → accumulation
 4. **Post-processing**: Wavelet sharpening, color correction
 
@@ -49,7 +49,7 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 - De-warping via `cv.remap()` with bilinear interpolation
 - Sharpness-weighted frame accumulation
 
-**Bayer Demosaicing**: Raw Bayer frames are demosaiced using OpenCV's `cv.demosaicing()` with bilinear interpolation. The demosaicing happens BEFORE stacking (frames are stacked as RGB, not raw Bayer).
+**Bayer Demosaicing**: Raw Bayer frames are demosaiced using OpenCV's `cv.demosaicing()` with VNG (Variable Number of Gradients) interpolation for better quality on fine detail. The demosaicing happens BEFORE stacking (frames are stacked as RGB, not raw Bayer).
 
 **OpenCV-WASM Limitation**: The `opencv-bindings` build does NOT include `cv.imencode`/`cv.imdecode`. PNG encoding uses `OffscreenCanvas.convertToBlob()` instead.
 

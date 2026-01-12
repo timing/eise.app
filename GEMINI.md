@@ -16,7 +16,7 @@ eise.app is a fully browser-based planetary image stacking tool designed to simp
 1.  **User Interaction:** An astrophotographer selects a video, SER, AVI, or image files through the frontend.
 2.  **Frame Extraction:** FFmpeg.js extracts frames from video files. SER and AVI files are parsed directly in JavaScript.
 3.  **Frame Analysis (WebWorkers):** WebWorkers utilizing OpenCV-WASM analyze frames for sharpness using Tenengrad (Sobel-based) metrics. Auto-crop detection centers on the planet using contour detection.
-4.  **Bayer Demosaicing:** Raw Bayer frames from SER/AVI are demosaiced to RGB using OpenCV's bilinear demosaicing.
+4.  **Bayer Demosaicing:** Raw Bayer frames from SER/AVI are demosaiced to RGB using OpenCV's VNG (Variable Number of Gradients) demosaicing for better quality on fine planetary detail.
 5.  **Frame Selection:** Best 30% of frames are selected based on sharpness scores (or user-defined threshold).
 6.  **Client-Side Stacking (WebWorker):** The stacking algorithm runs entirely in the browser:
     *   Creates alignment point grid across the image

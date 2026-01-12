@@ -1,10 +1,11 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v19 - fix Size cleanup bug)');
+console.log('unified_analyze_worker.js loaded (v20 - VNG demosaicing)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
 let isCvReady = false;
 const messageQueue = [];
+let loggedDemosaicMethod = false; // Log demosaic method once per worker
 
 // Load OpenCV
 self.importScripts('https://cdn.jsdelivr.net/npm/opencv-bindings@4.5.5/index.min.js');
@@ -38,6 +39,7 @@ self.addEventListener('message', (e) => {
             (cv) => {
                 _cv = cv;
                 isCvReady = true;
+
                 self.postMessage({ type: 'ready' });
 
                 // Process any queued messages
@@ -396,15 +398,23 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
         rgbaMat = new _cv.Mat();
         if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER File
              if (bayerChoice && bayerChoice !== "MONO") {
-                // Validate Bayer constant exists
-                if (_cv[bayerChoice] === undefined) {
+                // Prefer VNG demosaicing for better quality (less moiré on fine detail)
+                const vngChoice = bayerChoice + '_VNG';
+                const demosaicMethod = _cv[vngChoice] !== undefined ? vngChoice : bayerChoice;
+
+                if (!loggedDemosaicMethod) {
+                    console.log(`Using demosaicing method: ${demosaicMethod}`);
+                    loggedDemosaicMethod = true;
+                }
+
+                if (_cv[demosaicMethod] === undefined) {
                     throw new Error(`Invalid Bayer pattern: ${bayerChoice} not found in OpenCV. Available: COLOR_BayerBG2BGR, COLOR_BayerGB2BGR, COLOR_BayerRG2BGR, COLOR_BayerGR2BGR`);
                 }
                 const demosaiced = new _cv.Mat();
                 try {
-                    _cv.demosaicing(grayMat, demosaiced, _cv[bayerChoice]);
+                    _cv.demosaicing(grayMat, demosaiced, _cv[demosaicMethod]);
                 } catch (demosaicErr) {
-                    throw new Error(`Demosaicing failed (${actualWidth}x${actualHeight}, ${bayerChoice}=${_cv[bayerChoice]}): ${demosaicErr.message || demosaicErr}`);
+                    throw new Error(`Demosaicing failed (${actualWidth}x${actualHeight}, ${demosaicMethod}=${_cv[demosaicMethod]}): ${demosaicErr.message || demosaicErr}`);
                 }
                 try {
                     _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_RGB2RGBA);
@@ -428,8 +438,11 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
                 rawMat.copyTo(rgbaMat);
             } else if (fourCC === 'Y800') {
                  if (bayerChoice && bayerChoice !== "MONO" && _cv[bayerChoice]) {
+                    // Prefer VNG demosaicing for better quality
+                    const vngChoice = bayerChoice + '_VNG';
+                    const demosaicMethod = _cv[vngChoice] !== undefined ? vngChoice : bayerChoice;
                     const demosaiced = new _cv.Mat();
-                    _cv.demosaicing(rawMat, demosaiced, _cv[bayerChoice]);
+                    _cv.demosaicing(rawMat, demosaiced, _cv[demosaicMethod]);
                     _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_BGR2RGBA);
                     demosaiced.delete();
                 } else {
