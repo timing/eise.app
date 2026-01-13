@@ -510,4 +510,5 @@ function proceedWithStacking() {
 .stack-button:hover {
 	background-color: #7ABF6E;
 }
+
 </style>

@@ -28,19 +28,21 @@
 			<h3>How it works</h3>
 			<ul>
 				<li><strong>File support:</strong> SER files (recommended), AVI (uncompressed), or any video format via FFmpeg.js</li>
-				<li><strong>Frame ranking:</strong> Laplacian variance calculates sharpness for each frame</li>
-				<li><strong>Auto-crop:</strong> Detects and centers the planet in each frame</li>
-				<li><strong>Local alignment:</strong> Alignment Points (APs) track motion across the frame using OpenCV's matchTemplate (normalized cross-correlation)</li>
-				<li><strong>De-warping:</strong> Displacement maps correct atmospheric wobble using inverse distance weighted interpolation and cv.remap()</li>
-				<li><strong>Stacking:</strong> Quality-weighted averaging of the best 30% of frames</li>
-				<li><strong>Post-processing:</strong> Wavelet sharpening (from a <a href="https://github.com/mrossini-ethz/gimp-wavelet-sharpen/blob/master/src/wavelet.c" target="_blank">GIMP plugin</a>), noise reduction, and color alignment</li>
+				<li><strong>Frame ranking:</strong> Laplacian variance calculates sharpness for each frame. Manual threshold selection with quality graph.</li>
+				<li><strong>Auto-crop:</strong> Detects and centers the planet in each frame, rejects cut-off or smeared frames</li>
+				<li><strong>Global alignment:</strong> Cross-correlation finds sub-pixel offset between frames</li>
+				<li><strong>Local alignment:</strong> Alignment Points (APs) track motion across the frame using OpenCV's matchTemplate</li>
+				<li><strong>De-warping:</strong> Displacement maps correct atmospheric wobble using inverse distance weighted interpolation</li>
+				<li><strong>Drizzle:</strong> 1.5x output resolution using sub-pixel frame offsets</li>
+				<li><strong>Stacking:</strong> Quality-weighted averaging with brightness normalization</li>
+				<li><strong>Post-processing:</strong> Wavelet sharpening, deconvolution, RGB alignment (auto-detect + sub-pixel), rotation, crop</li>
 			</ul>
 
 			<h3>Acknowledgments</h3>
 			<p>
-			This project draws heavy inspiration from <a target="_blank" href="https://github.com/Rolf-Hempel/PlanetarySystemStacker">Planetary System Stacker</a> by Rolf Hempel.
-			The alignment point approach, local de-warping, and quality-weighted stacking concepts are all inspired by PSS's excellent implementation.
-			Thank you Rolf for making PSS open source and documenting the algorithms so well.
+			This project draws inspiration from <a target="_blank" href="https://github.com/Rolf-Hempel/PlanetarySystemStacker">Planetary System Stacker</a> by Rolf Hempel.
+			The alignment point approach, local de-warping, and quality-weighted stacking concepts are based on PSS's implementation.
+			Thank you Rolf for making PSS open source and documenting the algorithms.
 			</p>
 
 			<h3>Technology</h3>
@@ -48,13 +50,13 @@
 			All processing happens in your browser - works on any OS without installation.</p>
 
 			<h3>Alternative software</h3>
-			<p>eise.app is great for quick results without installing anything, but for more advanced features you might want to try:</p>
+			<p>eise.app works well for quick results without installing anything. For more advanced features you might want to try:</p>
 			<ul>
-				<li><a href="https://www.autostakkert.com/" target="_blank">AutoStakkert!</a> - The gold standard for planetary stacking (Windows)</li>
-				<li><a href="https://github.com/Rolf-Hempel/PlanetarySystemStacker" target="_blank">Planetary System Stacker</a> - Excellent open-source alternative (Python, cross-platform)</li>
-				<li><a href="https://www.astronomie.be/registax/" target="_blank">Registax</a> - Classic stacking software with great wavelet sharpening (Windows)</li>
+				<li><a href="https://www.autostakkert.com/" target="_blank">AutoStakkert!</a> - Popular planetary stacking software (Windows)</li>
+				<li><a href="https://github.com/Rolf-Hempel/PlanetarySystemStacker" target="_blank">Planetary System Stacker</a> - Open-source stacker (Python, cross-platform)</li>
+				<li><a href="https://www.astronomie.be/registax/" target="_blank">Registax</a> - Stacking software with wavelet sharpening (Windows)</li>
 				<li><a href="https://lynkeos.sourceforge.io/" target="_blank">Lynkeos</a> - Native macOS stacking application</li>
-				<li><a href="https://siril.org/" target="_blank">Siril</a> - Full-featured astrophotography suite (cross-platform)</li>
+				<li><a href="https://siril.org/" target="_blank">Siril</a> - Astrophotography suite (cross-platform)</li>
 			</ul>
 
 			<h3>Bugs or feature requests?</h3>
@@ -105,6 +107,7 @@ const isSelectingColorProfile = ref(false);
 const isSelectingQuality = ref(false);
 const qualityFrames = ref([]);
 const qualityWorkers = ref(null);
+const qualityNoiseRobust = ref(false);
 const croppedSerData = ref(null);
 const croppedAviData = ref(null);
 
@@ -143,6 +146,7 @@ function handleQualitySelectionReady(data) {
 	console.log('handleQualitySelectionReady', data);
 	qualityFrames.value = data.frames;
 	qualityWorkers.value = data.workers;
+	qualityNoiseRobust.value = data.noiseRobustAlignment || false;
 	isSelectingQuality.value = true;
 	eventBusEmit('stop-loading');
 }
@@ -157,7 +161,7 @@ async function handleThresholdSelected(data) {
 		addLog(`Stacking ${data.frames.length} frames (${Math.round(data.percentage * 100)}% threshold)`);
 
 		const stackingWorker = qualityWorkers.value[0];
-		const stackedBlob = await stackFramesLocally(data.frames, stackingWorker);
+		const stackedBlob = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value);
 
 		// Terminate workers after stacking
 		qualityWorkers.value.forEach(worker => worker.terminate());

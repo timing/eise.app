@@ -221,7 +221,7 @@ export function useImageReader() {
         return new Uint8Array(await blob.arrayBuffer());
     }
 
-    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, enableAutoCrop = false, stackPercentage = 30, drizzleScale = 1.5) {
+    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, enableAutoCrop = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -421,14 +421,15 @@ export function useImageReader() {
             addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
-                workers: unifiedAnalyzeWorkers
+                workers: unifiedAnalyzeWorkers,
+                noiseRobustAlignment
             });
             return; // Don't terminate workers yet - they'll be used for stacking
         }
 
         // Stack frames locally using the first worker (already initialized with OpenCV)
         const stackingWorker = unifiedAnalyzeWorkers[0];
-        const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale);
+        const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment);
 
         // Terminate workers after stacking
         unifiedAnalyzeWorkers.forEach(worker => worker.terminate());

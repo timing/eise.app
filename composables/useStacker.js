@@ -9,7 +9,7 @@ export function useStacker() {
      * @param existingWorker - Optional: reuse an existing initialized worker
      * @param drizzleScale - Output scale factor (1.0 = normal, 1.5 = drizzle)
      */
-    async function stackFramesLocally(frames, existingWorker = null, drizzleScale = 1.5) {
+    async function stackFramesLocally(frames, existingWorker = null, drizzleScale = 1.5, noiseRobustAlignment = false) {
         emit('set-caption', 'Preparing for stacking...');
         emit('update-loading', { progress: 0, current: 0, total: 0 });
 
@@ -71,6 +71,7 @@ export function useStacker() {
 
             function proceedWithStacking() {
 
+            let lastLoggedStage = '';
             const messageHandler = (e) => {
                 const { type } = e.data;
 
@@ -81,6 +82,15 @@ export function useStacker() {
                         current: Math.round(e.data.progress),
                         total: 100
                     });
+
+                    // Log key stage transitions (not every frame)
+                    const stage = e.data.stage;
+                    const stagePrefix = stage.replace(/\d+\/\d+/, '').trim(); // Remove frame numbers
+                    if (stagePrefix !== lastLoggedStage) {
+                        lastLoggedStage = stagePrefix;
+                        // Log the full stage message for the first occurrence
+                        addLog(stage);
+                    }
                 }
 
                 if (type === 'stack-complete') {
@@ -171,7 +181,8 @@ export function useStacker() {
             worker.postMessage({
                 type: 'stack-frames',
                 frames: frameData,
-                drizzleScale: drizzleScale
+                drizzleScale: drizzleScale,
+                noiseRobustAlignment: noiseRobustAlignment
             }, transferables);
             } // end proceedWithStacking
         });

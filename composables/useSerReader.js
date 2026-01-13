@@ -358,7 +358,7 @@ export function useSerReader() {
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5) {
+    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -730,7 +730,8 @@ export function useSerReader() {
             addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
-                workers: unifiedAnalyzeWorkers // Pass workers for later stacking
+                workers: unifiedAnalyzeWorkers, // Pass workers for later stacking
+                noiseRobustAlignment
             });
             // Don't terminate workers yet - they'll be used for stacking after selection
             return;
@@ -744,7 +745,7 @@ export function useSerReader() {
 
             // Use the first worker for stacking (it's already initialized with OpenCV)
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');
@@ -937,7 +938,7 @@ export function useSerReader() {
 
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
-    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5) {
+    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -1362,7 +1363,8 @@ export function useSerReader() {
             addLog(`Ready for manual threshold selection with ${allAnalyzedFrames.length} frames`);
             emit('quality-selection-ready', {
                 frames: allAnalyzedFrames,
-                workers: unifiedAnalyzeWorkers
+                workers: unifiedAnalyzeWorkers,
+                noiseRobustAlignment
             });
             return;
         } else if (clientSideStacking) {
@@ -1370,7 +1372,7 @@ export function useSerReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');

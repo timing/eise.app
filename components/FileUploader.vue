@@ -60,6 +60,12 @@
 			</div>
 			<p class="info-text">Drizzle uses sub-pixel offsets to increase resolution. Best with 100+ frames.</p>
 
+			<label class="checkbox-option">
+				<input type="checkbox" v-model="noiseRobustAlignment" />
+				Pre-blur alignment
+			</label>
+			<p class="info-text">Aligns on blurred frames first, then refines. Better for turbulent seeing, slower.</p>
+
 			<div class="separator"></div>
 
 			<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
@@ -91,7 +97,7 @@
 			<li>Select multiple image files (TIFF, PNG, JPG, etc.) for stacking and post processing.</li>
 			<li>Select one image file for post processing only.</li>
 		</ul>
-		<p>When stacking, eise.app will first analyze all frames/images, and then use 30% of the best ones for stacking.</p>
+		<p>When stacking, eise.app analyzes all frames by sharpness, then you select which ones to include using a quality graph or percentage threshold.</p>
 		<h3>More information, bugs and feature requests?</h3>
 		<p>Read more about Eise.app on the <a href="#" @click.prevent="showAbout">About page</a>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>.</p>
 	</div>
@@ -129,6 +135,7 @@ const cropMarginPercent = ref(10);
 const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
+const noiseRobustAlignment = ref(false);
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
@@ -248,7 +255,7 @@ async function processFiles(files) {
 		const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
 		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale);
+		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
 		return;
 	}
 
@@ -270,7 +277,7 @@ async function processFiles(files) {
 			const { readSerFile } = useSerReader();
 			const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 			const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale);
+			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
 			return;
 		}
 
@@ -293,7 +300,7 @@ async function processFiles(files) {
 				emit('processing-started');
 				const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 				const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale);
+				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -372,7 +379,7 @@ async function processFiles(files) {
 		// Route FFmpeg frames through AVI reader for unified processing (including cropping)
 		const { processFFmpegFrames } = useAviReader();
 		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale);
+		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
@@ -381,7 +388,7 @@ async function processFiles(files) {
 
 		const { readImageFiles } = useImageReader();
 		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, qualityMode.value === 'manual', false, stackPercentage.value, drizzleScale);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, qualityMode.value === 'manual', false, stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing
@@ -525,6 +532,16 @@ async function processFiles(files) {
 	cursor: pointer;
 }
 .radio-option input[type="radio"] {
+	margin: 0;
+}
+.checkbox-option {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	cursor: pointer;
+	margin: 10px 0;
+}
+.checkbox-option input[type="checkbox"] {
 	margin: 0;
 }
 .percentage-input {
