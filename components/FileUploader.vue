@@ -47,6 +47,21 @@
 
 			<div class="separator"></div>
 
+			<h4>Stacking mode</h4>
+			<div class="radio-group">
+				<label class="radio-option">
+					<input type="radio" v-model="drizzleMode" value="1.5x" />
+					1.5x Drizzle (recommended)
+				</label>
+				<label class="radio-option">
+					<input type="radio" v-model="drizzleMode" value="1x" />
+					Normal (1x)
+				</label>
+			</div>
+			<p class="info-text">Drizzle uses sub-pixel offsets to increase resolution. Best with 100+ frames.</p>
+
+			<div class="separator"></div>
+
 			<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
 			<input type="range" min="5" max="50" step="5" v-model="cropMarginPercent" />
 			{{ cropMarginPercent }}%
@@ -113,6 +128,7 @@ const cropMarginPercent = ref(10);
 // Quality threshold mode: 'manual' for interactive selection, 'percentage' for automatic
 const qualityMode = ref('manual');
 const stackPercentage = ref(30);
+const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
@@ -231,7 +247,8 @@ async function processFiles(files) {
 		const { readSerFiles } = useSerReader();
 		const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value);
+		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
+		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale);
 		return;
 	}
 
@@ -252,7 +269,8 @@ async function processFiles(files) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
 			const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value);
+			const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
+			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale);
 			return;
 		}
 
@@ -274,7 +292,8 @@ async function processFiles(files) {
 				// Can process directly - readAviFile will read frames as needed
 				emit('processing-started');
 				const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value);
+				const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
+				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -352,7 +371,8 @@ async function processFiles(files) {
 
 		// Route FFmpeg frames through AVI reader for unified processing (including cropping)
 		const { processFFmpegFrames } = useAviReader();
-		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value);
+		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
+		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
@@ -360,7 +380,8 @@ async function processFiles(files) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, qualityMode.value === 'manual', false, stackPercentage.value);
+		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, qualityMode.value === 'manual', false, stackPercentage.value, drizzleScale);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing

@@ -147,6 +147,61 @@ export function useSerReader() {
 
     // Map of pending frame resolvers per worker: workerIndex -> { frameIndex -> {resolve, reject, timeout} }
     const pendingFrames = new Map();
+    let framesSinceRecycle = 0;
+    const RECYCLE_THRESHOLD = 800; // Recycle workers every N frames to prevent WASM heap exhaustion
+
+    // Recycle workers to prevent WASM heap exhaustion on large files
+    async function recycleWorkers() {
+        // Wait for all pending frames to complete
+        const allPending = [];
+        for (const [workerIndex, frameMap] of pendingFrames) {
+            for (const [frameIndex, pending] of frameMap) {
+                allPending.push(new Promise(resolve => {
+                    const originalResolve = pending.resolve;
+                    const originalReject = pending.reject;
+                    pending.resolve = (result) => { originalResolve(result); resolve(); };
+                    pending.reject = (error) => { originalReject(error); resolve(); };
+                }));
+            }
+        }
+        if (allPending.length > 0) {
+            await Promise.all(allPending);
+        }
+
+        // Terminate old workers
+        unifiedAnalyzeWorkers.forEach(w => w.terminate());
+        unifiedAnalyzeWorkers.length = 0;
+        pendingFrames.clear();
+
+        // Create fresh workers
+        for (let i = 0; i < numWorkers; i++) {
+            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
+        }
+
+        // Wait for them to initialize
+        const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error(`Worker ${i} recycling timed out.`)), 30000);
+                worker.onmessage = (e) => {
+                    if (e.data.type === 'ready') {
+                        clearTimeout(timeout);
+                        worker.onmessage = null;
+                        resolve();
+                    }
+                };
+                worker.onerror = (e) => {
+                    clearTimeout(timeout);
+                    reject(e);
+                };
+                worker.postMessage({ type: 'init' });
+            });
+        });
+
+        await Promise.all(workerPromises);
+        setupWorkerHandlers();
+        framesSinceRecycle = 0;
+        addLog('Workers recycled to prevent memory exhaustion');
+    }
 
     // Set up single message handler per worker (call after workers are created)
     function setupWorkerHandlers() {
@@ -303,7 +358,7 @@ export function useSerReader() {
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30) {
+    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -548,6 +603,11 @@ export function useSerReader() {
                 break;
             }
 
+            // Recycle workers periodically to prevent WASM heap exhaustion
+            if (framesSinceRecycle >= RECYCLE_THRESHOLD) {
+                await recycleWorkers();
+            }
+
             // Wait for a slot before reading the frame (limits memory usage)
             await acquireSlot();
 
@@ -636,6 +696,7 @@ export function useSerReader() {
                     releaseSlot();  // Always release slot when done
                 });
             workerPromises.push(promise);
+            framesSinceRecycle++;
         }
 
         // Wait for all worker tasks to complete
@@ -683,7 +744,7 @@ export function useSerReader() {
 
             // Use the first worker for stacking (it's already initialized with OpenCV)
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');
@@ -876,7 +937,7 @@ export function useSerReader() {
 
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
-    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30) {
+    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -1174,6 +1235,11 @@ export function useSerReader() {
                     break;
                 }
 
+                // Recycle workers periodically to prevent WASM heap exhaustion
+                if (framesSinceRecycle >= RECYCLE_THRESHOLD) {
+                    await recycleWorkers();
+                }
+
                 await acquireSlot();
 
                 const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
@@ -1261,6 +1327,7 @@ export function useSerReader() {
 
                 workerPromises.push(promise);
                 globalFrameIndex++;
+                framesSinceRecycle++;
             }
         }
 
@@ -1303,7 +1370,7 @@ export function useSerReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');

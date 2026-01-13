@@ -1,5 +1,5 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v28 - production cleanup)');
+console.log('unified_analyze_worker.js loaded (v29 - drizzle stacking)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
@@ -73,9 +73,9 @@ async function handleMessage(e) {
 
         // Frame stacking with local alignment
         if (type === 'stack-frames') {
-            const { frames } = e.data; // Array of {rgbaBuffer, width, height, sharpness}
+            const { frames, drizzleScale = 1.0 } = e.data; // Array of {rgbaBuffer, width, height, sharpness}
             try {
-                const result = await stackFramesLocally(frames);
+                const result = await stackFramesLocally(frames, drizzleScale);
                 self.postMessage({ type: 'stack-complete', blob: result.blob, width: result.width, height: result.height });
             } catch (stackError) {
                 console.error('Stacking error:', stackError);
@@ -241,8 +241,7 @@ async function handleMessage(e) {
                 sharpness: result.sharpness,
                 pngBlob: result.pngBlob,
                 croppedBuffer: result.croppedBuffer,
-                // Force subPixelOffset to 0 - testing if this causes moiré
-                subPixelOffset: { x: 0, y: 0 },
+                subPixelOffset: result.subPixelOffset || { x: 0, y: 0 },
                 index,
                 circularity: bounds.circularity || 0
             };
@@ -1160,8 +1159,10 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
 
 /**
  * Stack frames with local alignment using Alignment Points (APs)
+ * @param frames - Array of frame objects
+ * @param drizzleScale - Output scale factor (1.0 = normal, 1.5 = drizzle)
  */
-async function stackFramesLocally(frames) {
+async function stackFramesLocally(frames, drizzleScale = 1.0) {
     // Track resources for cleanup on error
     let refMat = null, refGray = null, mapX = null, mapY = null;
 
@@ -1177,6 +1178,15 @@ async function stackFramesLocally(frames) {
 
         const { width, height } = validFrames[0];
         const frameCount = validFrames.length;
+
+        // Calculate output dimensions (drizzle)
+        const outWidth = Math.round(width * drizzleScale);
+        const outHeight = Math.round(height * drizzleScale);
+        const isDrizzle = drizzleScale > 1.0;
+
+        if (isDrizzle) {
+            console.log(`Drizzle mode: ${drizzleScale}x (${width}x${height} -> ${outWidth}x${outHeight})`);
+        }
 
         // Validate all frames have consistent dimensions
         for (let i = 0; i < validFrames.length; i++) {
@@ -1328,13 +1338,13 @@ async function stackFramesLocally(frames) {
         console.log('Alignment complete');
 
         // === Stack with LOCAL de-warping ===
-        self.postMessage({ type: 'stack-progress', stage: 'De-warping frames...', progress: 50 });
+        self.postMessage({ type: 'stack-progress', stage: isDrizzle ? 'Drizzle stacking...' : 'De-warping frames...', progress: 50 });
 
-        // Accumulator for final image (RGB + weight per pixel)
-        const accumR = new Float32Array(width * height);
-        const accumG = new Float32Array(width * height);
-        const accumB = new Float32Array(width * height);
-        const accumWeight = new Float32Array(width * height);
+        // Accumulator for final image (RGB + weight per pixel) - at OUTPUT resolution
+        const accumR = new Float32Array(outWidth * outHeight);
+        const accumG = new Float32Array(outWidth * outHeight);
+        const accumB = new Float32Array(outWidth * outHeight);
+        const accumWeight = new Float32Array(outWidth * outHeight);
 
         // Normalize sharpness for weighting
         const totalSharpness = validFrames.reduce((sum, f) => sum + f.sharpness, 0);
@@ -1368,9 +1378,9 @@ async function stackFramesLocally(frames) {
         const useLocalDewarping = true;
 
         if (useLocalDewarping) {
-            // Create remap matrices once (reused for each frame)
-            mapX = new _cv.Mat(height, width, _cv.CV_32FC1);
-            mapY = new _cv.Mat(height, width, _cv.CV_32FC1);
+            // Create remap matrices at OUTPUT resolution (for drizzle upscaling)
+            mapX = new _cv.Mat(outHeight, outWidth, _cv.CV_32FC1);
+            mapY = new _cv.Mat(outHeight, outWidth, _cv.CV_32FC1);
         }
 
         for (let f = 0; f < frameCount; f++) {
@@ -1411,15 +1421,16 @@ async function stackFramesLocally(frames) {
                     frameMat.data.set(frameData);
 
                     // Build displacement maps from shifts (local atmospheric wobble) plus global offset
-                    buildDisplacementMaps(mapX, mapY, width, height, activeAPs, shifts, patchSize, globalOffsetX, globalOffsetY);
+                    // Maps are at OUTPUT resolution, mapping back to INPUT coordinates
+                    buildDisplacementMaps(mapX, mapY, outWidth, outHeight, activeAPs, shifts, patchSize, globalOffsetX, globalOffsetY, drizzleScale);
 
-                    // Apply local de-warping via remap
+                    // Apply local de-warping via remap (output will be at outWidth x outHeight)
                     warpedMat = new _cv.Mat();
                     _cv.remap(frameMat, warpedMat, mapX, mapY, _cv.INTER_LINEAR, _cv.BORDER_CONSTANT);
 
-                    // Accumulate warped frame with brightness normalization
+                    // Accumulate warped frame with brightness normalization (at OUTPUT resolution)
                     const warpedData = warpedMat.data;
-                    for (let i = 0; i < width * height; i++) {
+                    for (let i = 0; i < outWidth * outHeight; i++) {
                         const srcIdx = i * 4;
                         // Skip black pixels (border from remap)
                         if (warpedData[srcIdx] === 0 && warpedData[srcIdx + 1] === 0 && warpedData[srcIdx + 2] === 0) {
@@ -1463,36 +1474,36 @@ async function stackFramesLocally(frames) {
         if (mapY) { mapY.delete(); mapY = null; }
         console.log('Stacking complete');
 
-        // === Compute final result ===
+        // === Compute final result (at OUTPUT resolution) ===
         self.postMessage({ type: 'stack-progress', stage: 'Finalizing...', progress: 95 });
-        const result = new Uint8ClampedArray(width * height * 4);
+        const result = new Uint8ClampedArray(outWidth * outHeight * 4);
 
-        for (let i = 0; i < width * height; i++) {
+        for (let i = 0; i < outWidth * outHeight; i++) {
             const w = accumWeight[i];
             if (w > 0) {
                 result[i * 4 + 0] = Math.round(accumR[i] / w);
                 result[i * 4 + 1] = Math.round(accumG[i] / w);
                 result[i * 4 + 2] = Math.round(accumB[i] / w);
             } else {
-                // Fallback to reference frame if no data
-                result[i * 4 + 0] = refData[i * 4 + 0];
-                result[i * 4 + 1] = refData[i * 4 + 1];
-                result[i * 4 + 2] = refData[i * 4 + 2];
+                // Fallback to black if no data (edge case for drizzle borders)
+                result[i * 4 + 0] = 0;
+                result[i * 4 + 1] = 0;
+                result[i * 4 + 2] = 0;
             }
             result[i * 4 + 3] = 255; // Alpha
         }
 
-        // Create ImageData and convert to blob
-        const canvas = new OffscreenCanvas(width, height);
+        // Create ImageData and convert to blob at OUTPUT resolution
+        const canvas = new OffscreenCanvas(outWidth, outHeight);
         const ctx = canvas.getContext('2d');
-        const imageData = new ImageData(result, width, height);
+        const imageData = new ImageData(result, outWidth, outHeight);
         ctx.putImageData(imageData, 0, 0);
 
         const blob = await canvas.convertToBlob({ type: 'image/png' });
-        console.log(`Stacked image: ${width}x${height}, ${(blob.size / 1024).toFixed(1)} KB`);
+        console.log(`Stacked image: ${outWidth}x${outHeight}${isDrizzle ? ` (${drizzleScale}x drizzle from ${width}x${height})` : ''}, ${(blob.size / 1024).toFixed(1)} KB`);
 
         self.postMessage({ type: 'stack-progress', stage: 'Stacking complete', progress: 100 });
-        return { blob, width, height };
+        return { blob, width: outWidth, height: outHeight };
 
     } catch (error) {
         // Convert OpenCV error codes to meaningful messages
@@ -1589,7 +1600,7 @@ function filterAPsByQuality(alignmentPoints, refGray, width, height, patchSize, 
  * @param globalOffsetX - Global X offset to align frame with reference (from sub-pixel crop centering)
  * @param globalOffsetY - Global Y offset to align frame with reference (from sub-pixel crop centering)
  */
-function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shifts, patchSize, globalOffsetX = 0, globalOffsetY = 0) {
+function buildDisplacementMaps(mapX, mapY, outWidth, outHeight, alignmentPoints, shifts, patchSize, globalOffsetX = 0, globalOffsetY = 0, drizzleScale = 1.0) {
     const mapXData = mapX.data32F;
     const mapYData = mapY.data32F;
 
@@ -1602,11 +1613,20 @@ function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shift
     // Minimum quality threshold - ignore poor matches
     const minQuality = 0.3;
 
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const idx = y * width + x;
+    // For drizzle, output is larger than input
+    // Each output pixel maps back to a sub-pixel location in input space
+    const invScale = 1.0 / drizzleScale;
+
+    for (let oy = 0; oy < outHeight; oy++) {
+        for (let ox = 0; ox < outWidth; ox++) {
+            const idx = oy * outWidth + ox;
+
+            // Map output pixel to input coordinate space
+            const inX = ox * invScale;
+            const inY = oy * invScale;
 
             // Interpolate shift from nearby APs using Gaussian weighting
+            // APs are in input coordinate space
             let totalWeight = 0;
             let weightedDx = 0;
             let weightedDy = 0;
@@ -1618,8 +1638,8 @@ function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shift
                 // Skip low-quality matches - they add noise
                 if (shift.quality < minQuality) continue;
 
-                const dx = x - ap.x;
-                const dy = y - ap.y;
+                const dx = inX - ap.x;
+                const dy = inY - ap.y;
                 const dist2 = dx * dx + dy * dy;
 
                 if (dist2 < influenceRadius * influenceRadius) {
@@ -1634,16 +1654,16 @@ function buildDisplacementMaps(mapX, mapY, width, height, alignmentPoints, shift
                 }
             }
 
-            // remap uses source coordinates, so we ADD the shift
+            // remap uses source coordinates (input frame coordinates)
             // Global offset aligns frame to reference (compensates for per-frame crop centering)
             // Local shift (from APs) corrects for atmospheric wobble
             if (totalWeight > 0) {
-                mapXData[idx] = x + globalOffsetX + weightedDx / totalWeight;
-                mapYData[idx] = y + globalOffsetY + weightedDy / totalWeight;
+                mapXData[idx] = inX + globalOffsetX + weightedDx / totalWeight;
+                mapYData[idx] = inY + globalOffsetY + weightedDy / totalWeight;
             } else {
                 // No nearby APs - apply global offset only
-                mapXData[idx] = x + globalOffsetX;
-                mapYData[idx] = y + globalOffsetY;
+                mapXData[idx] = inX + globalOffsetX;
+                mapYData[idx] = inY + globalOffsetY;
             }
         }
     }

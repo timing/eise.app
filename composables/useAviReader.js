@@ -505,7 +505,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, preloadedBuffer = null) {
+    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, preloadedBuffer = null) {
         emit('start-loading', 'Parsing AVI header...');
         emit('update-loading', 0);
 
@@ -646,6 +646,11 @@ export function useAviReader() {
                 break;
             }
 
+            // Recycle workers periodically to prevent WASM heap exhaustion
+            if (framesProcessedSinceRecycle >= RECYCLE_AFTER_FRAMES) {
+                await recycleWorkers();
+            }
+
             // Wait for a slot before reading the frame (limits memory usage)
             await acquireSlot();
 
@@ -726,6 +731,7 @@ export function useAviReader() {
                     releaseSlot();
                 });
             workerPromises.push(promise);
+            framesProcessedSinceRecycle++;
 
             currentMoviOffset += frameChunkHeaderSize + frameDataLength;
             if (frameDataLength % 2 !== 0) currentMoviOffset++;
@@ -758,7 +764,7 @@ export function useAviReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');
@@ -779,7 +785,7 @@ export function useAviReader() {
     }
 
     // Process FFmpeg-extracted PNG frames through the same pipeline as AVI
-    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30) {
+    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -997,7 +1003,7 @@ export function useAviReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');

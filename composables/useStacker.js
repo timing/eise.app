@@ -7,8 +7,9 @@ export function useStacker() {
      * Stack frames using a web worker for local alignment
      * @param frames - Array of frame objects with rgbaBuffer, width, height, sharpness
      * @param existingWorker - Optional: reuse an existing initialized worker
+     * @param drizzleScale - Output scale factor (1.0 = normal, 1.5 = drizzle)
      */
-    async function stackFramesLocally(frames, existingWorker = null) {
+    async function stackFramesLocally(frames, existingWorker = null, drizzleScale = 1.5) {
         emit('set-caption', 'Preparing for stacking...');
         emit('update-loading', { progress: 0, current: 0, total: 0 });
 
@@ -44,7 +45,8 @@ export function useStacker() {
         }
         emit('stacking-started', { referenceFrame });
 
-        addLog(`Sending ${validFrames.length} frames to stacking worker`);
+        const drizzleStr = drizzleScale > 1 ? ` with ${drizzleScale}x drizzle` : '';
+        addLog(`Sending ${validFrames.length} frames to stacking worker${drizzleStr}`);
 
         return new Promise((resolve, reject) => {
             // Create a FRESH worker for stacking to avoid WASM heap exhaustion from analysis
@@ -168,7 +170,8 @@ export function useStacker() {
             // Send stacking request - worker is already initialized
             worker.postMessage({
                 type: 'stack-frames',
-                frames: frameData
+                frames: frameData,
+                drizzleScale: drizzleScale
             }, transferables);
             } // end proceedWithStacking
         });

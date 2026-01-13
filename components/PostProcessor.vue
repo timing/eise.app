@@ -73,36 +73,19 @@
 			</fieldset>
 
 			<div class="color-alignment">
-			
-				<h4 style="color:blue;">Blue color alignment</h4>
+				<h4>RGB Alignment <button class="auto-align-btn" @click="autoAlignRGB" :disabled="isAutoAligning">{{ isAutoAligning ? 'Detecting...' : 'Auto' }}</button></h4>
 
-				<button @click="processChromaticAberration('blue', 'y', -1)">↑ 
-					{{ fixedAberration.blue?.y < 0 ? Math.abs(fixedAberration.blue.y) : '' }}
-				</button>
-				<button @click="processChromaticAberration('blue', 'y', 1)">↓ 
-					{{ fixedAberration.blue?.y > 0 ? fixedAberration.blue.y : '' }}
-				</button>
-				<button @click="processChromaticAberration('blue', 'x', -1)">← 
-					{{ fixedAberration.blue?.x < 0 ? Math.abs(fixedAberration.blue.x) : '' }}
-				</button>
-				<button @click="processChromaticAberration('blue', 'x', 1)">→ 
-					{{ fixedAberration.blue?.x > 0 ? fixedAberration.blue.x : '' }}
-				</button>
-				
-				<h4 style="color:red;">Red color alignment</h4>
+				<h5 style="color:blue;">Blue</h5>
+				<button @click="processChromaticAberration('blue', 'y', -0.5)">↑ {{ fixedAberration.blue?.y < 0 ? Math.abs(fixedAberration.blue.y) : '' }}</button>
+				<button @click="processChromaticAberration('blue', 'y', 0.5)">↓ {{ fixedAberration.blue?.y > 0 ? fixedAberration.blue.y : '' }}</button>
+				<button @click="processChromaticAberration('blue', 'x', -0.5)">← {{ fixedAberration.blue?.x < 0 ? Math.abs(fixedAberration.blue.x) : '' }}</button>
+				<button @click="processChromaticAberration('blue', 'x', 0.5)">→ {{ fixedAberration.blue?.x > 0 ? fixedAberration.blue.x : '' }}</button>
 
-				<button @click="processChromaticAberration('red', 'y', -1)">↑ 
-					{{ fixedAberration.red?.y < 0 ? Math.abs(fixedAberration.red.y) : '' }}
-				</button>
-				<button @click="processChromaticAberration('red', 'y', 1)">↓ 
-					{{ fixedAberration.red?.y > 0 ? fixedAberration.red.y : '' }}
-				</button>
-				<button @click="processChromaticAberration('red', 'x', -1)">← 
-					{{ fixedAberration.red?.x < 0 ? Math.abs(fixedAberration.red.x) : '' }}
-				</button>
-				<button @click="processChromaticAberration('red', 'x', 1)">→ 
-					{{ fixedAberration.red?.x > 0 ? fixedAberration.red.x : '' }}
-				</button>
+				<h5 style="color:red;">Red</h5>
+				<button @click="processChromaticAberration('red', 'y', -0.5)">↑ {{ fixedAberration.red?.y < 0 ? Math.abs(fixedAberration.red.y) : '' }}</button>
+				<button @click="processChromaticAberration('red', 'y', 0.5)">↓ {{ fixedAberration.red?.y > 0 ? fixedAberration.red.y : '' }}</button>
+				<button @click="processChromaticAberration('red', 'x', -0.5)">← {{ fixedAberration.red?.x < 0 ? Math.abs(fixedAberration.red.x) : '' }}</button>
+				<button @click="processChromaticAberration('red', 'x', 0.5)">→ {{ fixedAberration.red?.x > 0 ? fixedAberration.red.x : '' }}</button>
 
 			</div>
 
@@ -151,7 +134,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, defineProps, reactive, onUnmounted } from 'vue';
+import { ref, onMounted, watch, defineProps, reactive, onUnmounted, computed } from 'vue';
 import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import { encodeAvi } from '@/utils/aviEncoder.js'
@@ -288,10 +271,28 @@ const previewRotationAngle = ref(0); // CSS preview rotation while dragging
 const hasAppliedRotation = ref(false);
 let preRotationImageData = null; // Backup of original image before rotation
 let appliedRotation = 0; // Track what rotation has been applied to pixels
+const isAutoAligning = ref(false);
+
+// Check if any RGB alignment offset has been applied
+const hasAlignmentOffset = computed(() => {
+	return (fixedAberration.red?.x || fixedAberration.red?.y ||
+	        fixedAberration.blue?.x || fixedAberration.blue?.y);
+});
+
+// Format offset for display
+function formatOffset(channelOffset) {
+	if (!channelOffset) return '';
+	const parts = [];
+	if (channelOffset.x) parts.push(`x:${channelOffset.x > 0 ? '+' : ''}${channelOffset.x}`);
+	if (channelOffset.y) parts.push(`y:${channelOffset.y > 0 ? '+' : ''}${channelOffset.y}`);
+	return parts.join(' ');
+}
 
 function setSharpeningMethod(method) {
 	sharpeningMethod.value = method;
-	applyProcessing();
+	// Cancel any pending debounced call and run immediately
+	applyProcessing.cancel();
+	applyProcessingInternal();
 }
 
 // Crop state
@@ -986,7 +987,7 @@ function processChromaticAberration(channel, axis, magnitude){
 	if( fixedAberration[channel][axis] == undefined ){
 		fixedAberration[channel][axis] = 0;
 	}
-	
+
 	fixedAberration[channel][axis] += magnitude;
 }
 
@@ -998,44 +999,203 @@ function redoChromaticAberration(){
 	}
 }
 
+function resetRGBAlignment() {
+	fixedAberration.red = undefined;
+	fixedAberration.blue = undefined;
+	applyProcessing();
+}
+
+// Auto-detect RGB alignment using cross-correlation
+async function autoAlignRGB() {
+	if (!sharpenedImageData) return;
+
+	isAutoAligning.value = true;
+
+	// Use setTimeout to allow UI to update
+	await new Promise(resolve => setTimeout(resolve, 10));
+
+	try {
+		const width = sharpenedImageData.width;
+		const height = sharpenedImageData.height;
+		const data = sharpenedImageData.data;
+
+		// Extract channels
+		const red = new Float32Array(width * height);
+		const green = new Float32Array(width * height);
+		const blue = new Float32Array(width * height);
+
+		for (let i = 0; i < width * height; i++) {
+			red[i] = data[i * 4];
+			green[i] = data[i * 4 + 1];
+			blue[i] = data[i * 4 + 2];
+		}
+
+		// Find offset using cross-correlation (green is reference)
+		const redOffset = findChannelOffset(green, red, width, height);
+		const blueOffset = findChannelOffset(green, blue, width, height);
+
+		console.log('Auto-detected offsets:', { red: redOffset, blue: blueOffset });
+
+		// Reset existing alignment
+		fixedAberration.red = undefined;
+		fixedAberration.blue = undefined;
+
+		// Apply detected offsets (negated - correlation finds where channel IS, we need to shift it BACK)
+		if (redOffset.x !== 0 || redOffset.y !== 0) {
+			fixedAberration.red = reactive({ x: -redOffset.x, y: -redOffset.y });
+		}
+		if (blueOffset.x !== 0 || blueOffset.y !== 0) {
+			fixedAberration.blue = reactive({ x: -blueOffset.x, y: -blueOffset.y });
+		}
+
+		// Reapply processing with new alignment
+		applyProcessing();
+
+	} finally {
+		isAutoAligning.value = false;
+	}
+}
+
+// Find channel offset using normalized cross-correlation
+function findChannelOffset(ref, target, width, height) {
+	const maxSearch = 5; // Search range in pixels
+	let bestScore = -Infinity;
+	let bestX = 0;
+	let bestY = 0;
+
+	// Coarse search (1px steps)
+	for (let dy = -maxSearch; dy <= maxSearch; dy++) {
+		for (let dx = -maxSearch; dx <= maxSearch; dx++) {
+			const score = correlationScore(ref, target, width, height, dx, dy);
+			if (score > bestScore) {
+				bestScore = score;
+				bestX = dx;
+				bestY = dy;
+			}
+		}
+	}
+
+	// Fine search around best (0.5px steps)
+	for (let dy = bestY - 1; dy <= bestY + 1; dy += 0.5) {
+		for (let dx = bestX - 1; dx <= bestX + 1; dx += 0.5) {
+			const score = correlationScore(ref, target, width, height, dx, dy);
+			if (score > bestScore) {
+				bestScore = score;
+				bestX = dx;
+				bestY = dy;
+			}
+		}
+	}
+
+	// Round to 0.5px
+	return {
+		x: Math.round(bestX * 2) / 2,
+		y: Math.round(bestY * 2) / 2
+	};
+}
+
+// Calculate correlation score between reference and shifted target
+function correlationScore(ref, target, width, height, dx, dy) {
+	let sum = 0;
+	let count = 0;
+
+	// Use center region only (avoid edges, faster)
+	const margin = Math.max(10, Math.ceil(Math.abs(dx)) + 1, Math.ceil(Math.abs(dy)) + 1);
+
+	for (let y = margin; y < height - margin; y++) {
+		for (let x = margin; x < width - margin; x++) {
+			const refIdx = y * width + x;
+
+			// Bilinear interpolation for sub-pixel offset
+			const srcX = x + dx;
+			const srcY = y + dy;
+			const x0 = Math.floor(srcX);
+			const y0 = Math.floor(srcY);
+			const fx = srcX - x0;
+			const fy = srcY - y0;
+
+			const idx00 = y0 * width + x0;
+			const idx01 = y0 * width + (x0 + 1);
+			const idx10 = (y0 + 1) * width + x0;
+			const idx11 = (y0 + 1) * width + (x0 + 1);
+
+			const val = target[idx00] * (1 - fx) * (1 - fy) +
+			            target[idx01] * fx * (1 - fy) +
+			            target[idx10] * (1 - fx) * fy +
+			            target[idx11] * fx * fy;
+
+			// Normalized correlation (multiply centered values)
+			sum += (ref[refIdx] - 128) * (val - 128);
+			count++;
+		}
+	}
+
+	return count > 0 ? sum / count : 0;
+}
+
+// Sub-pixel chromatic aberration fix using bilinear interpolation
 function fixChromaticAberration(canvas, channel, axis, magnitude) {
 	const ctx = canvas.getContext('2d');
 	const width = canvas.width;
 	const height = canvas.height;
 
-	// Get the image data
 	const imageData = ctx.getImageData(0, 0, width, height);
 	const data = imageData.data;
-
-	// Create a copy of the original image data
 	const originalData = new Uint8ClampedArray(data);
 
-	for (let i = 0; i < data.length; i += 4) {
-		// Calculate the pixel index adjustment based on axis and magnitude
-		let indexAdjustment = 0;
-		if (axis === 'x') {
-			// Moving horizontally
-			indexAdjustment = magnitude * -4; // Each pixel is 4 units in data (RGBA)
-		} else if (axis === 'y') {
-			// Moving vertically
-			indexAdjustment = magnitude * width * -4; // Moving a full width's worth of pixels up or down
-		}
+	const channelIndexes = { 'red': 0, 'green': 1, 'blue': 2 };
+	const channelIndex = channelIndexes[channel];
+	if (channelIndex === undefined) return;
 
-		// Adjust specified color channels
-		const channelIndexes = {
-			'red': 0,
-			'green': 1,
-			'blue': 2
-		};
-		const channelIndex = channelIndexes[channel] ?? null;
+	// Calculate offset
+	const offsetX = axis === 'x' ? -magnitude : 0;
+	const offsetY = axis === 'y' ? -magnitude : 0;
 
-		// Ensure the channelIndex is valid to prevent processing undefined channels
-		if (channelIndex !== null && i + channelIndex + indexAdjustment >= 0 && i + channelIndex + indexAdjustment < data.length) {
-			data[i + channelIndex] = originalData[i + channelIndex + indexAdjustment];
+	// Check if we need sub-pixel interpolation
+	const needsInterpolation = (offsetX % 1 !== 0) || (offsetY % 1 !== 0);
+
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			const dstIdx = (y * width + x) * 4 + channelIndex;
+
+			const srcX = x + offsetX;
+			const srcY = y + offsetY;
+
+			if (needsInterpolation) {
+				// Bilinear interpolation for sub-pixel precision
+				const x0 = Math.floor(srcX);
+				const y0 = Math.floor(srcY);
+				const x1 = x0 + 1;
+				const y1 = y0 + 1;
+				const fx = srcX - x0;
+				const fy = srcY - y0;
+
+				// Bounds check
+				if (x0 >= 0 && x1 < width && y0 >= 0 && y1 < height) {
+					const v00 = originalData[(y0 * width + x0) * 4 + channelIndex];
+					const v01 = originalData[(y0 * width + x1) * 4 + channelIndex];
+					const v10 = originalData[(y1 * width + x0) * 4 + channelIndex];
+					const v11 = originalData[(y1 * width + x1) * 4 + channelIndex];
+
+					const val = v00 * (1 - fx) * (1 - fy) +
+					            v01 * fx * (1 - fy) +
+					            v10 * (1 - fx) * fy +
+					            v11 * fx * fy;
+
+					data[dstIdx] = Math.round(val);
+				}
+			} else {
+				// Integer offset - direct lookup
+				const srcXi = Math.round(srcX);
+				const srcYi = Math.round(srcY);
+
+				if (srcXi >= 0 && srcXi < width && srcYi >= 0 && srcYi < height) {
+					data[dstIdx] = originalData[(srcYi * width + srcXi) * 4 + channelIndex];
+				}
+			}
 		}
 	}
 
-	// Put the image data back to canvas
 	ctx.putImageData(imageData, 0, 0);
 }
 
@@ -1050,9 +1210,31 @@ canvas {
 .content {
 	max-width: none;
 }
+.color-alignment h4 {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.color-alignment h5 {
+	margin: 8px 0 4px 0;
+}
 .color-alignment button {
 	margin-right: 2px;
-	min-width: 66px;
+	min-width: 50px;
+	padding: 4px 8px;
+}
+.auto-align-btn {
+	font-size: 11px;
+	padding: 2px 8px;
+	min-width: auto !important;
+	background-color: #8CCF7E;
+	border: none;
+	border-radius: 3px;
+	cursor: pointer;
+}
+.auto-align-btn:disabled {
+	background-color: #ccc;
+	cursor: wait;
 }
 .crop-controls {
 	display: flex;
