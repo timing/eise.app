@@ -95,6 +95,8 @@ export function useAviReader() {
     const numWorkers = Math.min(navigator.hardwareConcurrency || 4, 4);
     const unifiedAnalyzeWorkers = [];
     let workersReady = false;
+    let framesProcessedSinceRecycle = 0;
+    const RECYCLE_AFTER_FRAMES = 500; // Restart workers every N frames to prevent WASM heap exhaustion
 
     // Initializes workers and ensures OpenCV is ready before processing
     async function initializeWorkers() {
@@ -139,6 +141,49 @@ export function useAviReader() {
             unifiedAnalyzeWorkers.forEach(w => w.terminate());
             unifiedAnalyzeWorkers.length = 0;
         }
+    }
+
+    // Recycle all workers to get fresh WASM heaps (prevents memory exhaustion on large files)
+    async function recycleWorkers() {
+        addLog("Recycling workers to free WASM memory...");
+
+        // Terminate all existing workers
+        unifiedAnalyzeWorkers.forEach(w => w.terminate());
+        unifiedAnalyzeWorkers.length = 0;
+        workersReady = false;
+
+        // Create fresh workers
+        for (let i = 0; i < numWorkers; i++) {
+            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
+        }
+
+        // Wait for them to initialize
+        const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error(`Worker ${i} recycle init timed out.`)), 30000);
+                worker.onmessage = (e) => {
+                    if (e.data.type === 'ready') {
+                        clearTimeout(timeout);
+                        worker.onmessage = null;
+                        resolve();
+                    } else if (e.data.type === 'error') {
+                        clearTimeout(timeout);
+                        worker.onmessage = null;
+                        reject(new Error(e.data.message || 'Worker recycle error'));
+                    }
+                };
+                worker.onerror = (e) => {
+                    clearTimeout(timeout);
+                    reject(e);
+                };
+                worker.postMessage({ type: 'init' });
+            });
+        });
+
+        await Promise.all(workerPromises);
+        workersReady = true;
+        framesProcessedSinceRecycle = 0;
+        addLog("Workers recycled successfully.");
     }
 
     function processFrameWithWorker(worker, data, transferables) {
@@ -905,6 +950,14 @@ export function useAviReader() {
 
             // Wait for batch to complete before starting next
             await Promise.all(batchPromises);
+
+            // Track frames for worker recycling
+            framesProcessedSinceRecycle += (batchEnd - batchStart);
+
+            // Recycle workers periodically to prevent WASM heap exhaustion
+            if (framesProcessedSinceRecycle >= RECYCLE_AFTER_FRAMES && batchEnd < frameCount) {
+                await recycleWorkers();
+            }
 
             // Update UI after each batch
             emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });

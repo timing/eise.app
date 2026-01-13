@@ -1,5 +1,5 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v27 - debayer-then-crop to fix moiré)');
+console.log('unified_analyze_worker.js loaded (v28 - production cleanup)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
@@ -212,10 +212,10 @@ async function handleMessage(e) {
                 const subPixelOffsetX = centerX - cropCenterX;
                 const subPixelOffsetY = centerY - cropCenterY;
 
-                // Debug: log first few frames' crop positioning with subPixelOffset
+                // Log if padding is needed (object near edge)
                 const needsPadding = padLeft > 0 || padTop > 0 || padRight > 0 || padBottom > 0;
-                if (index < 5 || needsPadding) {
-                    console.log(`Crop frame ${index}: center=(${centerX.toFixed(2)}, ${centerY.toFixed(2)}), cropAt=(${idealCropX}, ${idealCropY}), subPixelOffset=(${subPixelOffsetX.toFixed(3)}, ${subPixelOffsetY.toFixed(3)})${needsPadding ? ` PADDING: L=${padLeft} T=${padTop} R=${padRight} B=${padBottom}` : ''}`);
+                if (needsPadding && index < 3) {
+                    console.log(`Frame ${index}: crop needs padding L=${padLeft} T=${padTop} R=${padRight} B=${padBottom}`);
                 }
 
                 actualCropRegion = {
@@ -571,14 +571,6 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
         let rgbaBuffer = null;
         if (includeRgba) {
             rgbaBuffer = new Uint8ClampedArray(rgbaMat.data).buffer;
-
-            // DEBUG: Log checksum of first frame to compare SER vs AVI paths
-            if (frameIndex === 0) {
-                const data = new Uint8Array(rgbaBuffer);
-                let sum = 0;
-                for (let i = 0; i < data.length; i += 100) sum += data[i]; // Sample every 100th byte
-                console.log(`FRAME 0 CHECKSUM: ${sum}, size=${data.length}, first16=[${Array.from(data.slice(0,16)).join(',')}]`);
-            }
         }
 
         return { sharpness, pngBlob, croppedBuffer, rgbaBuffer, width: actualWidth, height: actualHeight };
@@ -1162,15 +1154,11 @@ async function stackFramesLocally(frames) {
         console.log(`Created ${alignmentPoints.length} alignment points (${patchSize}px patches, ${searchRadius}px search)`);
 
         // === Find local shifts for each frame at each AP ===
-        console.log(`Finding alignments for ${frameCount} frames with ${alignmentPoints.length} APs each...`);
+        const refIndex = validFrames.findIndex(f => f === referenceFrame);
         self.postMessage({ type: 'stack-progress', stage: `Aligning frame 1/${frameCount}...`, progress: 5 });
         const frameShifts = []; // frameShifts[frameIdx][apIdx] = {dx, dy, quality}
 
         // Create reference Mat once (reused for all frames)
-        // Sometimes OpenCV WASM fails intermittently - retry a few times
-        console.log('Creating reference Mat...');
-        console.log(`  Reference buffer: ${referenceFrame.rgbaBuffer?.byteLength || 'DETACHED'} bytes, expected ${width * height * 4}`);
-
         if (!referenceFrame.rgbaBuffer || referenceFrame.rgbaBuffer.byteLength === 0) {
             throw new Error(`Reference frame buffer is detached or empty`);
         }
@@ -1189,7 +1177,6 @@ async function stackFramesLocally(frames) {
                 refGray = new _cv.Mat();
                 _cv.cvtColor(refMat, refGray, _cv.COLOR_RGBA2GRAY);
 
-                console.log(`  Reference Mat created successfully (attempt ${attempt})`);
                 lastError = null;
                 break; // Success!
             } catch (e) {
@@ -1221,9 +1208,11 @@ async function stackFramesLocally(frames) {
         for (let f = 0; f < frameCount; f++) {
             const frame = validFrames[f];
 
-            // Check reference Mat is still valid
-            if (f < 3) {
-                console.log(`Frame ${f}: refGray valid=${refGray && !refGray.isDeleted()}, rows=${refGray?.rows}, cols=${refGray?.cols}`);
+            // Skip alignment for reference frame - it has zero shift by definition
+            if (f === refIndex) {
+                const zeroShifts = activeAPs.map(() => ({ dx: 0, dy: 0, quality: 1 }));
+                frameShifts.push(zeroShifts);
+                continue;
             }
 
             // Validate frame data
@@ -1238,48 +1227,24 @@ async function stackFramesLocally(frames) {
                 throw new Error(`Frame ${f} buffer size mismatch: expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
             }
 
-            // Debug: log first few frames' data
-            if (f < 3) {
-                console.log(`Frame ${f}: ${frame.width}x${frame.height}, buffer=${frame.rgbaBuffer.byteLength}, sharpness=${frame.sharpness?.toFixed(2)}`);
-                // Check first few bytes to verify data is valid
-                const preview = new Uint8ClampedArray(frame.rgbaBuffer.slice(0, 16));
-                console.log(`Frame ${f}: first 16 bytes: [${preview.join(', ')}]`);
-            }
-
             const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
-
-            // Verify data isn't all zeros (would indicate detached/invalid buffer)
-            if (f < 3) {
-                let nonZeroCount = 0;
-                for (let i = 0; i < Math.min(1000, frameData.length); i++) {
-                    if (frameData[i] !== 0) nonZeroCount++;
-                }
-                console.log(`Frame ${f}: ${nonZeroCount}/1000 non-zero bytes in first 1000`);
-            }
 
             // Create frame Mat once per frame
             let frameMat = null, frameGray = null;
             try {
-                if (f < 3) console.log(`Frame ${f}: Creating Mat(${height}, ${width}, CV_8UC4)...`);
-
-                // Try to create Mat with explicit error isolation
+                // Try to create Mat with fallback
                 try {
                     frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
                 } catch (matErr) {
-                    console.error(`Frame ${f}: Mat constructor failed:`, matErr);
-                    // Try alternative construction
-                    console.log(`Frame ${f}: Trying matFromArray...`);
+                    // Fallback to matFromArray if constructor fails
                     frameMat = _cv.matFromArray(height, width, _cv.CV_8UC4, frameData);
                 }
 
-                if (f < 3) console.log(`Frame ${f}: Setting ${frameData.length} bytes of data...`);
                 if (frameMat.data) {
                     frameMat.data.set(frameData);
                 }
-                if (f < 3) console.log(`Frame ${f}: Converting to grayscale...`);
                 frameGray = new _cv.Mat();
                 _cv.cvtColor(frameMat, frameGray, _cv.COLOR_RGBA2GRAY);
-                if (f < 3) console.log(`Frame ${f}: Mat creation successful`);
 
                 const shifts = [];
                 for (let a = 0; a < activeAPs.length; a++) {
@@ -1344,19 +1309,14 @@ async function stackFramesLocally(frames) {
         }
 
         const refBrightness = calcMeanBrightness(referenceFrame.rgbaBuffer, blackCutoff);
-        console.log(`Reference frame brightness: ${refBrightness.toFixed(2)} (black cutoff: ${blackCutoff})`);
 
         // Local de-warping with improved Gaussian weighting to reduce grid artifacts
         const useLocalDewarping = true;
 
         if (useLocalDewarping) {
             // Create remap matrices once (reused for each frame)
-            console.log('Creating remap matrices...');
             mapX = new _cv.Mat(height, width, _cv.CV_32FC1);
             mapY = new _cv.Mat(height, width, _cv.CV_32FC1);
-            console.log('Remap matrices created successfully');
-        } else {
-            console.log('Using simple weighted averaging (no local de-warping)');
         }
 
         for (let f = 0; f < frameCount; f++) {
@@ -1374,9 +1334,6 @@ async function stackFramesLocally(frames) {
             // Calculate brightness normalization factor for this frame
             const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, blackCutoff);
             const brightnessScale = refBrightness / frameBrightness;
-            if (f < 3) {
-                console.log(`Frame ${f}: brightness=${frameBrightness.toFixed(2)}, scale=${brightnessScale.toFixed(4)}`);
-            }
 
             if (useLocalDewarping) {
                 const shifts = frameShifts[f];
@@ -1392,11 +1349,6 @@ async function stackFramesLocally(frames) {
                 // const globalOffsetY = frameSubPixelOffset.y - refSubPixelOffset.y;
                 const globalOffsetX = 0; // Disabled for testing
                 const globalOffsetY = 0;
-
-                // Log first few frames' global offsets for debugging
-                if (f < 3) {
-                    console.log(`Frame ${f}: subPixelOffset=(${frameSubPixelOffset.x.toFixed(3)}, ${frameSubPixelOffset.y.toFixed(3)}), globalOffset=(${globalOffsetX.toFixed(3)}, ${globalOffsetY.toFixed(3)})`);
-                }
 
                 // Create frame Mat
                 let frameMat = null, warpedMat = null;
@@ -1721,6 +1673,7 @@ function findLocalShift(refData, frameData, width, height, ap, patchSize, search
     }
 
     let templateMat, searchMat, resultMat, refMat, frameMat;
+    let templateGray, searchGray;
 
     try {
         // Create Mats from RGBA data
@@ -1738,8 +1691,8 @@ function findLocalShift(refData, frameData, width, height, ap, patchSize, search
         searchMat = frameMat.roi(searchRect).clone();
 
         // Convert to grayscale for matching
-        const templateGray = new _cv.Mat();
-        const searchGray = new _cv.Mat();
+        templateGray = new _cv.Mat();
+        searchGray = new _cv.Mat();
         _cv.cvtColor(templateMat, templateGray, _cv.COLOR_RGBA2GRAY);
         _cv.cvtColor(searchMat, searchGray, _cv.COLOR_RGBA2GRAY);
 
@@ -1769,6 +1722,8 @@ function findLocalShift(refData, frameData, width, height, ap, patchSize, search
 
     } catch (err) {
         // Cleanup on error
+        if (templateGray) try { templateGray.delete(); } catch(e) {}
+        if (searchGray) try { searchGray.delete(); } catch(e) {}
         if (templateMat) try { templateMat.delete(); } catch(e) {}
         if (searchMat) try { searchMat.delete(); } catch(e) {}
         if (resultMat) try { resultMat.delete(); } catch(e) {}

@@ -28,14 +28,27 @@ export function useStacker() {
         addLog(`Sending ${validFrames.length} frames to stacking worker`);
 
         return new Promise((resolve, reject) => {
-            const worker = existingWorker;
-            const shouldTerminate = !existingWorker; // Only terminate if we created it
+            // Create a FRESH worker for stacking to avoid WASM heap exhaustion from analysis
+            addLog('Creating fresh worker for stacking...');
+            const worker = new Worker('/unified_analyze_worker.js');
+            const shouldTerminate = true; // Always terminate since we created it
 
-            if (!worker) {
-                addLog('Error: No worker provided for stacking');
-                reject(new Error('No worker provided for stacking'));
-                return;
-            }
+            // Wait for OpenCV to initialize in the new worker
+            const initHandler = (e) => {
+                if (e.data.type === 'ready') {
+                    addLog('Fresh stacking worker ready');
+                    worker.removeEventListener('message', initHandler);
+                    proceedWithStacking();
+                } else if (e.data.type === 'error') {
+                    addLog(`Fresh worker init error: ${e.data.message}`);
+                    worker.removeEventListener('message', initHandler);
+                    reject(new Error('Failed to initialize stacking worker'));
+                }
+            };
+            worker.addEventListener('message', initHandler);
+            worker.postMessage({ type: 'init' }); // Trigger OpenCV initialization
+
+            function proceedWithStacking() {
 
             const messageHandler = (e) => {
                 const { type } = e.data;
@@ -54,6 +67,7 @@ export function useStacker() {
                     addLog(`Stacked image: ${width}x${height}, ${(blob.size / 1024).toFixed(1)} KB`);
                     emit('set-caption', 'Stacking complete');
                     worker.removeEventListener('message', messageHandler);
+                    worker.terminate(); // Clean up fresh worker
                     resolve(blob);
                 }
 
@@ -61,6 +75,7 @@ export function useStacker() {
                     addLog(`Stacking error: ${e.data.error}`);
                     emit('set-caption', 'Stacking failed');
                     worker.removeEventListener('message', messageHandler);
+                    worker.terminate(); // Clean up fresh worker
                     reject(new Error(e.data.error));
                 }
             };
@@ -112,25 +127,31 @@ export function useStacker() {
             const transferables = Array.from(uniqueBuffers);
 
             // Emit frame data for AVI export BEFORE transfer (buffers will be detached after)
-            // Clone buffers so they remain accessible after transfer
-            const aviFrameData = frameData.map(f => ({
-                rgbaBuffer: f.rgbaBuffer instanceof ArrayBuffer ? f.rgbaBuffer.slice(0) : null,
-                width: f.width,
-                height: f.height
-            })).filter(f => f.rgbaBuffer !== null);
-            emit('cropped-avi-ready', {
-                frames: aviFrameData,
-                width: frameData[0].width,
-                height: frameData[0].height,
-                frameCount: aviFrameData.length
-            });
-            addLog(`AVI export data ready: ${aviFrameData.length} frames`);
+            // Skip AVI export for large frame counts to save memory
+            if (frameData.length <= 500) {
+                // Clone buffers so they remain accessible after transfer
+                const aviFrameData = frameData.map(f => ({
+                    rgbaBuffer: f.rgbaBuffer instanceof ArrayBuffer ? f.rgbaBuffer.slice(0) : null,
+                    width: f.width,
+                    height: f.height
+                })).filter(f => f.rgbaBuffer !== null);
+                emit('cropped-avi-ready', {
+                    frames: aviFrameData,
+                    width: frameData[0].width,
+                    height: frameData[0].height,
+                    frameCount: aviFrameData.length
+                });
+                addLog(`AVI export data ready: ${aviFrameData.length} frames`);
+            } else {
+                addLog(`Skipping AVI export for ${frameData.length} frames (memory optimization)`);
+            }
 
             // Send stacking request - worker is already initialized
             worker.postMessage({
                 type: 'stack-frames',
                 frames: frameData
             }, transferables);
+            } // end proceedWithStacking
         });
     }
 
