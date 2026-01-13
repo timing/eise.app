@@ -17,10 +17,18 @@
 		</div>
 
 		<div class="content" v-if="processingStage === 'analyzing' || processingStage === 'stacking'">
-			<div v-if="processingStage === 'analyzing' && bestFrame" class="preview-frame">
-				<h4>Best Frame So Far</h4>
-				<canvas ref="bestFrameCanvas"></canvas>
-				<p class="sharpness-label">Sharpness: {{ bestFrame.sharpness?.toFixed(2) }}</p>
+			<div class="preview-frames-row">
+				<div v-if="processingStage === 'analyzing' && bestFrame" class="preview-frame">
+					<h4>Sharpest Frame</h4>
+					<canvas ref="bestFrameCanvas"></canvas>
+					<p class="frame-stats">Sharpness: {{ bestFrame.sharpness?.toFixed(2) }} · Circularity: {{ bestFrame.circularity?.toFixed(2) || '?' }}</p>
+				</div>
+
+				<div v-if="processingStage === 'analyzing' && refCandidate" class="preview-frame">
+					<h4>Reference Candidate</h4>
+					<canvas ref="refCandidateCanvas"></canvas>
+					<p class="frame-stats">Sharpness: {{ refCandidate.sharpness?.toFixed(2) }} · Circularity: {{ refCandidate.circularity?.toFixed(2) || '?' }}</p>
+				</div>
 			</div>
 
 			<div v-if="processingStage === 'stacking' && referenceFrame" class="preview-frame">
@@ -52,8 +60,10 @@ const uploadError = ref(null); // New ref for upload errors
 
 const bestFrame = ref(null);
 const referenceFrame = ref(null);
+const refCandidate = ref(null);  // Most circular from top frames
 const bestFrameCanvas = ref(null);
 const referenceFrameCanvas = ref(null);
+const refCandidateCanvas = ref(null);
 const croppedSerData = ref(null);
 const skippedFrames = ref(0);
 
@@ -117,6 +127,29 @@ function rankFrame(frame) {
 		}
 	}
 	bestFramesCount.value = bestFramesForStacking.length;
+
+	// Update reference candidate: most circular from top 1% of sharpest frames
+	updateRefCandidate();
+}
+
+function updateRefCandidate() {
+	if (bestFramesForStacking.length === 0) return;
+
+	// Sort by sharpness to get top frames
+	const sorted = [...bestFramesForStacking].sort((a, b) => b.sharpness - a.sharpness);
+	const topCount = Math.max(1, Math.ceil(sorted.length * 0.01));
+	const topFrames = sorted.slice(0, topCount);
+
+	// Find most circular among top frames
+	const mostCircular = topFrames.reduce((best, f) =>
+		(f.circularity || 0) > (best.circularity || 0) ? f : best
+	);
+
+	// Only update if different (avoid unnecessary redraws)
+	if (!refCandidate.value || mostCircular.blob !== refCandidate.value.blob) {
+		refCandidate.value = mostCircular;
+		updateRefCandidateCanvas();
+	}
 }
 
 
@@ -138,6 +171,11 @@ onMounted(async () => {
 			bestFrame.value = frame;
 			updateBestFrameCanvas();
 		}
+	});
+
+	on('ref-candidate-updated', (frame) => {
+		refCandidate.value = frame;
+		updateRefCandidateCanvas();
 	});
 
 	on('stacking-started', (data) => {
@@ -198,6 +236,17 @@ function updateReferenceFrameCanvas() {
 	});
 }
 
+function updateRefCandidateCanvas() {
+	nextTick(() => {
+		if (refCandidate.value && refCandidateCanvas.value) {
+			const blob = refCandidate.value instanceof Blob ? refCandidate.value : refCandidate.value?.blob;
+			if (blob) {
+				drawImageOnCanvas(refCandidateCanvas.value, blob);
+			}
+		}
+	});
+}
+
 function drawImageOnCanvas(canvas, blob) {
   const ctx = canvas.getContext('2d');
   createImageBitmap(blob).then(img => {
@@ -252,9 +301,13 @@ async function processImageFrames(files) {
 			allFramesCount.value++;
 			emit('update-loading', { progress: (allFramesCount.value / files.length) * 100, current: allFramesCount.value, total: files.length });
 
-			// Worker returns { sharpness, pngBlob, index }
+			// Worker returns { sharpness, pngBlob, index, circularity }
 			if (e.data.sharpness !== undefined && e.data.pngBlob) {
-				const currentFrame = { sharpness: e.data.sharpness, blob: e.data.pngBlob };
+				const currentFrame = {
+					sharpness: e.data.sharpness,
+					blob: e.data.pngBlob,
+					circularity: e.data.circularity || 0
+				};
 				rankFrame(currentFrame);
 				resolveFunctions[index]();
 			} else if (e.data.error) {
@@ -307,6 +360,12 @@ async function processImageFrames(files) {
 </script>
 
 <style scoped>
+	.preview-frames-row {
+		display: flex;
+		gap: 20px;
+		justify-content: center;
+		flex-wrap: wrap;
+	}
 	.preview-frame {
 		text-align: center;
 		margin-bottom: 20px;
@@ -320,7 +379,7 @@ async function processImageFrames(files) {
 		border-radius: 5px;
 		max-width: 100%;
 	}
-	.sharpness-label {
+	.sharpness-label, .frame-stats {
 		margin: 8px 0 0 0;
 		font-size: 13px;
 		color: #c6fffd;

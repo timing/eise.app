@@ -117,6 +117,13 @@
 				</template>
 			</div>
 
+			<h4>Rotation</h4>
+			<div>
+				<input type="range" min="-180" max="180" step="0.1" v-model.number="rotation" @input="previewRotation" @change="applyRotation" />
+				<span>{{ rotation }}°</span>
+				<button v-if="rotation !== 0 || hasAppliedRotation" class="reset-rotation" @click="resetRotation">Reset</button>
+			</div>
+
 			<h4>Save lossless image</h4>
 
 			<button class="download" @click="downloadUnprocessedPNG">Download Unprocessed PNG</button>
@@ -136,7 +143,7 @@
 				<div class="loading-spinner"></div>
 				<p>Loading image...</p>
 			</div>
-			<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" />
+			<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" :previewRotation="previewRotationAngle" />
 		</template>
 	</div>
 
@@ -276,6 +283,11 @@ const blueDown = ref(0);
 const isProcessing = ref(false);
 const isLoadingImage = ref(false);
 const sharpeningMethod = ref('wavelets'); // 'wavelets', 'deconv', or 'none'
+const rotation = ref(0); // degrees (slider value)
+const previewRotationAngle = ref(0); // CSS preview rotation while dragging
+const hasAppliedRotation = ref(false);
+let preRotationImageData = null; // Backup of original image before rotation
+let appliedRotation = 0; // Track what rotation has been applied to pixels
 
 function setSharpeningMethod(method) {
 	sharpeningMethod.value = method;
@@ -813,7 +825,7 @@ function undoCrop() {
 	sharpenedImageData = new ImageData(preCropImageData.width, preCropImageData.height);
 
 	// Clear only the sharpening cache (not settings)
-	
+
 	// Force reprocess by clearing only dimension-related cached values
 	delete prevValues.gain;
 	delete prevValues.contrast;
@@ -826,6 +838,138 @@ function undoCrop() {
 	canUndoCrop.value = false;
 
 	// Reinitialize WebGL for restored dimensions
+	useWebGL = initWebGL(canvas.value.width, canvas.value.height);
+
+	// Reprocess with current settings
+	applyProcessing();
+}
+
+// Rotation functions
+function rotateImageData(imageData, angleDegrees) {
+	const angleRad = angleDegrees * Math.PI / 180;
+	const cos = Math.abs(Math.cos(angleRad));
+	const sin = Math.abs(Math.sin(angleRad));
+
+	const oldWidth = imageData.width;
+	const oldHeight = imageData.height;
+
+	// Calculate new dimensions to fit rotated image
+	const newWidth = Math.ceil(oldWidth * cos + oldHeight * sin);
+	const newHeight = Math.ceil(oldWidth * sin + oldHeight * cos);
+
+	// Create temp canvas with old image
+	const srcCanvas = document.createElement('canvas');
+	srcCanvas.width = oldWidth;
+	srcCanvas.height = oldHeight;
+	const srcCtx = srcCanvas.getContext('2d');
+	srcCtx.putImageData(imageData, 0, 0);
+
+	// Create rotated canvas
+	const rotatedCanvas = document.createElement('canvas');
+	rotatedCanvas.width = newWidth;
+	rotatedCanvas.height = newHeight;
+	const rotatedCtx = rotatedCanvas.getContext('2d');
+
+	// Fill with black background (for gaps)
+	rotatedCtx.fillStyle = '#000000';
+	rotatedCtx.fillRect(0, 0, newWidth, newHeight);
+
+	// Rotate around center
+	rotatedCtx.translate(newWidth / 2, newHeight / 2);
+	rotatedCtx.rotate(angleRad);
+	rotatedCtx.drawImage(srcCanvas, -oldWidth / 2, -oldHeight / 2);
+
+	return rotatedCtx.getImageData(0, 0, newWidth, newHeight);
+}
+
+function previewRotation() {
+	// Show CSS rotation preview (difference from applied rotation)
+	previewRotationAngle.value = rotation.value - appliedRotation;
+}
+
+function applyRotation() {
+	// Clear CSS preview
+	previewRotationAngle.value = 0;
+
+	// If rotation is same as already applied, nothing to do
+	if (rotation.value === appliedRotation) return;
+
+	// If rotation is 0 and we have applied rotation, reset instead
+	if (rotation.value === 0 && hasAppliedRotation.value) {
+		resetRotation();
+		return;
+	}
+
+	// Save backup before first rotation
+	if (!preRotationImageData) {
+		preRotationImageData = new ImageData(
+			new Uint8ClampedArray(initCanvasImageData.data),
+			initCanvasImageData.width,
+			initCanvasImageData.height
+		);
+	}
+
+	// Rotate from the original backup (not current state - avoids accumulated interpolation)
+	const rotatedData = rotateImageData(preRotationImageData, rotation.value);
+
+	// Update canvas size
+	canvas.value.width = rotatedData.width;
+	canvas.value.height = rotatedData.height;
+
+	// Update all image data references
+	initCanvasImageData = rotatedData;
+	gainedImageData = new ImageData(rotatedData.width, rotatedData.height);
+	preNoiseReducedImageData = new ImageData(rotatedData.width, rotatedData.height);
+	sharpenedImageData = new ImageData(rotatedData.width, rotatedData.height);
+
+	// Clear caches
+	prevValues = {};
+	fixedAberration = reactive({});
+
+	// Reinitialize WebGL for new dimensions
+	useWebGL = initWebGL(rotatedData.width, rotatedData.height);
+
+	hasAppliedRotation.value = true;
+	appliedRotation = rotation.value;
+
+	// Reprocess with current settings
+	applyProcessing();
+}
+
+function resetRotation() {
+	// Clear CSS preview
+	previewRotationAngle.value = 0;
+
+	if (!preRotationImageData) {
+		rotation.value = 0;
+		appliedRotation = 0;
+		return;
+	}
+
+	// Restore from backup
+	canvas.value.width = preRotationImageData.width;
+	canvas.value.height = preRotationImageData.height;
+
+	initCanvasImageData = new ImageData(
+		new Uint8ClampedArray(preRotationImageData.data),
+		preRotationImageData.width,
+		preRotationImageData.height
+	);
+	gainedImageData = new ImageData(preRotationImageData.width, preRotationImageData.height);
+	preNoiseReducedImageData = new ImageData(preRotationImageData.width, preRotationImageData.height);
+	sharpenedImageData = new ImageData(preRotationImageData.width, preRotationImageData.height);
+
+	// Clear caches
+	prevValues = {};
+	fixedAberration = reactive({});
+
+	// Clear backup and reset values
+	preRotationImageData = null;
+	rotation.value = 0;
+	appliedRotation = 0;
+	hasAppliedRotation.value = false;
+
+	// Reinitialize WebGL for original dimensions
 	useWebGL = initWebGL(canvas.value.width, canvas.value.height);
 
 	// Reprocess with current settings
@@ -1029,6 +1173,11 @@ button.download:hover {
 	border-radius: 50%;
 	animation: spin 0.8s linear infinite;
 	margin-bottom: 15px;
+}
+.reset-rotation {
+	margin-left: 10px;
+	padding: 4px 8px;
+	font-size: 12px;
 }
 </style>
 

@@ -24,12 +24,14 @@ export function useTracking() {
             window.removeEventListener('mousemove', onInteraction);
             window.removeEventListener('mousedown', onInteraction);
             window.removeEventListener('touchstart', onInteraction);
+            window.removeEventListener('keydown', onInteraction);
         };
 
         window.addEventListener('scroll', onInteraction, { once: true, passive: true });
         window.addEventListener('mousemove', onInteraction, { once: true, passive: true });
         window.addEventListener('mousedown', onInteraction, { once: true, passive: true });
         window.addEventListener('touchstart', onInteraction, { once: true, passive: true });
+        window.addEventListener('keydown', onInteraction, { once: true, passive: true });
     }
 
     return { track, trackHumanInteraction };

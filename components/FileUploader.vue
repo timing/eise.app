@@ -28,12 +28,29 @@
 				<p>{{ errorMessage }}</p>
 			</div>
 
-			<div v-if="hasSerFiles" class="ser-option">
-				<label>
-					<input type="checkbox" v-model="serThroughFfmpeg" />
-					Run SER through FFmpeg first (debug)
+			<div class="separator"></div>
+
+			<h4>Frame selection</h4>
+			<div class="radio-group">
+				<label class="radio-option">
+					<input type="radio" v-model="qualityMode" value="manual" />
+					Manually pick best frames threshold
+				</label>
+				<label class="radio-option">
+					<input type="radio" v-model="qualityMode" value="percentage" />
+					Stack best
+					<input type="number" v-model.number="stackPercentage" min="1" max="100" class="percentage-input" :disabled="qualityMode !== 'percentage'" />%
 				</label>
 			</div>
+			<p v-if="qualityMode === 'manual'" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack. Note: this keeps all frames in memory.</p>
+			<p v-if="qualityMode === 'percentage'" class="info-text">Stack best is recommended if you run into memory issues.</p>
+
+			<div class="separator"></div>
+
+			<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
+			<input type="range" min="5" max="50" step="5" v-model="cropMarginPercent" />
+			{{ cropMarginPercent }}%
+			<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
 
 			<div class="separator"></div>
 
@@ -45,23 +62,6 @@
 			<input type="range" min="2" max="5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
 			{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
 			<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
-
-			<div class="separator"></div>
-
-			<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
-			<input type="range" min="5" max="50" step="5" v-model="cropMarginPercent" />
-			{{ cropMarginPercent }}%
-			<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
-
-			<div class="separator"></div>
-
-			<h4>Quality threshold</h4>
-			<label>
-				<input type="checkbox" v-model="autoStack" />
-				Just stack the best 30%, no manual selection
-			</label>
-			<p v-if="!autoStack" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack. Note: this keeps all frames in memory.</p>
-			<p v-if="autoStack" class="info-text">Recommended for large files or multiple SER files. Only keeps the best frames in memory.</p>
 		</template>
 	</div>
 
@@ -110,11 +110,9 @@ const showCropMarginInfo = ref(false);
 // Crop margin setting (percentage of detected object size to add as margin)
 const cropMarginPercent = ref(10);
 
-// Auto-stack option (when checked, skip manual threshold selection)
-const autoStack = ref(false);
-
-// Debug option: route SER through FFmpeg instead of direct reader
-const serThroughFfmpeg = ref(false);
+// Quality threshold mode: 'manual' for interactive selection, 'percentage' for automatic
+const qualityMode = ref('manual');
+const stackPercentage = ref(30);
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
@@ -126,11 +124,6 @@ const selectedFilesDescription = computed(() => {
 	if (selectedFiles.value.length === 0) return '';
 	if (selectedFiles.value.length === 1) return selectedFiles.value[0].name;
 	return `${selectedFiles.value.length} files`;
-});
-
-// Check if any selected files are SER files
-const hasSerFiles = computed(() => {
-	return selectedFiles.value.some(f => f.name.endsWith('.ser'));
 });
 
 const startButtonText = computed(() => {
@@ -232,21 +225,13 @@ async function processFiles(files) {
 		return;
 	}
 
-	// Handle multiple SER files (combined stacking) - only when NOT routing through FFmpeg
-	if (serFiles.length > 1 && !serThroughFfmpeg.value) {
+	// Handle multiple SER files (combined stacking)
+	if (serFiles.length > 1) {
 		emit('processing-started');
 		const { readSerFiles } = useSerReader();
 		const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value, cropMarginPercent.value);
-		return;
-	}
-
-	// When routing SER through FFmpeg, only allow single file
-	if (serFiles.length > 1 && serThroughFfmpeg.value) {
-		alert('Multiple SER files not supported when routing through FFmpeg. Please select a single SER file.');
-		isProcessing.value = false;
-		eventBusEmit('stop-loading');
+		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value);
 		return;
 	}
 
@@ -262,15 +247,14 @@ async function processFiles(files) {
 			}
 		}
 
-		// Handle SER files - either direct reader or through FFmpeg based on checkbox
-		if (fileToProcess.name.endsWith('.ser') && !serThroughFfmpeg.value) {
+		// Handle SER files with direct reader
+		if (fileToProcess.name.endsWith('.ser')) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
 			const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value, cropMarginPercent.value);
+			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value);
 			return;
 		}
-		// When serThroughFfmpeg is true, SER falls through to FFmpeg processing below
 
 		let needsFfmpeg = !fileToProcess.name.endsWith('.avi'); // Non-AVI always needs FFmpeg
 		let expectedFrameCount = null; // From AVI header if available
@@ -290,7 +274,7 @@ async function processFiles(files) {
 				// Can process directly - readAviFile will read frames as needed
 				emit('processing-started');
 				const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, !autoStack.value);
+				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -368,7 +352,7 @@ async function processFiles(files) {
 
 		// Route FFmpeg frames through AVI reader for unified processing (including cropping)
 		const { processFFmpegFrames } = useAviReader();
-		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, !autoStack.value);
+		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
@@ -376,7 +360,7 @@ async function processFiles(files) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, !autoStack.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, qualityMode.value === 'manual', false, stackPercentage.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing
@@ -417,13 +401,6 @@ async function processFiles(files) {
 	margin-top: 10px;
 	border-radius: 5px;
 	font-weight: bold;
-}
-.ser-option {
-	margin-top: 10px;
-	padding: 8px;
-	background-color: #fff8e0;
-	border-radius: 5px;
-	font-size: 12px;
 }
 .file-upload-wrapper {
 	display: block;
@@ -513,5 +490,31 @@ async function processFiles(files) {
 .info-text ul {
 	margin: 0;
 	padding-left: 20px;
+}
+.radio-group {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin: 10px 0;
+}
+.radio-option {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	cursor: pointer;
+}
+.radio-option input[type="radio"] {
+	margin: 0;
+}
+.percentage-input {
+	width: 50px;
+	padding: 4px 6px;
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	text-align: center;
+}
+.percentage-input:disabled {
+	background: #eee;
+	color: #999;
 }
 </style>

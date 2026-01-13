@@ -176,7 +176,8 @@ export function useSerReader() {
                         width: e.data.width,
                         height: e.data.height,
                         index: e.data.index,
-                        subPixelOffset: e.data.subPixelOffset
+                        subPixelOffset: e.data.subPixelOffset,
+                        circularity: e.data.circularity || 0
                     });
                 }
             });
@@ -302,7 +303,7 @@ export function useSerReader() {
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10) {
+    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -443,10 +444,11 @@ export function useSerReader() {
 
         emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
 
-        const bestFramesCapacity = Math.floor(frameCount * 0.3);
+        const bestFramesCapacity = Math.max(1, Math.floor(frameCount * stackPercentage / 100));
         const bestFramesForStacking = []; // These will store {sharpness, blob, croppedBuffer}
         const allAnalyzedFrames = []; // Keep all frames when manual threshold is enabled
         let bestFrameSoFar = null; // Best frame found so far (for preview)
+        let refCandidateSoFar = null; // Most circular from top frames (for preview)
 
         function rankFrame(frame) {
             // Validate frame has valid blob
@@ -475,6 +477,25 @@ export function useSerReader() {
                 if (frame.sharpness > bestFramesForStacking[minSharpnessIndex].sharpness) {
                     bestFramesForStacking[minSharpnessIndex] = frame;
                 }
+            }
+
+            // Update reference candidate: most circular from top 1% of sharpest frames
+            updateRefCandidate();
+        }
+
+        function updateRefCandidate() {
+            if (bestFramesForStacking.length === 0) return;
+
+            const sorted = [...bestFramesForStacking].sort((a, b) => b.sharpness - a.sharpness);
+            const topCount = Math.max(1, Math.ceil(sorted.length * 0.01));
+            const topFrames = sorted.slice(0, topCount);
+
+            const mostCircular = topFrames.reduce((best, f) =>
+                (f.circularity || 0) > (best.circularity || 0) ? f : best
+            );
+
+            if (!refCandidateSoFar || mostCircular.blob !== refCandidateSoFar.blob) {
+                refCandidateSoFar = mostCircular;
             }
         }
 
@@ -569,7 +590,8 @@ export function useSerReader() {
                         width: result.width,
                         height: result.height,
                         index: result.index,
-                        subPixelOffset: result.subPixelOffset || { x: 0, y: 0 }
+                        subPixelOffset: result.subPixelOffset || { x: 0, y: 0 },
+                        circularity: result.circularity || 0
                     };
 
                     rankFrame(currentFrame);
@@ -582,7 +604,7 @@ export function useSerReader() {
                     completedFrames++;
 
                     if (completedFrames === 1) {
-                        addLog(`First frame succeeded (index ${result.index}, sharpness ${result.sharpness?.toFixed(2)})`);
+                        addLog(`First frame succeeded (index ${result.index}, sharpness ${result.sharpness?.toFixed(2)}, circularity ${result.circularity?.toFixed(2)})`);
                     }
 
                     if (completedFrames % 50 === 0 || completedFrames === frameCount) {
@@ -591,6 +613,9 @@ export function useSerReader() {
 
                         if (bestFrameSoFar) {
                             emit('best-frame-updated', bestFrameSoFar);
+                        }
+                        if (refCandidateSoFar) {
+                            emit('ref-candidate-updated', refCandidateSoFar);
                         }
                     }
                 })
@@ -851,7 +876,7 @@ export function useSerReader() {
 
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
-    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10) {
+    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -1026,11 +1051,12 @@ export function useSerReader() {
         emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
 
         // PHASE 5: Analyze all frames from all files
-        // Use streaming ranking - only keep best 30% in memory to avoid crashes
-        const bestFramesCapacity = Math.max(1, Math.floor(totalFramesToProcess * 0.3));
+        // Use streaming ranking - only keep best N% in memory to avoid crashes
+        const bestFramesCapacity = Math.max(1, Math.floor(totalFramesToProcess * stackPercentage / 100));
         const bestFramesForStacking = [];
         const allAnalyzedFrames = []; // Only used when manualThreshold is true
         let bestFrameSoFar = null;
+        let refCandidateSoFar = null;
 
         // Streaming rank function - keeps only top N frames in memory
         function rankFrame(frame) {
@@ -1061,6 +1087,25 @@ export function useSerReader() {
                     bestFramesForStacking[minSharpnessIndex] = frame;
                 }
                 // Otherwise frame is discarded (not kept in memory)
+            }
+
+            // Update reference candidate: most circular from top 1% of sharpest frames
+            updateRefCandidate();
+        }
+
+        function updateRefCandidate() {
+            if (bestFramesForStacking.length === 0) return;
+
+            const sorted = [...bestFramesForStacking].sort((a, b) => b.sharpness - a.sharpness);
+            const topCount = Math.max(1, Math.ceil(sorted.length * 0.01));
+            const topFrames = sorted.slice(0, topCount);
+
+            const mostCircular = topFrames.reduce((best, f) =>
+                (f.circularity || 0) > (best.circularity || 0) ? f : best
+            );
+
+            if (!refCandidateSoFar || mostCircular.blob !== refCandidateSoFar.blob) {
+                refCandidateSoFar = mostCircular;
             }
         }
 
@@ -1168,7 +1213,8 @@ export function useSerReader() {
                             height: result.height,
                             index: result.index,
                             sourceFile: filename,
-                            subPixelOffset: result.subPixelOffset || { x: 0, y: 0 }
+                            subPixelOffset: result.subPixelOffset || { x: 0, y: 0 },
+                            circularity: result.circularity || 0
                         };
 
                         // Validate frame has valid blob and rank it (streaming)
@@ -1190,6 +1236,9 @@ export function useSerReader() {
                             // Update preview with best frame so far
                             if (bestFrameSoFar) {
                                 emit('best-frame-updated', bestFrameSoFar);
+                            }
+                            if (refCandidateSoFar) {
+                                emit('ref-candidate-updated', refCandidateSoFar);
                             }
                         }
                     })

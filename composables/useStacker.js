@@ -20,9 +20,28 @@ export function useStacker() {
             return null;
         }
 
-        // Emit stacking-started with reference frame (best frame = first after sort)
+        // Select reference frame: for round planets, pick most circular from top 1% sharpest
         const sortedFrames = [...validFrames].sort((a, b) => b.sharpness - a.sharpness);
-        const referenceFrame = sortedFrames[0];
+
+        // Take top 1% of frames (minimum 1)
+        const topCount = Math.max(1, Math.ceil(sortedFrames.length * 0.01));
+        const topFrames = sortedFrames.slice(0, topCount);
+
+        // Calculate average circularity to detect planet type
+        const avgCircularity = topFrames.reduce((sum, f) => sum + (f.circularity || 0), 0) / topFrames.length;
+
+        let referenceFrame;
+        if (avgCircularity > 0.7) {
+            // Round planet (Jupiter, Mars, etc.) - pick most circular from top frames
+            referenceFrame = topFrames.reduce((best, f) =>
+                (f.circularity || 0) > (best.circularity || 0) ? f : best
+            );
+            addLog(`Round planet detected (circularity ${avgCircularity.toFixed(2)}), selecting most circular reference frame`);
+        } else {
+            // Non-round (Saturn) or unclear - stick with sharpest
+            referenceFrame = sortedFrames[0];
+            addLog(`Non-round planet detected (circularity ${avgCircularity.toFixed(2)}), selecting sharpest reference frame`);
+        }
         emit('stacking-started', { referenceFrame });
 
         addLog(`Sending ${validFrames.length} frames to stacking worker`);

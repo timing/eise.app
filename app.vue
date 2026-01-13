@@ -1,7 +1,7 @@
 <template>
 	<div>	
 		<nav class="tabs">
-			<button :class="{ active: currentTab === 'FileUploader' }" @click="currentTab = 'FileUploader'">✨ &nbsp; Stack & Process</button>
+			<button :class="{ active: currentTab === 'FileUploader' }" @click="handleStackProcessClick">✨ &nbsp; Stack & Process</button>
 			<button :class="{ active: currentTab === 'Tools' }" @click="currentTab = 'Tools'">🛠️ &nbsp; Tools</button>
 			<button :class="{ active: currentTab === 'About' }" style="float:right;" @click="currentTab = 'About'">ℹ️  &nbsp; About</button>
 		</nav>
@@ -200,8 +200,25 @@ function handleProcessingStarted() {
 async function handlePostProcessing(data) {
 	console.log('handlePostProcessing', data);
 	currentTab.value = 'PostProcessor';
-	selectedFile.value = data; 
+	selectedFile.value = data;
 	isProcessing.value = false;
+}
+
+function handleStackProcessClick() {
+	if (currentTab.value === 'PostProcessor') {
+		if (confirm('Leave post processing and start a new stack?')) {
+			// Reset state
+			selectedFile.value = null;
+			isProcessing.value = false;
+			isSelectingQuality.value = false;
+			isSelectingColorProfile.value = false;
+			croppedSerData.value = null;
+			croppedAviData.value = null;
+			currentTab.value = 'FileUploader';
+		}
+	} else {
+		currentTab.value = 'FileUploader';
+	}
 }
 
 useHead({

@@ -7,10 +7,10 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 
-const { logs, onLogAdded } = useEventBus();
+const { logs, onLogAdded, off } = useEventBus();
 const logContent = ref(null);
 const isExpanded = ref(false);
 
@@ -20,6 +20,22 @@ const toggleExpand = () => {
 	logContent.value.scrollTop = logContent.value.scrollHeight;
 };
 
+const handleLogAdded = (log) => {
+	if (!logContent.value) return; // Guard against unmounted component
+
+	let mem = '';
+	if (performance && performance.memory && performance.memory.usedJSHeapSize) {
+		mem = ' Mem:' + (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(2) + 'MB';
+	}
+
+	logContent.value.innerHTML += (new Date()).toLocaleString() + ': ' + log.trim() + mem + '\n';
+
+	const shouldScroll = !isExpanded.value || (logContent.value.scrollTop + logContent.value.clientHeight >= logContent.value.scrollHeight - 50);
+	if (shouldScroll) {
+		logContent.value.scrollTop = logContent.value.scrollHeight;
+	}
+};
+
 onMounted(() => {
 	let welcomeMem = '';
 	if (performance && performance.memory && performance.memory.usedJSHeapSize) {
@@ -27,21 +43,11 @@ onMounted(() => {
 	}
 	logContent.value.innerHTML += (new Date()).toLocaleString() + ': Welcome to eise.app!' + welcomeMem + '\n';
 
-	onLogAdded((log) => {
-		let mem = '';
-		if (performance && performance.memory && performance.memory.usedJSHeapSize) {
-			mem = ' Mem:' + (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(2) + 'MB';
-		}
+	onLogAdded(handleLogAdded);
+});
 
-		logContent.value.innerHTML += (new Date()).toLocaleString() + ': ' + log.trim() + mem + '\n';
-
-		//nextTick(() => {
-			const shouldScroll = !isExpanded.value || (logContent.value.scrollTop + logContent.value.clientHeight >= logContent.value.scrollHeight -50);
-			if (shouldScroll) {
-				logContent.value.scrollTop = logContent.value.scrollHeight;
-			}
-		//});
-	});
+onUnmounted(() => {
+	off('log', handleLogAdded);
 });
 </script>
 

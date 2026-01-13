@@ -19,6 +19,10 @@ const props = defineProps({
 	disableDrag: {
 		type: Boolean,
 		default: false
+	},
+	previewRotation: {
+		type: Number,
+		default: 0
 	}
 });
 
@@ -89,9 +93,10 @@ const handleDoubleClick = (event) => {
 
 
 const canvasStyle = computed(() => {
+	const rotateStr = props.previewRotation !== 0 ? ` rotate(${props.previewRotation}deg)` : '';
 	return {
-		transform: `translate(${position.value.x}px, ${position.value.y}px) scale(${zoomLevel.value})`,
-		transformOrigin: 'top left',
+		transform: `translate(${position.value.x}px, ${position.value.y}px) scale(${zoomLevel.value})${rotateStr}`,
+		transformOrigin: props.previewRotation !== 0 ? 'center center' : 'top left',
 		cursor: props.disableDrag ? 'crosshair' : (isDragging.value ? 'grabbing' : 'grab')
 	};
 });

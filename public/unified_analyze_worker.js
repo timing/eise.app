@@ -111,7 +111,8 @@ async function handleMessage(e) {
             const response = {
                 sharpness: result.sharpness,
                 pngBlob: result.pngBlob,
-                index
+                index,
+                circularity: result.circularity || 0
             };
             if (includeRgba && result.rgbaBuffer) {
                 response.rgbaBuffer = result.rgbaBuffer;
@@ -242,7 +243,8 @@ async function handleMessage(e) {
                 croppedBuffer: result.croppedBuffer,
                 // Force subPixelOffset to 0 - testing if this causes moiré
                 subPixelOffset: { x: 0, y: 0 },
-                index
+                index,
+                circularity: bounds.circularity || 0
             };
 
             // Only include RGBA data when client-side stacking is enabled
@@ -257,7 +259,7 @@ async function handleMessage(e) {
             return;
         }
 
-        let sharpness, pngBlob;
+        let sharpness, pngBlob, circularity = 0;
 
         if (type === 'ffmpeg') {
             const { analyze, includeRgba } = e.data;
@@ -309,10 +311,13 @@ async function handleMessage(e) {
             sharpness = result.sharpness;
             pngBlob = result.pngBlob;
 
+            // Include circularity for reference frame selection (1.0 = perfect circle)
+            circularity = bounds.circularity || 0;
+
             // Return with rgbaBuffer if client-side stacking is enabled
             if (includeRgba && result.rgbaBuffer) {
                 self.postMessage({
-                    sharpness, pngBlob, index,
+                    sharpness, pngBlob, index, circularity,
                     rgbaBuffer: result.rgbaBuffer,
                     width: result.width,
                     height: result.height
@@ -324,7 +329,7 @@ async function handleMessage(e) {
             throw new Error('Unknown analysis type');
         }
 
-        self.postMessage({ sharpness, pngBlob, index });
+        self.postMessage({ sharpness, pngBlob, index, circularity });
 
     } catch (error) {
         // OpenCV WASM can throw raw numbers as error codes
@@ -742,10 +747,12 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
         hierarchy = new _cv.Mat();
         _cv.findContours(binary, contours, hierarchy, _cv.RETR_EXTERNAL, _cv.CHAIN_APPROX_SIMPLE);
 
-        // Collect all bounding boxes
+        // Collect all bounding boxes; track largest contour (the planet) to measure its circularity
         let minX = width, minY = height, maxX = 0, maxY = 0;
         let hasObjects = false;
         const minContourArea = (width * height) * 0.0001; // Ignore tiny noise
+        let largestContour = null;
+        let largestArea = 0;
 
         for (let i = 0; i < contours.size(); i++) {
             const contour = contours.get(i);
@@ -758,6 +765,25 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
             minY = Math.min(minY, rect.y);
             maxX = Math.max(maxX, rect.x + rect.width);
             maxY = Math.max(maxY, rect.y + rect.height);
+
+            // Track largest contour for circularity calculation
+            if (area > largestArea) {
+                largestArea = area;
+                largestContour = contour;
+            }
+        }
+
+        // Calculate circularity of largest contour: 4π × area / perimeter²
+        // Perfect circle = 1.0, Saturn with rings ≈ 0.3-0.5
+        let circularity = 0;
+        let aspectRatio = 1;
+        if (largestContour) {
+            const perimeter = _cv.arcLength(largestContour, true);
+            if (perimeter > 0) {
+                circularity = (4 * Math.PI * largestArea) / (perimeter * perimeter);
+            }
+            const rect = _cv.boundingRect(largestContour);
+            aspectRatio = rect.width / Math.max(1, rect.height);
         }
 
         // Cleanup intermediate Mats (raw/gray cleaned in finally)
@@ -816,7 +842,9 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
             centerX: centerX,  // Actual detected object center (not affected by clamping)
             centerY: centerY,  // Actual detected object center (not affected by clamping)
             originalWidth: width,
-            originalHeight: height
+            originalHeight: height,
+            circularity: circularity,  // 1.0 = perfect circle, lower = elongated (Saturn)
+            aspectRatio: aspectRatio   // width/height of largest contour
         };
 
     } catch (error) {
@@ -883,10 +911,12 @@ async function detectObjectBoundsFromPng(pngData) {
         hierarchy = new _cv.Mat();
         _cv.findContours(binary, contours, hierarchy, _cv.RETR_EXTERNAL, _cv.CHAIN_APPROX_SIMPLE);
 
-        // Collect all bounding boxes
+        // Collect all bounding boxes; track largest contour (the planet) to measure its circularity
         let minX = width, minY = height, maxX = 0, maxY = 0;
         let hasObjects = false;
         const minContourArea = (width * height) * 0.0001;
+        let largestContour = null;
+        let largestArea = 0;
 
         for (let i = 0; i < contours.size(); i++) {
             const contour = contours.get(i);
@@ -899,6 +929,24 @@ async function detectObjectBoundsFromPng(pngData) {
             minY = Math.min(minY, rect.y);
             maxX = Math.max(maxX, rect.x + rect.width);
             maxY = Math.max(maxY, rect.y + rect.height);
+
+            // Track largest contour for circularity calculation
+            if (area > largestArea) {
+                largestArea = area;
+                largestContour = contour;
+            }
+        }
+
+        // Calculate circularity of largest contour: 4π × area / perimeter²
+        let circularity = 0;
+        let aspectRatio = 1;
+        if (largestContour) {
+            const perimeter = _cv.arcLength(largestContour, true);
+            if (perimeter > 0) {
+                circularity = (4 * Math.PI * largestArea) / (perimeter * perimeter);
+            }
+            const rect = _cv.boundingRect(largestContour);
+            aspectRatio = rect.width / Math.max(1, rect.height);
         }
 
         // Cleanup intermediate Mats (raw/gray cleaned in finally)
@@ -955,7 +1003,9 @@ async function detectObjectBoundsFromPng(pngData) {
             centerX: centerX,  // Actual detected object center (not affected by clamping)
             centerY: centerY,  // Actual detected object center (not affected by clamping)
             originalWidth: width,
-            originalHeight: height
+            originalHeight: height,
+            circularity: circularity,  // 1.0 = perfect circle, lower = elongated (Saturn)
+            aspectRatio: aspectRatio   // width/height of largest contour
         };
 
     } catch (error) {
@@ -1095,7 +1145,7 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
         rawMat.delete();
         grayMat.delete();
 
-        return { sharpness, pngBlob, rgbaBuffer, width: actualWidth, height: actualHeight };
+        return { sharpness, pngBlob, rgbaBuffer, width: actualWidth, height: actualHeight, circularity: bounds.circularity || 0 };
 
     } catch (error) {
         if (rawMat) try { rawMat.delete(); } catch(e) {}
@@ -1292,23 +1342,27 @@ async function stackFramesLocally(frames) {
         // === Brightness normalization (PSS-like, black cutoff = 4) ===
         const blackCutoff = 4;
 
-        // Calculate mean brightness of reference frame
-        function calcMeanBrightness(rgbaBuffer, blackCutoff) {
+        // Calculate mean brightness using sparse sampling (every 8th pixel in each direction = 1/64 of pixels)
+        function calcMeanBrightness(rgbaBuffer, width, height, blackCutoff) {
             const data = new Uint8ClampedArray(rgbaBuffer);
             let sum = 0;
             let count = 0;
-            for (let i = 0; i < data.length; i += 4) {
-                // Grayscale approximation: (R + G + B) / 3
-                const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-                if (brightness > blackCutoff) {
-                    sum += brightness;
-                    count++;
+            const step = 8; // Sample every 8th pixel in x and y
+            for (let y = 0; y < height; y += step) {
+                const rowOffset = y * width * 4;
+                for (let x = 0; x < width; x += step) {
+                    const i = rowOffset + x * 4;
+                    const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+                    if (brightness > blackCutoff) {
+                        sum += brightness;
+                        count++;
+                    }
                 }
             }
             return count > 0 ? sum / count : 1;
         }
 
-        const refBrightness = calcMeanBrightness(referenceFrame.rgbaBuffer, blackCutoff);
+        const refBrightness = calcMeanBrightness(referenceFrame.rgbaBuffer, width, height, blackCutoff);
 
         // Local de-warping with improved Gaussian weighting to reduce grid artifacts
         const useLocalDewarping = true;
@@ -1332,7 +1386,7 @@ async function stackFramesLocally(frames) {
             const frameWeight = frame.sharpness / totalSharpness * frameCount;
 
             // Calculate brightness normalization factor for this frame
-            const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, blackCutoff);
+            const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, width, height, blackCutoff);
             const brightnessScale = refBrightness / frameBrightness;
 
             if (useLocalDewarping) {

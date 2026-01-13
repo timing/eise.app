@@ -213,7 +213,8 @@ export function useAviReader() {
                         rgbaBuffer: e.data.rgbaBuffer,
                         width: e.data.width,
                         height: e.data.height,
-                        index: e.data.index
+                        index: e.data.index,
+                        circularity: e.data.circularity || 0
                     });
                 }
             };
@@ -504,7 +505,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, preloadedBuffer = null) {
+    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, preloadedBuffer = null) {
         emit('start-loading', 'Parsing AVI header...');
         emit('update-loading', 0);
 
@@ -562,7 +563,7 @@ export function useAviReader() {
 
         emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
 
-        const bestFramesCapacity = Math.floor(frameCount * 0.3);
+        const bestFramesCapacity = Math.max(1, Math.floor(frameCount * stackPercentage / 100));
         const bestFramesForStacking = []; // These will store {sharpness, blob} (8-bit PNG)
         let bestFrameSoFar = null; // Best frame found so far (for preview)
         const allAnalyzedFrames = []; // For manual threshold selection
@@ -778,7 +779,7 @@ export function useAviReader() {
     }
 
     // Process FFmpeg-extracted PNG frames through the same pipeline as AVI
-    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false) {
+    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -827,7 +828,7 @@ export function useAviReader() {
 
         emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
 
-        const bestFramesCapacity = Math.floor(frameCount * 0.3);
+        const bestFramesCapacity = Math.max(1, Math.floor(frameCount * stackPercentage / 100));
         const bestFramesForStacking = [];
         let bestFrameSoFar = null; // Best frame found so far (for preview)
         const allAnalyzedFrames = []; // For manual threshold selection

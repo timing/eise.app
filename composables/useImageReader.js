@@ -69,7 +69,8 @@ export function useImageReader() {
                         index: e.data.index,
                         rgbaBuffer: e.data.rgbaBuffer,
                         width: e.data.width,
-                        height: e.data.height
+                        height: e.data.height,
+                        circularity: e.data.circularity || 0
                     });
                 }
             };
@@ -220,7 +221,7 @@ export function useImageReader() {
         return new Uint8Array(await blob.arrayBuffer());
     }
 
-    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, enableAutoCrop = false) {
+    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, enableAutoCrop = false, stackPercentage = 30) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -235,7 +236,7 @@ export function useImageReader() {
         addLog(`Processing ${files.length} images for stacking...`);
 
         const frameCount = files.length;
-        const bestFramesCapacity = Math.max(1, Math.floor(frameCount * 0.3));
+        const bestFramesCapacity = Math.max(1, Math.floor(frameCount * stackPercentage / 100));
         const bestFramesForStacking = [];
         let bestFrameSoFar = null; // Best frame found so far (for preview)
         const allAnalyzedFrames = []; // For manual threshold selection
