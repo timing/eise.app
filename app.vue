@@ -2,6 +2,7 @@
 	<div>	
 		<nav class="tabs">
 			<button :class="{ active: currentTab === 'FileUploader' }" @click="currentTab = 'FileUploader'">✨ &nbsp; Stack & Process</button>
+			<button :class="{ active: currentTab === 'Tools' }" @click="currentTab = 'Tools'">🛠️ &nbsp; Tools</button>
 			<button :class="{ active: currentTab === 'About' }" style="float:right;" @click="currentTab = 'About'">ℹ️  &nbsp; About</button>
 		</nav>
 
@@ -63,6 +64,7 @@
 			</div>
 		</div>
 	
+		<Tools v-show="currentTab === 'Tools'" />
 		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing && !isSelectingQuality" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" @showAbout="currentTab = 'About'" />
 		<ColorProfileSelector v-show="currentTab === 'FileUploader' && isSelectingColorProfile" />
 		<QualitySelector v-show="currentTab === 'FileUploader' && isSelectingQuality" :frames="qualityFrames" @threshold-selected="handleThresholdSelected" />
@@ -80,6 +82,7 @@
 import FileUploader from '~/components/FileUploader.vue';
 import VideoFrameProcessor from './components/VideoFrameProcessor.vue';
 import PostProcessor from './components/PostProcessor.vue';
+import Tools from './components/Tools.vue';
 import Logger from './components/Logger.vue';
 import ColorProfileSelector from './components/ColorProfileSelector.vue';
 import QualitySelector from './components/QualitySelector.vue';
@@ -131,6 +134,8 @@ onMounted(() => {
 watch(currentTab, (newTab) => {
 	if (newTab === 'About') {
 		track('about');
+	} else if (newTab === 'Tools') {
+		track('tools');
 	}
 });
 

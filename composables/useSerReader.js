@@ -4,7 +4,8 @@ import { useUploader } from '@/composables/useUploader';
 import { useStacker } from '@/composables/useStacker';
 
 // These functions remain on the main thread as they are not performance bottlenecks
-function parseSerHeader(buffer) {
+// Exported for use by Tools component
+export function parseSerHeader(buffer) {
     const view = new DataView(buffer);
     const le = true; // SER files are little-endian
 
