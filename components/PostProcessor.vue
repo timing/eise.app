@@ -32,45 +32,45 @@
 				<span>{{ vibrance }}</span>
 			</div>
 
-			<h4>Sharpening</h4>
+			<fieldset class="sharpening-frame">
+				<legend>Sharpening</legend>
+				<div class="sharpening-tabs">
+					<button :class="{ active: sharpeningMethod === 'wavelets' }" @click="setSharpeningMethod('wavelets')">Wavelets</button>
+					<button :class="{ active: sharpeningMethod === 'deconv' }" @click="setSharpeningMethod('deconv')">Deconvolution</button>
+					<button :class="{ active: sharpeningMethod === 'none' }" @click="setSharpeningMethod('none')">None</button>
+				</div>
 
-			<div class="sharpening-subsection">
-				<h5>Wavelets</h5>
-				<div>
-					<label>Radius:</label>
-					<input type="range" min="0" max="5" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
-					<span>{{ waveletsRadius }}</span>
+				<div class="sharpening-content" v-if="sharpeningMethod === 'wavelets'">
+					<div>
+						<label>Radius:</label>
+						<input type="range" min="0" max="5" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
+						<span>{{ waveletsRadius }}</span>
+					</div>
+					<div>
+						<label>Amount:</label>
+						<input type="range" min="0" max="100" step="0.1" v-model="waveletsAmount" @input="applyProcessing"/>
+						<span>{{ waveletsAmount }}</span>
+					</div>
+					<div>
+						<label>Denoise:</label>
+						<input type="range" min="0" max="50" step="1" v-model="postNoiseReduction" @input="applyProcessing"/>
+						<span>{{ postNoiseReduction > 0 ? postNoiseReduction : 'Off' }}</span>
+					</div>
 				</div>
-				<div>
-					<label>Amount:</label>
-					<input type="range" min="0" max="100" step="0.1" v-model="waveletsAmount" @input="applyProcessing"/>
-					<span>{{ waveletsAmount }}</span>
-				</div>
-			</div>
 
-			<div class="sharpening-subsection">
-				<h5>Deconvolution (Richardson-Lucy)</h5>
-				<p class="deconv-hint">Slow operation - applies when you release the slider</p>
-				<div>
-					<label>PSF Radius:</label>
-					<input type="range" min="0" max="10" step="0.1" v-model="deconvRadius" @change="applyProcessing"/>
-					<span>{{ deconvRadius }}</span>
+				<div class="sharpening-content" v-if="sharpeningMethod === 'deconv'">
+					<div>
+						<label>PSF Radius:</label>
+						<input type="range" min="0" max="10" step="0.1" v-model="deconvRadius" @input="applyProcessing"/>
+						<span>{{ deconvRadius }}</span>
+					</div>
+					<div>
+						<label>Iterations:</label>
+						<input type="range" min="0" max="200" step="1" v-model="deconvIterations" @input="applyProcessing"/>
+						<span>{{ deconvIterations }}</span>
+					</div>
 				</div>
-				<div>
-					<label>Iterations:</label>
-					<input type="range" min="0" max="50" step="1" v-model="deconvIterations" @change="applyProcessing"/>
-					<span>{{ deconvIterations }}</span>
-				</div>
-			</div>
-
-			<div class="sharpening-subsection">
-				<h5>Noise Reduction</h5>
-				<div>
-					<label>Amount:</label>
-					<input type="range" min="0" max="50" step="1" v-model="postNoiseReduction" @input="applyProcessing"/>
-					<span>{{ postNoiseReduction > 0 ? postNoiseReduction : 'Off' }}</span>
-				</div>
-			</div>
+			</fieldset>
 
 			<div class="color-alignment">
 			
@@ -149,6 +149,7 @@ import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import { encodeAvi } from '@/utils/aviEncoder.js'
 import { initWebGL, processWithWebGL, isWebGLAvailable, disposeWebGL } from '@/utils/webglProcessor.js'
+import { deconvolveWebGL, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
@@ -238,6 +239,7 @@ const downloadCroppedAvi = () => {
 let waveletWorkers = null;
 let workersInitialized = false;
 
+
 function initializeWorkers() {
 	if (workersInitialized) return;
 	workersInitialized = true;
@@ -249,6 +251,7 @@ function initializeWorkers() {
 		waveletWorkers[i].onerror = (e) => { console.error(e); };
 	}
 }
+
 
 const props = defineProps({
 	file: Object,
@@ -272,6 +275,12 @@ const postNoiseReduction = ref(0);
 const blueDown = ref(0);
 const isProcessing = ref(false);
 const isLoadingImage = ref(false);
+const sharpeningMethod = ref('wavelets'); // 'wavelets', 'deconv', or 'none'
+
+function setSharpeningMethod(method) {
+	sharpeningMethod.value = method;
+	applyProcessing();
+}
 
 // Crop state
 const cropMode = ref(false);
@@ -288,6 +297,7 @@ onMounted(() => {
 
 onUnmounted(() => {
 	disposeWebGL();
+	disposeDeconvWebGL();
 });
 
 watch(() => props.file, (newVal) => {
@@ -466,8 +476,8 @@ const applyProcessingInternal = async() => {
 	// Start with original image
 	let workingImage = initCanvasImageData;
 
-	// STEP 1: Deconvolution (if enabled) - runs in worker
-	if (deconvRadius.value > 0 && deconvIterations.value > 0) {
+	// STEP 1: Sharpening (based on selected method)
+	if (sharpeningMethod.value === 'deconv' && deconvRadius.value > 0 && deconvIterations.value > 0) {
 		console.log(`deconvolution (PSF=${deconvRadius.value}, iterations=${deconvIterations.value})`);
 		try {
 			workingImage = await deconvolveInWorker(workingImage, parseFloat(deconvRadius.value), parseInt(deconvIterations.value));
@@ -476,10 +486,7 @@ const applyProcessingInternal = async() => {
 			isProcessing.value = false;
 			return;
 		}
-	}
-
-	// STEP 2: Wavelet sharpening (if enabled)
-	if (waveletsAmount.value > 0) {
+	} else if (sharpeningMethod.value === 'wavelets' && waveletsAmount.value > 0) {
 		console.log('wavelets');
 		try {
 			workingImage = await waveletSharpenInWorker(
@@ -498,8 +505,8 @@ const applyProcessingInternal = async() => {
 	console.log('color adjustments', useWebGL ? '(WebGL)' : '(CPU)');
 	workingImage = doColorAdjustments(workingImage);
 
-	// STEP 4: Noise reduction (if enabled)
-	if (postNoiseReduction.value >= 3) {
+	// STEP 4: Noise reduction (only with wavelets)
+	if (sharpeningMethod.value === 'wavelets' && postNoiseReduction.value >= 3) {
 		console.log('noise reduction');
 		const srcMat = imageDataToMat(workingImage);
 		const dstMat = new cv.Mat();
@@ -536,39 +543,19 @@ function imageDataToMat(imageData) {
 	return mat;
 }
 
-// Deconvolution in worker (uses same wavelet workers, runs in background)
+// WebGL-accelerated deconvolution
 let deconvTaskId = 0;
-function deconvolveInWorker(imageData, psfRadius, iterations) {
-	const width = imageData.width;
-	const height = imageData.height;
+
+async function deconvolveInWorker(imageData, psfRadius, iterations) {
 	deconvTaskId++;
-	const workerId = deconvTaskId % waveletWorkers.length;
 	const currentTask = deconvTaskId;
 
-	return new Promise((resolve, reject) => {
-		function handleWorkerMsg(e) {
-			if (e.data.type !== 'deconv') return; // Ignore wavelet responses
-
-			waveletWorkers[workerId].removeEventListener('message', handleWorkerMsg);
-
-			if (e.data.taskId === currentTask) {
-				if (e.data.error) {
-					console.error('Deconvolution worker error:', e.data.error);
-				}
-				resolve(e.data.imageData);
-			} else {
-				reject(new Error('Outdated deconv task'));
-			}
+	console.log(`WebGL deconvolution: PSF=${psfRadius}, iterations=${iterations}`);
+	return deconvolveWebGL(imageData, psfRadius, iterations, (progress) => {
+		// Check if superseded
+		if (deconvTaskId !== currentTask) {
+			throw new Error('Deconv task superseded');
 		}
-
-		waveletWorkers[workerId].addEventListener('message', handleWorkerMsg);
-
-		// Create a copy for transfer
-		const dataCopy = new Uint8ClampedArray(imageData.data);
-		waveletWorkers[workerId].postMessage(
-			{ type: 'deconv', imageData: dataCopy, width, height, psfRadius, iterations, taskId: currentTask },
-			[dataCopy.buffer]
-		);
 	});
 }
 
@@ -612,10 +599,6 @@ function waveletSharpenInWorker(imageData, amount, radius){
 	return new Promise((resolve, reject) => {
 
 		function handleWorkerMsg(e){
-			// Ignore deconv responses - only process wavelet responses
-			if (e.data.type === 'deconv') return;
-
-			// Get the processed image data from the worker
 			const { imageData, taskId } = e.data;
 
 			waveletWorkers[workerId].removeEventListener('message', handleWorkerMsg)
@@ -959,23 +942,48 @@ canvas {
 	font-size: 12px;
 	color: #666;
 }
-.sharpening-subsection {
-	margin: 10px 0;
+.sharpening-frame {
+	border: 2px groove #ccc;
+	border-radius: 4px;
 	padding: 10px;
-	background-color: #f8f8f8;
-	border-radius: 5px;
-	border-left: 3px solid #ddd;
+	margin: 10px 0;
 }
-.sharpening-subsection h5 {
-	margin: 0 0 10px 0;
-	font-size: 13px;
+.sharpening-frame legend {
+	font-weight: bold;
+	color: #333;
+	padding: 0 6px;
+}
+.sharpening-tabs {
+	display: flex;
+	gap: 0;
+	margin-bottom: 10px;
+	border-radius: 4px;
+	overflow: hidden;
+	border: 1px solid #ccc;
+}
+.sharpening-tabs button {
+	flex: 1;
+	padding: 6px 10px;
+	border: none;
+	background-color: #e8e8e8;
 	color: #555;
+	cursor: pointer;
+	font-size: 12px;
+	font-weight: bold;
+	transition: background-color 0.2s;
 }
-.deconv-hint {
-	font-size: 11px;
-	color: #888;
-	margin: 0 0 8px 0;
-	font-style: italic;
+.sharpening-tabs button:not(:last-child) {
+	border-right: 1px solid #ccc;
+}
+.sharpening-tabs button:hover {
+	background-color: #d0d0d0;
+}
+.sharpening-tabs button.active {
+	background-color: #8CCF7E;
+	color: #111;
+}
+.sharpening-content {
+	padding-top: 5px;
 }
 .processing-indicator {
 	position: absolute;
