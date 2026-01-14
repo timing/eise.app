@@ -3,6 +3,7 @@
 export default defineNuxtConfig({
 	devtools: { enabled: true },
 	plugins: [
+		'~/plugins/sentry.client.js',
 		'~/plugins/ffmpeg.js',
 		{src: '~/plugins/opencv.js', mode: 'client'}
 	],
