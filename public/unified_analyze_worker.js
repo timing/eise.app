@@ -1,5 +1,5 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v31 - optional noise-robust alignment)');
+console.log('unified_analyze_worker.js loaded (v32 - adaptive AP grid for small images)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
@@ -1547,8 +1547,21 @@ function createAPGrid(width, height) {
     const patchSize = 20;
     // PSS default: max alignment search width = 8px
     const searchRadius = 8;
-    // Spacing with 50% overlap for denser coverage (like PSS)
-    const spacing = Math.floor(patchSize / 2); // 10px spacing = 50% overlap
+
+    // Adaptive spacing based on image size
+    // For small images (<500px), use larger spacing to avoid too many APs
+    // Target ~100-200 APs for good coverage without excessive computation
+    const minDim = Math.min(width, height);
+    let spacing;
+    if (minDim < 300) {
+        spacing = 30; // ~100 APs for 300x300
+    } else if (minDim < 500) {
+        spacing = 25; // ~150 APs for 400x400
+    } else if (minDim < 800) {
+        spacing = 20; // ~250 APs for 600x600
+    } else {
+        spacing = Math.floor(patchSize / 2); // 10px = 50% overlap for large images
+    }
 
     const alignmentPoints = [];
     const marginX = Math.floor((width % spacing) / 2) + patchSize / 2;

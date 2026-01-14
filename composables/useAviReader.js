@@ -95,8 +95,9 @@ export function useAviReader() {
     const numWorkers = Math.min(navigator.hardwareConcurrency || 4, 4);
     const unifiedAnalyzeWorkers = [];
     let workersReady = false;
-    let framesProcessedSinceRecycle = 0;
-    const RECYCLE_AFTER_FRAMES = 500; // Restart workers every N frames to prevent WASM heap exhaustion
+    const workerFrameCounts = new Map(); // Track frames per worker for staggered recycling
+    const recyclingWorkers = new Set(); // Track which workers are currently being recycled
+    const RECYCLE_AFTER_FRAMES = 500; // Restart each worker after N frames
 
     // Initializes workers and ensures OpenCV is ready before processing
     async function initializeWorkers() {
@@ -133,6 +134,10 @@ export function useAviReader() {
         try {
             await Promise.all(workerPromises);
             workersReady = true;
+            // Initialize per-worker frame counts for staggered recycling
+            for (let i = 0; i < numWorkers; i++) {
+                workerFrameCounts.set(i, 0);
+            }
             addLog("Analysis workers ready.");
         } catch (error) {
             console.error("Worker initialization failed:", error);
@@ -182,8 +187,57 @@ export function useAviReader() {
 
         await Promise.all(workerPromises);
         workersReady = true;
-        framesProcessedSinceRecycle = 0;
+        // Initialize per-worker frame counts
+        for (let i = 0; i < numWorkers; i++) {
+            workerFrameCounts.set(i, 0);
+        }
         addLog("Workers recycled successfully.");
+    }
+
+    // Recycle a single worker (staggered approach - other workers keep running)
+    async function recycleSingleWorker(workerIndex) {
+        if (recyclingWorkers.has(workerIndex)) return;
+        recyclingWorkers.add(workerIndex);
+
+        // Terminate old worker
+        const oldWorker = unifiedAnalyzeWorkers[workerIndex];
+        if (oldWorker) oldWorker.terminate();
+
+        // Create fresh worker
+        const newWorker = new Worker('/unified_analyze_worker.js');
+        unifiedAnalyzeWorkers[workerIndex] = newWorker;
+
+        // Wait for it to initialize
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error(`Worker ${workerIndex} recycling timed out.`)), 30000);
+            newWorker.onmessage = (e) => {
+                if (e.data.type === 'ready') {
+                    clearTimeout(timeout);
+                    newWorker.onmessage = null;
+                    resolve();
+                }
+            };
+            newWorker.onerror = (e) => {
+                clearTimeout(timeout);
+                reject(e);
+            };
+            newWorker.postMessage({ type: 'init' });
+        });
+
+        workerFrameCounts.set(workerIndex, 0);
+        recyclingWorkers.delete(workerIndex);
+    }
+
+    // Check if a worker needs recycling and do it in background
+    function checkWorkerRecycle(workerIndex) {
+        const count = (workerFrameCounts.get(workerIndex) || 0) + 1;
+        workerFrameCounts.set(workerIndex, count);
+
+        if (count >= RECYCLE_AFTER_FRAMES && !recyclingWorkers.has(workerIndex)) {
+            recycleSingleWorker(workerIndex).catch(err => {
+                console.error(`Failed to recycle worker ${workerIndex}:`, err);
+            });
+        }
     }
 
     function processFrameWithWorker(worker, data, transferables) {
@@ -646,11 +700,6 @@ export function useAviReader() {
                 break;
             }
 
-            // Recycle workers periodically to prevent WASM heap exhaustion
-            if (framesProcessedSinceRecycle >= RECYCLE_AFTER_FRAMES) {
-                await recycleWorkers();
-            }
-
             // Wait for a slot before reading the frame (limits memory usage)
             await acquireSlot();
 
@@ -706,7 +755,10 @@ export function useAviReader() {
                         blob: result.pngBlob,
                         rgbaBuffer: result.rgbaBuffer,
                         width: result.width,
-                        height: result.height
+                        height: result.height,
+                        index: result.index,
+                        subPixelOffset: result.subPixelOffset || { x: 0, y: 0 },
+                        circularity: result.circularity || 0
                     };
                     rankFrame(currentFrame);
 
@@ -729,9 +781,9 @@ export function useAviReader() {
                 })
                 .finally(() => {
                     releaseSlot();
+                    checkWorkerRecycle(workerIndex);  // Staggered worker recycling
                 });
             workerPromises.push(promise);
-            framesProcessedSinceRecycle++;
 
             currentMoviOffset += frameChunkHeaderSize + frameDataLength;
             if (frameDataLength % 2 !== 0) currentMoviOffset++;
@@ -942,7 +994,10 @@ export function useAviReader() {
                             blob: result.pngBlob,
                             rgbaBuffer: result.rgbaBuffer,
                             width: result.width,
-                            height: result.height
+                            height: result.height,
+                            index: result.index,
+                            subPixelOffset: result.subPixelOffset || { x: 0, y: 0 },
+                            circularity: result.circularity || 0
                         };
                         rankFrame(currentFrame, result.index);
 
@@ -952,20 +1007,15 @@ export function useAviReader() {
                         errorCount++;
                         addLog(`Error processing frame ${i}: ${error}`);
                         console.error(`Error processing frame ${i}:`, error);
+                    })
+                    .finally(() => {
+                        checkWorkerRecycle(workerIndex);  // Staggered worker recycling
                     });
                 batchPromises.push(promise);
             }
 
             // Wait for batch to complete before starting next
             await Promise.all(batchPromises);
-
-            // Track frames for worker recycling
-            framesProcessedSinceRecycle += (batchEnd - batchStart);
-
-            // Recycle workers periodically to prevent WASM heap exhaustion
-            if (framesProcessedSinceRecycle >= RECYCLE_AFTER_FRAMES && batchEnd < frameCount) {
-                await recycleWorkers();
-            }
 
             // Update UI after each batch
             emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });

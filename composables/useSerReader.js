@@ -147,95 +147,116 @@ export function useSerReader() {
 
     // Map of pending frame resolvers per worker: workerIndex -> { frameIndex -> {resolve, reject, timeout} }
     const pendingFrames = new Map();
-    let framesSinceRecycle = 0;
-    const RECYCLE_THRESHOLD = 800; // Recycle workers every N frames to prevent WASM heap exhaustion
+    const workerFrameCounts = new Map(); // Track frames per worker for staggered recycling
+    const RECYCLE_THRESHOLD = 500; // Recycle each worker after N frames
+    const recyclingWorkers = new Set(); // Track which workers are currently being recycled
 
-    // Recycle workers to prevent WASM heap exhaustion on large files
-    async function recycleWorkers() {
-        // Wait for all pending frames to complete
-        const allPending = [];
-        for (const [workerIndex, frameMap] of pendingFrames) {
-            for (const [frameIndex, pending] of frameMap) {
-                allPending.push(new Promise(resolve => {
-                    const originalResolve = pending.resolve;
-                    const originalReject = pending.reject;
-                    pending.resolve = (result) => { originalResolve(result); resolve(); };
-                    pending.reject = (error) => { originalReject(error); resolve(); };
+    // Recycle a single worker to prevent WASM heap exhaustion (non-blocking for other workers)
+    async function recycleSingleWorker(workerIndex) {
+        if (recyclingWorkers.has(workerIndex)) return; // Already recycling
+        recyclingWorkers.add(workerIndex);
+
+        // Wait for pending frames on this worker only
+        const workerPending = pendingFrames.get(workerIndex);
+        if (workerPending && workerPending.size > 0) {
+            const pending = [];
+            for (const [frameIndex, p] of workerPending) {
+                pending.push(new Promise(resolve => {
+                    const originalResolve = p.resolve;
+                    const originalReject = p.reject;
+                    p.resolve = (result) => { originalResolve(result); resolve(); };
+                    p.reject = (error) => { originalReject(error); resolve(); };
                 }));
             }
-        }
-        if (allPending.length > 0) {
-            await Promise.all(allPending);
+            await Promise.all(pending);
         }
 
-        // Terminate old workers
-        unifiedAnalyzeWorkers.forEach(w => w.terminate());
-        unifiedAnalyzeWorkers.length = 0;
-        pendingFrames.clear();
+        // Terminate this worker
+        const oldWorker = unifiedAnalyzeWorkers[workerIndex];
+        if (oldWorker) oldWorker.terminate();
 
-        // Create fresh workers
-        for (let i = 0; i < numWorkers; i++) {
-            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
-        }
+        // Create fresh worker
+        const newWorker = new Worker('/unified_analyze_worker.js');
+        unifiedAnalyzeWorkers[workerIndex] = newWorker;
 
-        // Wait for them to initialize
-        const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
-            return new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error(`Worker ${i} recycling timed out.`)), 30000);
-                worker.onmessage = (e) => {
-                    if (e.data.type === 'ready') {
-                        clearTimeout(timeout);
-                        worker.onmessage = null;
-                        resolve();
-                    }
-                };
-                worker.onerror = (e) => {
+        // Wait for it to initialize
+        await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error(`Worker ${workerIndex} recycling timed out.`)), 30000);
+            newWorker.onmessage = (e) => {
+                if (e.data.type === 'ready') {
                     clearTimeout(timeout);
-                    reject(e);
-                };
-                worker.postMessage({ type: 'init' });
-            });
+                    newWorker.onmessage = null;
+                    resolve();
+                }
+            };
+            newWorker.onerror = (e) => {
+                clearTimeout(timeout);
+                reject(e);
+            };
+            newWorker.postMessage({ type: 'init' });
         });
 
-        await Promise.all(workerPromises);
-        setupWorkerHandlers();
-        framesSinceRecycle = 0;
-        addLog('Workers recycled to prevent memory exhaustion');
+        // Set up handler for this worker
+        setupSingleWorkerHandler(workerIndex);
+        workerFrameCounts.set(workerIndex, 0);
+        recyclingWorkers.delete(workerIndex);
+    }
+
+    // Set up handler for a single worker
+    function setupSingleWorkerHandler(workerIndex) {
+        const worker = unifiedAnalyzeWorkers[workerIndex];
+        pendingFrames.set(workerIndex, new Map());
+
+        worker.addEventListener('message', (e) => {
+            const frameIndex = e.data.index;
+            const pending = pendingFrames.get(workerIndex)?.get(frameIndex);
+            if (!pending) return;
+
+            clearTimeout(pending.timeout);
+            pendingFrames.get(workerIndex).delete(frameIndex);
+
+            if (e.data.error) {
+                pending.reject(e.data.error);
+            } else if (e.data.type === 'bounds') {
+                pending.resolve({ type: 'bounds', bounds: e.data.bounds, index: e.data.index });
+            } else if (e.data.skipped) {
+                pending.resolve({ skipped: true, reason: e.data.reason, index: e.data.index });
+            } else {
+                pending.resolve(e.data);
+            }
+        });
+
+        worker.addEventListener('error', (e) => {
+            console.error(`Worker ${workerIndex} error:`, e);
+            const workerPending = pendingFrames.get(workerIndex);
+            if (workerPending) {
+                for (const [frameIndex, pending] of workerPending) {
+                    clearTimeout(pending.timeout);
+                    pending.reject(e);
+                }
+                workerPending.clear();
+            }
+        });
+    }
+
+    // Check if a worker needs recycling and do it in background
+    function checkWorkerRecycle(workerIndex) {
+        const count = (workerFrameCounts.get(workerIndex) || 0) + 1;
+        workerFrameCounts.set(workerIndex, count);
+
+        if (count >= RECYCLE_THRESHOLD && !recyclingWorkers.has(workerIndex)) {
+            // Recycle in background - don't await
+            recycleSingleWorker(workerIndex).catch(err => {
+                console.error(`Failed to recycle worker ${workerIndex}:`, err);
+            });
+        }
     }
 
     // Set up single message handler per worker (call after workers are created)
     function setupWorkerHandlers() {
         unifiedAnalyzeWorkers.forEach((worker, workerIndex) => {
-            pendingFrames.set(workerIndex, new Map());
-
-            worker.addEventListener('message', (e) => {
-                const frameIndex = e.data.index;
-                const pending = pendingFrames.get(workerIndex)?.get(frameIndex);
-                if (!pending) return; // Not a frame message or already handled
-
-                clearTimeout(pending.timeout);
-                pendingFrames.get(workerIndex).delete(frameIndex);
-
-                if (e.data.error) {
-                    pending.reject(e.data.error);
-                } else if (e.data.type === 'bounds') {
-                    pending.resolve({ type: 'bounds', bounds: e.data.bounds, index: e.data.index });
-                } else if (e.data.skipped) {
-                    pending.resolve({ skipped: true, reason: e.data.reason, index: e.data.index });
-                } else {
-                    pending.resolve({
-                        sharpness: e.data.sharpness,
-                        pngBlob: e.data.pngBlob,
-                        croppedBuffer: e.data.croppedBuffer,
-                        rgbaBuffer: e.data.rgbaBuffer,
-                        width: e.data.width,
-                        height: e.data.height,
-                        index: e.data.index,
-                        subPixelOffset: e.data.subPixelOffset,
-                        circularity: e.data.circularity || 0
-                    });
-                }
-            });
+            workerFrameCounts.set(workerIndex, 0);
+            setupSingleWorkerHandler(workerIndex);
         });
     }
 
@@ -603,11 +624,6 @@ export function useSerReader() {
                 break;
             }
 
-            // Recycle workers periodically to prevent WASM heap exhaustion
-            if (framesSinceRecycle >= RECYCLE_THRESHOLD) {
-                await recycleWorkers();
-            }
-
             // Wait for a slot before reading the frame (limits memory usage)
             await acquireSlot();
 
@@ -694,9 +710,9 @@ export function useSerReader() {
                 })
                 .finally(() => {
                     releaseSlot();  // Always release slot when done
+                    checkWorkerRecycle(workerIndex);  // Staggered worker recycling
                 });
             workerPromises.push(promise);
-            framesSinceRecycle++;
         }
 
         // Wait for all worker tasks to complete
@@ -1236,11 +1252,6 @@ export function useSerReader() {
                     break;
                 }
 
-                // Recycle workers periodically to prevent WASM heap exhaustion
-                if (framesSinceRecycle >= RECYCLE_THRESHOLD) {
-                    await recycleWorkers();
-                }
-
                 await acquireSlot();
 
                 const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
@@ -1324,11 +1335,11 @@ export function useSerReader() {
                     })
                     .finally(() => {
                         releaseSlot();
+                        checkWorkerRecycle(workerIndex);  // Staggered worker recycling
                     });
 
                 workerPromises.push(promise);
                 globalFrameIndex++;
-                framesSinceRecycle++;
             }
         }
 
