@@ -349,4 +349,8 @@ canvas {
 .card h4 {
 	margin-bottom: 0;
 }
+/* Move Sentry feedback button up to avoid blocking expand log button */
+#sentry-feedback {
+	bottom: 80px !important;
+}
 </style>
