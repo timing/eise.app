@@ -23,3 +23,19 @@ Cache-Control: no-cache, must-revalidate
 
 /wavelet_sharpen_worker.wasm
 Cache-Control: no-cache, must-revalidate
+
+/webgpu_worker.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
+/webgpu_analyze_worker.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
+/webgpu_template_match.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
+/webgpu_stacking.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate

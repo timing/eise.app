@@ -559,7 +559,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, preloadedBuffer = null) {
+    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null) {
         emit('start-loading', 'Parsing AVI header...');
         emit('update-loading', 0);
 
@@ -806,7 +806,8 @@ export function useAviReader() {
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: unifiedAnalyzeWorkers,
-                noiseRobustAlignment
+                noiseRobustAlignment,
+                useWebGPU
             });
             return; // Don't terminate workers yet - they'll be used for stacking
         }
@@ -817,7 +818,7 @@ export function useAviReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');
@@ -838,7 +839,7 @@ export function useAviReader() {
     }
 
     // Process FFmpeg-extracted PNG frames through the same pipeline as AVI
-    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false) {
+    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -1044,7 +1045,8 @@ export function useAviReader() {
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: unifiedAnalyzeWorkers,
-                noiseRobustAlignment
+                noiseRobustAlignment,
+                useWebGPU
             });
             return; // Don't terminate workers yet - they'll be used for stacking
         }
@@ -1055,7 +1057,7 @@ export function useAviReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');

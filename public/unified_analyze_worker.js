@@ -1,5 +1,5 @@
 // public/unified_analyze_worker.js
-console.log('unified_analyze_worker.js loaded (v32 - adaptive AP grid for small images)');
+console.log('unified_analyze_worker.js loaded (v36 - WebGPU via main thread)');
 
 // Use _cv to avoid conflicts with global 'cv' from opencv-bindings
 let _cv = null;
@@ -71,11 +71,45 @@ async function handleMessage(e) {
              throw new Error("OpenCV (_cv) is not initialized in worker.");
         }
 
-        // Frame stacking with local alignment
+        // Frame stacking with local alignment (CPU path)
         if (type === 'stack-frames') {
-            const { frames, drizzleScale = 1.0, noiseRobustAlignment = false } = e.data; // Array of {rgbaBuffer, width, height, sharpness}
+            const { frames, drizzleScale = 1.0, noiseRobustAlignment = false } = e.data;
             try {
                 const result = await stackFramesLocally(frames, drizzleScale, noiseRobustAlignment);
+                self.postMessage({ type: 'stack-complete', blob: result.blob, width: result.width, height: result.height });
+            } catch (stackError) {
+                console.error('Stacking error:', stackError);
+                self.postMessage({ type: 'stack-error', error: stackError.message || String(stackError) });
+            }
+            return;
+        }
+
+        // Prepare alignment data for external GPU processing
+        if (type === 'prepare-alignment') {
+            const { refFrame, refIndex } = e.data;
+            try {
+                const result = await prepareAlignmentData(refFrame);
+                self.postMessage({
+                    type: 'alignment-prepared',
+                    alignmentPoints: result.alignmentPoints,
+                    refGrayData: result.refGrayData,
+                    refIndex: refIndex,
+                    patchSize: result.patchSize,
+                    searchRadius: result.searchRadius,
+                    width: result.width,
+                    height: result.height
+                }, [result.refGrayData.buffer]);
+            } catch (err) {
+                self.postMessage({ type: 'prepare-error', error: err.message });
+            }
+            return;
+        }
+
+        // Stack with pre-computed shifts (for external GPU alignment)
+        if (type === 'stack-with-shifts') {
+            const { frames, frameShifts, alignmentPoints, refIndex, drizzleScale = 1.0, patchSize = 64 } = e.data;
+            try {
+                const result = await stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, refIndex, drizzleScale, patchSize);
                 self.postMessage({ type: 'stack-complete', blob: result.blob, width: result.width, height: result.height });
             } catch (stackError) {
                 console.error('Stacking error:', stackError);
@@ -122,6 +156,104 @@ async function handleMessage(e) {
             } else {
                 self.postMessage(response);
             }
+            return;
+        }
+
+        // Crop-only mode: detect + crop, return RGBA for GPU analysis (skip sharpness/PNG)
+        if (type === 'crop-only') {
+            const { frameBuffer, header, bayerChoice, cropRegion } = e.data;
+
+            // Validate buffer size (same check as analyze-cropped)
+            let expectedSize;
+            if (header.fileId && header.fileId.startsWith('LUCAM-REC')) {
+                expectedSize = header.width * header.height * (header.pixelDepth > 8 ? 2 : 1);
+            } else {
+                const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[header.fourCC] || 3;
+                expectedSize = header.width * header.height * bytesPerPixel;
+            }
+            if (frameBuffer.byteLength !== expectedSize) {
+                console.error(`crop-only: Buffer size mismatch: got ${frameBuffer.byteLength}, expected ${expectedSize}`);
+                self.postMessage({ skipped: true, reason: 'buffer-mismatch', index });
+                return;
+            }
+
+            // Check if object is cut-off (partially outside frame)
+            let bounds;
+            try {
+                bounds = await detectObjectBounds(frameBuffer, header, bayerChoice);
+            } catch (boundsError) {
+                bounds = { canCrop: false, reason: 'detection-error' };
+            }
+
+            // Skip frames where the object is cut-off
+            if (bounds.reason === 'cut-off') {
+                self.postMessage({ skipped: true, reason: 'cut-off', index });
+                return;
+            }
+
+            // Skip oversized objects
+            if (bounds.canCrop && bounds.size && cropRegion && cropRegion.medianObjectSize) {
+                const sizeRatio = bounds.size / cropRegion.medianObjectSize;
+                if (sizeRatio > 1.1) {
+                    self.postMessage({ skipped: true, reason: 'oversized', index });
+                    return;
+                }
+            }
+
+            let actualCropRegion = null;
+            if (cropRegion && cropRegion.size) {
+                let centerX, centerY;
+                if (bounds.canCrop && bounds.centerX !== undefined) {
+                    centerX = bounds.centerX;
+                    centerY = bounds.centerY;
+                } else if (cropRegion.referenceCenter) {
+                    centerX = cropRegion.referenceCenter.x;
+                    centerY = cropRegion.referenceCenter.y;
+                } else {
+                    self.postMessage({ skipped: true, reason: bounds.reason || 'no-center', index });
+                    return;
+                }
+
+                const halfSize = cropRegion.size / 2;
+                let idealCropX = Math.floor(centerX - halfSize);
+                let idealCropY = Math.floor(centerY - halfSize);
+                idealCropX = idealCropX & ~1;
+                idealCropY = idealCropY & ~1;
+
+                const padLeft = Math.max(0, -idealCropX);
+                const padTop = Math.max(0, -idealCropY);
+                const padRight = Math.max(0, (idealCropX + cropRegion.size) - header.width);
+                const padBottom = Math.max(0, (idealCropY + cropRegion.size) - header.height);
+
+                const cropCenterX = idealCropX + cropRegion.size / 2;
+                const cropCenterY = idealCropY + cropRegion.size / 2;
+                const subPixelOffsetX = centerX - cropCenterX;
+                const subPixelOffsetY = centerY - cropCenterY;
+
+                actualCropRegion = {
+                    x: idealCropX,
+                    y: idealCropY,
+                    size: cropRegion.size,
+                    padding: { left: padLeft, top: padTop, right: padRight, bottom: padBottom },
+                    subPixelOffset: { x: subPixelOffsetX, y: subPixelOffsetY }
+                };
+            }
+
+            if (cropRegion && !actualCropRegion) {
+                self.postMessage({ skipped: true, reason: 'crop-failed', index });
+                return;
+            }
+
+            // Process with skipAnalysis=true (no sharpness/PNG, just RGBA)
+            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index, false, true);
+
+            self.postMessage({
+                rgbaBuffer: result.rgbaBuffer,
+                width: result.width,
+                height: result.height,
+                subPixelOffset: actualCropRegion?.subPixelOffset || { x: 0, y: 0 },
+                index
+            }, [result.rgbaBuffer]);
             return;
         }
 
@@ -350,7 +482,7 @@ async function handleMessage(e) {
     }
 }
 
-async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropRegion = null, frameIndex = undefined, includeRgba = false) {
+async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropRegion = null, frameIndex = undefined, includeRgba = false, skipAnalysis = false) {
     const { width, height, pixelDepth, fourCC, bpp } = header;
     let rawMat, grayMat, rgbaMat;
     let croppedBuffer = null;
@@ -548,32 +680,38 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
         const actualWidth = rgbaMat.cols;
         const actualHeight = rgbaMat.rows;
 
-        // --- Step 2: Calculate sharpness from the grayscale mat ---
-        const sharpness = calculateSharpnessFromMat(grayMat, frameIndex);
+        // --- Step 2: Calculate sharpness from the grayscale mat (skip if only cropping) ---
+        let sharpness = 0;
+        if (!skipAnalysis) {
+            sharpness = calculateSharpnessFromMat(grayMat, frameIndex);
+        }
 
-        // --- Step 4: Create PNG Blob (optional - may fail if memory is tight) ---
+        // --- Step 4: Create PNG Blob (optional - skip if only cropping) ---
         let pngBlob = null;
-        try {
-            const tempOffscreenCanvas = new OffscreenCanvas(actualWidth, actualHeight);
-            const tempCtx = tempOffscreenCanvas.getContext('2d');
-            const expectedBytes = actualWidth * actualHeight * 4;
-            if (rgbaMat.data.length !== expectedBytes) {
-                throw new Error(`RGBA mat size mismatch: got ${rgbaMat.data.length}, expected ${expectedBytes}`);
-            }
-            const imageData = new ImageData(new Uint8ClampedArray(rgbaMat.data), actualWidth, actualHeight);
-            tempCtx.putImageData(imageData, 0, 0);
-            pngBlob = await tempOffscreenCanvas.convertToBlob({ type: 'image/png' });
-        } catch (pngErr) {
-            // PNG creation failed (likely out of memory) - continue without it
-            // The rgbaBuffer can still be used for stacking and preview generation
-            if (frameIndex !== undefined && frameIndex % 500 === 0) {
-                console.warn(`PNG creation skipped for frame ${frameIndex} (memory): ${pngErr.message || pngErr}`);
+        if (!skipAnalysis) {
+            try {
+                const tempOffscreenCanvas = new OffscreenCanvas(actualWidth, actualHeight);
+                const tempCtx = tempOffscreenCanvas.getContext('2d');
+                const expectedBytes = actualWidth * actualHeight * 4;
+                if (rgbaMat.data.length !== expectedBytes) {
+                    throw new Error(`RGBA mat size mismatch: got ${rgbaMat.data.length}, expected ${expectedBytes}`);
+                }
+                const imageData = new ImageData(new Uint8ClampedArray(rgbaMat.data), actualWidth, actualHeight);
+                tempCtx.putImageData(imageData, 0, 0);
+                pngBlob = await tempOffscreenCanvas.convertToBlob({ type: 'image/png' });
+            } catch (pngErr) {
+                // PNG creation failed (likely out of memory) - continue without it
+                // The rgbaBuffer can still be used for stacking and preview generation
+                if (frameIndex !== undefined && frameIndex % 500 === 0) {
+                    console.warn(`PNG creation skipped for frame ${frameIndex} (memory): ${pngErr.message || pngErr}`);
+                }
             }
         }
 
         // --- Step 5: Get RGBA buffer for client-side stacking (copy before mat is deleted) ---
         let rgbaBuffer = null;
-        if (includeRgba) {
+        if (includeRgba || skipAnalysis) {
+            // Always include RGBA when skipAnalysis (crop-only mode needs it for GPU)
             rgbaBuffer = new Uint8ClampedArray(rgbaMat.data).buffer;
         }
 
@@ -1158,7 +1296,193 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
 // =====================================================
 
 /**
- * Stack frames with local alignment using Alignment Points (APs)
+ * Prepare alignment data for external GPU processing
+ * Returns AP grid and reference grayscale for use by WebGPU worker
+ */
+async function prepareAlignmentData(refFrame) {
+    if (!refFrame || !refFrame.rgbaBuffer || !refFrame.width || !refFrame.height) {
+        throw new Error('Invalid reference frame');
+    }
+
+    const { width, height } = refFrame;
+    const refData = new Uint8ClampedArray(refFrame.rgbaBuffer);
+
+    // Create AP grid
+    const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height);
+
+    // Create reference grayscale
+    const refMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+    refMat.data.set(refData);
+    const refGray = new _cv.Mat();
+    _cv.cvtColor(refMat, refGray, _cv.COLOR_RGBA2GRAY);
+
+    // Filter APs by quality
+    const filteredAPs = filterAPsByQuality(alignmentPoints, refGray, width, height, patchSize, 0.02, 5);
+    const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
+
+    // Extract grayscale data for GPU
+    const refGrayData = new Uint8Array(refGray.data.length);
+    refGrayData.set(refGray.data);
+
+    // Cleanup
+    refGray.delete();
+    refMat.delete();
+
+    return {
+        alignmentPoints: activeAPs,
+        refGrayData,
+        patchSize,
+        searchRadius,
+        width,
+        height
+    };
+}
+
+/**
+ * Stack frames with pre-computed shifts (from external GPU alignment)
+ */
+async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, refIndex, drizzleScale = 1.0, patchSize = 64) {
+    let mapX = null, mapY = null;
+
+    try {
+        self.postMessage({ type: 'stack-progress', stage: 'Stacking with GPU shifts...', progress: 50 });
+
+        const validFrames = frames.filter(f => f.rgbaBuffer && f.width && f.height && f.sharpness > 0);
+        const { width, height } = validFrames[0];
+        const frameCount = validFrames.length;
+
+        // Calculate output dimensions
+        const outWidth = Math.round(width * drizzleScale);
+        const outHeight = Math.round(height * drizzleScale);
+        const isDrizzle = drizzleScale > 1.0;
+
+        // Accumulator arrays
+        const accumR = new Float32Array(outWidth * outHeight);
+        const accumG = new Float32Array(outWidth * outHeight);
+        const accumB = new Float32Array(outWidth * outHeight);
+        const accumWeight = new Float32Array(outWidth * outHeight);
+
+        const totalSharpness = validFrames.reduce((sum, f) => sum + f.sharpness, 0);
+        const blackCutoff = 4;
+
+        // Brightness normalization helper
+        function calcMeanBrightness(rgbaBuffer, width, height, blackCutoff) {
+            const data = new Uint8ClampedArray(rgbaBuffer);
+            let sum = 0, count = 0;
+            for (let y = 0; y < height; y += 8) {
+                for (let x = 0; x < width; x += 8) {
+                    const idx = (y * width + x) * 4;
+                    const brightness = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+                    if (brightness > blackCutoff) {
+                        sum += brightness;
+                        count++;
+                    }
+                }
+            }
+            return count > 0 ? sum / count : 1;
+        }
+
+        // Calculate reference brightness
+        const referenceFrame = validFrames[refIndex];
+        const refBrightness = calcMeanBrightness(referenceFrame.rgbaBuffer, width, height, blackCutoff);
+
+        // Pre-allocate displacement maps at OUTPUT resolution (for drizzle upscaling)
+        mapX = new _cv.Mat(outHeight, outWidth, _cv.CV_32FC1);
+        mapY = new _cv.Mat(outHeight, outWidth, _cv.CV_32FC1);
+
+        // Stack each frame using OpenCV remap
+        for (let f = 0; f < frameCount; f++) {
+            const frame = validFrames[f];
+            const shifts = frameShifts[f];
+            const frameWeight = frame.sharpness / totalSharpness;
+            const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
+
+            // Brightness correction
+            const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, width, height, blackCutoff);
+            const brightnessScale = refBrightness / frameBrightness;
+
+            // Sub-pixel offset for global alignment
+            const subPixelOffset = frame.subPixelOffset || { x: 0, y: 0 };
+            const refSubPixelOffset = referenceFrame.subPixelOffset || { x: 0, y: 0 };
+            const globalOffsetX = subPixelOffset.x - refSubPixelOffset.x;
+            const globalOffsetY = subPixelOffset.y - refSubPixelOffset.y;
+
+            // Build displacement map from shifts with global offset
+            buildDisplacementMaps(mapX, mapY, outWidth, outHeight, alignmentPoints, shifts, patchSize, globalOffsetX, globalOffsetY, drizzleScale);
+
+            // Apply warping with OpenCV remap
+            let frameMat = null, warpedMat = null;
+            try {
+                frameMat = new _cv.Mat(height, width, _cv.CV_8UC4);
+                frameMat.data.set(frameData);
+
+                // Apply local de-warping via remap (output at outWidth x outHeight)
+                warpedMat = new _cv.Mat();
+                _cv.remap(frameMat, warpedMat, mapX, mapY, _cv.INTER_LINEAR, _cv.BORDER_CONSTANT);
+
+                // Accumulate warped frame with brightness normalization
+                const warpedData = warpedMat.data;
+                for (let i = 0; i < outWidth * outHeight; i++) {
+                    const srcIdx = i * 4;
+                    // Skip black pixels (border from remap)
+                    if (warpedData[srcIdx] === 0 && warpedData[srcIdx + 1] === 0 && warpedData[srcIdx + 2] === 0) {
+                        continue;
+                    }
+                    // Apply brightness normalization and weight
+                    accumR[i] += warpedData[srcIdx] * brightnessScale * frameWeight;
+                    accumG[i] += warpedData[srcIdx + 1] * brightnessScale * frameWeight;
+                    accumB[i] += warpedData[srcIdx + 2] * brightnessScale * frameWeight;
+                    accumWeight[i] += frameWeight;
+                }
+            } catch (cvError) {
+                const errMsg = typeof cvError === 'number' ? `OpenCV error code: ${cvError}` : (cvError.message || String(cvError));
+                console.error(`Frame ${f} warp error:`, errMsg);
+                // Skip this frame but continue with others
+            } finally {
+                if (warpedMat) try { warpedMat.delete(); } catch(e) {}
+                if (frameMat) try { frameMat.delete(); } catch(e) {}
+            }
+
+            const progress = 50 + (f / frameCount) * 45;
+            self.postMessage({ type: 'stack-progress', stage: `Stacking frame ${f + 1}/${frameCount}...`, progress });
+        }
+
+        // Cleanup maps
+        mapX.delete(); mapX = null;
+        mapY.delete(); mapY = null;
+
+        // Create output image
+        self.postMessage({ type: 'stack-progress', stage: 'Creating final image...', progress: 95 });
+
+        const outputData = new Uint8ClampedArray(outWidth * outHeight * 4);
+        for (let i = 0; i < outWidth * outHeight; i++) {
+            const w = accumWeight[i];
+            if (w > 0) {
+                outputData[i * 4] = Math.min(255, Math.max(0, Math.round(accumR[i] / w)));
+                outputData[i * 4 + 1] = Math.min(255, Math.max(0, Math.round(accumG[i] / w)));
+                outputData[i * 4 + 2] = Math.min(255, Math.max(0, Math.round(accumB[i] / w)));
+            }
+            outputData[i * 4 + 3] = 255;
+        }
+
+        // Convert to PNG
+        const imageData = new ImageData(outputData, outWidth, outHeight);
+        const canvas = new OffscreenCanvas(outWidth, outHeight);
+        const ctx = canvas.getContext('2d');
+        ctx.putImageData(imageData, 0, 0);
+        const blob = await canvas.convertToBlob({ type: 'image/png' });
+
+        return { blob, width: outWidth, height: outHeight };
+
+    } catch (error) {
+        if (mapX) try { mapX.delete(); } catch(e) {}
+        if (mapY) try { mapY.delete(); } catch(e) {}
+        throw error;
+    }
+}
+
+/**
+ * Stack frames with local alignment using Alignment Points (APs) - CPU only
  * @param frames - Array of frame objects
  * @param drizzleScale - Output scale factor (1.0 = normal, 1.5 = drizzle)
  */
@@ -1296,7 +1620,7 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
 
             const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
 
-            // Create frame Mat once per frame
+            // CPU path: OpenCV template matching
             let frameMat = null, frameGray = null, frameGrayBlurred = null;
             try {
                 // Try to create Mat with fallback
@@ -1339,7 +1663,7 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
                 if (frameMat) try { frameMat.delete(); } catch(e) {}
             }
 
-            // Update progress every frame
+            // Update progress
             const progress = 5 + (f / frameCount) * 45;
             self.postMessage({
                 type: 'stack-progress',

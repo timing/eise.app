@@ -74,6 +74,8 @@
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
 		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" :croppedSerData="croppedSerData" :croppedAviData="croppedAviData" />
 
+		<div class="clearb"></div>
+
 		<Logger />
 
 		<img v-if="loadPixel" src="https://analytics.tijmentiming.workers.dev/pixel.gif"/>
@@ -108,6 +110,7 @@ const isSelectingQuality = ref(false);
 const qualityFrames = ref([]);
 const qualityWorkers = ref(null);
 const qualityNoiseRobust = ref(false);
+const qualityUseWebGPU = ref(false);
 const croppedSerData = ref(null);
 const croppedAviData = ref(null);
 
@@ -143,16 +146,15 @@ watch(currentTab, (newTab) => {
 });
 
 function handleQualitySelectionReady(data) {
-	console.log('handleQualitySelectionReady', data);
 	qualityFrames.value = data.frames;
 	qualityWorkers.value = data.workers;
 	qualityNoiseRobust.value = data.noiseRobustAlignment || false;
+	qualityUseWebGPU.value = data.useWebGPU || false;
 	isSelectingQuality.value = true;
 	eventBusEmit('stop-loading');
 }
 
 async function handleThresholdSelected(data) {
-	console.log('handleThresholdSelected', data);
 	isSelectingQuality.value = false;
 
 	// Stack the selected frames
@@ -161,7 +163,7 @@ async function handleThresholdSelected(data) {
 		addLog(`Stacking ${data.frames.length} frames (${Math.round(data.percentage * 100)}% threshold)`);
 
 		const stackingWorker = qualityWorkers.value[0];
-		const stackedBlob = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value);
+		const stackedBlob = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value, qualityUseWebGPU.value);
 
 		// Terminate workers after stacking
 		qualityWorkers.value.forEach(worker => worker.terminate());
@@ -182,7 +184,6 @@ async function handleThresholdSelected(data) {
 }
 
 async function handleStackedImageReady(data) {
-	console.log('handleStackedImageReady', data);
 	// Convert blob to format expected by PostProcessor
 	currentTab.value = 'PostProcessor';
 	selectedFile.value = data.blob;
@@ -202,7 +203,6 @@ function handleProcessingStarted() {
 }
 
 async function handlePostProcessing(data) {
-	console.log('handlePostProcessing', data);
 	currentTab.value = 'PostProcessor';
 	selectedFile.value = data;
 	isProcessing.value = false;
@@ -256,6 +256,9 @@ html {
 }
 body {
 	padding-bottom: 80px;
+}
+.clearb {
+	clear: both;
 }
 header {
 	padding: 0 10px;

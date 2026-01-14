@@ -66,6 +66,12 @@
 			</label>
 			<p class="info-text">Aligns on blurred frames first, then refines. Better for turbulent seeing, slower.</p>
 
+			<label class="checkbox-option" v-if="webGPUAvailable">
+				<input type="checkbox" v-model="useWebGPU" />
+				WebGPU acceleration (experimental)
+			</label>
+			<p v-if="webGPUAvailable" class="info-text">Use GPU for alignment. Faster on supported browsers (Chrome/Edge).</p>
+
 			<div class="separator"></div>
 
 			<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
@@ -106,7 +112,7 @@
 
 <script setup>
 import { fetchFile } from '@ffmpeg/ffmpeg';
-import { computed, defineEmits, ref } from 'vue';
+import { computed, defineEmits, ref, onMounted, watch } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useSerReader } from '@/composables/useSerReader';
 import { useAviReader } from '@/composables/useAviReader';
@@ -136,6 +142,64 @@ const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 const noiseRobustAlignment = ref(false);
+const useWebGPU = ref(false);
+const webGPUAvailable = ref(false);
+
+// Load settings from localStorage
+function loadSettings() {
+	try {
+		const saved = localStorage.getItem('eise-settings');
+		if (saved) {
+			const settings = JSON.parse(saved);
+			if (settings.qualityMode) qualityMode.value = settings.qualityMode;
+			if (settings.stackPercentage) stackPercentage.value = settings.stackPercentage;
+			if (settings.drizzleMode) drizzleMode.value = settings.drizzleMode;
+			if (settings.noiseRobustAlignment !== undefined) noiseRobustAlignment.value = settings.noiseRobustAlignment;
+			if (settings.useWebGPU !== undefined) useWebGPU.value = settings.useWebGPU;
+			if (settings.cropMarginPercent) cropMarginPercent.value = settings.cropMarginPercent;
+			if (settings.enableMaxFrames !== undefined) enableMaxFrames.value = settings.enableMaxFrames;
+			if (settings.selectedMaxFrames) selectedMaxFrames.value = settings.selectedMaxFrames;
+		}
+	} catch (e) {
+		console.warn('Failed to load settings:', e);
+	}
+}
+
+// Save settings to localStorage
+function saveSettings() {
+	try {
+		const settings = {
+			qualityMode: qualityMode.value,
+			stackPercentage: stackPercentage.value,
+			drizzleMode: drizzleMode.value,
+			noiseRobustAlignment: noiseRobustAlignment.value,
+			useWebGPU: useWebGPU.value,
+			cropMarginPercent: cropMarginPercent.value,
+			enableMaxFrames: enableMaxFrames.value,
+			selectedMaxFrames: selectedMaxFrames.value
+		};
+		localStorage.setItem('eise-settings', JSON.stringify(settings));
+	} catch (e) {
+		console.warn('Failed to save settings:', e);
+	}
+}
+
+// Watch all settings and save on change
+watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, useWebGPU, cropMarginPercent, enableMaxFrames, selectedMaxFrames], saveSettings);
+
+// Check for WebGPU support on mount
+onMounted(async () => {
+	loadSettings();
+
+	if (navigator.gpu) {
+		try {
+			const adapter = await navigator.gpu.requestAdapter();
+			webGPUAvailable.value = !!adapter;
+		} catch (e) {
+			webGPUAvailable.value = false;
+		}
+	}
+});
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
@@ -255,7 +319,7 @@ async function processFiles(files) {
 		const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
 		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
+		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value, useWebGPU.value);
 		return;
 	}
 
@@ -277,7 +341,7 @@ async function processFiles(files) {
 			const { readSerFile } = useSerReader();
 			const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 			const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
+			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value, useWebGPU.value);
 			return;
 		}
 
@@ -300,7 +364,7 @@ async function processFiles(files) {
 				emit('processing-started');
 				const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 				const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
+				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value, useWebGPU.value);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -379,7 +443,7 @@ async function processFiles(files) {
 		// Route FFmpeg frames through AVI reader for unified processing (including cropping)
 		const { processFFmpegFrames } = useAviReader();
 		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
+		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value, useWebGPU.value);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
@@ -388,7 +452,7 @@ async function processFiles(files) {
 
 		const { readImageFiles } = useImageReader();
 		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, qualityMode.value === 'manual', false, stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, qualityMode.value === 'manual', false, stackPercentage.value, drizzleScale, noiseRobustAlignment.value, useWebGPU.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing

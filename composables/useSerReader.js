@@ -3,6 +3,25 @@ import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
 import { useStacker } from '@/composables/useStacker';
 
+// Map OpenCV Bayer pattern names to GPU shader pattern indices
+// The SER format uses: 8=RGGB, 9=GRBG, 10=GBRG, 11=BGGR
+// OpenCV names these counter-intuitively (BG means RGGB, RG means BGGR)
+// GPU shader indices: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
+function bayerChoiceToGpuPattern(bayerChoice) {
+    const mapping = {
+        'COLOR_BayerBG2RGB': 0,  // RGGB (SER ColorID 8)
+        'COLOR_BayerBG2BGR': 0,
+        'COLOR_BayerRG2RGB': 1,  // BGGR (SER ColorID 11)
+        'COLOR_BayerRG2BGR': 1,
+        'COLOR_BayerGB2RGB': 2,  // GRBG (SER ColorID 9)
+        'COLOR_BayerGB2BGR': 2,
+        'COLOR_BayerGR2RGB': 3,  // GBRG (SER ColorID 10)
+        'COLOR_BayerGR2BGR': 3,
+        'MONO': -1  // No demosaic needed
+    };
+    return mapping[bayerChoice] ?? -1;
+}
+
 // These functions remain on the main thread as they are not performance bottlenecks
 // Exported for use by Tools component
 export function parseSerHeader(buffer) {
@@ -254,8 +273,12 @@ export function useSerReader() {
 
     // Set up single message handler per worker (call after workers are created)
     function setupWorkerHandlers() {
+        const numWorkers = unifiedAnalyzeWorkers.length;
+        const staggerOffset = Math.floor(RECYCLE_THRESHOLD / numWorkers);
         unifiedAnalyzeWorkers.forEach((worker, workerIndex) => {
-            workerFrameCounts.set(workerIndex, 0);
+            // Stagger initial counts so workers don't all recycle at once
+            // Worker 0 starts at 0, worker 1 at -staggerOffset, etc.
+            workerFrameCounts.set(workerIndex, -workerIndex * staggerOffset);
             setupSingleWorkerHandler(workerIndex);
         });
     }
@@ -379,7 +402,123 @@ export function useSerReader() {
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false) {
+    // GPU batch analysis helper
+    let gpuAnalyzeWorker = null;
+    let gpuWorkerReady = false;
+
+    async function initGpuAnalyzeWorker() {
+        if (gpuAnalyzeWorker && gpuWorkerReady) return true;
+
+        gpuAnalyzeWorker = new Worker('/webgpu_analyze_worker.js');
+
+        return new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+                addLog('WebGPU analyze worker timeout');
+                gpuAnalyzeWorker.terminate();
+                gpuAnalyzeWorker = null;
+                resolve(false);
+            }, 10000);
+
+            gpuAnalyzeWorker.onmessage = (e) => {
+                if (e.data.type === 'ready') {
+                    clearTimeout(timeout);
+                    gpuWorkerReady = true;
+                    addLog('WebGPU analyze worker ready');
+                    resolve(true);
+                } else if (e.data.type === 'init-error') {
+                    clearTimeout(timeout);
+                    addLog(`WebGPU analyze worker error: ${e.data.error}`);
+                    gpuAnalyzeWorker.terminate();
+                    gpuAnalyzeWorker = null;
+                    resolve(false);
+                }
+            };
+            gpuAnalyzeWorker.postMessage({ type: 'init' });
+        });
+    }
+
+    function terminateGpuAnalyzeWorker() {
+        if (gpuAnalyzeWorker) {
+            // Cleanup cached GPU buffers before terminating
+            gpuAnalyzeWorker.postMessage({ type: 'cleanup' });
+            gpuAnalyzeWorker.terminate();
+            gpuAnalyzeWorker = null;
+            gpuWorkerReady = false;
+        }
+    }
+
+    /**
+     * Analyze frames in batches using WebGPU
+     * @param frames - Array of { data, index } where data is raw frame buffer
+     * @param width - Frame width
+     * @param height - Frame height
+     * @param bayerPattern - GPU pattern index (0-3) or -1 for MONO/RGB
+     * @param threshold - Threshold for circularity (0-1, typically 0.1)
+     */
+    async function analyzeFrameBatchGpu(frames, width, height, bayerPattern, threshold = 0.1) {
+        if (!gpuAnalyzeWorker || !gpuWorkerReady) {
+            throw new Error('GPU worker not initialized');
+        }
+
+        const requestId = Date.now();
+
+        return new Promise((resolve, reject) => {
+            const handler = (e) => {
+                if (e.data.requestId !== requestId) return;
+                gpuAnalyzeWorker.removeEventListener('message', handler);
+
+                if (e.data.type === 'analyze-result') {
+                    resolve(e.data.results);
+                } else if (e.data.type === 'analyze-error') {
+                    reject(new Error(e.data.error));
+                }
+            };
+
+            gpuAnalyzeWorker.addEventListener('message', handler);
+            gpuAnalyzeWorker.postMessage({
+                type: 'analyze-batch',
+                frames,
+                width,
+                height,
+                bayerPattern,
+                threshold,
+                requestId
+            });
+        });
+    }
+
+    /**
+     * Crop raw Bayer/Mono frame data to a region
+     * Ensures even coordinates for Bayer pattern alignment
+     */
+    function cropRawFrame(data, srcWidth, srcHeight, cropX, cropY, cropSize, bytesPerPixel) {
+        // Ensure even coordinates for Bayer pattern
+        const x = Math.floor(cropX / 2) * 2;
+        const y = Math.floor(cropY / 2) * 2;
+
+        const cropped = new (bytesPerPixel === 2 ? Uint16Array : Uint8Array)(cropSize * cropSize);
+
+        for (let row = 0; row < cropSize; row++) {
+            const srcRow = y + row;
+            if (srcRow >= srcHeight) break;
+
+            const srcOffset = srcRow * srcWidth + x;
+            const dstOffset = row * cropSize;
+            const copyLen = Math.min(cropSize, srcWidth - x);
+
+            if (bytesPerPixel === 2) {
+                const src16 = new Uint16Array(data.buffer, data.byteOffset + srcOffset * 2, copyLen);
+                cropped.set(src16, dstOffset);
+            } else {
+                const src8 = new Uint8Array(data.buffer, data.byteOffset + srcOffset, copyLen);
+                cropped.set(src8, dstOffset);
+            }
+        }
+
+        return cropped;
+    }
+
+    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -526,10 +665,27 @@ export function useSerReader() {
         let bestFrameSoFar = null; // Best frame found so far (for preview)
         let refCandidateSoFar = null; // Most circular from top frames (for preview)
 
+        // Lazy blob creation - only when needed for display
+        async function ensureBlob(frame) {
+            if (frame.blob) return frame;
+            if (!frame.rgbaBuffer) return frame;
+            try {
+                const rgba = new Uint8ClampedArray(frame.rgbaBuffer);
+                const imageData = new ImageData(rgba, frame.width, frame.height);
+                const canvas = new OffscreenCanvas(frame.width, frame.height);
+                const ctx = canvas.getContext('2d');
+                ctx.putImageData(imageData, 0, 0);
+                frame.blob = await canvas.convertToBlob({ type: 'image/png' });
+            } catch (e) {
+                console.warn(`Failed to create blob for frame ${frame.index}:`, e);
+            }
+            return frame;
+        }
+
         function rankFrame(frame) {
-            // Validate frame has valid blob
-            if (!frame.blob || !(frame.blob instanceof Blob) || frame.blob.size === 0) {
-                console.warn(`Skipping frame ${frame.index}: invalid blob (type=${frame.blob?.constructor?.name}, size=${frame.blob?.size})`);
+            // Validate frame has either blob or rgbaBuffer (GPU path has no blob initially)
+            if (!frame.rgbaBuffer && (!frame.blob || !(frame.blob instanceof Blob) || frame.blob.size === 0)) {
+                console.warn(`Skipping frame ${frame.index}: no valid data`);
                 return;
             }
 
@@ -614,6 +770,253 @@ export function useSerReader() {
             colorID: header.colorID
         };
 
+        // GPU batch processing path
+        // Hybrid approach: CPU workers do per-frame detection + cropping, GPU does sharpness/circularity
+        let usedGpuPath = false;
+        if (useWebGPU) {
+            const gpuReady = await initGpuAnalyzeWorker();
+            if (gpuReady) {
+                usedGpuPath = true;
+
+                const bpp = header.pixelDepth > 8 ? 2 : 1;
+                const BATCH_SIZE = 32;
+
+                if (cropRegion) {
+                    // HYBRID PATH: CPU crops, GPU analyzes
+                    addLog('Using hybrid CPU crop + GPU analysis');
+                    const processWidth = cropRegion.size;
+                    const processHeight = cropRegion.size;
+
+                    // Process frames through CPU workers for cropping, batch to GPU for analysis
+                    let pendingCrops = [];
+                    let croppedBatch = [];
+
+                    for (let i = 0; i < frameCount; i++) {
+                        if (stopDispatching) break;
+
+                        const offset = 178 + (i * frameSize);
+                        if (offset + frameSize > file.size) break;
+
+                        await acquireSlot();
+                        const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+
+                        // Pick a worker that's not currently recycling
+                        let workerIndex = i % numWorkers;
+                        let attempts = 0;
+                        while (recyclingWorkers.has(workerIndex) && attempts < numWorkers) {
+                            workerIndex = (workerIndex + 1) % numWorkers;
+                            attempts++;
+                        }
+                        // If all workers are recycling, wait a bit for one to finish
+                        if (attempts >= numWorkers) {
+                            await new Promise(r => setTimeout(r, 100));
+                        }
+
+                        // Send to CPU worker for crop-only processing
+                        const cropPromise = processFrameWithWorker(workerIndex, {
+                            type: 'crop-only',
+                            frameBuffer,
+                            header: headerForWorker,
+                            bayerChoice,
+                            cropRegion,
+                            index: i
+                        }, [frameBuffer]).then(result => {
+                            releaseSlot();
+                            checkWorkerRecycle(workerIndex);  // Staggered worker recycling
+                            return result;
+                        }).catch(err => {
+                            releaseSlot();
+                            checkWorkerRecycle(workerIndex);  // Still count towards recycling on error
+                            console.error(`Hybrid crop error for frame ${i}:`, err.message || err);
+                            return { skipped: true, reason: 'error', index: i };
+                        });
+
+                        pendingCrops.push(cropPromise);
+
+                        // When we have enough pending crops or at the end, process them
+                        if (pendingCrops.length >= BATCH_SIZE || i === frameCount - 1) {
+                            const cropResults = await Promise.all(pendingCrops);
+                            pendingCrops = [];
+
+                            // Filter successful crops and prepare for GPU
+                            const gpuBatchFrames = [];
+                            const gpuBatchMeta = [];
+
+                            for (const result of cropResults) {
+                                if (result.skipped) {
+                                    if (result.reason === 'cut-off') cutOffFrames++;
+                                    else if (result.reason === 'oversized') oversizedFrames++;
+                                    else {
+                                        skippedFrames++;
+                                    }
+                                    completedFrames++;
+                                    continue;
+                                }
+
+                                // Convert RGBA ArrayBuffer to Uint8Array for GPU
+                                gpuBatchFrames.push({
+                                    data: new Uint8Array(result.rgbaBuffer),
+                                    index: result.index
+                                });
+                                gpuBatchMeta.push({
+                                    index: result.index,
+                                    subPixelOffset: result.subPixelOffset,
+                                    rgbaBuffer: result.rgbaBuffer
+                                });
+                            }
+
+                            if (gpuBatchFrames.length > 0) {
+                                try {
+                                    // GPU analyze with bayerPattern=-1 (already RGBA)
+                                    const gpuResults = await analyzeFrameBatchGpu(
+                                        gpuBatchFrames, processWidth, processHeight, -1, 0.1
+                                    );
+
+                                    for (let j = 0; j < gpuResults.length; j++) {
+                                        const gpuResult = gpuResults[j];
+                                        const meta = gpuBatchMeta[j];
+
+                                        const currentFrame = {
+                                            sharpness: gpuResult.sharpness,
+                                            rgbaBuffer: meta.rgbaBuffer,
+                                            width: processWidth,
+                                            height: processHeight,
+                                            index: meta.index,
+                                            subPixelOffset: meta.subPixelOffset,
+                                            circularity: gpuResult.circularity || 0
+                                        };
+
+                                        rankFrame(currentFrame);
+                                        successfulFrames++;
+                                        completedFrames++;
+
+                                        if (successfulFrames === 1) {
+                                            addLog(`First hybrid frame: sharpness ${gpuResult.sharpness?.toFixed(2)}, circularity ${gpuResult.circularity?.toFixed(2)}`);
+                                        }
+                                    }
+                                } catch (gpuError) {
+                                    addLog(`GPU batch error: ${gpuError.message}, falling back to CPU`);
+                                    usedGpuPath = false;
+                                    completedFrames = 0;
+                                    successfulFrames = 0;
+                                    rankedFrames.length = 0;
+                                    bestFrameSoFar = null;
+                                    refCandidateSoFar = null;
+                                    break;
+                                }
+                            }
+
+                            // Update progress
+                            emit('update-loading', {
+                                progress: (completedFrames / frameCount) * 100,
+                                current: completedFrames,
+                                total: frameCount
+                            });
+
+                            if (completedFrames % 100 === 0 || completedFrames === frameCount) {
+                                addLog(`Hybrid analyzed ${completedFrames}/${frameCount} frames`);
+                                if (bestFrameSoFar) {
+                                    await ensureBlob(bestFrameSoFar);
+                                    emit('best-frame-updated', bestFrameSoFar);
+                                }
+                                if (refCandidateSoFar) {
+                                    await ensureBlob(refCandidateSoFar);
+                                    emit('ref-candidate-updated', refCandidateSoFar);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // PURE GPU PATH: No cropping needed
+                    addLog('Using WebGPU for frame analysis (no cropping)');
+                    const gpuBayerPattern = bayerChoiceToGpuPattern(bayerChoice);
+                    const processWidth = header.width;
+                    const processHeight = header.height;
+
+                    for (let batchStart = 0; batchStart < frameCount; batchStart += BATCH_SIZE) {
+                        const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
+                        const batchFrames = [];
+
+                        for (let i = batchStart; i < batchEnd; i++) {
+                            const offset = 178 + (i * frameSize);
+                            if (offset + frameSize > file.size) break;
+
+                            const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+                            const frameData = bpp === 2
+                                ? new Uint16Array(frameBuffer)
+                                : new Uint8Array(frameBuffer);
+
+                            batchFrames.push({ data: frameData, index: i });
+                        }
+
+                        if (batchFrames.length === 0) break;
+
+                        try {
+                            const results = await analyzeFrameBatchGpu(
+                                batchFrames, processWidth, processHeight, gpuBayerPattern, 0.1
+                            );
+
+                            for (let j = 0; j < results.length; j++) {
+                                const result = results[j];
+                                const frameIndex = batchFrames[j].index;
+
+                                const currentFrame = {
+                                    sharpness: result.sharpness,
+                                    rgbaBuffer: result.rgbaBuffer,
+                                    width: processWidth,
+                                    height: processHeight,
+                                    index: frameIndex,
+                                    subPixelOffset: { x: 0, y: 0 },
+                                    circularity: result.circularity || 0
+                                };
+
+                                rankFrame(currentFrame);
+                                successfulFrames++;
+                                completedFrames++;
+
+                                if (successfulFrames === 1) {
+                                    addLog(`First GPU frame: sharpness ${result.sharpness?.toFixed(2)}, circularity ${result.circularity?.toFixed(2)}`);
+                                }
+                            }
+
+                            emit('update-loading', {
+                                progress: (completedFrames / frameCount) * 100,
+                                current: completedFrames,
+                                total: frameCount
+                            });
+
+                            if (completedFrames % 100 === 0 || completedFrames === frameCount) {
+                                addLog(`GPU analyzed ${completedFrames}/${frameCount} frames`);
+                                if (bestFrameSoFar) {
+                                    await ensureBlob(bestFrameSoFar);
+                                    emit('best-frame-updated', bestFrameSoFar);
+                                }
+                                if (refCandidateSoFar) {
+                                    await ensureBlob(refCandidateSoFar);
+                                    emit('ref-candidate-updated', refCandidateSoFar);
+                                }
+                            }
+                        } catch (gpuError) {
+                            addLog(`GPU batch error: ${gpuError.message}, falling back to CPU`);
+                            usedGpuPath = false;
+                            completedFrames = 0;
+                            successfulFrames = 0;
+                            bestFramesForStacking.length = 0;
+                            bestFrameSoFar = null;
+                            refCandidateSoFar = null;
+                            break;
+                        }
+                    }
+                }
+
+                terminateGpuAnalyzeWorker();
+            } else {
+                addLog('WebGPU not available, using CPU workers');
+            }
+        }
+
+        // CPU worker path (fallback or primary if not using GPU)
+        if (!usedGpuPath) {
         for (let i = 0; i < frameCount; i++) {
             if (stopDispatching) {
                 break;
@@ -628,7 +1031,18 @@ export function useSerReader() {
             await acquireSlot();
 
             const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
-            const workerIndex = i % numWorkers;
+
+            // Pick a worker that's not currently recycling
+            let workerIndex = i % numWorkers;
+            let attempts = 0;
+            while (recyclingWorkers.has(workerIndex) && attempts < numWorkers) {
+                workerIndex = (workerIndex + 1) % numWorkers;
+                attempts++;
+            }
+            // If all workers are recycling, wait a bit for one to finish
+            if (attempts >= numWorkers) {
+                await new Promise(r => setTimeout(r, 100));
+            }
 
             const dataToWorker = {
                 type: cropRegion ? 'analyze-cropped' : 'ser',
@@ -717,6 +1131,7 @@ export function useSerReader() {
 
         // Wait for all worker tasks to complete
         await Promise.all(workerPromises);
+        } // End of CPU path (if !usedGpuPath)
 
         const skipMsgs = [];
         if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
@@ -747,7 +1162,8 @@ export function useSerReader() {
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: unifiedAnalyzeWorkers, // Pass workers for later stacking
-                noiseRobustAlignment
+                noiseRobustAlignment,
+                useWebGPU
             });
             // Don't terminate workers yet - they'll be used for stacking after selection
             return;
@@ -761,7 +1177,7 @@ export function useSerReader() {
 
             // Use the first worker for stacking (it's already initialized with OpenCV)
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');
@@ -954,7 +1370,7 @@ export function useSerReader() {
 
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
-    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false) {
+    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
         await initializeWorkers();
 
         if (!workersReady) {
@@ -1255,7 +1671,19 @@ export function useSerReader() {
                 await acquireSlot();
 
                 const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
-                const workerIndex = globalFrameIndex % numWorkers;
+
+                // Pick a worker that's not currently recycling
+                let workerIndex = globalFrameIndex % numWorkers;
+                let attempts = 0;
+                while (recyclingWorkers.has(workerIndex) && attempts < numWorkers) {
+                    workerIndex = (workerIndex + 1) % numWorkers;
+                    attempts++;
+                }
+                // If all workers are recycling, wait a bit for one to finish
+                if (attempts >= numWorkers) {
+                    await new Promise(r => setTimeout(r, 100));
+                }
+
                 const currentGlobalIndex = globalFrameIndex;
 
                 const dataToWorker = {
@@ -1375,7 +1803,8 @@ export function useSerReader() {
             emit('quality-selection-ready', {
                 frames: allAnalyzedFrames,
                 workers: unifiedAnalyzeWorkers,
-                noiseRobustAlignment
+                noiseRobustAlignment,
+                useWebGPU
             });
             return;
         } else if (clientSideStacking) {
@@ -1383,7 +1812,7 @@ export function useSerReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment);
+            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
             if (stackedBlob) {
                 addLog('Client-side stacking complete');
