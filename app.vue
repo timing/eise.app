@@ -351,6 +351,6 @@ canvas {
 }
 /* Move Sentry feedback button up to avoid blocking expand log button */
 #sentry-feedback {
-	bottom: 80px !important;
+	--inset: auto 0 80px auto;
 }
 </style>
