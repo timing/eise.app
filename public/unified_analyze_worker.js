@@ -1512,17 +1512,31 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
             console.log(`Drizzle mode: ${drizzleScale}x (${width}x${height} -> ${outWidth}x${outHeight})`);
         }
 
-        // Validate all frames have consistent dimensions
-        for (let i = 0; i < validFrames.length; i++) {
-            const f = validFrames[i];
+        // Filter frames with inconsistent dimensions (instead of throwing)
+        const consistentFrames = validFrames.filter((f, i) => {
             if (f.width !== width || f.height !== height) {
-                throw new Error(`Frame ${i} has dimensions ${f.width}x${f.height}, expected ${width}x${height}`);
+                console.warn(`Skipping frame ${i}: dimensions ${f.width}x${f.height} don't match expected ${width}x${height}`);
+                return false;
             }
             const expectedBytes = f.width * f.height * 4;
             if (!f.rgbaBuffer || f.rgbaBuffer.byteLength !== expectedBytes) {
-                throw new Error(`Frame ${i} buffer mismatch: got ${f.rgbaBuffer?.byteLength || 0} bytes, expected ${expectedBytes} (${f.width}x${f.height})`);
+                console.warn(`Skipping frame ${i}: buffer size ${f.rgbaBuffer?.byteLength || 0} doesn't match expected ${expectedBytes}`);
+                return false;
             }
+            return true;
+        });
+
+        if (consistentFrames.length === 0) {
+            throw new Error('No frames with consistent dimensions to stack');
         }
+
+        if (consistentFrames.length < validFrames.length) {
+            console.log(`Filtered ${validFrames.length - consistentFrames.length} frames with mismatched dimensions`);
+        }
+
+        // Use consistent frames for stacking
+        validFrames = consistentFrames;
+        frameCount = validFrames.length;
 
         console.log(`Stacking ${frameCount} frames (${width}x${height}) with local alignment`);
 

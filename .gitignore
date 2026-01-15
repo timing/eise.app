@@ -26,3 +26,4 @@ logs
 # Vim files
 .swp
 .swo
+config/sentry-env.sh

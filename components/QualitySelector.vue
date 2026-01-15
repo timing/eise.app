@@ -255,8 +255,19 @@ async function drawPreview() {
 
 		// Scale to fit max 500px while maintaining aspect ratio
 		const maxSize = 500;
-		const imgWidth = img.width || frame.width;
-		const imgHeight = img.height || frame.height;
+		const imgWidth = img?.width || frame?.width || 200;
+		const imgHeight = img?.height || frame?.height || 200;
+		if (!imgWidth || !imgHeight) {
+			console.warn('Invalid image dimensions, using placeholder');
+			canvas.width = 200;
+			canvas.height = 50;
+			ctx.fillStyle = '#333';
+			ctx.fillRect(0, 0, 200, 50);
+			ctx.fillStyle = '#999';
+			ctx.font = '12px sans-serif';
+			ctx.fillText('Invalid dimensions', 20, 30);
+			return;
+		}
 		const scale = Math.min(maxSize / imgWidth, maxSize / imgHeight, 1);
 		const drawWidth = imgWidth * scale;
 		const drawHeight = imgHeight * scale;
