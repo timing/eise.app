@@ -1494,14 +1494,14 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         self.postMessage({ type: 'stack-progress', stage: 'Preparing frames...', progress: 0 });
 
         // Filter frames that have valid rgbaBuffer and sharpness
-        const validFrames = frames.filter(f => f.rgbaBuffer && f.width && f.height && f.sharpness > 0);
+        let validFrames = frames.filter(f => f.rgbaBuffer && f.width && f.height && f.sharpness > 0);
 
         if (validFrames.length === 0) {
             throw new Error('No valid frames with RGBA data for stacking');
         }
 
         const { width, height } = validFrames[0];
-        const frameCount = validFrames.length;
+        let frameCount = validFrames.length;
 
         // Calculate output dimensions (drizzle)
         const outWidth = Math.round(width * drizzleScale);
