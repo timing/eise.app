@@ -453,7 +453,10 @@ export function useStacker() {
 
                 worker.addEventListener('message', messageHandler);
 
-                const transferables = frameData.map(f => f.rgbaBuffer).filter(b => b instanceof ArrayBuffer && b.byteLength > 0);
+                // Use Set to deduplicate - same buffer may be referenced by multiple frames
+                const transferables = [...new Set(
+                    frameData.map(f => f.rgbaBuffer).filter(b => b instanceof ArrayBuffer && b.byteLength > 0)
+                )];
                 worker.postMessage({
                     type: 'stack-frames',
                     frames: frameData,
