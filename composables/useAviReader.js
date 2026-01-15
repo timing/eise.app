@@ -3,6 +3,7 @@
 import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
 import { useStacker } from '@/composables/useStacker';
+import { reportError } from '@/composables/useSentryReporting';
 
 /**
  * Determines if an AVI FourCC represents an "easy" (uncompressed/raw) format.
@@ -141,6 +142,7 @@ export function useAviReader() {
             addLog("Analysis workers ready.");
         } catch (error) {
             console.error("Worker initialization failed:", error);
+            reportError(error, { component: 'useAviReader', action: 'initializeWorkers' });
             addLog(`Error: Could not initialize analysis workers. Reason: ${error.message}`);
             // Handle cleanup of created workers if necessary
             unifiedAnalyzeWorkers.forEach(w => w.terminate());
@@ -554,6 +556,7 @@ export function useAviReader() {
         } catch (e) {
             addLog(`[ERROR] in parseFullAviHeader: ${e.message}`);
             console.error("Error parsing full AVI header:", e);
+            reportError(e, { component: 'useAviReader', action: 'parseFullAviHeader' });
             return null;
         }
     }

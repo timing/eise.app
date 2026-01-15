@@ -2,6 +2,7 @@
 
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
+import { reportError } from '@/composables/useSentryReporting';
 
 // Native image formats that browsers can decode directly
 const NATIVE_FORMATS = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'];
@@ -46,6 +47,7 @@ export function useImageReader() {
             addLog("Analysis workers ready.");
         } catch (error) {
             console.error("Worker initialization failed:", error);
+            reportError(error, { component: 'useImageReader', action: 'initializeWorkers' });
             addLog(`Error: Could not initialize analysis workers. Reason: ${error.message}`);
             unifiedAnalyzeWorkers.forEach(w => w.terminate());
             unifiedAnalyzeWorkers.length = 0;
@@ -309,6 +311,7 @@ export function useImageReader() {
                 }
             } catch (error) {
                 addLog(`Error processing ${file.name}: ${error.message}`);
+                reportError(error, { component: 'useImageReader', action: 'convertImage', extra: { fileName: file.name, fileType: file.type } });
                 pngDataArray.push(null); // Placeholder for failed conversions
             }
         }

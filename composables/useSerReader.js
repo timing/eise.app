@@ -2,6 +2,7 @@
 import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
 import { useStacker } from '@/composables/useStacker';
+import { reportError } from '@/composables/useSentryReporting';
 
 // Map OpenCV Bayer pattern names to GPU shader pattern indices
 // The SER format uses: 8=RGGB, 9=GRBG, 10=GBRG, 11=BGGR
@@ -158,6 +159,7 @@ export function useSerReader() {
             addLog("Analysis workers ready.");
         } catch (error) {
             console.error("Worker initialization failed:", error);
+            reportError(error, { component: 'useSerReader', action: 'initializeWorkers' });
             addLog(`Error: Could not initialize analysis workers. Reason: ${error.message}`);
             unifiedAnalyzeWorkers.forEach(w => w.terminate());
             unifiedAnalyzeWorkers.length = 0;
@@ -1412,6 +1414,7 @@ export function useSerReader() {
 
                 addLog(`${file.name}: ${header.width}x${header.height}, ${header.frameCount} frames, ${header.pixelDepth}-bit, colorID=${header.colorID}`);
             } catch (error) {
+                reportError(error, { component: 'useSerReader', action: 'parseSerHeader', extra: { fileName: file.name, fileSize: file.size } });
                 addLog(`Error reading ${file.name}: ${error.message}. Skipping this file.`);
                 // Continue with other files
             }

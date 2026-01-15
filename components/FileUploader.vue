@@ -118,6 +118,7 @@ import { useSerReader } from '@/composables/useSerReader';
 import { useAviReader } from '@/composables/useAviReader';
 import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
+import { reportError } from '@/composables/useSentryReporting';
 
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
@@ -245,6 +246,7 @@ async function startProcessing() {
 		await processFiles(selectedFiles.value);
 	} catch (error) {
 		console.error('Processing error:', error);
+		reportError(error, { component: 'FileUploader', action: 'processFiles' });
 		errorMessage.value = error.message || 'An error occurred during processing';
 		isProcessing.value = false;
 		eventBusEmit('show-error');
@@ -379,6 +381,7 @@ async function processFiles(files) {
 		try {
 			await $loadFFmpeg();
 		} catch (err) {
+			reportError(err, { component: 'FileUploader', action: 'loadFFmpeg' });
 			eventBusEmit('upload-error', err.message || 'Failed to load FFmpeg. Please refresh and try again.');
 			eventBusEmit('show-error');
 			return;
@@ -391,6 +394,7 @@ async function processFiles(files) {
 			$ffmpeg.FS('writeFile', fileToProcess.name, await fetchFile(fileToProcess));
 		} catch(err) {
 			console.error('FFmpeg writeFile error:', err);
+			reportError(err, { component: 'FileUploader', action: 'ffmpegWriteFile', extra: { fileName: fileToProcess.name, fileSize: fileToProcess.size } });
 			addLog(`ffmpeg: Storing video in memory failed: ${err.message || err}`);
 			eventBusEmit('upload-error', 'Failed to load video into memory. The file may be too large. Try using a SER file instead, or enable frame limiting.');
 			eventBusEmit('show-error');
