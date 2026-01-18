@@ -100,7 +100,7 @@ export function useAviReader() {
     let workersReady = false;
     const workerFrameCounts = new Map(); // Track frames per worker for staggered recycling
     const recyclingWorkers = new Set(); // Track which workers are currently being recycled
-    const RECYCLE_AFTER_FRAMES = 300; // Restart each worker after N frames (lower = more aggressive memory cleanup)
+    const RECYCLE_AFTER_FRAMES = 200; // Restart each worker after N frames (lower = more aggressive memory cleanup)
 
     // Initializes workers and ensures OpenCV is ready before processing
     async function initializeWorkers() {
@@ -137,9 +137,11 @@ export function useAviReader() {
         try {
             await Promise.all(workerPromises);
             workersReady = true;
-            // Initialize per-worker frame counts for staggered recycling
+            // Initialize per-worker frame counts with staggered offsets so workers don't all recycle at once
+            const staggerOffset = Math.floor(RECYCLE_AFTER_FRAMES / numWorkers);
             for (let i = 0; i < numWorkers; i++) {
-                workerFrameCounts.set(i, 0);
+                // Worker 0 starts at 0, worker 1 at -staggerOffset, etc.
+                workerFrameCounts.set(i, -i * staggerOffset);
             }
             addLog("Analysis workers ready.");
         } catch (error) {
@@ -191,9 +193,10 @@ export function useAviReader() {
 
         await Promise.all(workerPromises);
         workersReady = true;
-        // Initialize per-worker frame counts
+        // Initialize per-worker frame counts with staggered offsets so workers don't all recycle at once
+        const staggerOffset = Math.floor(RECYCLE_AFTER_FRAMES / numWorkers);
         for (let i = 0; i < numWorkers; i++) {
-            workerFrameCounts.set(i, 0);
+            workerFrameCounts.set(i, -i * staggerOffset);
         }
         addLog("Workers recycled successfully.");
     }
@@ -242,6 +245,29 @@ export function useAviReader() {
                 console.error(`Failed to recycle worker ${workerIndex}:`, err);
             });
         }
+    }
+
+    // Detect WASM heap corruption from error messages and force immediate recycle
+    function isHeapCorruptionError(error) {
+        const msg = error?.message || String(error);
+        // OpenCV heap corruption shows as garbage error codes (large numbers)
+        const match = msg.match(/OpenCV error code:\s*(\d+)/);
+        if (match) {
+            const code = parseInt(match[1], 10);
+            // Valid OpenCV error codes are small (< 100), garbage values are huge
+            return code > 10000;
+        }
+        return false;
+    }
+
+    // Force immediate worker recycle due to heap corruption
+    function forceWorkerRecycle(workerIndex) {
+        if (recyclingWorkers.has(workerIndex)) return; // Already recycling
+
+        console.warn(`Forcing immediate recycle of worker ${workerIndex} due to heap corruption`);
+        recycleSingleWorker(workerIndex).catch(err => {
+            console.error(`Failed to force recycle worker ${workerIndex}:`, err);
+        });
     }
 
     function processFrameWithWorker(worker, data, transferables) {
@@ -799,6 +825,10 @@ export function useAviReader() {
                 .catch(error => {
                     errorCount++;
                     completedFrames++;
+                    // Check for heap corruption and force immediate recycle
+                    if (isHeapCorruptionError(error)) {
+                        forceWorkerRecycle(workerIndex);
+                    }
                     addLog(`Error processing AVI frame ${i}: ${error}`);
                     console.error(`Error processing AVI frame ${i}:`, error);
                 })
@@ -1047,6 +1077,10 @@ export function useAviReader() {
                     })
                     .catch(error => {
                         errorCount++;
+                        // Check for heap corruption and force immediate recycle
+                        if (isHeapCorruptionError(error)) {
+                            forceWorkerRecycle(workerIndex);
+                        }
                         addLog(`Error processing frame ${i}: ${error}`);
                         console.error(`Error processing frame ${i}:`, error);
                     })

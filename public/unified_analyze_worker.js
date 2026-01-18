@@ -7,6 +7,21 @@ let isCvReady = false;
 const messageQueue = [];
 let loggedDemosaicMethod = false; // Log demosaic method once per worker
 
+/**
+ * Safari-safe wrapper for OffscreenCanvas.convertToBlob()
+ * Safari's encoder can fail under memory pressure - retry once on failure
+ */
+async function safeConvertToBlob(canvas, options = { type: 'image/png' }) {
+    try {
+        return await canvas.convertToBlob(options);
+    } catch (e) {
+        // Safari sometimes fails on first try - retry once after a brief delay
+        console.warn('convertToBlob failed, retrying:', e.message || e);
+        await new Promise(r => setTimeout(r, 100));
+        return await canvas.convertToBlob(options);
+    }
+}
+
 // Load OpenCV
 self.importScripts('https://cdn.jsdelivr.net/npm/opencv-bindings@4.5.5/index.min.js');
 
@@ -759,7 +774,7 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
                 }
                 const imageData = new ImageData(new Uint8ClampedArray(rgbaMat.data), actualWidth, actualHeight);
                 tempCtx.putImageData(imageData, 0, 0);
-                pngBlob = await tempOffscreenCanvas.convertToBlob({ type: 'image/png' });
+                pngBlob = await safeConvertToBlob(tempOffscreenCanvas, { type: 'image/png' });
             } catch (pngErr) {
                 // PNG creation failed (likely out of memory) - continue without it
                 // The rgbaBuffer can still be used for stacking and preview generation
@@ -1332,7 +1347,7 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
         const outputCtx = outputCanvas.getContext('2d');
         const outputImageData = new ImageData(new Uint8ClampedArray(rawMat.data), actualWidth, actualHeight);
         outputCtx.putImageData(outputImageData, 0, 0);
-        const pngBlob = await outputCanvas.convertToBlob({ type: 'image/png' });
+        const pngBlob = await safeConvertToBlob(outputCanvas, { type: 'image/png' });
 
         // Get RGBA buffer if needed
         let rgbaBuffer = null;
@@ -1531,7 +1546,7 @@ async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, 
         const canvas = new OffscreenCanvas(outWidth, outHeight);
         const ctx = canvas.getContext('2d');
         ctx.putImageData(imageData, 0, 0);
-        const blob = await canvas.convertToBlob({ type: 'image/png' });
+        const blob = await safeConvertToBlob(canvas, { type: 'image/png' });
 
         return { blob, width: outWidth, height: outHeight };
 
@@ -1915,7 +1930,7 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         const imageData = new ImageData(result, outWidth, outHeight);
         ctx.putImageData(imageData, 0, 0);
 
-        const blob = await canvas.convertToBlob({ type: 'image/png' });
+        const blob = await safeConvertToBlob(canvas, { type: 'image/png' });
         console.log(`Stacked image: ${outWidth}x${outHeight}${isDrizzle ? ` (${drizzleScale}x drizzle from ${width}x${height})` : ''}, ${(blob.size / 1024).toFixed(1)} KB`);
 
         self.postMessage({ type: 'stack-progress', stage: 'Stacking complete', progress: 100 });

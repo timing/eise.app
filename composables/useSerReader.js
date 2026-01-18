@@ -171,7 +171,7 @@ export function useSerReader() {
     // Map of pending frame resolvers per worker: workerIndex -> { frameIndex -> {resolve, reject, timeout} }
     const pendingFrames = new Map();
     const workerFrameCounts = new Map(); // Track frames per worker for staggered recycling
-    const RECYCLE_THRESHOLD = 300; // Recycle each worker after N frames (lower = more aggressive memory cleanup)
+    const RECYCLE_THRESHOLD = 200; // Recycle each worker after N frames (lower = more aggressive memory cleanup)
     const recyclingWorkers = new Set(); // Track which workers are currently being recycled
 
     // Recycle a single worker to prevent WASM heap exhaustion (non-blocking for other workers)
@@ -273,6 +273,29 @@ export function useSerReader() {
                 console.error(`Failed to recycle worker ${workerIndex}:`, err);
             });
         }
+    }
+
+    // Detect WASM heap corruption from error messages and force immediate recycle
+    function isHeapCorruptionError(error) {
+        const msg = error?.message || String(error);
+        // OpenCV heap corruption shows as garbage error codes (large numbers)
+        const match = msg.match(/OpenCV error code:\s*(\d+)/);
+        if (match) {
+            const code = parseInt(match[1], 10);
+            // Valid OpenCV error codes are small (< 100), garbage values are huge
+            return code > 10000;
+        }
+        return false;
+    }
+
+    // Force immediate worker recycle due to heap corruption
+    function forceWorkerRecycle(workerIndex) {
+        if (recyclingWorkers.has(workerIndex)) return; // Already recycling
+
+        console.warn(`Forcing immediate recycle of worker ${workerIndex} due to heap corruption`);
+        recycleSingleWorker(workerIndex).catch(err => {
+            console.error(`Failed to force recycle worker ${workerIndex}:`, err);
+        });
     }
 
     // Set up single message handler per worker (call after workers are created)
@@ -849,7 +872,12 @@ export function useSerReader() {
                             return result;
                         }).catch(err => {
                             releaseSlot();
-                            checkWorkerRecycle(workerIndex);  // Still count towards recycling on error
+                            // Check for heap corruption and force immediate recycle if detected
+                            if (isHeapCorruptionError(err)) {
+                                forceWorkerRecycle(workerIndex);
+                            } else {
+                                checkWorkerRecycle(workerIndex);
+                            }
                             console.error(`Hybrid crop error for frame ${i}:`, err.message || err);
                             return { skipped: true, reason: 'error', index: i };
                         });
@@ -1146,6 +1174,10 @@ export function useSerReader() {
                 .catch(error => {
                     totalErrors++;
                     completedFrames++;
+                    // Check for heap corruption and force immediate recycle
+                    if (isHeapCorruptionError(error)) {
+                        forceWorkerRecycle(workerIndex);
+                    }
                     if (totalErrors <= 3) {
                         addLog(`Error processing frame ${i}: ${error}`);
                     } else if (totalErrors === 4) {
@@ -1804,6 +1836,10 @@ export function useSerReader() {
                     .catch(error => {
                         totalErrors++;
                         completedFrames++;
+                        // Check for heap corruption and force immediate recycle
+                        if (isHeapCorruptionError(error)) {
+                            forceWorkerRecycle(workerIndex);
+                        }
                         if (totalErrors <= 3) {
                             addLog(`Error processing frame ${currentGlobalIndex} from ${filename}: ${error}`);
                         } else if (totalErrors === 4) {
