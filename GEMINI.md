@@ -50,7 +50,7 @@ The application provides a fully in-browser experience for planetary image stack
     ```bash
     npm run generate
     ```
-    This command also copies `config/cloudflare_headers.txt` to `dist/_headers` for Cloudflare deployment.
+    Cloudflare headers are in `public/_headers` and get copied to the output automatically.
 
 5.  **Preview Production Build:**
     ```bash
