@@ -4,6 +4,7 @@ import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
 import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
+import { useComparisonExport } from '@/composables/useComparisonExport';
 
 /**
  * Determines if an AVI FourCC represents an "easy" (uncompressed/raw) format.
@@ -89,6 +90,7 @@ export function useAviReader() {
     const { addLog, emit } = useEventBus();
     const { uploadFrames } = useUploader();
     const { stackFramesLocally } = useStacker();
+    const { capturePreCropFrame, capturePostCropFrame, resetCaptures } = useComparisonExport();
 
     const previewCanvas = document.createElement('canvas');
 
@@ -98,7 +100,7 @@ export function useAviReader() {
     let workersReady = false;
     const workerFrameCounts = new Map(); // Track frames per worker for staggered recycling
     const recyclingWorkers = new Set(); // Track which workers are currently being recycled
-    const RECYCLE_AFTER_FRAMES = 500; // Restart each worker after N frames
+    const RECYCLE_AFTER_FRAMES = 300; // Restart each worker after N frames (lower = more aggressive memory cleanup)
 
     // Initializes workers and ensures OpenCV is ready before processing
     async function initializeWorkers() {
@@ -563,6 +565,9 @@ export function useAviReader() {
 
 
     async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null) {
+        // Reset comparison export captures for new processing
+        resetCaptures();
+
         emit('start-loading', 'Parsing AVI header...');
         emit('update-loading', 0);
 
@@ -626,6 +631,11 @@ export function useAviReader() {
         const allAnalyzedFrames = []; // For manual threshold selection
 
         function rankFrame(frame) { // frame is {sharpness, blob}
+            // Capture post-crop frames for comparison export (sample evenly)
+            if (frame.rgbaBuffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.rgbaBuffer, frame.width, frame.height, frame.index, frameCount);
+            }
+
             // Store all frames when manual threshold is enabled
             if (manualThreshold) {
                 allAnalyzedFrames.push(frame);
@@ -722,6 +732,10 @@ export function useAviReader() {
                 break;
             }
 
+            // Determine if this frame should capture pre-crop for comparison video
+            const preCropSampleInterval = Math.max(1, Math.floor(frameCount / 10));
+            const shouldCapturePreCrop = cropRegion && (i % preCropSampleInterval === 0);
+
             const dataToWorker = {
                 type: cropRegion ? 'analyze-cropped' : 'avi',
                 frameBuffer: frameBuffer,
@@ -730,6 +744,7 @@ export function useAviReader() {
                 bayerChoice: aviHeader.bayerChoice,
                 cropRegion: cropRegion,
                 clientSideStacking: clientSideStacking,
+                capturePreCrop: shouldCapturePreCrop,
                 index: i
             };
 
@@ -751,6 +766,11 @@ export function useAviReader() {
                             emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: completedFrames });
                         }
                         return;
+                    }
+
+                    // Capture pre-crop frame if available (for comparison video)
+                    if (result.preCropRgbaBuffer && result.preCropWidth && result.preCropHeight) {
+                        capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, frameCount);
                     }
 
                     const currentFrame = {
@@ -843,6 +863,9 @@ export function useAviReader() {
 
     // Process FFmpeg-extracted PNG frames through the same pipeline as AVI
     async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
+        // Reset comparison export captures for new processing
+        resetCaptures();
+
         await initializeWorkers();
 
         if (!workersReady) {
@@ -899,6 +922,11 @@ export function useAviReader() {
         function rankFrame(frame, frameIndex) {
             // Store the frame index on the frame object for tracking
             frame.frameIndex = frameIndex;
+
+            // Capture post-crop frames for comparison export (sample evenly)
+            if (frame.rgbaBuffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.rgbaBuffer, frame.width, frame.height, frameIndex, frameCount);
+            }
 
             // Store all frames when manual threshold is enabled
             if (manualThreshold) {
@@ -966,6 +994,10 @@ export function useAviReader() {
                 const workerIndex = i % numWorkers;
                 const worker = unifiedAnalyzeWorkers[workerIndex];
 
+                // Determine if this frame should capture pre-crop for comparison video
+                const preCropSampleInterval = Math.max(1, Math.floor(frameCount / 10));
+                const shouldCapturePreCrop = cropRegion && (i % preCropSampleInterval === 0);
+
                 const dataToWorker = {
                     type: cropRegion ? 'analyze-cropped' : 'avi',
                     frameBuffer: rgbaBuffer,
@@ -974,6 +1006,7 @@ export function useAviReader() {
                     bayerChoice: 'MONO',
                     cropRegion: cropRegion,
                     clientSideStacking: clientSideStacking,
+                    capturePreCrop: shouldCapturePreCrop,
                     index: i
                 };
 
@@ -991,6 +1024,11 @@ export function useAviReader() {
                             }
                             completedFrames++;
                             return;
+                        }
+
+                        // Capture pre-crop frame if available (for comparison video)
+                        if (result.preCropRgbaBuffer && result.preCropWidth && result.preCropHeight) {
+                            capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, frameCount);
                         }
 
                         const currentFrame = {

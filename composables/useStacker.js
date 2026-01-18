@@ -1,7 +1,9 @@
 import { useEventBus } from '@/composables/eventBus';
+import { useComparisonExport } from '@/composables/useComparisonExport';
 
 export function useStacker() {
     const { addLog, emit } = useEventBus();
+    const { captureUnstackedImage } = useComparisonExport();
 
     /**
      * Convert RGBA buffer to grayscale
@@ -382,6 +384,10 @@ export function useStacker() {
 
             addLog(`Stacked image: ${result.width}x${result.height}, ${(result.blob.size / 1024).toFixed(1)} KB`);
             emit('set-caption', 'Stacking complete');
+
+            // Capture unstacked image for comparison export
+            captureUnstackedImage(result.blob);
+
             return result.blob;
 
         } catch (error) {
@@ -437,6 +443,10 @@ export function useStacker() {
                         const { blob, width, height } = e.data;
                         addLog(`Stacked image: ${width}x${height}, ${(blob.size / 1024).toFixed(1)} KB`);
                         emit('set-caption', 'Stacking complete');
+
+                        // Capture unstacked image for comparison export
+                        captureUnstackedImage(blob);
+
                         worker.removeEventListener('message', messageHandler);
                         worker.terminate();
                         resolve(blob);

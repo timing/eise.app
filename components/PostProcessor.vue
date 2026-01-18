@@ -114,6 +114,12 @@
 			<button v-if="props.croppedSerData" class="download" @click="downloadCroppedSer">Download Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})</button>
 			<button v-if="props.croppedAviData" class="download" @click="downloadCroppedAvi">Download Cropped AVI ({{ props.croppedAviData.frameCount }} frames)</button>
 
+			<h4>Share</h4>
+			<button class="download comparison-btn" @click="downloadComparisonVideo" :disabled="!canExport() || isExportingVideo">
+				{{ isExportingVideo ? exportProgress : 'Download Comparison Video' }}
+			</button>
+			<p v-if="!canExport()" class="export-hint">Comparison video available after auto-crop + GPU stacking</p>
+
 		</div>
 	</div>
 	<div class="content">
@@ -143,11 +149,17 @@ import { deconvolveWebGL, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
+import { useComparisonExport } from '@/composables/useComparisonExport';
 
 const { track } = useTracking();
 const { getOutputFilename } = useProcessingState();
+const { captureProcessedImage, canExport, generateComparisonVideo, getExportStatus } = useComparisonExport();
 
-const { $loadOpenCV } = useNuxtApp();
+// Comparison video export state
+const isExportingVideo = ref(false);
+const exportProgress = ref('');
+
+const { $loadOpenCV, $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
 let canvas;
 let opencvLoaded = false;
@@ -191,6 +203,46 @@ const downloadUnprocessedPNG = () => {
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
 	document.body.removeChild(link);
+};
+
+const downloadComparisonVideo = async () => {
+	if (!canExport() || isExportingVideo.value) return;
+
+	isExportingVideo.value = true;
+	exportProgress.value = 'Preparing...';
+
+	try {
+		// Capture current processed image from canvas
+		if (canvas && canvas.value) {
+			const processedBlob = await new Promise(resolve =>
+				canvas.value.toBlob(resolve, 'image/png')
+			);
+			captureProcessedImage(processedBlob);
+		}
+
+		track('download_comparison_video');
+
+		const videoBlob = await generateComparisonVideo($ffmpeg, $loadFFmpeg, (status) => {
+			exportProgress.value = status;
+		});
+
+		// Download the video
+		const url = URL.createObjectURL(videoBlob);
+		const link = document.createElement('a');
+		link.download = getOutputFilename('comparison', 'mp4');
+		link.href = url;
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+		URL.revokeObjectURL(url);
+
+	} catch (error) {
+		console.error('Comparison video export failed:', error);
+		alert('Failed to generate comparison video: ' + error.message);
+	} finally {
+		isExportingVideo.value = false;
+		exportProgress.value = '';
+	}
 };
 
 const downloadCroppedSer = () => {
@@ -1360,6 +1412,15 @@ button.download:hover {
 	margin-left: 10px;
 	padding: 4px 8px;
 	font-size: 12px;
+}
+.export-hint {
+	font-size: 12px;
+	color: #888;
+	margin-top: 5px;
+}
+.comparison-btn:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
 }
 </style>
 

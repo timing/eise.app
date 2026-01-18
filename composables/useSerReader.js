@@ -3,6 +3,7 @@ import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
 import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
+import { useComparisonExport } from '@/composables/useComparisonExport';
 
 // Map OpenCV Bayer pattern names to GPU shader pattern indices
 // The SER format uses: 8=RGGB, 9=GRBG, 10=GBRG, 11=BGGR
@@ -113,6 +114,7 @@ export function useSerReader() {
     const { addLog, emit } = useEventBus();
     const { uploadFrames } = useUploader();
     const { stackFramesLocally } = useStacker();
+    const { capturePreCropFrame, capturePostCropFrame, resetCaptures } = useComparisonExport();
 
     // Create a pool of workers
     // Limit workers to prevent OpenCV WASM memory exhaustion on large frames
@@ -169,7 +171,7 @@ export function useSerReader() {
     // Map of pending frame resolvers per worker: workerIndex -> { frameIndex -> {resolve, reject, timeout} }
     const pendingFrames = new Map();
     const workerFrameCounts = new Map(); // Track frames per worker for staggered recycling
-    const RECYCLE_THRESHOLD = 500; // Recycle each worker after N frames
+    const RECYCLE_THRESHOLD = 300; // Recycle each worker after N frames (lower = more aggressive memory cleanup)
     const recyclingWorkers = new Set(); // Track which workers are currently being recycled
 
     // Recycle a single worker to prevent WASM heap exhaustion (non-blocking for other workers)
@@ -521,6 +523,9 @@ export function useSerReader() {
     }
 
     async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
+        // Reset comparison export captures for new processing
+        resetCaptures();
+
         await initializeWorkers();
 
         if (!workersReady) {
@@ -691,6 +696,11 @@ export function useSerReader() {
                 return;
             }
 
+            // Capture post-crop frames for comparison export (sample evenly)
+            if (frame.rgbaBuffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.rgbaBuffer, frame.width, frame.height, frame.index, frameCount);
+            }
+
             // Keep all frames when manual threshold is enabled
             if (manualThreshold) {
                 allAnalyzedFrames.push(frame);
@@ -814,6 +824,10 @@ export function useSerReader() {
                             await new Promise(r => setTimeout(r, 100));
                         }
 
+                        // Determine if this frame should capture pre-crop for comparison video
+                        const preCropSampleInterval = Math.max(1, Math.floor(frameCount / 10));
+                        const shouldCapturePreCrop = (i % preCropSampleInterval === 0);
+
                         // Send to CPU worker for crop-only processing
                         const cropPromise = processFrameWithWorker(workerIndex, {
                             type: 'crop-only',
@@ -821,10 +835,17 @@ export function useSerReader() {
                             header: headerForWorker,
                             bayerChoice,
                             cropRegion,
+                            capturePreCrop: shouldCapturePreCrop,
                             index: i
                         }, [frameBuffer]).then(result => {
                             releaseSlot();
                             checkWorkerRecycle(workerIndex);  // Staggered worker recycling
+
+                            // Capture pre-crop frame if available (for comparison video)
+                            if (result.preCropRgbaBuffer && result.preCropWidth && result.preCropHeight) {
+                                capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, frameCount);
+                            }
+
                             return result;
                         }).catch(err => {
                             releaseSlot();
@@ -1046,6 +1067,11 @@ export function useSerReader() {
                 await new Promise(r => setTimeout(r, 100));
             }
 
+            // Determine if this frame should capture pre-crop for comparison video
+            // Sample evenly across all frames (10 samples max)
+            const preCropSampleInterval = Math.max(1, Math.floor(frameCount / 10));
+            const shouldCapturePreCrop = cropRegion && (i % preCropSampleInterval === 0);
+
             const dataToWorker = {
                 type: cropRegion ? 'analyze-cropped' : 'ser',
                 frameBuffer: frameBuffer,
@@ -1053,6 +1079,7 @@ export function useSerReader() {
                 bayerChoice: bayerChoice,
                 cropRegion: cropRegion,
                 clientSideStacking: clientSideStacking,
+                capturePreCrop: shouldCapturePreCrop,
                 index: i
             };
 
@@ -1072,6 +1099,11 @@ export function useSerReader() {
                             emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: completedFrames });
                         }
                         return;
+                    }
+
+                    // Capture pre-crop frame if available (for comparison video)
+                    if (result.preCropRgbaBuffer && result.preCropWidth && result.preCropHeight) {
+                        capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, frameCount);
                     }
 
                     const currentFrame = {
@@ -1373,6 +1405,9 @@ export function useSerReader() {
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
     async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
+        // Reset comparison export captures for new processing
+        resetCaptures();
+
         await initializeWorkers();
 
         if (!workersReady) {
@@ -1557,6 +1592,11 @@ export function useSerReader() {
 
         // Streaming rank function - keeps only top N frames in memory
         function rankFrame(frame) {
+            // Capture post-crop frames for comparison export (sample evenly)
+            if (frame.rgbaBuffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.rgbaBuffer, frame.width, frame.height, frame.index, totalFramesToProcess);
+            }
+
             // For manual threshold, we need all frames (may still crash on large sets)
             if (manualThreshold) {
                 allAnalyzedFrames.push(frame);
@@ -1689,6 +1729,10 @@ export function useSerReader() {
 
                 const currentGlobalIndex = globalFrameIndex;
 
+                // Determine if this frame should capture pre-crop for comparison video
+                const preCropSampleInterval = Math.max(1, Math.floor(totalFramesToProcess / 10));
+                const shouldCapturePreCrop = cropRegion && (currentGlobalIndex % preCropSampleInterval === 0);
+
                 const dataToWorker = {
                     type: cropRegion ? 'analyze-cropped' : 'ser',
                     frameBuffer: frameBuffer,
@@ -1696,6 +1740,7 @@ export function useSerReader() {
                     bayerChoice: bayerChoice,
                     cropRegion: cropRegion,
                     clientSideStacking: clientSideStacking,
+                    capturePreCrop: shouldCapturePreCrop,
                     index: currentGlobalIndex
                 };
 
@@ -1711,6 +1756,11 @@ export function useSerReader() {
                             }
                             completedFrames++;
                             return;
+                        }
+
+                        // Capture pre-crop frame if available (for comparison video)
+                        if (result.preCropRgbaBuffer && result.preCropWidth && result.preCropHeight) {
+                            capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, totalFramesToProcess);
                         }
 
                         const currentFrame = {

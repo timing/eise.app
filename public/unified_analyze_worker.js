@@ -161,7 +161,7 @@ async function handleMessage(e) {
 
         // Crop-only mode: detect + crop, return RGBA for GPU analysis (skip sharpness/PNG)
         if (type === 'crop-only') {
-            const { frameBuffer, header, bayerChoice, cropRegion } = e.data;
+            const { frameBuffer, header, bayerChoice, cropRegion, capturePreCrop } = e.data;
 
             // Validate buffer size (same check as analyze-cropped)
             let expectedSize;
@@ -245,21 +245,33 @@ async function handleMessage(e) {
             }
 
             // Process with skipAnalysis=true (no sharpness/PNG, just RGBA)
-            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index, false, true);
+            // Pass capturePreCrop to get full frame RGBA before cropping
+            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index, false, true, capturePreCrop);
 
-            self.postMessage({
+            const response = {
                 rgbaBuffer: result.rgbaBuffer,
                 width: result.width,
                 height: result.height,
                 subPixelOffset: actualCropRegion?.subPixelOffset || { x: 0, y: 0 },
                 index
-            }, [result.rgbaBuffer]);
+            };
+
+            // Include pre-crop RGBA if captured (for comparison video)
+            const transferables = [result.rgbaBuffer];
+            if (result.preCropRgbaBuffer) {
+                response.preCropRgbaBuffer = result.preCropRgbaBuffer;
+                response.preCropWidth = result.preCropWidth;
+                response.preCropHeight = result.preCropHeight;
+                transferables.push(result.preCropRgbaBuffer);
+            }
+
+            self.postMessage(response, transferables);
             return;
         }
 
         // Analyze with optional cropping - uses fixed reference center for stable positioning
         if (type === 'analyze-cropped') {
-            const { frameBuffer, header, bayerChoice, cropRegion } = e.data;
+            const { frameBuffer, header, bayerChoice, cropRegion, capturePreCrop } = e.data;
 
             // Calculate expected size based on file type
             let expectedSize;
@@ -367,7 +379,8 @@ async function handleMessage(e) {
             }
 
             const includeRgba = e.data.clientSideStacking === true;
-            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index, includeRgba);
+            const shouldCapturePreCrop = capturePreCrop && actualCropRegion; // Only makes sense if cropping
+            const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index, includeRgba, false, shouldCapturePreCrop);
 
             const response = {
                 sharpness: result.sharpness,
@@ -383,7 +396,22 @@ async function handleMessage(e) {
                 response.rgbaBuffer = result.rgbaBuffer;
                 response.width = result.width;
                 response.height = result.height;
-                self.postMessage(response, [result.rgbaBuffer]); // Transfer for zero-copy
+            }
+
+            // Include pre-crop RGBA if captured (for comparison video)
+            if (result.preCropRgbaBuffer) {
+                response.preCropRgbaBuffer = result.preCropRgbaBuffer;
+                response.preCropWidth = result.preCropWidth;
+                response.preCropHeight = result.preCropHeight;
+            }
+
+            // Transfer buffers for zero-copy
+            const transferables = [];
+            if (response.rgbaBuffer) transferables.push(response.rgbaBuffer);
+            if (response.preCropRgbaBuffer) transferables.push(response.preCropRgbaBuffer);
+
+            if (transferables.length > 0) {
+                self.postMessage(response, transferables);
             } else {
                 self.postMessage(response);
             }
@@ -482,10 +510,13 @@ async function handleMessage(e) {
     }
 }
 
-async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropRegion = null, frameIndex = undefined, includeRgba = false, skipAnalysis = false) {
+async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropRegion = null, frameIndex = undefined, includeRgba = false, skipAnalysis = false, capturePreCrop = false) {
     const { width, height, pixelDepth, fourCC, bpp } = header;
     let rawMat, grayMat, rgbaMat;
     let croppedBuffer = null;
+    let preCropRgbaBuffer = null;
+    let preCropWidth = 0;
+    let preCropHeight = 0;
 
     try {
         // Log every 100th frame to track progress without flooding console
@@ -577,6 +608,17 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
                         demosaiced = null; // Don't delete, we're using it
                     }
 
+                    // Capture pre-crop RGBA before cropping (for comparison video)
+                    if (capturePreCrop && cropRegion) {
+                        const preCropRgba = new _cv.Mat();
+                        _cv.cvtColor(rgbFull, preCropRgba, _cv.COLOR_RGB2RGBA);
+                        preCropWidth = preCropRgba.cols;
+                        preCropHeight = preCropRgba.rows;
+                        preCropRgbaBuffer = new ArrayBuffer(preCropWidth * preCropHeight * 4);
+                        new Uint8Array(preCropRgbaBuffer).set(new Uint8Array(preCropRgba.data.buffer, preCropRgba.data.byteOffset, preCropWidth * preCropHeight * 4));
+                        preCropRgba.delete();
+                    }
+
                     // Now crop the demosaiced frame, then convert to RGBA
                     if (cropRegion) {
                         // Note: applyCropWithPadding deletes rgbFull internally
@@ -599,6 +641,17 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
                     rawMat.convertTo(grayMat, _cv.CV_8U, 1/256);
                 } else {
                     rawMat.copyTo(grayMat);
+                }
+
+                // Capture pre-crop RGBA before cropping (for comparison video)
+                if (capturePreCrop && cropRegion) {
+                    const preCropRgba = new _cv.Mat();
+                    _cv.cvtColor(grayMat, preCropRgba, _cv.COLOR_GRAY2RGBA);
+                    preCropWidth = preCropRgba.cols;
+                    preCropHeight = preCropRgba.rows;
+                    preCropRgbaBuffer = new ArrayBuffer(preCropWidth * preCropHeight * 4);
+                    new Uint8Array(preCropRgbaBuffer).set(new Uint8Array(preCropRgba.data.buffer, preCropRgba.data.byteOffset, preCropWidth * preCropHeight * 4));
+                    preCropRgba.delete();
                 }
 
                 if (cropRegion) {
@@ -637,6 +690,14 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
                 demosaiced.delete();
                 rawMat.delete();
                 rawMat = null;
+
+                // Capture pre-crop RGBA before cropping (for comparison video)
+                if (capturePreCrop && cropRegion) {
+                    preCropWidth = rgbaMat.cols;
+                    preCropHeight = rgbaMat.rows;
+                    preCropRgbaBuffer = new ArrayBuffer(preCropWidth * preCropHeight * 4);
+                    new Uint8Array(preCropRgbaBuffer).set(new Uint8Array(rgbaMat.data.buffer, rgbaMat.data.byteOffset, preCropWidth * preCropHeight * 4));
+                }
 
                 // Crop after demosaicing
                 if (cropRegion) {
@@ -715,7 +776,7 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             rgbaBuffer = new Uint8ClampedArray(rgbaMat.data).buffer;
         }
 
-        return { sharpness, pngBlob, croppedBuffer, rgbaBuffer, width: actualWidth, height: actualHeight };
+        return { sharpness, pngBlob, croppedBuffer, rgbaBuffer, width: actualWidth, height: actualHeight, preCropRgbaBuffer, preCropWidth, preCropHeight };
 
     } finally {
         if (rawMat) rawMat.delete();
