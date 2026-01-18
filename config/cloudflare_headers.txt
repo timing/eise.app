@@ -5,6 +5,7 @@ Cross-Origin-Opener-Policy: same-origin
 /_nuxt/*
 Cross-Origin-Embedder-Policy: require-corp
 Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Resource-Policy: same-origin
 
 /_nuxt/wavelet_worker*
 Cross-Origin-Embedder-Policy: require-corp
