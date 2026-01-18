@@ -3,6 +3,28 @@
         <h2>Tools</h2>
 
         <div class="tool-section">
+            <h3>Worker Loading Test</h3>
+            <p class="tool-description">Test different methods of loading web workers on Cloudflare.</p>
+
+            <button @click="runWorkerTests" :disabled="workerTestRunning" class="test-button">
+                {{ workerTestRunning ? 'Testing...' : 'Run Worker Tests' }}
+            </button>
+
+            <div v-if="workerTestResults.length > 0" class="test-results">
+                <div
+                    v-for="(result, idx) in workerTestResults"
+                    :key="idx"
+                    :class="['test-result', result.success ? 'success' : 'error']"
+                >
+                    <span class="method">{{ result.method }}:</span>
+                    <span class="message">{{ result.message }}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="separator"></div>
+
+        <div class="tool-section">
             <h3>Trim SER File</h3>
             <p class="tool-description">Extract a range of frames from a SER file without re-encoding.</p>
 
@@ -91,6 +113,126 @@
 import { ref, computed } from 'vue';
 import { parseSerHeader } from '@/composables/useSerReader';
 
+// Worker test state
+const workerTestRunning = ref(false);
+const workerTestResults = ref([]);
+
+// Inline worker code for blob test
+const inlineWorkerCode = `
+self.addEventListener('message', (e) => {
+    const { method, timestamp } = e.data;
+    const start = performance.now();
+    let sum = 0;
+    for (let i = 0; i < 1000000; i++) {
+        sum += Math.sqrt(i);
+    }
+    const elapsed = performance.now() - start;
+    self.postMessage({
+        method,
+        success: true,
+        message: 'Worker responded in ' + elapsed.toFixed(2) + 'ms',
+        timestamp,
+        computeResult: sum
+    });
+});
+`;
+
+async function testWorkerMethod(method, createWorker) {
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            resolve({ method, success: false, message: 'Timeout after 5s' });
+        }, 5000);
+
+        try {
+            const worker = createWorker();
+            worker.onmessage = (e) => {
+                clearTimeout(timeout);
+                worker.terminate();
+                resolve({ method, success: true, message: e.data.message });
+            };
+            worker.onerror = (err) => {
+                clearTimeout(timeout);
+                worker.terminate();
+                resolve({ method, success: false, message: err.message || 'Worker error' });
+            };
+            worker.postMessage({ method, timestamp: Date.now() });
+        } catch (err) {
+            clearTimeout(timeout);
+            resolve({ method, success: false, message: err.message || 'Failed to create worker' });
+        }
+    });
+}
+
+async function runWorkerTests() {
+    workerTestRunning.value = true;
+    workerTestResults.value = [];
+
+    const tests = [
+        {
+            method: '1. Vite URL import (classic)',
+            createWorker: () => new Worker(
+                new URL('../workers/testWorker.js', import.meta.url)
+            )
+        },
+        {
+            method: '2. Vite URL import (module)',
+            createWorker: () => new Worker(
+                new URL('../workers/testWorker.js', import.meta.url),
+                { type: 'module' }
+            )
+        },
+        {
+            method: '3. Inline Blob worker',
+            createWorker: () => {
+                const blob = new Blob([inlineWorkerCode], { type: 'application/javascript' });
+                return new Worker(URL.createObjectURL(blob));
+            }
+        },
+        {
+            method: '4. Vite ?worker import',
+            createWorker: () => {
+                // This uses Vite's special ?worker suffix
+                // We'll try dynamic import
+                throw new Error('Requires static import - see console');
+            }
+        }
+    ];
+
+    for (const test of tests) {
+        const result = await testWorkerMethod(test.method, test.createWorker);
+        workerTestResults.value.push(result);
+    }
+
+    // Try the ?worker import separately (needs static import at top)
+    try {
+        const TestWorker = (await import('../workers/testWorker.js?worker')).default;
+        const worker = new TestWorker();
+        const result = await new Promise((resolve) => {
+            const timeout = setTimeout(() => {
+                resolve({ method: '5. Vite ?worker suffix', success: false, message: 'Timeout after 5s' });
+            }, 5000);
+            worker.onmessage = (e) => {
+                clearTimeout(timeout);
+                worker.terminate();
+                resolve({ method: '5. Vite ?worker suffix', success: true, message: e.data.message });
+            };
+            worker.onerror = (err) => {
+                clearTimeout(timeout);
+                worker.terminate();
+                resolve({ method: '5. Vite ?worker suffix', success: false, message: err.message || 'Worker error' });
+            };
+            worker.postMessage({ method: '5. Vite ?worker suffix', timestamp: Date.now() });
+        });
+        // Replace test 4 result with actual ?worker result
+        workerTestResults.value[3] = result;
+    } catch (err) {
+        workerTestResults.value[3] = { method: '4. Vite ?worker suffix', success: false, message: err.message };
+    }
+
+    workerTestRunning.value = false;
+}
+
+// SER trimmer state
 const fileInput = ref(null);
 const selectedFile = ref(null);
 const fileBuffer = ref(null);
@@ -388,5 +530,61 @@ async function createTrimmedSerFile() {
 .separator {
     border-top: 1px solid #ddd;
     margin: 15px -20px;
+}
+
+.test-button {
+    width: 100%;
+    padding: 12px;
+    background: #5c9eff;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.2s;
+    margin-bottom: 10px;
+}
+
+.test-button:hover:not(:disabled) {
+    background: #3d7fe0;
+}
+
+.test-button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+.test-results {
+    margin-top: 10px;
+}
+
+.test-result {
+    padding: 8px 10px;
+    margin-bottom: 5px;
+    border-radius: 4px;
+    font-size: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.test-result.success {
+    background: #e8f5e9;
+    border-left: 3px solid #4caf50;
+}
+
+.test-result.error {
+    background: #ffebee;
+    border-left: 3px solid #f44336;
+}
+
+.test-result .method {
+    font-weight: bold;
+    color: #333;
+}
+
+.test-result .message {
+    color: #666;
+    word-break: break-word;
 }
 </style>

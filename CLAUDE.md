@@ -110,3 +110,27 @@ OpenCV's Bayer pattern naming differs from the rest of the industry (camera manu
 - Now using RGB output variants (COLOR_BayerXX2RGB) instead of BGR
 - Mapping: SER RGGB (colorID 8) → OpenCV BG, SER BGGR (colorID 11) → OpenCV RG, etc.
 - Files updated: useSerReader.js (bayerMap), ColorProfileSelector.vue (profiles), useAviReader.js (default)
+
+## Sentry Error Tracking
+
+**Access Sentry issues via API:**
+```bash
+# Config is in config/sentry-env.sh
+source config/sentry-env.sh
+
+# Fetch unresolved issues
+curl -s -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+  "https://sentry.io/api/0/projects/$SENTRY_ORG/$SENTRY_PROJECT/issues/?query=is:unresolved"
+
+# Get issue details
+curl -s -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+  "https://sentry.io/api/0/issues/{issue_id}/"
+
+# Mark issue as resolved
+curl -s -X PUT -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "resolved"}' \
+  "https://sentry.io/api/0/issues/{issue_id}/"
+```
+
+**Note:** When Claude is asked to "fix Sentry issues", use curl with the auth token from `config/sentry-env.sh` to fetch and manage issues.
