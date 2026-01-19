@@ -1,69 +1,42 @@
 /*
-  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Embedder-Policy: credentialless
   Cross-Origin-Opener-Policy: same-origin
-  Cross-Origin-Resource-Policy: same-origin
-
-/_nuxt/*
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Opener-Policy: same-origin
-  Cross-Origin-Resource-Policy: same-origin
 
 /wavelet_worker*
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /sharpen_per_channel_worker.js
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /usm_worker.js
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /unified_analyze_worker.js
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /deconv_channel_worker.js
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /wavelet_sharpen_worker.wasm
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /webgpu_worker.js
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /webgpu_analyze_worker.js
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /webgpu_template_match.js
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /webgpu_stacking.js
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
   Cache-Control: no-cache, must-revalidate
 
 /ffmpeg-core.js
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
+  Cache-Control: no-cache, must-revalidate
 
 /ffmpeg-core.wasm
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
+  Cache-Control: no-cache, must-revalidate
 
 /ffmpeg-core.worker.js
-  Cross-Origin-Embedder-Policy: require-corp
-  Cross-Origin-Resource-Policy: same-origin
+  Cache-Control: no-cache, must-revalidate
