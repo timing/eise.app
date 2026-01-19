@@ -187,46 +187,12 @@ async function runWorkerTests() {
                 const blob = new Blob([inlineWorkerCode], { type: 'application/javascript' });
                 return new Worker(URL.createObjectURL(blob));
             }
-        },
-        {
-            method: '4. Vite ?worker import',
-            createWorker: () => {
-                // This uses Vite's special ?worker suffix
-                // We'll try dynamic import
-                throw new Error('Requires static import - see console');
-            }
         }
     ];
 
     for (const test of tests) {
         const result = await testWorkerMethod(test.method, test.createWorker);
         workerTestResults.value.push(result);
-    }
-
-    // Try the ?worker import separately (needs static import at top)
-    try {
-        const TestWorker = (await import('../workers/testWorker.js?worker')).default;
-        const worker = new TestWorker();
-        const result = await new Promise((resolve) => {
-            const timeout = setTimeout(() => {
-                resolve({ method: '5. Vite ?worker suffix', success: false, message: 'Timeout after 5s' });
-            }, 5000);
-            worker.onmessage = (e) => {
-                clearTimeout(timeout);
-                worker.terminate();
-                resolve({ method: '5. Vite ?worker suffix', success: true, message: e.data.message });
-            };
-            worker.onerror = (err) => {
-                clearTimeout(timeout);
-                worker.terminate();
-                resolve({ method: '5. Vite ?worker suffix', success: false, message: err.message || 'Worker error' });
-            };
-            worker.postMessage({ method: '5. Vite ?worker suffix', timestamp: Date.now() });
-        });
-        // Replace test 4 result with actual ?worker result
-        workerTestResults.value[3] = result;
-    } catch (err) {
-        workerTestResults.value[3] = { method: '4. Vite ?worker suffix', success: false, message: err.message };
     }
 
     workerTestRunning.value = false;
