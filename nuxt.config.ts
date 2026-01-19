@@ -2,6 +2,11 @@
 // also trying to fix this: https://github.com/nuxt/nuxt/issues/22141
 export default defineNuxtConfig({
 	devtools: { enabled: true },
+	runtimeConfig: {
+		public: {
+			buildTime: new Date().toISOString()
+		}
+	},
 	plugins: [
 		'~/plugins/sentry.client.js',
 		'~/plugins/ffmpeg.js',

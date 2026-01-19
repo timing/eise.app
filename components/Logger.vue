@@ -11,6 +11,7 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 
 const { logs, onLogAdded, off } = useEventBus();
+const config = useRuntimeConfig();
 const logContent = ref(null);
 const isExpanded = ref(false);
 
@@ -41,7 +42,8 @@ onMounted(() => {
 	if (performance && performance.memory && performance.memory.usedJSHeapSize) {
 		welcomeMem = ' Mem:' + (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(2) + 'MB';
 	}
-	logContent.value.innerHTML += (new Date()).toLocaleString() + ': Welcome to eise.app!' + welcomeMem + '\n';
+	const buildTime = config.public.buildTime ? ` (build: ${new Date(config.public.buildTime).toLocaleString()})` : '';
+	logContent.value.innerHTML += (new Date()).toLocaleString() + ': Welcome to eise.app!' + buildTime + welcomeMem + '\n';
 
 	onLogAdded(handleLogAdded);
 });
