@@ -21,6 +21,7 @@ export default defineNuxtPlugin(nuxtApp => {
 			console.log('Loading OpenCV...');
 			const script = document.createElement('script');
 			script.src = 'https://cdn.jsdelivr.net/npm/opencv-bindings@4.5.5/index.min.js';
+			script.crossOrigin = 'anonymous';
 			script.id = 'opencv-script';
 			script.onload = () => {
 				cv['onRuntimeInitialized'] = () => {
