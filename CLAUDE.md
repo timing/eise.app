@@ -64,7 +64,7 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 
 **Event Bus Pattern**: Cross-component communication via `composables/eventBus.js`. Key events: `set-caption`, `update-loading`, `stop-loading`, `upload-error`, `postProcessing`, `stacking-started`, `stacked-image-ready`.
 
-**SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `public/_headers`.
+**SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`.
 
 ## File Limits
 

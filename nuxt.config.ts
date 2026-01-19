@@ -11,7 +11,7 @@ export default defineNuxtConfig({
 	routeRules: {
 		'/': {
 			headers: {
-				'Cross-Origin-Embedder-Policy': 'credentialless',
+				'Cross-Origin-Embedder-Policy': 'require-corp',
 				'Cross-Origin-Opener-Policy': 'same-origin'
 			}
 		}
@@ -22,7 +22,7 @@ export default defineNuxtConfig({
 		},
 		server: {
 			headers: {
-				'Cross-Origin-Embedder-Policy': 'credentialless',
+				'Cross-Origin-Embedder-Policy': 'require-corp',
 				'Cross-Origin-Opener-Policy': 'same-origin'
 			}
 		} 
