@@ -1,23 +1,23 @@
 /**
- * 16-bit PNG encoder using UPNG.js
+ * 16-bit PNG encoder using fast-png
  *
  * Exports Float32Array image data as 16-bit PNG files.
- * UPNG.js is dynamically imported to avoid bundling overhead when not used.
+ * fast-png is dynamically imported to avoid bundling overhead when not used.
  */
 
-let UPNG = null;
+let fastPng = null;
 
 /**
- * Load UPNG.js library
- * @returns {Promise<Object>} UPNG module
+ * Load fast-png library
+ * @returns {Promise<Object>} fast-png module
  */
-async function loadUPNG() {
-	if (UPNG) return UPNG;
+async function loadFastPng() {
+	if (fastPng) return fastPng;
 
-	// Dynamic import of UPNG.js
-	const module = await import('upng-js');
-	UPNG = module.default || module;
-	return UPNG;
+	// Dynamic import of fast-png
+	const module = await import('fast-png');
+	fastPng = module;
+	return fastPng;
 }
 
 /**
@@ -28,10 +28,9 @@ async function loadUPNG() {
  * @returns {Promise<Blob>} PNG blob
  */
 export async function encode16BitPNG(data, width, height) {
-	const upng = await loadUPNG();
+	const { encode } = await loadFastPng();
 
 	// Convert Float32Array (0.0-1.0) to Uint16Array (0-65535)
-	// UPNG expects RGBA16 data in Uint16Array or Uint8Array view of the same buffer
 	const uint16Data = new Uint16Array(data.length);
 	const scale = 65535;
 
@@ -40,19 +39,14 @@ export async function encode16BitPNG(data, width, height) {
 		uint16Data[i] = Math.round(Math.max(0, Math.min(1, data[i])) * scale);
 	}
 
-	// UPNG.encode expects the buffer and interprets it based on the depth parameter
-	// For 16-bit, pass ctype=6 (RGBA), depth=16
-	// Note: UPNG.encode signature: encode(imgs, w, h, cnum, dels, forbidPlte)
-	// For a single image: encode([buffer], w, h, 0)
-	// But for 16-bit we need to use encodeLL which gives more control
-
-	// Convert to ArrayBuffer view that UPNG can use
-	const buffer = uint16Data.buffer;
-
-	// UPNG.encodeLL(width, height, cnum, depth, ctype, rgba, dels)
-	// ctype: 0=grayscale, 2=RGB, 4=grayscale+alpha, 6=RGBA
-	// depth: 8 or 16
-	const pngBuffer = upng.encodeLL([buffer], width, height, 4, 1, 16, [0]);
+	// fast-png encode with 16-bit depth
+	const pngBuffer = encode({
+		width,
+		height,
+		data: uint16Data,
+		depth: 16,
+		channels: 4  // RGBA
+	});
 
 	return new Blob([pngBuffer], { type: 'image/png' });
 }
@@ -65,9 +59,15 @@ export async function encode16BitPNG(data, width, height) {
  * @returns {Promise<Blob>} PNG blob
  */
 export async function encode16BitPNGFromUint16(uint16Data, width, height) {
-	const upng = await loadUPNG();
+	const { encode } = await loadFastPng();
 
-	const pngBuffer = upng.encodeLL([uint16Data.buffer], width, height, 4, 1, 16, [0]);
+	const pngBuffer = encode({
+		width,
+		height,
+		data: uint16Data,
+		depth: 16,
+		channels: 4
+	});
 
 	return new Blob([pngBuffer], { type: 'image/png' });
 }

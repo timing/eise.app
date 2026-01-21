@@ -130,7 +130,7 @@
 
 			<button class="download" @click="downloadUnprocessedPNG">Download Unprocessed PNG</button>
 			<button class="download" @click="downloadCanvasAsPNG">Download Processed PNG (8-bit)</button>
-			<button class="download download-16bit" @click="download16BitProcessedPNG" v-if="use16bit && sharpenedImage16">Download Processed PNG (16-bit)</button>
+			<button class="download" @click="download16BitProcessedPNG" v-if="use16bit && sharpenedImage16">Download Processed PNG (16-bit)</button>
 			<button v-if="props.croppedSerData" class="download" @click="downloadCroppedSer">Download Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})</button>
 			<button v-if="props.croppedAviData" class="download" @click="downloadCroppedAvi">Download Cropped AVI ({{ props.croppedAviData.frameCount }} frames)</button>
 
@@ -1775,13 +1775,6 @@ button.download {
 }
 button.download:hover {
 	background-color: #7ABF6E;
-}
-button.download.download-16bit {
-	background-color: #7EB8CF;
-	font-weight: bold;
-}
-button.download.download-16bit:hover {
-	background-color: #6EA8BF;
 }
 .loading-overlay {
 	display: flex;

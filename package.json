@@ -14,10 +14,10 @@
     "@ffmpeg/core": "^0.10.0",
     "@ffmpeg/ffmpeg": "^0.10.1",
     "@sentry/vue": "^10.33.0",
+    "fast-png": "^8.0.0",
     "lodash": "^4.17.21",
     "nuxt": "^3.10.3",
     "socket.io-client": "^4.7.4",
-    "upng-js": "^2.1.0",
     "vue": "^3.4.19",
     "vue-router": "^4.2.5"
   }
