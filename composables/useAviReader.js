@@ -400,8 +400,18 @@ export function useAviReader() {
             return null;
         }
 
-        // Add 10% margin to the max size and round up to even number
-        let finalSize = Math.ceil(maxSize * 1.05 / 2) * 2;
+        // Calculate median size (more robust than max which can be skewed by moons/noise)
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
+
+        // Use median size with 5% margin, capped at frame dimensions
+        const desiredSize = Math.ceil(medianSize * 1.05 / 2) * 2;
+        const maxAllowedSize = Math.min(aviHeader.width, aviHeader.height);
+        let finalSize = Math.min(desiredSize, maxAllowedSize);
+
+        if (desiredSize > maxAllowedSize) {
+            addLog(`Crop size ${desiredSize} (from median ${medianSize}) exceeds frame size ${maxAllowedSize}, clamping`);
+        }
 
         // Calculate median center position as fallback reference
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -409,18 +419,7 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Calculate median size for outlier detection (reject doubled/smeared frames)
-        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
-        const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
-
-        // Limit crop size to frame dimensions
-        const maxAllowedSize = Math.min(aviHeader.width, aviHeader.height);
-        if (finalSize > maxAllowedSize) {
-            addLog(`Crop size ${finalSize} exceeds frame size ${maxAllowedSize}, skipping auto-crop`);
-            return null;
-        }
-
-        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, max detected: ${maxSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
@@ -1173,6 +1172,7 @@ export function useAviReader() {
         let maxSize = 0;
         let canCropCount = 0;
         const detectedCenters = []; // Collect center positions for stable reference
+        const detectedSizes = []; // Collect sizes for median calculation
 
         // Process sequentially to limit memory usage
         for (let idx = 0; idx < sampleIndices.length; idx++) {
@@ -1208,6 +1208,7 @@ export function useAviReader() {
                     maxSize = Math.max(maxSize, result.bounds.size);
                     // Use actual detected center (not derived from clamped crop coords)
                     detectedCenters.push({ x: result.bounds.centerX, y: result.bounds.centerY });
+                    detectedSizes.push(result.bounds.size);
                 } else if (result.bounds) {
                     console.log(`Frame ${i} can't crop: ${result.bounds.reason || 'unknown'}`);
                 }
@@ -1229,12 +1230,17 @@ export function useAviReader() {
             return null;
         }
 
-        let finalSize = Math.ceil(maxSize * 1.05 / 2) * 2;
+        // Calculate median size (more robust than max which can be skewed by moons/noise)
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
 
+        // Use median size with 5% margin, capped at frame dimensions
+        const desiredSize = Math.ceil(medianSize * 1.05 / 2) * 2;
         const maxAllowedSize = Math.min(header.width, header.height);
-        if (finalSize > maxAllowedSize) {
-            addLog(`Crop size ${finalSize} exceeds frame size ${maxAllowedSize}, skipping auto-crop`);
-            return null;
+        let finalSize = Math.min(desiredSize, maxAllowedSize);
+
+        if (desiredSize > maxAllowedSize) {
+            addLog(`Crop size ${desiredSize} (from median ${medianSize}) exceeds frame size ${maxAllowedSize}, clamping`);
         }
 
         // Calculate median center position as fallback reference
@@ -1243,7 +1249,7 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, max detected: ${maxSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY } };
     }

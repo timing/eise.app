@@ -192,7 +192,6 @@ export function useImageReader() {
 
         // Process in batches
         const BATCH_SIZE = 32;
-        let maxSize = 0;
         let canCropCount = 0;
         const detectedCenters = [];
         const detectedSizes = [];
@@ -206,7 +205,6 @@ export function useImageReader() {
             for (const result of results) {
                 if (result.bounds) {
                     canCropCount++;
-                    maxSize = Math.max(maxSize, result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
                     detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
                     detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
                 }
@@ -225,27 +223,28 @@ export function useImageReader() {
             return null;
         }
 
-        // Add 10% margin and round to even
-        let finalSize = Math.ceil(maxSize * 1.05 / 2) * 2;
+        // Calculate median size (more robust than max which can be skewed by moons/noise)
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
 
+        // Use median size with 5% margin, capped at frame dimensions
+        const desiredSize = Math.ceil(medianSize * 1.05 / 2) * 2;
         const maxAllowedSize = Math.min(frameWidth, frameHeight);
-        if (finalSize > maxAllowedSize) {
-            addLog(`Crop size ${finalSize} exceeds frame size ${maxAllowedSize}, skipping auto-crop`);
-            return null;
+        let finalSize = Math.min(desiredSize, maxAllowedSize);
+
+        if (desiredSize > maxAllowedSize) {
+            addLog(`Crop size ${desiredSize} (from median ${Math.round(medianSize)}) exceeds frame size ${maxAllowedSize}, clamping`);
         }
 
         if (detectedCenters.length === 0) {
-            addLog(`Detected crop size: ${finalSize}x${finalSize}`);
-            return { size: finalSize };
+            addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}`);
+            return { size: finalSize, medianObjectSize: medianSize };
         }
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
         const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
-
-        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
-        const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
 
         addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}`);
 

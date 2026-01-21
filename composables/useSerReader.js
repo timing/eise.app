@@ -380,21 +380,24 @@ export function useSerReader() {
             return null;
         }
 
-        // Add margin to the max size and round up to even number
-        const marginMultiplier = 1 + (cropMarginPercent / 100);
-        let finalSize = Math.ceil(maxSize * marginMultiplier / 2) * 2;
+        // Calculate median size (more robust than max which can be skewed by moons/noise)
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
 
-        // Limit crop size to frame dimensions
+        // Use median size with margin, capped at frame dimensions
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(header.width, header.height);
-        if (finalSize > maxAllowedSize) {
-            addLog(`Crop size ${finalSize} exceeds frame size ${maxAllowedSize}, skipping auto-crop`);
-            return null;
+        let finalSize = Math.min(desiredSize, maxAllowedSize);
+
+        if (desiredSize > maxAllowedSize) {
+            addLog(`Crop size ${desiredSize} (from median ${medianSize}) exceeds frame size ${maxAllowedSize}, clamping`);
         }
 
         // Calculate median center as fallback reference
         if (detectedCenters.length === 0) {
-            addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
-            return { size: finalSize };
+            addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+            return { size: finalSize, medianObjectSize: medianSize };
         }
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -402,17 +405,14 @@ export function useSerReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Calculate median size for outlier detection (reject doubled/smeared frames)
-        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
-        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
-
-        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, max detected: ${maxSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
     // GPU-accelerated crop region detection - uses GPU for bounds detection
     async function detectCropRegionGpu(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent = 10) {
+        addLog(`Using crop margin: ${cropMarginPercent}%`);
         emit('set-caption', 'Detecting planet position (GPU)...');
         emit('update-loading', { progress: 0, current: 0, total: frameCount });
 
@@ -502,21 +502,24 @@ export function useSerReader() {
             return null;
         }
 
-        // Add margin to the max size and round up to even number
-        const marginMultiplier = 1 + (cropMarginPercent / 100);
-        let finalSize = Math.ceil(maxSize * marginMultiplier / 2) * 2;
+        // Calculate median size (more robust than max which can be skewed by moons/noise)
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
 
-        // Limit crop size to frame dimensions
+        // Use median size with margin, capped at frame dimensions
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(header.width, header.height);
-        if (finalSize > maxAllowedSize) {
-            addLog(`Crop size ${finalSize} exceeds frame size ${maxAllowedSize}, skipping auto-crop`);
-            return null;
+        let finalSize = Math.min(desiredSize, maxAllowedSize);
+
+        if (desiredSize > maxAllowedSize) {
+            addLog(`Crop size ${desiredSize} (from median ${medianSize}) exceeds frame size ${maxAllowedSize}, clamping`);
         }
 
         // Calculate median center as fallback reference
         if (detectedCenters.length === 0) {
-            addLog(`GPU detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
-            return { size: finalSize };
+            addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+            return { size: finalSize, medianObjectSize: medianSize };
         }
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -524,11 +527,7 @@ export function useSerReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Calculate median size for outlier detection
-        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
-        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
-
-        addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+        addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, max detected: ${maxSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
@@ -1554,20 +1553,23 @@ export function useSerReader() {
             return null;
         }
 
-        // Add margin and round to even
-        const marginMultiplier = 1 + (cropMarginPercent / 100);
-        let finalSize = Math.ceil(maxSize * marginMultiplier / 2) * 2;
+        // Calculate median size (more robust than max which can be skewed by moons/noise)
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
 
-        // Limit to smallest frame dimensions across all files
+        // Use median size with margin, capped at smallest frame dimensions
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(...fileInfos.map(info => Math.min(info.header.width, info.header.height)));
-        if (finalSize > maxAllowedSize) {
-            addLog(`Crop size ${finalSize} exceeds smallest frame size ${maxAllowedSize}, skipping auto-crop`);
-            return null;
+        let finalSize = Math.min(desiredSize, maxAllowedSize);
+
+        if (desiredSize > maxAllowedSize) {
+            addLog(`Crop size ${desiredSize} (from median ${medianSize}) exceeds smallest frame size ${maxAllowedSize}, clamping`);
         }
 
         if (detectedCenters.length === 0) {
-            addLog(`GPU detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleFrames.length} frames croppable)`);
-            return { size: finalSize };
+            addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleFrames.length} frames croppable)`);
+            return { size: finalSize, medianObjectSize: medianSize };
         }
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -1575,10 +1577,7 @@ export function useSerReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
-        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
-
-        addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleFrames.length} frames croppable across ${fileInfos.length} files)`);
+        addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, max detected: ${maxSize} (${canCropCount}/${sampleFrames.length} frames croppable across ${fileInfos.length} files)`);
 
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
@@ -1666,19 +1665,23 @@ export function useSerReader() {
             return null;
         }
 
-        const marginMultiplier = 1 + (cropMarginPercent / 100);
-        let finalSize = Math.ceil(maxSize * marginMultiplier / 2) * 2;
+        // Calculate median size (more robust than max which can be skewed by moons/noise)
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
 
-        // Use the smallest frame dimensions across all files as limit
+        // Use median size with margin, capped at smallest frame dimensions
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(...fileInfos.map(info => Math.min(info.header.width, info.header.height)));
-        if (finalSize > maxAllowedSize) {
-            addLog(`Crop size ${finalSize} exceeds smallest frame size ${maxAllowedSize}, skipping auto-crop`);
-            return null;
+        let finalSize = Math.min(desiredSize, maxAllowedSize);
+
+        if (desiredSize > maxAllowedSize) {
+            addLog(`Crop size ${desiredSize} (from median ${medianSize}) exceeds smallest frame size ${maxAllowedSize}, clamping`);
         }
 
         if (detectedCenters.length === 0) {
-            addLog(`Detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${actualSamples} frames croppable)`);
-            return { size: finalSize };
+            addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${actualSamples} frames croppable)`);
+            return { size: finalSize, medianObjectSize: medianSize };
         }
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -1686,10 +1689,7 @@ export function useSerReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
-        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
-
-        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${actualSamples} frames croppable across ${fileInfos.length} files)`);
+        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, max detected: ${maxSize} (${canCropCount}/${actualSamples} frames croppable across ${fileInfos.length} files)`);
 
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
