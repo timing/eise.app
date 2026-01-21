@@ -42,7 +42,7 @@
 					<input type="number" v-model.number="stackPercentage" min="1" max="100" class="percentage-input" :disabled="qualityMode !== 'percentage'" />%
 				</label>
 			</div>
-			<p v-if="qualityMode === 'manual'" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack. Note: this keeps all frames in memory.</p>
+			<p v-if="qualityMode === 'manual'" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack.</p>
 			<p v-if="qualityMode === 'percentage'" class="info-text">Stack best is recommended if you run into memory issues.</p>
 
 			<div class="separator"></div>

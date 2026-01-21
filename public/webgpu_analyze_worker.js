@@ -2317,6 +2317,24 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
     return results;
 }
 
+// Demosaic a single frame and scale to target size (for comparison video pre-crop frames)
+// Reuses the thumbnail scaling logic from generateBayerThumbnails
+async function demosaicAndScale(rawData, srcWidth, srcHeight, targetWidth, targetHeight, bayerPattern) {
+    // Call generateBayerThumbnails with just the one pattern we need
+    const results = await generateBayerThumbnails(
+        rawData, srcWidth, srcHeight,
+        rawData.byteLength / (srcWidth * srcHeight) > 1 ? 16 : 8,  // pixelDepth
+        targetWidth, targetHeight
+    );
+
+    // Find the result for our pattern
+    const patternIds = ['COLOR_BayerBG2RGB', 'COLOR_BayerRG2RGB', 'COLOR_BayerGB2RGB', 'COLOR_BayerGR2RGB', 'MONO'];
+    const patternId = bayerPattern < 0 ? 'MONO' : patternIds[bayerPattern] || patternIds[0];
+    const result = results.find(r => r.id === patternId);
+
+    return result ? result.rgba : results[0].rgba;
+}
+
 // ============================================================
 // MESSAGE HANDLING
 // ============================================================
@@ -2407,6 +2425,25 @@ self.addEventListener('message', async (e) => {
                 results.map(r => r.rgba));
         } catch (err) {
             self.postMessage({ type: 'demosaic-thumbnails-error', error: err.message });
+        }
+        return;
+    }
+
+    // Demosaic a single frame and scale to target size (for comparison video pre-crop frames)
+    if (type === 'demosaic-scaled') {
+        if (!isReady) {
+            self.postMessage({ type: 'demosaic-scaled-error', error: 'Not initialized', requestId: e.data.requestId });
+            return;
+        }
+
+        const { rawData, srcWidth, srcHeight, targetWidth, targetHeight, bayerPattern, requestId } = e.data;
+
+        try {
+            const result = await demosaicAndScale(rawData, srcWidth, srcHeight, targetWidth, targetHeight, bayerPattern);
+            self.postMessage({ type: 'demosaic-scaled-result', requestId, rgba: result }, [result]);
+        } catch (err) {
+            console.error('[GPU] demosaic-scaled error:', err);
+            self.postMessage({ type: 'demosaic-scaled-error', requestId, error: err.message });
         }
         return;
     }

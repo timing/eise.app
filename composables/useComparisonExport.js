@@ -4,7 +4,8 @@
 import { ref } from 'vue';
 
 // Shared state for captured frames
-const preCropFrames = ref([]);       // Frames before cropping (full frame, shows wobble)
+const preCropFrames = ref([]);       // Frames before cropping (full frame, shows wobble) - legacy RGBA
+const preCropRawFrames = ref([]);    // Raw Bayer frames for lazy demosaic (two-pass mode)
 const postCropFrames = ref([]);      // Frames after cropping (centered on planet)
 const unstackedImage = ref(null);    // Raw stack before post-processing
 const processedImage = ref(null);    // Final processed image
@@ -13,21 +14,22 @@ const MAX_COMPARISON_FRAMES = 10;
 
 export function useComparisonExport() {
     /**
-     * Store a pre-crop frame (full frame before cropping)
-     * Called during frame analysis before crop is applied
+     * Store a pre-crop frame (raw Bayer data for lazy demosaic)
+     * Called during stacking with raw frame data
      */
-    function capturePreCropFrame(rgbaBuffer, width, height, index, totalFrames) {
+    function capturePreCropFrame(rawData, width, height, index, totalFrames, bayerPattern = 0) {
         // Sample evenly across all frames
         const sampleInterval = Math.max(1, Math.floor(totalFrames / MAX_COMPARISON_FRAMES));
 
-        if (index % sampleInterval === 0 && preCropFrames.value.length < MAX_COMPARISON_FRAMES) {
+        if (index % sampleInterval === 0 && preCropRawFrames.value.length < MAX_COMPARISON_FRAMES) {
             // Clone the buffer since it may be transferred
-            const clonedBuffer = rgbaBuffer.slice(0);
-            preCropFrames.value.push({
-                rgbaBuffer: clonedBuffer,
+            const clonedBuffer = rawData.buffer ? rawData.slice(0) : new Uint8Array(rawData).slice(0);
+            preCropRawFrames.value.push({
+                rawData: clonedBuffer,
                 width,
                 height,
-                index
+                index,
+                bayerPattern
             });
         }
     }
@@ -71,6 +73,7 @@ export function useComparisonExport() {
      */
     function resetCaptures() {
         preCropFrames.value = [];
+        preCropRawFrames.value = [];
         postCropFrames.value = [];
         unstackedImage.value = null;
         processedImage.value = null;
@@ -118,9 +121,21 @@ export function useComparisonExport() {
 
         const gridSize = 512;  // Each quadrant is 256x256, total 512x512
         const quadrantSize = 256;
-        const hasPreCrop = preCropFrames.value.length > 0;
+
+        // Check for pre-crop data (either processed RGBA or raw Bayer)
+        const hasPreCropRgba = preCropFrames.value.length > 0;
+        const hasPreCropRaw = preCropRawFrames.value.length > 0;
+        const hasPreCrop = hasPreCropRgba || hasPreCropRaw;
+
+        // Process raw pre-crop frames lazily if needed
+        let processedPreCropFrames = preCropFrames.value;
+        if (!hasPreCropRgba && hasPreCropRaw) {
+            onProgress?.('Processing pre-crop frames...');
+            processedPreCropFrames = await processRawFrames(preCropRawFrames.value, quadrantSize, onProgress);
+        }
+
         const frameCount = hasPreCrop
-            ? Math.min(preCropFrames.value.length, postCropFrames.value.length)
+            ? Math.min(processedPreCropFrames.length, postCropFrames.value.length)
             : postCropFrames.value.length;
         const fps = 10;
 
@@ -150,8 +165,8 @@ export function useComparisonExport() {
             ctx.fillRect(0, quadrantSize, gridSize, 20);
 
             // Top-left: Pre-crop frame if available, otherwise first post-crop frame (static)
-            if (hasPreCrop) {
-                const preCropFrame = preCropFrames.value[i % preCropFrames.value.length];
+            if (hasPreCrop && processedPreCropFrames.length > 0) {
+                const preCropFrame = processedPreCropFrames[i % processedPreCropFrames.length];
                 drawScaledFrame(ctx, preCropFrame.rgbaBuffer, preCropFrame.width, preCropFrame.height, 0, 0, quadrantSize, quadrantSize);
             } else {
                 // Show first frame as static "original"
@@ -248,6 +263,70 @@ export function useComparisonExport() {
     }
 
     /**
+     * Helper: Process raw Bayer frames to RGBA using GPU worker
+     */
+    async function processRawFrames(rawFrames, targetSize, onProgress) {
+        const results = [];
+
+        // Create a temporary GPU worker for demosaic (the stacking worker may have been terminated)
+        const worker = new Worker('/webgpu_analyze_worker.js');
+
+        try {
+            // Wait for worker to initialize
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('GPU worker timeout')), 10000);
+                worker.onmessage = (e) => {
+                    if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
+                    else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
+                };
+                worker.postMessage({ type: 'init' });
+            });
+
+            for (let i = 0; i < rawFrames.length; i++) {
+                const frame = rawFrames[i];
+                onProgress?.(`Demosaicing pre-crop frame ${i + 1}/${rawFrames.length}...`);
+
+                const rgba = await new Promise((resolve, reject) => {
+                    const requestId = Date.now() + Math.random();
+                    const handler = (e) => {
+                        if (e.data.requestId !== requestId) return;
+                        worker.removeEventListener('message', handler);
+                        if (e.data.type === 'demosaic-scaled-result') {
+                            resolve(e.data.rgba);
+                        } else if (e.data.type === 'demosaic-scaled-error') {
+                            reject(new Error(e.data.error));
+                        }
+                    };
+                    worker.addEventListener('message', handler);
+                    worker.postMessage({
+                        type: 'demosaic-scaled',
+                        rawData: frame.rawData,
+                        srcWidth: frame.width,
+                        srcHeight: frame.height,
+                        targetWidth: targetSize,
+                        targetHeight: targetSize,
+                        bayerPattern: frame.bayerPattern,
+                        requestId
+                    });
+                });
+
+                results.push({
+                    rgbaBuffer: rgba,
+                    width: targetSize,
+                    height: targetSize,
+                    index: frame.index
+                });
+            }
+        } catch (err) {
+            console.warn('Failed to process pre-crop frames:', err);
+        } finally {
+            worker.terminate();
+        }
+
+        return results;
+    }
+
+    /**
      * Helper: Draw RGBA buffer scaled to target area
      */
     function drawScaledFrame(ctx, rgbaBuffer, srcWidth, srcHeight, destX, destY, destWidth, destHeight) {
@@ -285,6 +364,7 @@ export function useComparisonExport() {
         generateComparisonVideo,
         // Expose refs for reactivity
         preCropFrames,
+        preCropRawFrames,
         postCropFrames,
         unstackedImage,
         processedImage

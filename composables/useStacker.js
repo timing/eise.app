@@ -3,7 +3,7 @@ import { useComparisonExport } from '@/composables/useComparisonExport';
 
 export function useStacker() {
     const { addLog, emit } = useEventBus();
-    const { captureUnstackedImage } = useComparisonExport();
+    const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
 
     /**
      * Convert Float32 buffer to Uint8 buffer (for GPU workers that expect Uint8)
@@ -353,6 +353,17 @@ export function useStacker() {
 
                 // Process current batch via GPU (demosaic + crop)
                 const gpuResults = await processGpuBatch(rawBatch.frames, rawBatch.centers);
+
+                // Capture frames for comparison video (both raw pre-crop and processed post-crop)
+                for (let i = 0; i < gpuResults.length; i++) {
+                    const globalIndex = batchStart + i;
+                    // Post-crop: convert float32 to uint8
+                    const uint8Buffer = float32ToUint8(gpuResults[i].float32Buffer, cropSize, cropSize);
+                    capturePostCropFrame(uint8Buffer, cropSize, cropSize, globalIndex, frameCount);
+                    // Pre-crop: store raw Bayer data for lazy demosaic later
+                    const rawFrame = rawBatch.frames[i];
+                    capturePreCropFrame(rawFrame.data, srcWidth, srcHeight, globalIndex, frameCount, bayerPattern);
+                }
 
                 // Calculate shifts for batch via GPU template matching
                 const frameGrayDatas = gpuResults.map(r =>
