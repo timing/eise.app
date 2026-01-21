@@ -228,6 +228,16 @@ async function drawPreview() {
 				img.onerror = reject;
 				img.src = url;
 			});
+		} else if (frame.uint8Buffer && frame.width && frame.height) {
+			// Use Uint8 buffer directly (already 8-bit RGBA)
+			const uint8Data = new Uint8ClampedArray(frame.uint8Buffer);
+			const tempCanvas = document.createElement('canvas');
+			tempCanvas.width = frame.width;
+			tempCanvas.height = frame.height;
+			const tempCtx = tempCanvas.getContext('2d');
+			const imageData = new ImageData(uint8Data, frame.width, frame.height);
+			tempCtx.putImageData(imageData, 0, 0);
+			img = tempCanvas;
 		} else if (frame.float32Buffer && frame.width && frame.height) {
 			// Convert Float32Array (0.0-1.0) to Uint8ClampedArray for display
 			const float32Data = new Float32Array(frame.float32Buffer);

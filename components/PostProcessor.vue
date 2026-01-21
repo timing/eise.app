@@ -1279,39 +1279,33 @@ function undoCrop() {
 // Rotation functions
 function rotateImageData(imageData, angleDegrees) {
 	const angleRad = angleDegrees * Math.PI / 180;
-	const cos = Math.abs(Math.cos(angleRad));
-	const sin = Math.abs(Math.sin(angleRad));
 
-	const oldWidth = imageData.width;
-	const oldHeight = imageData.height;
-
-	// Calculate new dimensions to fit rotated image
-	const newWidth = Math.ceil(oldWidth * cos + oldHeight * sin);
-	const newHeight = Math.ceil(oldWidth * sin + oldHeight * cos);
+	const width = imageData.width;
+	const height = imageData.height;
 
 	// Create temp canvas with old image
 	const srcCanvas = document.createElement('canvas');
-	srcCanvas.width = oldWidth;
-	srcCanvas.height = oldHeight;
+	srcCanvas.width = width;
+	srcCanvas.height = height;
 	const srcCtx = srcCanvas.getContext('2d');
 	srcCtx.putImageData(imageData, 0, 0);
 
-	// Create rotated canvas
+	// Create rotated canvas (same size - corners will be clipped)
 	const rotatedCanvas = document.createElement('canvas');
-	rotatedCanvas.width = newWidth;
-	rotatedCanvas.height = newHeight;
+	rotatedCanvas.width = width;
+	rotatedCanvas.height = height;
 	const rotatedCtx = rotatedCanvas.getContext('2d');
 
-	// Fill with black background (for gaps)
+	// Fill with black background
 	rotatedCtx.fillStyle = '#000000';
-	rotatedCtx.fillRect(0, 0, newWidth, newHeight);
+	rotatedCtx.fillRect(0, 0, width, height);
 
 	// Rotate around center
-	rotatedCtx.translate(newWidth / 2, newHeight / 2);
+	rotatedCtx.translate(width / 2, height / 2);
 	rotatedCtx.rotate(angleRad);
-	rotatedCtx.drawImage(srcCanvas, -oldWidth / 2, -oldHeight / 2);
+	rotatedCtx.drawImage(srcCanvas, -width / 2, -height / 2);
 
-	return rotatedCtx.getImageData(0, 0, newWidth, newHeight);
+	return rotatedCtx.getImageData(0, 0, width, height);
 }
 
 function previewRotation() {
@@ -1320,11 +1314,11 @@ function previewRotation() {
 }
 
 function applyRotation() {
-	// Clear CSS preview
-	previewRotationAngle.value = 0;
-
 	// If rotation is same as already applied, nothing to do
-	if (rotation.value === appliedRotation) return;
+	if (rotation.value === appliedRotation) {
+		previewRotationAngle.value = 0;
+		return;
+	}
 
 	// If rotation is 0 and we have applied rotation, reset instead
 	if (rotation.value === 0 && hasAppliedRotation.value) {
@@ -1371,6 +1365,9 @@ function applyRotation() {
 
 	// Reprocess with current settings
 	applyProcessing();
+
+	// Clear CSS preview after pixels are rotated
+	previewRotationAngle.value = 0;
 }
 
 function resetRotation() {

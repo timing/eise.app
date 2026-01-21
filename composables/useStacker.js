@@ -84,14 +84,384 @@ export function useStacker() {
     }
 
     /**
+     * Pipelined two-pass GPU stacking
+     * Loads frames from file and stacks them concurrently for better performance
+     * Instead of: load ALL → then stack ALL
+     * Does: load batch → align → stack, while loading next batch
+     *
+     * Supports both SER files (raw Bayer) and image files (RGBA)
+     */
+    async function stackWithGpuPipelined(frameMetadata, frameReReader, drizzleScale, addLog, emit) {
+        const frameCount = frameMetadata.length;
+
+        // Detect frameReReader type and extract parameters
+        const isSerFile = frameReReader.fileType === 'ser' || frameReReader.header;
+        const isImageFile = frameReReader.fileType === 'image' || frameReReader.rgbaFrames;
+
+        let cropSize, srcWidth, srcHeight, bayerPattern;
+
+        if (isSerFile) {
+            const { header, bayerChoice, cropRegion } = frameReReader;
+            cropSize = cropRegion?.size || header.width;
+            srcWidth = header.width;
+            srcHeight = header.height;
+
+            // Map bayer choice to GPU pattern
+            const bayerMap = {
+                'COLOR_BayerBG2RGB': 0, 'COLOR_BayerGB2RGB': 1,
+                'COLOR_BayerRG2RGB': 2, 'COLOR_BayerGR2RGB': 3,
+                'COLOR_BayerBG2RGB_VNG': 0, 'COLOR_BayerGB2RGB_VNG': 1,
+                'COLOR_BayerRG2RGB_VNG': 2, 'COLOR_BayerGR2RGB_VNG': 3,
+                'MONO': -1
+            };
+            bayerPattern = bayerMap[bayerChoice] ?? -1;
+        } else if (isImageFile) {
+            cropSize = frameReReader.cropRegion?.size || frameReReader.srcWidth;
+            srcWidth = frameReReader.srcWidth;
+            srcHeight = frameReReader.srcHeight;
+            bayerPattern = -1; // RGBA input, no demosaic
+        } else {
+            throw new Error('Unknown frameReReader type');
+        }
+
+        addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}`);
+        emit('set-caption', 'Initializing GPU workers...');
+
+        // Initialize all workers in parallel
+        const gpuAnalyzeWorker = new Worker('/webgpu_analyze_worker.js');
+        const cvWorker = new Worker('/unified_analyze_worker.js');
+        const gpuStackWorker = new Worker('/webgpu_worker.js');
+
+        try {
+            // Init all workers in parallel
+            await Promise.all([
+                new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error('GPU analyze worker timeout')), 30000);
+                    gpuAnalyzeWorker.onmessage = (e) => {
+                        if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
+                        else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
+                    };
+                    gpuAnalyzeWorker.postMessage({ type: 'init' });
+                }),
+                new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error('CV worker timeout')), 30000);
+                    cvWorker.onmessage = (e) => {
+                        if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
+                        else if (e.data.type === 'error') { clearTimeout(timeout); reject(new Error(e.data.message)); }
+                    };
+                    cvWorker.postMessage({ type: 'init' });
+                }),
+                new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error('GPU stack worker timeout')), 10000);
+                    gpuStackWorker.onmessage = (e) => {
+                        if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
+                        else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
+                    };
+                    gpuStackWorker.postMessage({ type: 'init' });
+                })
+            ]);
+            addLog('All workers initialized');
+
+            // Helper to load a batch of frames (SER from file, images from memory)
+            async function loadRawBatch(batchFrames) {
+                const frames = [];
+                const centers = [];
+
+                if (isSerFile) {
+                    const { file, frameSize, header } = frameReReader;
+                    for (const frame of batchFrames) {
+                        const offset = 178 + (frame.index * frameSize);
+                        const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+                        const data = header.pixelDepth > 8
+                            ? new Uint16Array(frameBuffer)
+                            : new Uint8Array(frameBuffer);
+                        frames.push({ data, index: frame.index });
+                        centers.push({ x: frame.centerX, y: frame.centerY });
+                    }
+                } else if (isImageFile) {
+                    for (const frame of batchFrames) {
+                        const rgba = frameReReader.rgbaFrames[frame.index];
+                        if (rgba) {
+                            frames.push({ data: rgba.data, index: frame.index });
+                            centers.push({ x: frame.centerX, y: frame.centerY });
+                        }
+                    }
+                }
+
+                return { frames, centers };
+            }
+
+            // Helper to process batch via GPU analyze worker
+            async function processGpuBatch(frames, centers) {
+                return new Promise((resolve, reject) => {
+                    const requestId = Date.now() + Math.random();
+                    const handler = (e) => {
+                        if (e.data.requestId !== requestId) return;
+                        gpuAnalyzeWorker.removeEventListener('message', handler);
+                        if (e.data.type === 'crop-analyze-result') {
+                            resolve(e.data.results);
+                        } else if (e.data.type === 'crop-analyze-error') {
+                            reject(new Error(e.data.error));
+                        }
+                    };
+                    gpuAnalyzeWorker.addEventListener('message', handler);
+                    gpuAnalyzeWorker.postMessage({
+                        type: 'crop-analyze-batch',
+                        frames,
+                        srcWidth,
+                        srcHeight,
+                        cropSize,
+                        centers,
+                        bayerPattern,
+                        threshold: 0.1,
+                        requestId,
+                        metadataOnly: false // Get float32 data for stacking
+                    });
+                });
+            }
+
+            // Step 1: Find and load reference frame
+            emit('set-caption', 'Loading reference frame...');
+            const sortedBySharpness = [...frameMetadata].sort((a, b) => b.sharpness - a.sharpness);
+            const topCount = Math.max(1, Math.ceil(sortedBySharpness.length * 0.01));
+            const topFrames = sortedBySharpness.slice(0, topCount);
+            const avgCircularity = topFrames.reduce((sum, f) => sum + (f.circularity || 0), 0) / topFrames.length;
+
+            let refFrameMeta;
+            if (avgCircularity > 0.7) {
+                refFrameMeta = topFrames.reduce((best, f) =>
+                    (f.circularity || 0) > (best.circularity || 0) ? f : best
+                );
+            } else {
+                refFrameMeta = sortedBySharpness[0];
+            }
+
+            // Load reference frame
+            const { frames: refFrames, centers: refCenters } = await loadRawBatch([refFrameMeta]);
+            const refResults = await processGpuBatch(refFrames, refCenters);
+            const refFrame = {
+                ...refFrameMeta,
+                float32Buffer: refResults[0].float32Buffer,
+                width: cropSize,
+                height: cropSize
+            };
+            emit('stacking-started', { referenceFrame: refFrame });
+            addLog(`Reference frame loaded: index ${refFrame.index}`);
+
+            // Step 2: Prepare alignment points
+            emit('set-caption', 'Preparing alignment points...');
+            const refFrameData = {
+                float32Buffer: refFrame.float32Buffer.slice(0),
+                width: cropSize,
+                height: cropSize,
+                sharpness: refFrame.sharpness
+            };
+
+            const alignmentData = await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('Alignment preparation timeout')), 60000);
+                cvWorker.onmessage = (e) => {
+                    if (e.data.type === 'alignment-prepared') {
+                        clearTimeout(timeout);
+                        resolve(e.data);
+                    } else if (e.data.type === 'prepare-error') {
+                        clearTimeout(timeout);
+                        reject(new Error(e.data.error));
+                    }
+                };
+                cvWorker.postMessage({ type: 'prepare-alignment', refFrame: refFrameData, refIndex: 0 });
+            });
+
+            const { alignmentPoints, refGrayData, patchSize, searchRadius } = alignmentData;
+            addLog(`Alignment prepared: ${alignmentPoints.length} APs`);
+
+            // Calculate reference brightness for normalization
+            const refBrightness = calcMeanBrightness(refFrame.float32Buffer, cropSize, cropSize, true) * 255;
+
+            // Step 3: Initialize GPU stacker
+            await new Promise((resolve, reject) => {
+                const handler = (e) => {
+                    if (e.data.type === 'init-stacking-done') {
+                        gpuStackWorker.removeEventListener('message', handler);
+                        resolve();
+                    } else if (e.data.type === 'init-stacking-error') {
+                        gpuStackWorker.removeEventListener('message', handler);
+                        reject(new Error(e.data.error));
+                    }
+                };
+                gpuStackWorker.addEventListener('message', handler);
+                gpuStackWorker.postMessage({
+                    type: 'init-stacking',
+                    width: cropSize,
+                    height: cropSize,
+                    drizzleScale,
+                    alignmentPoints,
+                    patchSize,
+                    refBrightness
+                });
+            });
+            addLog('GPU stacker initialized');
+
+            // Step 4: Process frames in pipelined batches
+            emit('set-caption', 'Stacking...');
+            const BATCH_SIZE = 32;
+            const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
+            let processedCount = 0;
+
+            // Pre-load first batch
+            let batchStart = 0;
+            let nextBatchPromise = null;
+
+            while (batchStart < frameCount) {
+                const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
+                const batchFrames = frameMetadata.slice(batchStart, batchEnd);
+
+                // Get current batch (pre-loaded or load now)
+                let rawBatch;
+                if (nextBatchPromise) {
+                    rawBatch = await nextBatchPromise;
+                } else {
+                    rawBatch = await loadRawBatch(batchFrames);
+                }
+
+                // Start loading next batch while processing current
+                const nextStart = batchEnd;
+                if (nextStart < frameCount) {
+                    const nextEnd = Math.min(nextStart + BATCH_SIZE, frameCount);
+                    const nextFrames = frameMetadata.slice(nextStart, nextEnd);
+                    nextBatchPromise = loadRawBatch(nextFrames);
+                } else {
+                    nextBatchPromise = null;
+                }
+
+                // Process current batch via GPU (demosaic + crop)
+                const gpuResults = await processGpuBatch(rawBatch.frames, rawBatch.centers);
+
+                // Calculate shifts for batch via GPU template matching
+                const frameGrayDatas = gpuResults.map(r =>
+                    rgbaToGrayscale(r.float32Buffer, cropSize, cropSize, true)
+                );
+
+                const batchShifts = await new Promise((resolve, reject) => {
+                    const requestId = batchStart;
+                    const handler = (e) => {
+                        if (e.data.requestId !== requestId) return;
+                        gpuStackWorker.removeEventListener('message', handler);
+                        if (e.data.type === 'batch-result') resolve(e.data.allShifts);
+                        else if (e.data.type === 'batch-error') reject(new Error(e.data.error));
+                    };
+                    gpuStackWorker.addEventListener('message', handler);
+                    gpuStackWorker.postMessage({
+                        type: 'match-templates-batch',
+                        requestId,
+                        refGrayData,
+                        frameGrayDatas,
+                        width: cropSize,
+                        height: cropSize,
+                        alignmentPoints,
+                        patchSize,
+                        searchRadius
+                    });
+                });
+
+                // Send batch to GPU stacker
+                const batchForStacker = gpuResults.map((r, i) => ({
+                    rgbaBuffer: float32ToUint8(r.float32Buffer, cropSize, cropSize),
+                    sharpness: batchFrames[i].sharpness
+                }));
+                const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
+
+                await new Promise((resolve, reject) => {
+                    const handler = (e) => {
+                        if (e.data.type === 'stack-batch-done') {
+                            gpuStackWorker.removeEventListener('message', handler);
+                            resolve();
+                        } else if (e.data.type === 'stack-frame-error') {
+                            gpuStackWorker.removeEventListener('message', handler);
+                            reject(new Error(e.data.error));
+                        }
+                    };
+                    gpuStackWorker.addEventListener('message', handler);
+                    gpuStackWorker.postMessage({
+                        type: 'stack-frame-batch',
+                        frames: batchForStacker,
+                        shifts: batchShifts,
+                        frameWeights: batchWeights
+                    });
+                });
+
+                processedCount += batchFrames.length;
+                const progress = (processedCount / frameCount) * 90;
+                emit('set-caption', 'Stacking...');
+                emit('update-loading', { progress, current: processedCount, total: frameCount });
+
+                batchStart = batchEnd;
+            }
+
+            // Step 5: Finalize stacking
+            emit('set-caption', 'Finalizing...');
+            const result = await new Promise((resolve, reject) => {
+                const handler = (e) => {
+                    if (e.data.type === 'stack-complete') {
+                        gpuStackWorker.removeEventListener('message', handler);
+                        resolve(e.data);
+                    } else if (e.data.type === 'finalize-error') {
+                        gpuStackWorker.removeEventListener('message', handler);
+                        reject(new Error(e.data.error));
+                    }
+                };
+                gpuStackWorker.addEventListener('message', handler);
+                gpuStackWorker.postMessage({ type: 'finalize-stacking' });
+            });
+
+            // Cleanup
+            gpuStackWorker.postMessage({ type: 'cleanup' });
+            gpuAnalyzeWorker.terminate();
+            cvWorker.terminate();
+            gpuStackWorker.terminate();
+
+            addLog(`Stacking complete: ${result.width}x${result.height}`);
+            emit('set-caption', 'Stacking complete');
+
+            captureUnstackedImage(result.blob);
+
+            return {
+                blob: result.blob,
+                float32Data: result.float32Buffer ? new Float32Array(result.float32Buffer) : null,
+                width: result.width,
+                height: result.height
+            };
+
+        } catch (error) {
+            gpuAnalyzeWorker.terminate();
+            cvWorker.terminate();
+            gpuStackWorker.terminate();
+            addLog(`Pipelined stacking error: ${error.message}`);
+            throw error;
+        }
+    }
+
+    /**
      * Stack frames using a web worker for local alignment
      * @param frames - Array of frame objects with float32Buffer (or rgbaBuffer for legacy), width, height, sharpness
+     *                 For two-pass mode: frames may have only metadata (sharpness, centerX, centerY) with no buffer
      * @param existingWorker - Optional: reuse an existing initialized worker
      * @param drizzleScale - Output scale factor (1.0 = normal, 1.5 = drizzle)
+     * @param noiseRobustAlignment - Enable noise-robust alignment
+     * @param useWebGPU - Use WebGPU for stacking
+     * @param frameReReader - Optional: two-pass mode - re-read frames on demand instead of using pre-loaded buffers
      */
-    async function stackFramesLocally(frames, existingWorker = null, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
+    async function stackFramesLocally(frames, existingWorker = null, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, frameReReader = null) {
         emit('set-caption', 'Preparing for stacking...');
         emit('update-loading', { progress: 0, current: 0, total: 0 });
+
+        // TWO-PASS MODE: If frameReReader is provided and frames don't have buffers,
+        // use pipelined stacking (load + stack concurrently)
+        const hasTwoPassFrames = frames.length > 0 && !frames[0].float32Buffer && !frames[0].rgbaBuffer && frameReReader;
+
+        if (hasTwoPassFrames && useWebGPU) {
+            // Use pipelined approach: load batch → align → stack, while loading next batch
+            return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit);
+        }
 
         // Filter frames that have valid buffer (float32Buffer preferred, rgbaBuffer for legacy) and sharpness
         // DEBUG: Log filtering stats
@@ -445,8 +815,8 @@ export function useStacker() {
 
                 stackedCount = batchEnd;
                 const progress = 50 + (stackedCount / frameCount) * 40;
-                emit('set-caption', `GPU stacking frame ${stackedCount}/${frameCount}...`);
-                emit('update-loading', { progress, current: Math.round(progress), total: 100 });
+                emit('set-caption', 'Stacking...');
+                emit('update-loading', { progress, current: stackedCount, total: frameCount });
             }
 
             addLog('GPU stacking complete, finalizing...');

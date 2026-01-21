@@ -93,10 +93,20 @@ const handleDoubleClick = (event) => {
 
 
 const canvasStyle = computed(() => {
-	const rotateStr = props.previewRotation !== 0 ? ` rotate(${props.previewRotation}deg)` : '';
+	const isRotating = props.previewRotation !== 0;
+	// Always use top left origin for consistent zoom behavior
+	// For rotation, we rotate around the scaled canvas center
+	let transform = `translate(${position.value.x}px, ${position.value.y}px) scale(${zoomLevel.value})`;
+	if (isRotating && canvas.value) {
+		// Rotate around canvas center: translate to center, rotate, translate back
+		const cx = canvas.value.width / 2;
+		const cy = canvas.value.height / 2;
+		transform += ` translate(${cx}px, ${cy}px) rotate(${props.previewRotation}deg) translate(${-cx}px, ${-cy}px)`;
+	}
 	return {
-		transform: `translate(${position.value.x}px, ${position.value.y}px) scale(${zoomLevel.value})${rotateStr}`,
-		transformOrigin: props.previewRotation !== 0 ? 'center center' : 'top left',
+		transform,
+		transformOrigin: 'top left',
+		transition: isRotating ? 'none' : 'transform 0.05s ease',
 		cursor: props.disableDrag ? 'crosshair' : (isDragging.value ? 'grabbing' : 'grab')
 	};
 });

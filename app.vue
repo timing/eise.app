@@ -113,6 +113,7 @@ const qualityFrames = ref([]);
 const qualityWorkers = ref(null);
 const qualityNoiseRobust = ref(false);
 const qualityUseWebGPU = ref(false);
+const qualityFrameReReader = ref(null); // Two-pass mode: re-read frames on demand
 const croppedSerData = ref(null);
 const croppedAviData = ref(null);
 
@@ -152,6 +153,7 @@ function handleQualitySelectionReady(data) {
 	qualityWorkers.value = data.workers;
 	qualityNoiseRobust.value = data.noiseRobustAlignment || false;
 	qualityUseWebGPU.value = data.useWebGPU || false;
+	qualityFrameReReader.value = data.frameReReader || null; // Two-pass mode
 	isSelectingQuality.value = true;
 	eventBusEmit('stop-loading');
 }
@@ -162,21 +164,31 @@ async function handleThresholdSelected(data) {
 	// Stack the selected frames
 	// In GPU mode, stackFramesLocally creates its own workers (qualityWorkers is empty)
 	// In CPU mode, we need existing workers from the analysis phase
+	// Two-pass mode: frameReReader allows on-demand frame loading for memory efficiency
 	const hasValidWorkers = qualityWorkers.value && qualityWorkers.value.length > 0;
+	const hasFrameReReader = qualityFrameReReader.value !== null;
 	const canStack = qualityUseWebGPU.value || hasValidWorkers;
 
 	if (data.frames && data.frames.length > 0 && canStack) {
 		eventBusEmit('start-loading', 'Stacking selected frames...');
-		addLog(`Stacking ${data.frames.length} frames (${Math.round(data.percentage * 100)}% threshold)`);
+		addLog(`Stacking ${data.frames.length} frames (${Math.round(data.percentage * 100)}% threshold)${hasFrameReReader ? ' (two-pass mode)' : ''}`);
+
+		// Free 8-bit preview buffers before stacking to save memory
+		// (stacking will re-read frames in 16-bit from frameReReader)
+		for (const frame of qualityFrames.value) {
+			delete frame.uint8Buffer;
+			delete frame.blob;
+		}
 
 		const stackingWorker = hasValidWorkers ? qualityWorkers.value[0] : null;
-		const stackResult = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value, qualityUseWebGPU.value);
+		const stackResult = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value, qualityUseWebGPU.value, qualityFrameReReader.value);
 
 		// Terminate workers after stacking (CPU mode only)
 		if (hasValidWorkers) {
 			qualityWorkers.value.forEach(worker => worker.terminate());
 		}
 		qualityWorkers.value = null;
+		qualityFrameReReader.value = null; // Clear frameReReader after stacking
 
 		if (stackResult && stackResult.blob) {
 			addLog('Client-side stacking complete');

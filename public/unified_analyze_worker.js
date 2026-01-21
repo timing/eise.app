@@ -165,6 +165,179 @@ async function handleMessage(e) {
             return;
         }
 
+        // =====================================================
+        // TWO-PASS MEMORY OPTIMIZATION HANDLERS
+        // =====================================================
+
+        // Pass 1: Metadata-only analysis - returns sharpness/bounds without storing float32Buffer
+        // This dramatically reduces memory usage during analysis phase
+        if (type === 'analyze-metadata-only') {
+            const { frameBuffer, header, bayerChoice, cropRegion } = e.data;
+
+            try {
+                // Validate buffer size
+                let expectedSize;
+                if (header.fileId && header.fileId.startsWith('LUCAM-REC')) {
+                    expectedSize = header.width * header.height * (header.pixelDepth > 8 ? 2 : 1);
+                } else {
+                    const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[header.fourCC] || 3;
+                    expectedSize = header.width * header.height * bytesPerPixel;
+                }
+                if (frameBuffer.byteLength !== expectedSize) {
+                    self.postMessage({ type: 'metadata', skipped: true, reason: 'buffer-mismatch', index });
+                    return;
+                }
+
+                // Step 1: Detect bounds for this frame
+                let bounds;
+                try {
+                    bounds = await detectObjectBounds(frameBuffer, header, bayerChoice);
+                } catch (boundsError) {
+                    bounds = { canCrop: false, reason: 'detection-error' };
+                }
+
+                // Check for cut-off frames
+                if (bounds.reason === 'cut-off') {
+                    self.postMessage({ type: 'metadata', skipped: true, reason: 'cut-off', is_cut_off: true, index });
+                    return;
+                }
+
+                // Check for oversized frames
+                if (bounds.canCrop && bounds.size && cropRegion && cropRegion.medianObjectSize) {
+                    const sizeRatio = bounds.size / cropRegion.medianObjectSize;
+                    if (sizeRatio > 1.1) {
+                        self.postMessage({ type: 'metadata', skipped: true, reason: 'oversized', is_oversized: true, index });
+                        return;
+                    }
+                }
+
+                // Calculate crop parameters for this frame
+                let subPixelOffset = { x: 0, y: 0 };
+                let centerX = bounds.canCrop ? bounds.centerX : (cropRegion?.referenceCenter?.x || header.width / 2);
+                let centerY = bounds.canCrop ? bounds.centerY : (cropRegion?.referenceCenter?.y || header.height / 2);
+
+                if (cropRegion && cropRegion.size) {
+                    const halfSize = cropRegion.size / 2;
+                    let idealCropX = Math.floor(centerX - halfSize);
+                    let idealCropY = Math.floor(centerY - halfSize);
+                    idealCropX = idealCropX & ~1; // Even alignment for Bayer
+                    idealCropY = idealCropY & ~1;
+
+                    const cropCenterX = idealCropX + cropRegion.size / 2;
+                    const cropCenterY = idealCropY + cropRegion.size / 2;
+                    subPixelOffset = {
+                        x: centerX - cropCenterX,
+                        y: centerY - cropCenterY
+                    };
+                }
+
+                // Step 2: Calculate sharpness using 8-bit conversion (lightweight)
+                // We demosaic a small portion or use grayscale for sharpness calculation
+                const sharpness = await calculateSharpnessLightweight(frameBuffer, header, bayerChoice, cropRegion, bounds);
+
+                // Return metadata only - no float32Buffer, no pngBlob
+                self.postMessage({
+                    type: 'metadata',
+                    index,
+                    sharpness,
+                    circularity: bounds.circularity || 0,
+                    centerX,
+                    centerY,
+                    subPixelOffset,
+                    is_cut_off: false,
+                    is_oversized: false
+                });
+            } catch (error) {
+                const errorMsg = typeof error === 'number'
+                    ? `OpenCV error code: ${error}`
+                    : (error.message || String(error));
+                console.error(`analyze-metadata-only error for frame ${index}:`, errorMsg);
+                self.postMessage({ type: 'metadata', skipped: true, reason: 'error', error: errorMsg, index });
+            }
+            return;
+        }
+
+        // Pass 2: Process frame for stacking - full demosaic + crop to float32Buffer
+        // Called on-demand during stacking for selected frames only
+        if (type === 'process-for-stacking') {
+            const { frameBuffer, header, bayerChoice, cropRegion, centerX, centerY } = e.data;
+
+            try {
+                // Validate buffer size
+                let expectedSize;
+                if (header.fileId && header.fileId.startsWith('LUCAM-REC')) {
+                    expectedSize = header.width * header.height * (header.pixelDepth > 8 ? 2 : 1);
+                } else {
+                    const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[header.fourCC] || 3;
+                    expectedSize = header.width * header.height * bytesPerPixel;
+                }
+                if (frameBuffer.byteLength !== expectedSize) {
+                    self.postMessage({ type: 'stacking-frame', skipped: true, reason: 'buffer-mismatch', index });
+                    return;
+                }
+
+                // Calculate crop region with the provided center
+                let actualCropRegion = null;
+                let subPixelOffset = { x: 0, y: 0 };
+
+                if (cropRegion && cropRegion.size && centerX !== undefined && centerY !== undefined) {
+                    const halfSize = cropRegion.size / 2;
+                    let idealCropX = Math.floor(centerX - halfSize);
+                    let idealCropY = Math.floor(centerY - halfSize);
+                    idealCropX = idealCropX & ~1;
+                    idealCropY = idealCropY & ~1;
+
+                    const padLeft = Math.max(0, -idealCropX);
+                    const padTop = Math.max(0, -idealCropY);
+                    const padRight = Math.max(0, (idealCropX + cropRegion.size) - header.width);
+                    const padBottom = Math.max(0, (idealCropY + cropRegion.size) - header.height);
+
+                    const cropCenterX = idealCropX + cropRegion.size / 2;
+                    const cropCenterY = idealCropY + cropRegion.size / 2;
+                    subPixelOffset = {
+                        x: centerX - cropCenterX,
+                        y: centerY - cropCenterY
+                    };
+
+                    actualCropRegion = {
+                        x: idealCropX,
+                        y: idealCropY,
+                        size: cropRegion.size,
+                        padding: { left: padLeft, top: padTop, right: padRight, bottom: padBottom },
+                        subPixelOffset
+                    };
+                }
+
+                // Full processing: demosaic + crop + convert to float32
+                const result = await processRawFrameWithOpenCV(
+                    frameBuffer, header, bayerChoice, actualCropRegion, index,
+                    true,  // includeRgba = true
+                    true   // skipAnalysis = true (we already have sharpness)
+                );
+
+                if (result.skipped) {
+                    self.postMessage({ type: 'stacking-frame', skipped: true, reason: result.reason, index });
+                    return;
+                }
+
+                self.postMessage({
+                    type: 'stacking-frame',
+                    float32Buffer: result.float32Buffer,
+                    width: result.width,
+                    height: result.height,
+                    subPixelOffset,
+                    index
+                }, [result.float32Buffer]);
+            } catch (error) {
+                const errorMsg = typeof error === 'number'
+                    ? `OpenCV error code: ${error}`
+                    : (error.message || String(error));
+                console.error(`process-for-stacking error for frame ${index}:`, errorMsg);
+                self.postMessage({ type: 'stacking-frame', skipped: true, reason: 'error', error: errorMsg, index });
+            }
+            return;
+        }
+
         // Analyze PNG with cropping (for image files)
         if (type === 'analyze-cropped-png') {
             const { pngData, cropRegion, includeRgba } = e.data;
@@ -972,6 +1145,76 @@ function calculateSharpnessFromMat(grayMat, frameIndex) {
         if (sobelX2) try { sobelX2.delete(); } catch(e) {}
         if (sobelY2) try { sobelY2.delete(); } catch(e) {}
         if (gradientMagnitude) try { gradientMagnitude.delete(); } catch(e) {}
+    }
+}
+
+/**
+ * Lightweight sharpness calculation for Pass 1 of two-pass processing
+ * Uses 8-bit grayscale conversion to minimize memory usage
+ * For cropped analysis, calculates sharpness on the cropped region only
+ */
+async function calculateSharpnessLightweight(frameBuffer, header, bayerChoice, cropRegion, bounds) {
+    const { width, height, pixelDepth } = header;
+    let rawMat = null, grayMat = null, croppedGray = null;
+
+    try {
+        // Create grayscale mat from frame buffer (8-bit only, no float32)
+        if (header.fileId && header.fileId.startsWith('LUCAM-REC')) { // SER file
+            const serDataType = pixelDepth > 8 ? _cv.CV_16UC1 : _cv.CV_8UC1;
+            const serData = pixelDepth > 8 ? new Uint16Array(frameBuffer) : new Uint8Array(frameBuffer);
+            rawMat = _cv.matFromArray(height, width, serDataType, serData);
+
+            grayMat = new _cv.Mat();
+            const alpha = pixelDepth > 8 ? 1/256 : 1;
+            rawMat.convertTo(grayMat, _cv.CV_8U, alpha);
+        } else { // AVI file
+            const { fourCC } = header;
+            const aviDataType = { 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[fourCC];
+            rawMat = new _cv.Mat(height, width, aviDataType);
+            rawMat.data.set(new Uint8Array(frameBuffer));
+
+            grayMat = new _cv.Mat();
+            if (fourCC === 'DIB ' || fourCC === 'RGB ') {
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_BGR2GRAY);
+            } else if (fourCC === 'RGBA') {
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
+            } else if (fourCC === 'YUY2' || fourCC === 'UYVY') {
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_YUV2GRAY_YUY2);
+            } else {
+                rawMat.copyTo(grayMat);
+            }
+        }
+
+        // If we have a crop region and valid bounds, calculate sharpness on cropped area
+        // This gives more accurate sharpness values for the planet, not background
+        if (cropRegion && cropRegion.size && bounds && bounds.canCrop) {
+            const centerX = bounds.centerX;
+            const centerY = bounds.centerY;
+            const halfSize = cropRegion.size / 2;
+
+            let cropX = Math.floor(centerX - halfSize);
+            let cropY = Math.floor(centerY - halfSize);
+            cropX = Math.max(0, cropX) & ~1;
+            cropY = Math.max(0, cropY) & ~1;
+
+            // Ensure crop stays within bounds
+            const actualSize = Math.min(cropRegion.size, width - cropX, height - cropY);
+            if (actualSize > 50) { // Minimum size for meaningful sharpness
+                const rect = new _cv.Rect(cropX, cropY, actualSize, actualSize);
+                croppedGray = grayMat.roi(rect).clone();
+
+                const sharpness = calculateSharpnessFromMat(croppedGray, -1); // -1 to suppress logging
+                return sharpness;
+            }
+        }
+
+        // Fallback: calculate sharpness on full frame
+        return calculateSharpnessFromMat(grayMat, -1);
+
+    } finally {
+        if (croppedGray) try { croppedGray.delete(); } catch(e) {}
+        if (grayMat) try { grayMat.delete(); } catch(e) {}
+        if (rawMat) try { rawMat.delete(); } catch(e) {}
     }
 }
 

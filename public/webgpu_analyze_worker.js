@@ -9,6 +9,7 @@ let isReady = false;
 // Pipelines
 let demosaicPipeline = null;
 let demosaicCropPipeline = null;
+let rgbaCropPipeline = null;
 let grayscalePipeline = null;
 let laplacianPipeline = null;
 let reductionPipeline = null;
@@ -345,6 +346,54 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Output to cropped buffer
     let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
     output[outIdx] = rgba;
+}
+`;
+
+// RGBA Crop shader - crops RGBA images without demosaicing (for PNG/JPEG input)
+const rgbaCropShader = `
+struct Params {
+    srcWidth: u32,
+    srcHeight: u32,
+    cropSize: u32,
+    _pad1: u32,
+    batchSize: u32,
+    _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
+}
+
+struct CropCenter {
+    x: f32,
+    y: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> input: array<u32>;       // Source RGBA
+@group(0) @binding(2) var<storage, read> centers: array<CropCenter>;
+@group(0) @binding(3) var<storage, read_write> output: array<u32>; // Cropped RGBA
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let outX = gid.x;
+    let outY = gid.y;
+    let frameIdx = gid.z;
+
+    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
+        return;
+    }
+
+    let center = centers[frameIdx];
+    let halfSize = f32(params.cropSize) / 2.0;
+    let cropStartX = i32(floor(center.x - halfSize));
+    let cropStartY = i32(floor(center.y - halfSize));
+
+    let srcX = u32(clamp(cropStartX + i32(outX), 0, i32(params.srcWidth) - 1));
+    let srcY = u32(clamp(cropStartY + i32(outY), 0, i32(params.srcHeight) - 1));
+
+    let srcIdx = frameIdx * params.srcWidth * params.srcHeight + srcY * params.srcWidth + srcX;
+    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
+
+    output[outIdx] = input[srcIdx];
 }
 `;
 
@@ -771,6 +820,12 @@ async function init() {
     demosaicCropPipeline = device.createComputePipeline({
         layout: 'auto',
         compute: { module: demosaicCropModule, entryPoint: 'main' }
+    });
+
+    const rgbaCropModule = await createShader(rgbaCropShader, 'rgbaCrop');
+    rgbaCropPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: rgbaCropModule, entryPoint: 'main' }
     });
 
     const grayscaleModule = await createShader(grayscaleShader, 'grayscale');
@@ -1457,31 +1512,13 @@ function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize) {
  * @param {number} bayerPattern - Bayer pattern (0-3, or -1 for mono)
  * @param {number} threshold - Threshold for moments (default 0.1)
  */
-async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1) {
+async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1, metadataOnly = false) {
     const batchSize = frames.length;
     const srcPixelCount = srcWidth * srcHeight;
     const cropPixelCount = cropSize * cropSize;
     const numWorkgroups = Math.ceil(cropPixelCount / 256);
 
     const buffers = getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize);
-
-    // Upload Bayer data
-    const bayerData = new Uint32Array(batchSize * srcPixelCount);
-    for (let i = 0; i < batchSize; i++) {
-        const frame = frames[i];
-        const offset = i * srcPixelCount;
-        if (frame.data instanceof Uint16Array) {
-            for (let j = 0; j < srcPixelCount; j++) {
-                bayerData[offset + j] = frame.data[j];
-            }
-        } else {
-            // 8-bit data, scale up
-            for (let j = 0; j < srcPixelCount; j++) {
-                bayerData[offset + j] = frame.data[j] * 257;
-            }
-        }
-    }
-    queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
 
     // Upload centers
     const centersData = new Float32Array(batchSize * 2);
@@ -1492,27 +1529,92 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     queue.writeBuffer(buffers.centersBuffer, 0, centersData);
 
     // Set crop params
-    const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, bayerPattern, batchSize, 0, 0, 0]);
+    const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, 0, 0, 0]);
     queue.writeBuffer(buffers.paramsBuffer, 0, cropParams);
 
-    // Run demosaic+crop
-    const demosaicCropBindGroup = device.createBindGroup({
-        layout: demosaicCropPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: buffers.inputBuffer } },
-            { binding: 2, resource: { buffer: buffers.centersBuffer } },
-            { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } }
-        ]
-    });
+    const needsDemosaic = bayerPattern >= 0;
 
-    let encoder = device.createCommandEncoder();
-    let pass = encoder.beginComputePass();
-    pass.setPipeline(demosaicCropPipeline);
-    pass.setBindGroup(0, demosaicCropBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-    pass.end();
-    queue.submit([encoder.finish()]);
+    if (needsDemosaic) {
+        // Upload Bayer data
+        const bayerData = new Uint32Array(batchSize * srcPixelCount);
+        for (let i = 0; i < batchSize; i++) {
+            const frame = frames[i];
+            const offset = i * srcPixelCount;
+            if (frame.data instanceof Uint16Array) {
+                for (let j = 0; j < srcPixelCount; j++) {
+                    bayerData[offset + j] = frame.data[j];
+                }
+            } else {
+                // 8-bit data, scale up
+                for (let j = 0; j < srcPixelCount; j++) {
+                    bayerData[offset + j] = frame.data[j] * 257;
+                }
+            }
+        }
+        queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
+
+        // Run demosaic+crop
+        const demosaicCropBindGroup = device.createBindGroup({
+            layout: demosaicCropPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: buffers.paramsBuffer } },
+                { binding: 1, resource: { buffer: buffers.inputBuffer } },
+                { binding: 2, resource: { buffer: buffers.centersBuffer } },
+                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } }
+            ]
+        });
+
+        let encoder = device.createCommandEncoder();
+        let pass = encoder.beginComputePass();
+        pass.setPipeline(demosaicCropPipeline);
+        pass.setBindGroup(0, demosaicCropBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.end();
+        queue.submit([encoder.finish()]);
+    } else {
+        // RGBA input - upload directly and run crop-only
+        const rgbaData = new Uint32Array(batchSize * srcPixelCount);
+        for (let i = 0; i < batchSize; i++) {
+            const frame = frames[i];
+            const offset = i * srcPixelCount;
+            let src;
+            if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
+                src = frame.data;
+            } else if (frame.data instanceof ArrayBuffer) {
+                src = new Uint8Array(frame.data);
+            } else if (frame.data.buffer instanceof ArrayBuffer) {
+                src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
+            } else {
+                console.error('Unknown frame data type:', typeof frame.data);
+                continue;
+            }
+
+            // Pack RGBA bytes into u32
+            for (let j = 0; j < srcPixelCount; j++) {
+                rgbaData[offset + j] = src[j*4] | (src[j*4+1] << 8) | (src[j*4+2] << 16) | (src[j*4+3] << 24);
+            }
+        }
+        queue.writeBuffer(buffers.inputBuffer, 0, rgbaData);
+
+        // Run RGBA crop
+        const rgbaCropBindGroup = device.createBindGroup({
+            layout: rgbaCropPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: buffers.paramsBuffer } },
+                { binding: 1, resource: { buffer: buffers.inputBuffer } },
+                { binding: 2, resource: { buffer: buffers.centersBuffer } },
+                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } }
+            ]
+        });
+
+        let encoder = device.createCommandEncoder();
+        let pass = encoder.beginComputePass();
+        pass.setPipeline(rgbaCropPipeline);
+        pass.setBindGroup(0, rgbaCropBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.end();
+        queue.submit([encoder.finish()]);
+    }
 
     // Now analyze the cropped frames
     // Grayscale params for cropped size
@@ -1685,23 +1787,361 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
             }
         }
 
-        // Extract cropped RGBA for this frame
+        // Extract cropped RGBA for this frame (8-bit)
         const frameRgba = croppedData.slice(i * cropPixelCount * 4, (i + 1) * cropPixelCount * 4);
 
-        // Convert to Float32 (0.0-1.0) for 16-bit pipeline
-        const float32Data = new Float32Array(frameRgba.length);
-        for (let j = 0; j < frameRgba.length; j++) {
-            float32Data[j] = frameRgba[j] / 255.0;
+        if (metadataOnly) {
+            // Pass 1: Return only metadata + 8-bit data for preview
+            results.push({
+                sharpness,
+                circularity,
+                index: frames[i].index,
+                uint8Buffer: frameRgba.buffer, // 8-bit for preview
+                width: cropSize,
+                height: cropSize
+            });
+        } else {
+            // Pass 2 / legacy: Convert to Float32 (0.0-1.0) for 16-bit stacking pipeline
+            const float32Data = new Float32Array(frameRgba.length);
+            for (let j = 0; j < frameRgba.length; j++) {
+                float32Data[j] = frameRgba[j] / 255.0;
+            }
+            results.push({
+                sharpness,
+                circularity,
+                index: frames[i].index,
+                float32Buffer: float32Data.buffer,
+                width: cropSize,
+                height: cropSize
+            });
+        }
+    }
+
+    return results;
+}
+
+/**
+ * Combined detect + crop + analyze in ONE pass (single demosaic)
+ * This is 2x faster than separate analyzeBatch + cropAndAnalyzeBatch
+ *
+ * Flow:
+ * 1. Demosaic full frame to RGBA
+ * 2. Detect bounds on full frame
+ * 3. Read bounds to get centers
+ * 4. Crop from already-demosaiced RGBA
+ * 5. Calculate sharpness on cropped
+ */
+async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false) {
+    const batchSize = frames.length;
+    const srcPixelCount = srcWidth * srcHeight;
+    const cropPixelCount = cropSize * cropSize;
+    const numWorkgroupsFull = Math.ceil(srcPixelCount / 256);
+    const numWorkgroupsCrop = Math.ceil(cropPixelCount / 256);
+
+    // Get buffers for full-frame analysis
+    const analyzeBuffers = getAnalyzeBuffers(batchSize, srcWidth, srcHeight);
+
+    // Get buffers for cropped analysis (reuses some, creates others)
+    const cropBuffers = getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize);
+
+    const needsDemosaic = bayerPattern >= 0;
+
+    // ===== STEP 1: Upload raw data and demosaic to full RGBA =====
+    if (needsDemosaic) {
+        const bayerData = new Uint32Array(batchSize * srcPixelCount);
+        for (let i = 0; i < batchSize; i++) {
+            const frame = frames[i];
+            const offset = i * srcPixelCount;
+            if (frame.data instanceof Uint16Array) {
+                for (let j = 0; j < srcPixelCount; j++) {
+                    bayerData[offset + j] = frame.data[j];
+                }
+            } else {
+                for (let j = 0; j < srcPixelCount; j++) {
+                    bayerData[offset + j] = frame.data[j] * 257;
+                }
+            }
+        }
+        queue.writeBuffer(analyzeBuffers.inputBuffer, 0, bayerData);
+        queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, bayerPattern]));
+
+        const demosaicBindGroup = device.createBindGroup({
+            layout: demosaicPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
+                { binding: 1, resource: { buffer: analyzeBuffers.inputBuffer } },
+                { binding: 2, resource: { buffer: analyzeBuffers.rgbaBuffer } }
+            ]
+        });
+
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(demosaicPipeline);
+        pass.setBindGroup(0, demosaicBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
+        pass.end();
+        queue.submit([encoder.finish()]);
+    } else {
+        // RGBA input
+        const rgbaData = new Uint32Array(batchSize * srcPixelCount);
+        for (let i = 0; i < batchSize; i++) {
+            const frame = frames[i];
+            const offset = i * srcPixelCount;
+            let src = frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray
+                ? frame.data
+                : new Uint8Array(frame.data.buffer || frame.data);
+            for (let j = 0; j < srcPixelCount; j++) {
+                rgbaData[offset + j] = src[j*4] | (src[j*4+1] << 8) | (src[j*4+2] << 16) | (src[j*4+3] << 24);
+            }
+        }
+        queue.writeBuffer(analyzeBuffers.rgbaBuffer, 0, rgbaData);
+    }
+
+    // ===== STEP 2: Grayscale + bounds detection on full frame =====
+    queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, 0]));
+    queue.writeBuffer(analyzeBuffers.reductionParamsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, srcPixelCount]));
+
+    const boundsParamsData = new ArrayBuffer(16);
+    new Uint32Array(boundsParamsData, 0, 3).set([srcWidth, srcHeight, batchSize]);
+    new Float32Array(boundsParamsData, 12, 1).set([threshold]);
+    queue.writeBuffer(analyzeBuffers.boundsParamsBuffer, 0, boundsParamsData);
+
+    const grayBindGroup = device.createBindGroup({
+        layout: grayscalePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
+            { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },
+            { binding: 2, resource: { buffer: analyzeBuffers.grayBuffer } }
+        ]
+    });
+
+    const boundsBindGroup = device.createBindGroup({
+        layout: boundsPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: analyzeBuffers.boundsParamsBuffer } },
+            { binding: 1, resource: { buffer: analyzeBuffers.grayBuffer } },
+            { binding: 2, resource: { buffer: analyzeBuffers.boundsBuffer } }
+        ]
+    });
+
+    const boundsReductionBindGroup = device.createBindGroup({
+        layout: boundsReductionPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: analyzeBuffers.reductionParamsBuffer } },
+            { binding: 1, resource: { buffer: analyzeBuffers.boundsBuffer } },
+            { binding: 2, resource: { buffer: analyzeBuffers.boundsReductionBuffer } }
+        ]
+    });
+
+    let encoder = device.createCommandEncoder();
+    let pass = encoder.beginComputePass();
+    pass.setPipeline(grayscalePipeline);
+    pass.setBindGroup(0, grayBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
+    pass.end();
+
+    pass = encoder.beginComputePass();
+    pass.setPipeline(boundsPipeline);
+    pass.setBindGroup(0, boundsBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
+    pass.end();
+
+    pass = encoder.beginComputePass();
+    pass.setPipeline(boundsReductionPipeline);
+    pass.setBindGroup(0, boundsReductionBindGroup);
+    pass.dispatchWorkgroups(numWorkgroupsFull, batchSize, 1);
+    pass.end();
+
+    encoder.copyBufferToBuffer(analyzeBuffers.boundsReductionBuffer, 0, analyzeBuffers.boundsReadback, 0, batchSize * numWorkgroupsFull * 16);
+    queue.submit([encoder.finish()]);
+
+    // ===== STEP 3: Read back bounds and compute centers =====
+    await analyzeBuffers.boundsReadback.mapAsync(GPUMapMode.READ);
+    const boundsData = new Uint32Array(analyzeBuffers.boundsReadback.getMappedRange().slice(0));
+    analyzeBuffers.boundsReadback.unmap();
+
+    const centers = [];
+    const validFrameIndices = [];
+    const bounds = [];
+
+    for (let i = 0; i < batchSize; i++) {
+        let minX = srcWidth, minY = srcHeight, maxX = 0, maxY = 0;
+        for (let w = 0; w < numWorkgroupsFull; w++) {
+            const idx = (i * numWorkgroupsFull + w) * 4;
+            if (boundsData[idx] < minX) minX = boundsData[idx];
+            if (boundsData[idx + 1] < minY) minY = boundsData[idx + 1];
+            if (boundsData[idx + 2] > maxX) maxX = boundsData[idx + 2];
+            if (boundsData[idx + 3] > maxY) maxY = boundsData[idx + 3];
         }
 
-        results.push({
-            sharpness,
-            circularity,
-            index: frames[i].index,
-            float32Buffer: float32Data.buffer,
-            width: cropSize,
-            height: cropSize
-        });
+        if (maxX > minX && maxY > minY) {
+            const centroidX = (minX + maxX) / 2;
+            const centroidY = (minY + maxY) / 2;
+            const bboxWidth = maxX - minX;
+            const bboxHeight = maxY - minY;
+            // Simple circularity from bounding box aspect ratio (1.0 = circle, lower = elongated)
+            const circularity = Math.min(bboxWidth, bboxHeight) / Math.max(bboxWidth, bboxHeight);
+            centers.push({ x: centroidX, y: centroidY });
+            validFrameIndices.push(i);
+            bounds.push({
+                x: minX, y: minY,
+                width: bboxWidth, height: bboxHeight,
+                centroidX, centroidY,
+                size: Math.max(bboxWidth, bboxHeight),
+                circularity
+            });
+        } else {
+            centers.push(null);
+            bounds.push(null);
+        }
+    }
+
+    // ===== STEP 4: Crop from demosaiced RGBA using detected centers =====
+    // Upload centers for valid frames
+    const centersData = new Float32Array(batchSize * 2);
+    for (let i = 0; i < batchSize; i++) {
+        if (centers[i]) {
+            centersData[i * 2] = centers[i].x;
+            centersData[i * 2 + 1] = centers[i].y;
+        } else {
+            centersData[i * 2] = srcWidth / 2;
+            centersData[i * 2 + 1] = srcHeight / 2;
+        }
+    }
+    queue.writeBuffer(cropBuffers.centersBuffer, 0, centersData);
+
+    // Set params for RGBA crop (reuse from analyzeBuffers.rgbaBuffer)
+    const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, 0, batchSize, 0, 0, 0]);
+    queue.writeBuffer(cropBuffers.paramsBuffer, 0, cropParams);
+
+    // Crop from the already-demosaiced rgbaBuffer
+    const rgbaCropBindGroup = device.createBindGroup({
+        layout: rgbaCropPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: cropBuffers.paramsBuffer } },
+            { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },  // Source: full demosaiced
+            { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },
+            { binding: 3, resource: { buffer: cropBuffers.croppedRgbaBuffer } }  // Dest: cropped
+        ]
+    });
+
+    encoder = device.createCommandEncoder();
+    pass = encoder.beginComputePass();
+    pass.setPipeline(rgbaCropPipeline);
+    pass.setBindGroup(0, rgbaCropBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+    pass.end();
+    queue.submit([encoder.finish()]);
+
+    // ===== STEP 5: Sharpness calculation on cropped =====
+    queue.writeBuffer(cropBuffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
+    queue.writeBuffer(cropBuffers.reductionParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, cropPixelCount]));
+
+    const cropGrayBindGroup = device.createBindGroup({
+        layout: grayscalePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
+            { binding: 1, resource: { buffer: cropBuffers.croppedRgbaBuffer } },
+            { binding: 2, resource: { buffer: cropBuffers.grayBuffer } }
+        ]
+    });
+
+    const lapBindGroup = device.createBindGroup({
+        layout: laplacianPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
+            { binding: 1, resource: { buffer: cropBuffers.grayBuffer } },
+            { binding: 2, resource: { buffer: cropBuffers.laplacianBuffer } },
+            { binding: 3, resource: { buffer: cropBuffers.laplacianSqBuffer } }
+        ]
+    });
+
+    const reductionBindGroup = device.createBindGroup({
+        layout: reductionPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: cropBuffers.reductionParamsBuffer } },
+            { binding: 1, resource: { buffer: cropBuffers.laplacianBuffer } },
+            { binding: 2, resource: { buffer: cropBuffers.laplacianSqBuffer } },
+            { binding: 3, resource: { buffer: cropBuffers.reductionBuffer } }
+        ]
+    });
+
+    encoder = device.createCommandEncoder();
+
+    pass = encoder.beginComputePass();
+    pass.setPipeline(grayscalePipeline);
+    pass.setBindGroup(0, cropGrayBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+    pass.end();
+
+    pass = encoder.beginComputePass();
+    pass.setPipeline(laplacianPipeline);
+    pass.setBindGroup(0, lapBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+    pass.end();
+
+    pass = encoder.beginComputePass();
+    pass.setPipeline(reductionPipeline);
+    pass.setBindGroup(0, reductionBindGroup);
+    pass.dispatchWorkgroups(numWorkgroupsCrop, batchSize, 1);
+    pass.end();
+
+    // Copy results for readback
+    encoder.copyBufferToBuffer(cropBuffers.reductionBuffer, 0, cropBuffers.readbackBuffer, 0, batchSize * numWorkgroupsCrop * 8);
+    encoder.copyBufferToBuffer(cropBuffers.croppedRgbaBuffer, 0, cropBuffers.croppedReadbackBuffer, 0, batchSize * cropPixelCount * 4);
+    queue.submit([encoder.finish()]);
+
+    // ===== STEP 6: Read back results =====
+    await Promise.all([
+        cropBuffers.readbackBuffer.mapAsync(GPUMapMode.READ),
+        cropBuffers.croppedReadbackBuffer.mapAsync(GPUMapMode.READ)
+    ]);
+
+    const reductionData = new Float32Array(cropBuffers.readbackBuffer.getMappedRange().slice(0));
+    const croppedData = new Uint8Array(cropBuffers.croppedReadbackBuffer.getMappedRange().slice(0));
+    cropBuffers.readbackBuffer.unmap();
+    cropBuffers.croppedReadbackBuffer.unmap();
+
+    // Build results
+    const results = [];
+    for (let i = 0; i < batchSize; i++) {
+        let tenengradSum = 0;
+        for (let w = 0; w < numWorkgroupsCrop; w++) {
+            tenengradSum += reductionData[(i * numWorkgroupsCrop + w) * 2];
+        }
+        const sharpness = (tenengradSum / cropPixelCount) * 65025;
+
+        const frameRgba = croppedData.slice(i * cropPixelCount * 4, (i + 1) * cropPixelCount * 4);
+
+        if (metadataOnly) {
+            results.push({
+                sharpness,
+                circularity: bounds[i]?.circularity || 0,
+                index: frames[i].index,
+                bounds: bounds[i],
+                centerX: centers[i]?.x,
+                centerY: centers[i]?.y,
+                uint8Buffer: frameRgba.buffer,
+                width: cropSize,
+                height: cropSize
+            });
+        } else {
+            const float32Data = new Float32Array(frameRgba.length);
+            for (let j = 0; j < frameRgba.length; j++) {
+                float32Data[j] = frameRgba[j] / 255.0;
+            }
+            results.push({
+                sharpness,
+                circularity: bounds[i]?.circularity || 0,
+                index: frames[i].index,
+                bounds: bounds[i],
+                centerX: centers[i]?.x,
+                centerY: centers[i]?.y,
+                float32Buffer: float32Data.buffer,
+                width: cropSize,
+                height: cropSize
+            });
+        }
     }
 
     return results;
@@ -1895,10 +2335,7 @@ self.addEventListener('message', async (e) => {
         const { frames, width, height, bayerPattern, threshold, requestId } = e.data;
 
         try {
-            console.log(`[GPU] analyze-batch: received ${frames.length} frames`);
             const results = await analyzeBatch(frames, width, height, bayerPattern, threshold);
-            const withBounds = results.filter(r => r.bounds !== null).length;
-            console.log(`[GPU] analyze-batch: returning ${results.length} results, ${withBounds} with valid bounds`);
             self.postMessage({ type: 'analyze-result', requestId, results },
                 results.map(r => r.float32Buffer));
         } catch (err) {
@@ -1914,17 +2351,36 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId } = e.data;
+        const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId, metadataOnly } = e.data;
 
         try {
-            console.log(`[GPU] crop-analyze-batch: received ${frames.length} frames for crop+analyze`);
-            const results = await cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold);
-            console.log(`[GPU] crop-analyze-batch: returning ${results.length} results`);
-            self.postMessage({ type: 'crop-analyze-result', requestId, results },
-                results.map(r => r.float32Buffer));
+            const results = await cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly);
+            // Transfer uint8Buffer or float32Buffer depending on mode
+            const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
+            self.postMessage({ type: 'crop-analyze-result', requestId, results }, transferables);
         } catch (err) {
             console.error(`[GPU] crop-analyze-batch error:`, err);
             self.postMessage({ type: 'crop-analyze-error', requestId, error: err.message });
+        }
+        return;
+    }
+
+    if (type === 'detect-crop-analyze-batch') {
+        if (!isReady) {
+            self.postMessage({ type: 'detect-crop-analyze-error', error: 'Not initialized', requestId: e.data.requestId });
+            return;
+        }
+
+        const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly } = e.data;
+
+        try {
+            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly);
+            // Transfer uint8Buffer or float32Buffer depending on mode
+            const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
+            self.postMessage({ type: 'detect-crop-analyze-result', requestId, results }, transferables);
+        } catch (err) {
+            console.error(`[GPU] detect-crop-analyze-batch error:`, err);
+            self.postMessage({ type: 'detect-crop-analyze-error', requestId, error: err.message });
         }
         return;
     }
