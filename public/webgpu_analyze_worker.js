@@ -794,6 +794,14 @@ async function init() {
     });
     queue = device.queue;
 
+    // Handle GPU device lost (tab suspended, driver crash, etc.)
+    device.lost.then((info) => {
+        console.error('WebGPU device lost:', info.message);
+        device = null;
+        queue = null;
+        self.postMessage({ type: 'error', error: `GPU device lost: ${info.message}. Please reload the page.` });
+    });
+
     // Helper to create shader module with error checking
     async function createShader(code, name) {
         const module = device.createShaderModule({ code });

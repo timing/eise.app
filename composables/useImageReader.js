@@ -136,7 +136,15 @@ export function useImageReader() {
         ffmpeg.FS('writeFile', inputName, await fetchFile(file));
         await ffmpeg.run('-i', inputName, outputName);
 
-        const data = ffmpeg.FS('readFile', outputName);
+        // Check if output file exists before reading
+        let data;
+        try {
+            data = ffmpeg.FS('readFile', outputName);
+        } catch (readError) {
+            // Cleanup input file before throwing
+            try { ffmpeg.FS('unlink', inputName); } catch (e) {}
+            throw new Error(`Failed to convert image "${file.name}": FFmpeg did not produce output. The file may be corrupted or in an unsupported format.`);
+        }
 
         ffmpeg.FS('unlink', inputName);
         ffmpeg.FS('unlink', outputName);
@@ -346,6 +354,12 @@ export function useImageReader() {
 
         const validCount = rgbaFrames.filter(f => f !== null).length;
         addLog(`Loaded ${validCount}/${frameCount} images`);
+
+        if (validCount === 0) {
+            emit('upload-error', 'Failed to load any images. The files may be corrupted or in unsupported formats.');
+            emit('stop-loading');
+            return;
+        }
 
         // Detect crop region using GPU
         const MIN_SIZE_FOR_CROP = 300;

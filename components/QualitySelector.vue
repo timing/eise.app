@@ -33,7 +33,7 @@
 				<span v-else>Preview: </span>
 				Frame #{{ previewFrameIndex + 1 }}
 				<span class="sharpness-badge" :class="{ included: previewFrameIndex < selectedCount }">
-					Sharpness: {{ previewFrame.sharpness.toFixed(2) }} · Circularity: {{ previewFrame.circularity?.toFixed(2) || '?' }}
+					Sharpness: {{ previewFrame.sharpness?.toFixed(2) || '?' }} · Circularity: {{ previewFrame.circularity?.toFixed(2) || '?' }}
 					<span v-if="previewFrameIndex < selectedCount">(included)</span>
 					<span v-else>(excluded)</span>
 				</span>

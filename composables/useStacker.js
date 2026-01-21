@@ -18,6 +18,22 @@ export function useStacker() {
     }
 
     /**
+     * Create a PNG blob from float32Buffer for preview display
+     */
+    async function float32ToBlob(float32Buffer, width, height) {
+        const float32Data = new Float32Array(float32Buffer);
+        const uint8Data = new Uint8ClampedArray(float32Data.length);
+        for (let i = 0; i < float32Data.length; i++) {
+            uint8Data[i] = Math.round(float32Data[i] * 255);
+        }
+        const imageData = new ImageData(uint8Data, width, height);
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        ctx.putImageData(imageData, 0, 0);
+        return await canvas.convertToBlob({ type: 'image/png' });
+    }
+
+    /**
      * Convert RGBA buffer to grayscale (supports both Float32 and Uint8 input)
      */
     function rgbaToGrayscale(buffer, width, height, isFloat32 = false) {
@@ -239,11 +255,13 @@ export function useStacker() {
             // Load reference frame
             const { frames: refFrames, centers: refCenters } = await loadRawBatch([refFrameMeta]);
             const refResults = await processGpuBatch(refFrames, refCenters);
+            const refBlob = await float32ToBlob(refResults[0].float32Buffer, cropSize, cropSize);
             const refFrame = {
                 ...refFrameMeta,
                 float32Buffer: refResults[0].float32Buffer,
                 width: cropSize,
-                height: cropSize
+                height: cropSize,
+                blob: refBlob
             };
             emit('stacking-started', { referenceFrame: refFrame });
             addLog(`Reference frame loaded: index ${refFrame.index}`);
@@ -500,6 +518,18 @@ export function useStacker() {
             // Non-round (Saturn) or unclear - stick with sharpest
             referenceFrame = sortedFrames[0];
             addLog(`Non-round planet detected (circularity ${avgCircularity.toFixed(2)}), selecting sharpest reference frame`);
+        }
+
+        // Ensure reference frame has a blob for preview display
+        if (!referenceFrame.blob && referenceFrame.float32Buffer) {
+            referenceFrame.blob = await float32ToBlob(referenceFrame.float32Buffer, referenceFrame.width, referenceFrame.height);
+        } else if (!referenceFrame.blob && referenceFrame.uint8Buffer) {
+            // Create blob from uint8Buffer
+            const imageData = new ImageData(new Uint8ClampedArray(referenceFrame.uint8Buffer), referenceFrame.width, referenceFrame.height);
+            const canvas = new OffscreenCanvas(referenceFrame.width, referenceFrame.height);
+            const ctx = canvas.getContext('2d');
+            ctx.putImageData(imageData, 0, 0);
+            referenceFrame.blob = await canvas.convertToBlob({ type: 'image/png' });
         }
         emit('stacking-started', { referenceFrame });
 
