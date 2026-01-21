@@ -69,7 +69,7 @@ export function useImageReader() {
                         sharpness: e.data.sharpness,
                         pngBlob: e.data.pngBlob,
                         index: e.data.index,
-                        rgbaBuffer: e.data.rgbaBuffer,
+                        float32Buffer: e.data.float32Buffer,
                         width: e.data.width,
                         height: e.data.height,
                         circularity: e.data.circularity || 0
@@ -377,7 +377,7 @@ export function useImageReader() {
                     const currentFrame = {
                         sharpness: result.sharpness,
                         blob: result.pngBlob,
-                        rgbaBuffer: result.rgbaBuffer,
+                        float32Buffer: result.float32Buffer,
                         width: result.width,
                         height: result.height
                     };
@@ -433,16 +433,21 @@ export function useImageReader() {
 
         // Stack frames locally using the first worker (already initialized with OpenCV)
         const stackingWorker = unifiedAnalyzeWorkers[0];
-        const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
+        const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
         // Terminate workers after stacking
         unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
         unifiedAnalyzeWorkers.length = 0;
         workersReady = false;
 
-        if (stackedBlob) {
+        if (stackResult && stackResult.blob) {
             addLog('Client-side stacking complete');
-            emit('stacked-image-ready', { blob: stackedBlob });
+            emit('stacked-image-ready', {
+                blob: stackResult.blob,
+                float32Data: stackResult.float32Data,
+                width: stackResult.width,
+                height: stackResult.height
+            });
         } else {
             addLog('Client-side stacking failed - no valid frames');
             emit('stop-loading');

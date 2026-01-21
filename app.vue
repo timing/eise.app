@@ -72,7 +72,7 @@
 		<QualitySelector v-show="currentTab === 'FileUploader' && isSelectingQuality" :frames="qualityFrames" @threshold-selected="handleThresholdSelected" />
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing && !isSelectingColorProfile && !isSelectingQuality"
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
-		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" :croppedSerData="croppedSerData" :croppedAviData="croppedAviData" />
+		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" :float32Data="stackedFloat32Data" :imageDimensions="stackedImageDimensions" :croppedSerData="croppedSerData" :croppedAviData="croppedAviData" />
 
 		<div class="clearb"></div>
 
@@ -102,6 +102,8 @@ const { track, trackHumanInteraction } = useTracking();
 const frames = ref([]);
 const currentFrame = ref(null);
 const selectedFile = ref(null);
+const stackedFloat32Data = ref(null);  // 16-bit stacking data
+const stackedImageDimensions = ref(null);  // { width, height }
 const currentTab = ref('FileUploader');
 const videoProcessorRef = ref(null);
 const isProcessing = ref(false);
@@ -158,20 +160,32 @@ async function handleThresholdSelected(data) {
 	isSelectingQuality.value = false;
 
 	// Stack the selected frames
-	if (data.frames && data.frames.length > 0 && qualityWorkers.value && qualityWorkers.value.length > 0) {
+	// In GPU mode, stackFramesLocally creates its own workers (qualityWorkers is empty)
+	// In CPU mode, we need existing workers from the analysis phase
+	const hasValidWorkers = qualityWorkers.value && qualityWorkers.value.length > 0;
+	const canStack = qualityUseWebGPU.value || hasValidWorkers;
+
+	if (data.frames && data.frames.length > 0 && canStack) {
 		eventBusEmit('start-loading', 'Stacking selected frames...');
 		addLog(`Stacking ${data.frames.length} frames (${Math.round(data.percentage * 100)}% threshold)`);
 
-		const stackingWorker = qualityWorkers.value[0];
-		const stackedBlob = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value, qualityUseWebGPU.value);
+		const stackingWorker = hasValidWorkers ? qualityWorkers.value[0] : null;
+		const stackResult = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value, qualityUseWebGPU.value);
 
-		// Terminate workers after stacking
-		qualityWorkers.value.forEach(worker => worker.terminate());
+		// Terminate workers after stacking (CPU mode only)
+		if (hasValidWorkers) {
+			qualityWorkers.value.forEach(worker => worker.terminate());
+		}
 		qualityWorkers.value = null;
 
-		if (stackedBlob) {
+		if (stackResult && stackResult.blob) {
 			addLog('Client-side stacking complete');
-			eventBusEmit('stacked-image-ready', { blob: stackedBlob });
+			eventBusEmit('stacked-image-ready', {
+				blob: stackResult.blob,
+				float32Data: stackResult.float32Data,
+				width: stackResult.width,
+				height: stackResult.height
+			});
 		} else {
 			addLog('Client-side stacking failed - no valid frames');
 			eventBusEmit('stop-loading');
@@ -187,6 +201,9 @@ async function handleStackedImageReady(data) {
 	// Convert blob to format expected by PostProcessor
 	currentTab.value = 'PostProcessor';
 	selectedFile.value = data.blob;
+	// Store 16-bit data for high-quality post-processing
+	stackedFloat32Data.value = data.float32Data || null;
+	stackedImageDimensions.value = (data.width && data.height) ? { width: data.width, height: data.height } : null;
 	isProcessing.value = false;
 	track('post_process');
 }

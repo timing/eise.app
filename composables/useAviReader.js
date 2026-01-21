@@ -98,9 +98,7 @@ export function useAviReader() {
     const numWorkers = Math.min(navigator.hardwareConcurrency || 4, 4);
     const unifiedAnalyzeWorkers = [];
     let workersReady = false;
-    const workerFrameCounts = new Map(); // Track frames per worker for staggered recycling
     const recyclingWorkers = new Set(); // Track which workers are currently being recycled
-    const RECYCLE_AFTER_FRAMES = 200; // Restart each worker after N frames (lower = more aggressive memory cleanup)
 
     // Initializes workers and ensures OpenCV is ready before processing
     async function initializeWorkers() {
@@ -137,12 +135,6 @@ export function useAviReader() {
         try {
             await Promise.all(workerPromises);
             workersReady = true;
-            // Initialize per-worker frame counts with staggered offsets so workers don't all recycle at once
-            const staggerOffset = Math.floor(RECYCLE_AFTER_FRAMES / numWorkers);
-            for (let i = 0; i < numWorkers; i++) {
-                // Worker 0 starts at 0, worker 1 at -staggerOffset, etc.
-                workerFrameCounts.set(i, -i * staggerOffset);
-            }
             addLog("Analysis workers ready.");
         } catch (error) {
             console.error("Worker initialization failed:", error);
@@ -154,7 +146,7 @@ export function useAviReader() {
         }
     }
 
-    // Recycle all workers to get fresh WASM heaps (prevents memory exhaustion on large files)
+    // Recycle all workers to get fresh WASM heaps (used on error recovery)
     async function recycleWorkers() {
         addLog("Recycling workers to free WASM memory...");
 
@@ -193,15 +185,10 @@ export function useAviReader() {
 
         await Promise.all(workerPromises);
         workersReady = true;
-        // Initialize per-worker frame counts with staggered offsets so workers don't all recycle at once
-        const staggerOffset = Math.floor(RECYCLE_AFTER_FRAMES / numWorkers);
-        for (let i = 0; i < numWorkers; i++) {
-            workerFrameCounts.set(i, -i * staggerOffset);
-        }
         addLog("Workers recycled successfully.");
     }
 
-    // Recycle a single worker (staggered approach - other workers keep running)
+    // Recycle a single worker on error (other workers keep running)
     async function recycleSingleWorker(workerIndex) {
         if (recyclingWorkers.has(workerIndex)) return;
         recyclingWorkers.add(workerIndex);
@@ -231,20 +218,7 @@ export function useAviReader() {
             newWorker.postMessage({ type: 'init' });
         });
 
-        workerFrameCounts.set(workerIndex, 0);
         recyclingWorkers.delete(workerIndex);
-    }
-
-    // Check if a worker needs recycling and do it in background
-    function checkWorkerRecycle(workerIndex) {
-        const count = (workerFrameCounts.get(workerIndex) || 0) + 1;
-        workerFrameCounts.set(workerIndex, count);
-
-        if (count >= RECYCLE_AFTER_FRAMES && !recyclingWorkers.has(workerIndex)) {
-            recycleSingleWorker(workerIndex).catch(err => {
-                console.error(`Failed to recycle worker ${workerIndex}:`, err);
-            });
-        }
     }
 
     // Detect WASM heap corruption from error messages and force immediate recycle
@@ -294,7 +268,7 @@ export function useAviReader() {
                     resolve({
                         sharpness: e.data.sharpness,
                         pngBlob: e.data.pngBlob,
-                        rgbaBuffer: e.data.rgbaBuffer,
+                        float32Buffer: e.data.float32Buffer,
                         width: e.data.width,
                         height: e.data.height,
                         index: e.data.index,
@@ -407,6 +381,9 @@ export function useAviReader() {
                     emit('update-loading', { progress: ((idx + 1) / sampleIndices.length) * 100, current: idx + 1, total: sampleIndices.length });
                 })
                 .catch(error => {
+                    if (isHeapCorruptionError(error)) {
+                        forceWorkerRecycle(workerIndex);
+                    }
                     console.error(`Error detecting bounds for sample ${idx}:`, error);
                 })
                 .finally(() => releaseSlot());
@@ -658,8 +635,14 @@ export function useAviReader() {
 
         function rankFrame(frame) { // frame is {sharpness, blob}
             // Capture post-crop frames for comparison export (sample evenly)
-            if (frame.rgbaBuffer && frame.width && frame.height) {
-                capturePostCropFrame(frame.rgbaBuffer, frame.width, frame.height, frame.index, frameCount);
+            // Convert Float32 to Uint8 for video export
+            if (frame.float32Buffer && frame.width && frame.height) {
+                const float32Data = new Float32Array(frame.float32Buffer);
+                const uint8Data = new Uint8ClampedArray(float32Data.length);
+                for (let i = 0; i < float32Data.length; i++) {
+                    uint8Data[i] = Math.round(float32Data[i] * 255);
+                }
+                capturePostCropFrame(uint8Data.buffer, frame.width, frame.height, frame.index, frameCount);
             }
 
             // Store all frames when manual threshold is enabled
@@ -802,7 +785,7 @@ export function useAviReader() {
                     const currentFrame = {
                         sharpness: result.sharpness,
                         blob: result.pngBlob,
-                        rgbaBuffer: result.rgbaBuffer,
+                        float32Buffer: result.float32Buffer,
                         width: result.width,
                         height: result.height,
                         index: result.index,
@@ -834,7 +817,6 @@ export function useAviReader() {
                 })
                 .finally(() => {
                     releaseSlot();
-                    checkWorkerRecycle(workerIndex);  // Staggered worker recycling
                 });
             workerPromises.push(promise);
 
@@ -871,11 +853,16 @@ export function useAviReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
+            const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
-            if (stackedBlob) {
+            if (stackResult && stackResult.blob) {
                 addLog('Client-side stacking complete');
-                emit('stacked-image-ready', { blob: stackedBlob });
+                emit('stacked-image-ready', {
+                    blob: stackResult.blob,
+                    float32Data: stackResult.float32Data,
+                    width: stackResult.width,
+                    height: stackResult.height
+                });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
                 emit('stop-loading');
@@ -954,8 +941,14 @@ export function useAviReader() {
             frame.frameIndex = frameIndex;
 
             // Capture post-crop frames for comparison export (sample evenly)
-            if (frame.rgbaBuffer && frame.width && frame.height) {
-                capturePostCropFrame(frame.rgbaBuffer, frame.width, frame.height, frameIndex, frameCount);
+            // Convert Float32 to Uint8 for video export
+            if (frame.float32Buffer && frame.width && frame.height) {
+                const float32Data = new Float32Array(frame.float32Buffer);
+                const uint8Data = new Uint8ClampedArray(float32Data.length);
+                for (let i = 0; i < float32Data.length; i++) {
+                    uint8Data[i] = Math.round(float32Data[i] * 255);
+                }
+                capturePostCropFrame(uint8Data.buffer, frame.width, frame.height, frameIndex, frameCount);
             }
 
             // Store all frames when manual threshold is enabled
@@ -1064,7 +1057,7 @@ export function useAviReader() {
                         const currentFrame = {
                             sharpness: result.sharpness,
                             blob: result.pngBlob,
-                            rgbaBuffer: result.rgbaBuffer,
+                            float32Buffer: result.float32Buffer,
                             width: result.width,
                             height: result.height,
                             index: result.index,
@@ -1083,9 +1076,6 @@ export function useAviReader() {
                         }
                         addLog(`Error processing frame ${i}: ${error}`);
                         console.error(`Error processing frame ${i}:`, error);
-                    })
-                    .finally(() => {
-                        checkWorkerRecycle(workerIndex);  // Staggered worker recycling
                     });
                 batchPromises.push(promise);
             }
@@ -1132,11 +1122,16 @@ export function useAviReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
+            const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
-            if (stackedBlob) {
+            if (stackResult && stackResult.blob) {
                 addLog('Client-side stacking complete');
-                emit('stacked-image-ready', { blob: stackedBlob });
+                emit('stacked-image-ready', {
+                    blob: stackResult.blob,
+                    float32Data: stackResult.float32Data,
+                    width: stackResult.width,
+                    height: stackResult.height
+                });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
                 emit('stop-loading');

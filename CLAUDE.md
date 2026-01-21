@@ -52,6 +52,8 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 
 **Bayer Demosaicing**: Raw Bayer frames are demosaiced using OpenCV's `cv.demosaicing()` with VNG (Variable Number of Gradients) interpolation for better quality on fine detail. The demosaicing happens BEFORE stacking (frames are stacked as RGB, not raw Bayer).
 
+**Per-Frame Planet Centering (CRITICAL)**: Each frame MUST be cropped with per-frame center detection so the planet is always centered in the cropped output. The planet moves across frames due to atmospheric refraction and mount drift. Skipping per-frame detection and using a fixed reference center will cause the planet to drift across frames, ruining the stack. The `detectObjectBounds()` function in unified_analyze_worker.js finds the bright object's centroid for each frame. NEVER skip this step or use a fixed center for all frames.
+
 **OpenCV-WASM Limitation**: The `opencv-bindings` build does NOT include `cv.imencode`/`cv.imdecode`. PNG encoding uses `OffscreenCanvas.convertToBlob()` instead.
 
 **File Format Support**:

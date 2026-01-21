@@ -346,6 +346,8 @@ function initializeWorkers() {
 
 const props = defineProps({
 	file: Object,
+	float32Data: Object,  // Float32Array from 16-bit stacking (RGBA, 0.0-1.0 range)
+	imageDimensions: Object,  // { width, height } for float32Data
 	croppedSerData: Object,
 	croppedAviData: Object
 });
@@ -462,6 +464,10 @@ async function loadImage(file) {
 
 	console.log(file);
 
+	// Check if we have 16-bit float32 data from stacking
+	const hasFloat32Data = props.float32Data && props.imageDimensions &&
+		props.imageDimensions.width && props.imageDimensions.height;
+
 	const img = new Image();
 	img.onload = function() {
 		canvas.value.width = img.width;
@@ -477,9 +483,24 @@ async function loadImage(file) {
 		sharpenedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
 
 		// Initialize 16-bit image container
-		image16 = Image16.fromImageData(initCanvasImageData);
+		if (hasFloat32Data) {
+			// Use Float32Array directly from stacking (full precision preserved)
+			console.log('float32Data type:', props.float32Data?.constructor?.name);
+			console.log('float32Data length:', props.float32Data?.length);
+			console.log('float32Data expected:', props.imageDimensions.width * props.imageDimensions.height * 4);
+			// Sample from CENTER of image (not black corners)
+			const centerY = Math.floor(props.imageDimensions.height / 2);
+			const centerX = Math.floor(props.imageDimensions.width / 2);
+			const centerIdx = (centerY * props.imageDimensions.width + centerX) * 4;
+			console.log(`float32Data CENTER (${centerX},${centerY}) RGBA:`, Array.from(props.float32Data?.slice(centerIdx, centerIdx + 4) || []));
+			image16 = Image16.fromFloat32Array(props.float32Data, props.imageDimensions.width, props.imageDimensions.height);
+			console.log('16-bit image initialized from stacking data (full precision):', props.imageDimensions.width, 'x', props.imageDimensions.height);
+		} else {
+			// Upscale from 8-bit (fallback for direct file uploads)
+			image16 = Image16.fromImageData(initCanvasImageData);
+			console.log('16-bit image container initialized (upscaled from 8-bit):', img.width, 'x', img.height);
+		}
 		sharpenedImage16 = null;
-		console.log('16-bit image container initialized:', img.width, 'x', img.height);
 
 		// Initialize WebGL2 for 16-bit processing (preferred)
 		useWebGL2 = initWebGL2(img.width, img.height);

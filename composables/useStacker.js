@@ -6,47 +6,86 @@ export function useStacker() {
     const { captureUnstackedImage } = useComparisonExport();
 
     /**
-     * Convert RGBA buffer to grayscale
+     * Convert Float32 buffer to Uint8 buffer (for GPU workers that expect Uint8)
      */
-    function rgbaToGrayscale(rgbaBuffer, width, height) {
+    function float32ToUint8(float32Buffer, width, height) {
+        const float32Data = new Float32Array(float32Buffer);
+        const uint8Data = new Uint8Array(float32Data.length);
+        for (let i = 0; i < float32Data.length; i++) {
+            uint8Data[i] = Math.round(float32Data[i] * 255);
+        }
+        return uint8Data.buffer;
+    }
+
+    /**
+     * Convert RGBA buffer to grayscale (supports both Float32 and Uint8 input)
+     */
+    function rgbaToGrayscale(buffer, width, height, isFloat32 = false) {
         const gray = new Uint8Array(width * height);
-        const rgba = new Uint8ClampedArray(rgbaBuffer);
-        for (let i = 0; i < width * height; i++) {
-            gray[i] = Math.round(
-                0.299 * rgba[i * 4] +
-                0.587 * rgba[i * 4 + 1] +
-                0.114 * rgba[i * 4 + 2]
-            );
+        if (isFloat32) {
+            const rgba = new Float32Array(buffer);
+            for (let i = 0; i < width * height; i++) {
+                gray[i] = Math.round(
+                    (0.299 * rgba[i * 4] +
+                    0.587 * rgba[i * 4 + 1] +
+                    0.114 * rgba[i * 4 + 2]) * 255
+                );
+            }
+        } else {
+            const rgba = new Uint8ClampedArray(buffer);
+            for (let i = 0; i < width * height; i++) {
+                gray[i] = Math.round(
+                    0.299 * rgba[i * 4] +
+                    0.587 * rgba[i * 4 + 1] +
+                    0.114 * rgba[i * 4 + 2]
+                );
+            }
         }
         return gray;
     }
 
     /**
      * Calculate mean brightness of non-black pixels (for normalization)
+     * Supports both Float32 (0.0-1.0) and Uint8 (0-255) input
      */
-    function calcMeanBrightness(rgbaBuffer, width, height) {
-        const data = new Uint8Array(rgbaBuffer);
-        const blackCutoff = 10;
+    function calcMeanBrightness(buffer, width, height, isFloat32 = false) {
         let sum = 0;
         let count = 0;
         const step = 8;
 
-        for (let y = 0; y < height; y += step) {
-            for (let x = 0; x < width; x += step) {
-                const i = (y * width + x) * 4;
-                const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
-                if (brightness > blackCutoff) {
-                    sum += brightness;
-                    count++;
+        if (isFloat32) {
+            const data = new Float32Array(buffer);
+            const blackCutoff = 10 / 255; // ~0.04 in float range
+            for (let y = 0; y < height; y += step) {
+                for (let x = 0; x < width; x += step) {
+                    const i = (y * width + x) * 4;
+                    const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+                    if (brightness > blackCutoff) {
+                        sum += brightness;
+                        count++;
+                    }
+                }
+            }
+        } else {
+            const data = new Uint8Array(buffer);
+            const blackCutoff = 10;
+            for (let y = 0; y < height; y += step) {
+                for (let x = 0; x < width; x += step) {
+                    const i = (y * width + x) * 4;
+                    const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+                    if (brightness > blackCutoff) {
+                        sum += brightness;
+                        count++;
+                    }
                 }
             }
         }
-        return count > 0 ? sum / count : 1;
+        return count > 0 ? sum / count : (isFloat32 ? 1.0/255 : 1);
     }
 
     /**
      * Stack frames using a web worker for local alignment
-     * @param frames - Array of frame objects with rgbaBuffer, width, height, sharpness
+     * @param frames - Array of frame objects with float32Buffer (or rgbaBuffer for legacy), width, height, sharpness
      * @param existingWorker - Optional: reuse an existing initialized worker
      * @param drizzleScale - Output scale factor (1.0 = normal, 1.5 = drizzle)
      */
@@ -54,8 +93,16 @@ export function useStacker() {
         emit('set-caption', 'Preparing for stacking...');
         emit('update-loading', { progress: 0, current: 0, total: 0 });
 
-        // Filter frames that have valid rgbaBuffer and sharpness
-        const validFrames = frames.filter(f => f.rgbaBuffer && f.width && f.height && f.sharpness > 0);
+        // Filter frames that have valid buffer (float32Buffer preferred, rgbaBuffer for legacy) and sharpness
+        // DEBUG: Log filtering stats
+        const noBuffer = frames.filter(f => !f.float32Buffer && !f.rgbaBuffer).length;
+        const noWidth = frames.filter(f => !f.width).length;
+        const noHeight = frames.filter(f => !f.height).length;
+        const noSharpness = frames.filter(f => !f.sharpness || f.sharpness <= 0).length;
+        addLog(`Stacker input: ${frames.length} frames, filtering: noBuffer=${noBuffer}, noWidth=${noWidth}, noHeight=${noHeight}, noSharpness=${noSharpness}`);
+
+        const validFrames = frames.filter(f => (f.float32Buffer || f.rgbaBuffer) && f.width && f.height && f.sharpness > 0);
+        addLog(`Stacker: ${validFrames.length} valid frames after filtering`);
 
         if (validFrames.length === 0) {
             addLog('No valid frames with RGBA data for stacking');
@@ -90,24 +137,28 @@ export function useStacker() {
         addLog(`Sending ${validFrames.length} frames to stacking worker${drizzleStr}${useWebGPU ? ' (WebGPU)' : ''}`);
 
         // Prepare frame data - only include cloneable/transferable properties
+        // Use float32Buffer (16-bit path) if available, otherwise fall back to rgbaBuffer (8-bit legacy)
         const frameData = [];
         for (let i = 0; i < validFrames.length; i++) {
             const f = validFrames[i];
-            let buffer = f.rgbaBuffer;
+            const isFloat32 = !!f.float32Buffer;
+            let buffer = f.float32Buffer || f.rgbaBuffer;
             if (buffer && !(buffer instanceof ArrayBuffer)) {
                 if (buffer.buffer instanceof ArrayBuffer) {
                     buffer = buffer.buffer;
                 } else {
-                    console.warn(`Frame ${i}: rgbaBuffer is not an ArrayBuffer, skipping`);
+                    console.warn(`Frame ${i}: buffer is not an ArrayBuffer, skipping`);
                     continue;
                 }
             }
             if (!buffer || buffer.byteLength === 0) {
-                console.warn(`Frame ${i}: rgbaBuffer is empty or detached, skipping`);
+                console.warn(`Frame ${i}: buffer is empty or detached, skipping`);
                 continue;
             }
             frameData.push({
-                rgbaBuffer: buffer,
+                float32Buffer: isFloat32 ? buffer : null,
+                rgbaBuffer: isFloat32 ? null : buffer,
+                isFloat32,
                 width: f.width,
                 height: f.height,
                 sharpness: f.sharpness,
@@ -122,12 +173,18 @@ export function useStacker() {
         addLog(`Prepared ${frameData.length} frames for stacking`);
 
         // Emit frame data for AVI export BEFORE transfer
+        // AVI export needs Uint8 data, so convert Float32 if needed
         if (frameData.length <= 500) {
-            const aviFrameData = frameData.map(f => ({
-                rgbaBuffer: f.rgbaBuffer instanceof ArrayBuffer ? f.rgbaBuffer.slice(0) : null,
-                width: f.width,
-                height: f.height
-            })).filter(f => f.rgbaBuffer !== null);
+            const aviFrameData = frameData.map(f => {
+                let rgbaBuffer = null;
+                if (f.isFloat32 && f.float32Buffer) {
+                    // Convert Float32 to Uint8 for AVI export
+                    rgbaBuffer = float32ToUint8(f.float32Buffer, f.width, f.height);
+                } else if (f.rgbaBuffer instanceof ArrayBuffer) {
+                    rgbaBuffer = f.rgbaBuffer.slice(0);
+                }
+                return { rgbaBuffer, width: f.width, height: f.height };
+            }).filter(f => f.rgbaBuffer !== null);
             emit('cropped-avi-ready', {
                 frames: aviFrameData,
                 width: frameData[0].width,
@@ -193,8 +250,23 @@ export function useStacker() {
             const refFrame = frameData[refIndex];
 
             // Only clone the reference frame buffer for alignment preparation
+            // Worker expects float32Buffer and converts internally
+            let refBuffer;
+            if (refFrame.isFloat32 && refFrame.float32Buffer) {
+                refBuffer = refFrame.float32Buffer.slice(0);
+            } else if (refFrame.rgbaBuffer) {
+                // Convert Uint8 to Float32 for the worker
+                const uint8Data = new Uint8Array(refFrame.rgbaBuffer);
+                const float32Data = new Float32Array(uint8Data.length);
+                for (let i = 0; i < uint8Data.length; i++) {
+                    float32Data[i] = uint8Data[i] / 255.0;
+                }
+                refBuffer = float32Data.buffer;
+            } else {
+                throw new Error('Reference frame has no valid buffer');
+            }
             const refFrameData = {
-                rgbaBuffer: refFrame.rgbaBuffer.slice(0),
+                float32Buffer: refBuffer,
                 width: refFrame.width,
                 height: refFrame.height,
                 sharpness: refFrame.sharpness
@@ -246,10 +318,12 @@ export function useStacker() {
                 const batchEnd = Math.min(batchStart + batchSize, framesToProcess.length);
                 const batchIndices = framesToProcess.slice(batchStart, batchEnd);
 
-                // Convert batch frames to grayscale
-                const frameGrayDatas = batchIndices.map(f =>
-                    rgbaToGrayscale(frameData[f].rgbaBuffer, width, height)
-                );
+                // Convert batch frames to grayscale (handle both Float32 and Uint8)
+                const frameGrayDatas = batchIndices.map(f => {
+                    const frame = frameData[f];
+                    const buffer = frame.isFloat32 ? frame.float32Buffer : frame.rgbaBuffer;
+                    return rgbaToGrayscale(buffer, width, height, frame.isFloat32);
+                });
 
                 // Send batch to GPU
                 const batchShifts = await new Promise((resolve, reject) => {
@@ -294,8 +368,15 @@ export function useStacker() {
             // Calculate total sharpness for weighting
             const totalSharpness = frameData.reduce((sum, f) => sum + f.sharpness, 0);
 
-            // Calculate reference brightness (refFrame already defined above)
-            const refBrightness = calcMeanBrightness(frameData[refIndex].rgbaBuffer, width, height);
+            // Calculate reference brightness (refFrame already defined above, handle Float32)
+            // GPU worker's calcMeanBrightness uses Uint8 (0-255 range), so we need to match that
+            const refFrameForBrightness = frameData[refIndex];
+            const refBrightnessBuffer = refFrameForBrightness.isFloat32 ? refFrameForBrightness.float32Buffer : refFrameForBrightness.rgbaBuffer;
+            let refBrightness = calcMeanBrightness(refBrightnessBuffer, width, height, refFrameForBrightness.isFloat32);
+            // Convert to 0-255 range if calculated from Float32 data (0-1 range)
+            if (refFrameForBrightness.isFloat32) {
+                refBrightness *= 255;
+            }
 
             // Initialize stacking
             await new Promise((resolve, reject) => {
@@ -327,12 +408,20 @@ export function useStacker() {
                 const batchWeights = [];
 
                 for (let i = batchStart; i < batchEnd; i++) {
+                    const frame = frameData[i];
+                    // GPU worker expects Uint8 rgbaBuffer, convert Float32 if needed
+                    let rgbaBuffer;
+                    if (frame.isFloat32 && frame.float32Buffer) {
+                        rgbaBuffer = float32ToUint8(frame.float32Buffer, frame.width, frame.height);
+                    } else {
+                        rgbaBuffer = frame.rgbaBuffer;
+                    }
                     batchFrames.push({
-                        rgbaBuffer: frameData[i].rgbaBuffer,
-                        sharpness: frameData[i].sharpness
+                        rgbaBuffer,
+                        sharpness: frame.sharpness
                     });
                     batchShifts.push(frameShifts[i]);
-                    batchWeights.push(frameData[i].sharpness / totalSharpness * frameCount);
+                    batchWeights.push(frame.sharpness / totalSharpness * frameCount);
                 }
 
                 await new Promise((resolve, reject) => {
@@ -388,7 +477,16 @@ export function useStacker() {
             // Capture unstacked image for comparison export
             captureUnstackedImage(result.blob);
 
-            return result.blob;
+            // Reconstruct Float32Array from transferred buffer
+            const float32Data = result.float32Buffer ? new Float32Array(result.float32Buffer) : null;
+
+            // Return full object with blob and float32Data for 16-bit post-processing
+            return {
+                blob: result.blob,
+                float32Data,
+                width: result.width,
+                height: result.height
+            };
 
         } catch (error) {
             cvWorker.terminate();
@@ -440,16 +538,20 @@ export function useStacker() {
                     }
 
                     if (type === 'stack-complete') {
-                        const { blob, width, height } = e.data;
+                        const { blob, width, height, float32Buffer } = e.data;
                         addLog(`Stacked image: ${width}x${height}, ${(blob.size / 1024).toFixed(1)} KB`);
                         emit('set-caption', 'Stacking complete');
 
                         // Capture unstacked image for comparison export
                         captureUnstackedImage(blob);
 
+                        // Reconstruct Float32Array from transferred buffer
+                        const float32Data = float32Buffer ? new Float32Array(float32Buffer) : null;
+
                         worker.removeEventListener('message', messageHandler);
                         worker.terminate();
-                        resolve(blob);
+                        // Return object with blob and float32Data for 16-bit post-processing
+                        resolve({ blob, float32Data, width, height });
                     }
 
                     if (type === 'stack-error') {
@@ -464,8 +566,9 @@ export function useStacker() {
                 worker.addEventListener('message', messageHandler);
 
                 // Use Set to deduplicate - same buffer may be referenced by multiple frames
+                // Include both float32Buffer and rgbaBuffer for hybrid mode
                 const transferables = [...new Set(
-                    frameData.map(f => f.rgbaBuffer).filter(b => b instanceof ArrayBuffer && b.byteLength > 0)
+                    frameData.flatMap(f => [f.float32Buffer, f.rgbaBuffer]).filter(b => b instanceof ArrayBuffer && b.byteLength > 0)
                 )];
                 worker.postMessage({
                     type: 'stack-frames',

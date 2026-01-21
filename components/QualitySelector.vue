@@ -228,17 +228,18 @@ async function drawPreview() {
 				img.onerror = reject;
 				img.src = url;
 			});
-		} else if (frame.rgbaBuffer && frame.width && frame.height) {
-			// Fall back to rgbaBuffer if no blob (memory-constrained mode)
+		} else if (frame.float32Buffer && frame.width && frame.height) {
+			// Convert Float32Array (0.0-1.0) to Uint8ClampedArray for display
+			const float32Data = new Float32Array(frame.float32Buffer);
+			const uint8Data = new Uint8ClampedArray(float32Data.length);
+			for (let i = 0; i < float32Data.length; i++) {
+				uint8Data[i] = Math.round(float32Data[i] * 255);
+			}
 			const tempCanvas = document.createElement('canvas');
 			tempCanvas.width = frame.width;
 			tempCanvas.height = frame.height;
 			const tempCtx = tempCanvas.getContext('2d');
-			const imageData = new ImageData(
-				new Uint8ClampedArray(frame.rgbaBuffer),
-				frame.width,
-				frame.height
-			);
+			const imageData = new ImageData(uint8Data, frame.width, frame.height);
 			tempCtx.putImageData(imageData, 0, 0);
 			img = tempCanvas;
 		} else {

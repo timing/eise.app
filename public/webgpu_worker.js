@@ -177,6 +177,13 @@ self.addEventListener('message', async (e) => {
             for (let i = 0; i < frames.length; i++) {
                 const frame = frames[i];
 
+                // DEBUG: Check input frame values - CENTER pixel, not corners
+                if (i === 0) {
+                    const sample = new Uint8Array(frame.rgbaBuffer);
+                    const centerIdx = (Math.floor(ctx.height / 2) * ctx.width + Math.floor(ctx.width / 2)) * 4;
+                    console.log(`GPU frame 0 - CENTER pixel (${Math.floor(ctx.width/2)},${Math.floor(ctx.height/2)}) RGBA:`, Array.from(sample.slice(centerIdx, centerIdx + 4)));
+                }
+
                 // Calculate brightness normalization
                 const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, ctx.width, ctx.height);
                 const brightnessScale = ctx.refBrightness / frameBrightness;
@@ -216,15 +223,45 @@ self.addEventListener('message', async (e) => {
             // Read back accumulated results
             const { accumR, accumG, accumB, accumW } = await readAccumulators(ctx.outWidth, ctx.outHeight);
 
+            // DEBUG: Check accumulator values from CENTER of image (not black corners)
+            const centerY = Math.floor(ctx.outHeight / 2);
+            const centerX = Math.floor(ctx.outWidth / 2);
+            const centerIdx = centerY * ctx.outWidth + centerX;
+            console.log(`accumR center sample (${centerX},${centerY}):`, Array.from(accumR.slice(centerIdx, centerIdx + 8)));
+            console.log(`accumW center sample:`, Array.from(accumW.slice(centerIdx, centerIdx + 8)));
+            // Also show the normalized values
+            const sampleR = accumR[centerIdx];
+            const sampleW = accumW[centerIdx];
+            console.log(`Center pixel: accumR=${sampleR}, accumW=${sampleW}, normalized=${sampleR / sampleW / 255}`);
+
             // Create final image
             const result = new Uint8ClampedArray(ctx.outWidth * ctx.outHeight * 4);
+            // Also create Float32Array for 16-bit post-processing (RGBA, 0.0-1.0 range)
+            const float32Data = new Float32Array(ctx.outWidth * ctx.outHeight * 4);
 
             for (let i = 0; i < ctx.outWidth * ctx.outHeight; i++) {
                 const w = accumW[i];
                 if (w > 0) {
-                    result[i * 4] = Math.min(255, Math.max(0, Math.round(accumR[i] / w)));
-                    result[i * 4 + 1] = Math.min(255, Math.max(0, Math.round(accumG[i] / w)));
-                    result[i * 4 + 2] = Math.min(255, Math.max(0, Math.round(accumB[i] / w)));
+                    // Normalized float values (0.0-1.0) - preserves full accumulator precision
+                    const r = accumR[i] / w / 255.0;
+                    const g = accumG[i] / w / 255.0;
+                    const b = accumB[i] / w / 255.0;
+
+                    // Float32 output (full precision)
+                    float32Data[i * 4 + 0] = r;
+                    float32Data[i * 4 + 1] = g;
+                    float32Data[i * 4 + 2] = b;
+                    float32Data[i * 4 + 3] = 1.0;
+
+                    // 8-bit output (for preview/compatibility)
+                    result[i * 4] = Math.min(255, Math.max(0, Math.round(r * 255)));
+                    result[i * 4 + 1] = Math.min(255, Math.max(0, Math.round(g * 255)));
+                    result[i * 4 + 2] = Math.min(255, Math.max(0, Math.round(b * 255)));
+                } else {
+                    float32Data[i * 4 + 0] = 0;
+                    float32Data[i * 4 + 1] = 0;
+                    float32Data[i * 4 + 2] = 0;
+                    float32Data[i * 4 + 3] = 1.0;
                 }
                 result[i * 4 + 3] = 255;
             }
@@ -237,12 +274,14 @@ self.addEventListener('message', async (e) => {
 
             self.stackingContext = null;
 
+            // Transfer float32Data buffer for zero-copy
             self.postMessage({
                 type: 'stack-complete',
                 blob,
                 width: ctx.outWidth,
-                height: ctx.outHeight
-            });
+                height: ctx.outHeight,
+                float32Buffer: float32Data.buffer
+            }, [float32Data.buffer]);
 
         } catch (err) {
             self.postMessage({ type: 'finalize-error', error: err.message });

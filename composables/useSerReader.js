@@ -170,11 +170,9 @@ export function useSerReader() {
 
     // Map of pending frame resolvers per worker: workerIndex -> { frameIndex -> {resolve, reject, timeout} }
     const pendingFrames = new Map();
-    const workerFrameCounts = new Map(); // Track frames per worker for staggered recycling
-    const RECYCLE_THRESHOLD = 200; // Recycle each worker after N frames (lower = more aggressive memory cleanup)
     const recyclingWorkers = new Set(); // Track which workers are currently being recycled
 
-    // Recycle a single worker to prevent WASM heap exhaustion (non-blocking for other workers)
+    // Recycle a single worker on error (non-blocking for other workers)
     async function recycleSingleWorker(workerIndex) {
         if (recyclingWorkers.has(workerIndex)) return; // Already recycling
         recyclingWorkers.add(workerIndex);
@@ -221,7 +219,6 @@ export function useSerReader() {
 
         // Set up handler for this worker
         setupSingleWorkerHandler(workerIndex);
-        workerFrameCounts.set(workerIndex, 0);
         recyclingWorkers.delete(workerIndex);
     }
 
@@ -262,19 +259,6 @@ export function useSerReader() {
         });
     }
 
-    // Check if a worker needs recycling and do it in background
-    function checkWorkerRecycle(workerIndex) {
-        const count = (workerFrameCounts.get(workerIndex) || 0) + 1;
-        workerFrameCounts.set(workerIndex, count);
-
-        if (count >= RECYCLE_THRESHOLD && !recyclingWorkers.has(workerIndex)) {
-            // Recycle in background - don't await
-            recycleSingleWorker(workerIndex).catch(err => {
-                console.error(`Failed to recycle worker ${workerIndex}:`, err);
-            });
-        }
-    }
-
     // Detect WASM heap corruption from error messages and force immediate recycle
     function isHeapCorruptionError(error) {
         const msg = error?.message || String(error);
@@ -300,12 +284,7 @@ export function useSerReader() {
 
     // Set up single message handler per worker (call after workers are created)
     function setupWorkerHandlers() {
-        const numWorkers = unifiedAnalyzeWorkers.length;
-        const staggerOffset = Math.floor(RECYCLE_THRESHOLD / numWorkers);
         unifiedAnalyzeWorkers.forEach((worker, workerIndex) => {
-            // Stagger initial counts so workers don't all recycle at once
-            // Worker 0 starts at 0, worker 1 at -staggerOffset, etc.
-            workerFrameCounts.set(workerIndex, -workerIndex * staggerOffset);
             setupSingleWorkerHandler(workerIndex);
         });
     }
@@ -383,6 +362,9 @@ export function useSerReader() {
                     emit('update-loading', { progress: ((idx + 1) / sampleIndices.length) * 100, current: idx + 1, total: sampleIndices.length });
                 })
                 .catch(error => {
+                    if (isHeapCorruptionError(error)) {
+                        forceWorkerRecycle(workerIndex);
+                    }
                     console.error(`Error detecting bounds for sample ${idx}:`, error);
                 });
 
@@ -429,6 +411,128 @@ export function useSerReader() {
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
+    // GPU-accelerated crop region detection - uses GPU for bounds detection
+    async function detectCropRegionGpu(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent = 10) {
+        emit('set-caption', 'Detecting planet position (GPU)...');
+        emit('update-loading', { progress: 0, current: 0, total: frameCount });
+
+        // Initialize GPU worker
+        const gpuReady = await initGpuAnalyzeWorker();
+        if (!gpuReady) {
+            addLog('GPU not available, falling back to CPU detection');
+            return detectCropRegion(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent);
+        }
+
+        // Sample every Nth frame for faster detection
+        const sampleInterval = Math.max(1, Math.floor(frameCount / 50)); // ~50 samples max
+        const sampleIndices = [];
+        for (let i = 0; i < frameCount; i += sampleInterval) {
+            sampleIndices.push(i);
+        }
+
+        addLog(`GPU sampling ${sampleIndices.length} frames for crop detection...`);
+
+        // Map bayer choice to pattern index for GPU
+        // bayerChoice comes from ColorProfileSelector as OpenCV constants
+        // GPU shader: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
+        const bayerPatternMap = {
+            // Short names (for backwards compat)
+            'RGGB': 0, 'BGGR': 1, 'GRBG': 2, 'GBRG': 3, 'MONO': -1,
+            // OpenCV constants from ColorProfileSelector (note: OpenCV naming is inverted)
+            'COLOR_BayerBG2RGB': 0,  // OpenCV BG = camera RGGB
+            'COLOR_BayerRG2RGB': 1,  // OpenCV RG = camera BGGR
+            'COLOR_BayerGB2RGB': 2,  // OpenCV GB = camera GRBG
+            'COLOR_BayerGR2RGB': 3,  // OpenCV GR = camera GBRG
+        };
+        const bayerPattern = bayerPatternMap[bayerChoice] ?? -1;
+
+        // Load all sample frames in batches for GPU processing
+        const batchSize = 16; // Process 16 frames at a time on GPU
+        let maxSize = 0;
+        let canCropCount = 0;
+        const detectedCenters = [];
+        const detectedSizes = [];
+
+        for (let batchStart = 0; batchStart < sampleIndices.length; batchStart += batchSize) {
+            const batchEnd = Math.min(batchStart + batchSize, sampleIndices.length);
+            const batchIndices = sampleIndices.slice(batchStart, batchEnd);
+
+            // Load frame data for this batch
+            const frames = [];
+            for (const i of batchIndices) {
+                const offset = 178 + (i * frameSize);
+                const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+
+                // Convert to appropriate typed array based on pixel depth
+                let data;
+                if (header.pixelDepth > 8) {
+                    data = new Uint16Array(frameBuffer);
+                } else {
+                    data = new Uint8Array(frameBuffer);
+                }
+                frames.push({ data, index: i });
+            }
+
+            try {
+                // GPU analyze with threshold ~0.05 (12/255 normalized, matching CPU threshold of 12)
+                const results = await analyzeFrameBatchGpu(frames, header.width, header.height, bayerPattern, 0.05);
+
+                for (const result of results) {
+                    if (result.bounds) {
+                        canCropCount++;
+                        // Calculate size from bounds (raw bounding box)
+                        const size = Math.max(result.bounds.width, result.bounds.height);
+                        maxSize = Math.max(maxSize, size);
+                        detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
+                        detectedSizes.push(size);
+                    }
+                }
+            } catch (err) {
+                console.error('GPU crop detection batch error:', err);
+                // Continue with other batches
+            }
+
+            emit('update-loading', { progress: (batchEnd / sampleIndices.length) * 100, current: batchEnd, total: sampleIndices.length });
+        }
+
+        // Only need 50% of frames to be croppable
+        const cropThreshold = sampleIndices.length * 0.5;
+        if (canCropCount < cropThreshold) {
+            addLog(`Only ${canCropCount}/${sampleIndices.length} frames can be cropped. Skipping auto-crop.`);
+            return null;
+        }
+
+        // Add margin to the max size and round up to even number
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        let finalSize = Math.ceil(maxSize * marginMultiplier / 2) * 2;
+
+        // Limit crop size to frame dimensions
+        const maxAllowedSize = Math.min(header.width, header.height);
+        if (finalSize > maxAllowedSize) {
+            addLog(`Crop size ${finalSize} exceeds frame size ${maxAllowedSize}, skipping auto-crop`);
+            return null;
+        }
+
+        // Calculate median center as fallback reference
+        if (detectedCenters.length === 0) {
+            addLog(`GPU detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+            return { size: finalSize };
+        }
+
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        // Calculate median size for outlier detection
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
+
+        addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+    }
+
     // GPU batch analysis helper
     let gpuAnalyzeWorker = null;
     let gpuWorkerReady = false;
@@ -447,6 +551,10 @@ export function useSerReader() {
             }, 10000);
 
             gpuAnalyzeWorker.onmessage = (e) => {
+                if (!e.data) {
+                    console.warn('GPU worker sent null message');
+                    return;
+                }
                 if (e.data.type === 'ready') {
                     clearTimeout(timeout);
                     gpuWorkerReady = true;
@@ -459,6 +567,14 @@ export function useSerReader() {
                     gpuAnalyzeWorker = null;
                     resolve(false);
                 }
+            };
+            gpuAnalyzeWorker.onerror = (err) => {
+                clearTimeout(timeout);
+                console.error('GPU analyze worker error:', err);
+                addLog(`WebGPU analyze worker crashed: ${err.message}`);
+                gpuAnalyzeWorker.terminate();
+                gpuAnalyzeWorker = null;
+                resolve(false);
             };
             gpuAnalyzeWorker.postMessage({ type: 'init' });
         });
@@ -515,6 +631,50 @@ export function useSerReader() {
     }
 
     /**
+     * Crop and analyze frames in one GPU pass
+     * @param frames - Array of { data, index } where data is raw frame buffer
+     * @param srcWidth - Source frame width
+     * @param srcHeight - Source frame height
+     * @param cropSize - Output crop size (square)
+     * @param centers - Array of {x, y} per-frame centers
+     * @param bayerPattern - GPU pattern index (0-3) or -1 for MONO
+     * @param threshold - Threshold for moments (default 0.1)
+     */
+    async function cropAndAnalyzeGpu(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1) {
+        if (!gpuAnalyzeWorker || !gpuWorkerReady) {
+            throw new Error('GPU worker not initialized');
+        }
+
+        const requestId = Date.now() + Math.random();
+
+        return new Promise((resolve, reject) => {
+            const handler = (e) => {
+                if (e.data.requestId !== requestId) return;
+                gpuAnalyzeWorker.removeEventListener('message', handler);
+
+                if (e.data.type === 'crop-analyze-result') {
+                    resolve(e.data.results);
+                } else if (e.data.type === 'crop-analyze-error') {
+                    reject(new Error(e.data.error));
+                }
+            };
+
+            gpuAnalyzeWorker.addEventListener('message', handler);
+            gpuAnalyzeWorker.postMessage({
+                type: 'crop-analyze-batch',
+                frames,
+                srcWidth,
+                srcHeight,
+                cropSize,
+                centers,
+                bayerPattern,
+                threshold,
+                requestId
+            });
+        });
+    }
+
+    /**
      * Crop raw Bayer/Mono frame data to a region
      * Ensures even coordinates for Bayer pattern alignment
      */
@@ -549,12 +709,16 @@ export function useSerReader() {
         // Reset comparison export captures for new processing
         resetCaptures();
 
-        await initializeWorkers();
+        // Only initialize CPU worker pool if NOT using GPU mode
+        // GPU mode uses webgpu_analyze_worker instead
+        if (!useWebGPU) {
+            await initializeWorkers();
 
-        if (!workersReady) {
-            addLog("Stopping SER processing due to worker initialization failure.");
-            emit('show-error');
-            return;
+            if (!workersReady) {
+                addLog("Stopping SER processing due to worker initialization failure.");
+                emit('show-error');
+                return;
+            }
         }
 
         emit('start-loading', 'Reading file header');
@@ -596,7 +760,8 @@ export function useSerReader() {
         let previewHeader = header;
         const MIN_SIZE_FOR_CROP = 300;
 
-        if (enableAutoCrop && header.width >= MIN_SIZE_FOR_CROP && header.height >= MIN_SIZE_FOR_CROP) {
+        // Preview crop for color selector (skip in GPU mode - uses full frame instead)
+        if (!useWebGPU && enableAutoCrop && header.width >= MIN_SIZE_FOR_CROP && header.height >= MIN_SIZE_FOR_CROP) {
             emit('set-caption', 'Detecting planet for preview...');
             try {
                 const headerForWorker = {
@@ -678,7 +843,12 @@ export function useSerReader() {
 
         if (enableAutoCrop && header.width >= MIN_SIZE_FOR_CROP && header.height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${header.width}x${header.height} qualifies for auto-crop`);
-            cropRegion = await detectCropRegion(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent);
+            // Use GPU detection when WebGPU is enabled, falls back to CPU automatically
+            if (useWebGPU) {
+                cropRegion = await detectCropRegionGpu(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent);
+            } else {
+                cropRegion = await detectCropRegion(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent);
+            }
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
@@ -698,9 +868,14 @@ export function useSerReader() {
         // Lazy blob creation - only when needed for display
         async function ensureBlob(frame) {
             if (frame.blob) return frame;
-            if (!frame.rgbaBuffer) return frame;
+            if (!frame.float32Buffer) return frame;
             try {
-                const rgba = new Uint8ClampedArray(frame.rgbaBuffer);
+                // Convert Float32 (0.0-1.0) to Uint8 (0-255) for display
+                const float32Data = new Float32Array(frame.float32Buffer);
+                const rgba = new Uint8ClampedArray(float32Data.length);
+                for (let i = 0; i < float32Data.length; i++) {
+                    rgba[i] = Math.round(float32Data[i] * 255);
+                }
                 const imageData = new ImageData(rgba, frame.width, frame.height);
                 const canvas = new OffscreenCanvas(frame.width, frame.height);
                 const ctx = canvas.getContext('2d');
@@ -713,15 +888,15 @@ export function useSerReader() {
         }
 
         function rankFrame(frame) {
-            // Validate frame has either blob or rgbaBuffer (GPU path has no blob initially)
-            if (!frame.rgbaBuffer && (!frame.blob || !(frame.blob instanceof Blob) || frame.blob.size === 0)) {
+            // Validate frame has either blob or float32Buffer (GPU path has no blob initially)
+            if (!frame.float32Buffer && (!frame.blob || !(frame.blob instanceof Blob) || frame.blob.size === 0)) {
                 console.warn(`Skipping frame ${frame.index}: no valid data`);
                 return;
             }
 
             // Capture post-crop frames for comparison export (sample evenly)
-            if (frame.rgbaBuffer && frame.width && frame.height) {
-                capturePostCropFrame(frame.rgbaBuffer, frame.width, frame.height, frame.index, frameCount);
+            if (frame.float32Buffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.float32Buffer, frame.width, frame.height, frame.index, frameCount);
             }
 
             // Keep all frames when manual threshold is enabled
@@ -814,169 +989,187 @@ export function useSerReader() {
                 usedGpuPath = true;
 
                 const bpp = header.pixelDepth > 8 ? 2 : 1;
-                const BATCH_SIZE = 32;
+                // Larger batch size for better GPU utilization
+                const BATCH_SIZE = 64;
 
                 if (cropRegion) {
-                    // HYBRID PATH: CPU crops, GPU analyzes
-                    addLog('Using hybrid CPU crop + GPU analysis');
-                    const processWidth = cropRegion.size;
-                    const processHeight = cropRegion.size;
+                    // FULL GPU PATH: GPU detects centers + crops + analyzes
+                    addLog('Using full GPU crop + analyze path');
+                    const cropSize = cropRegion.size;
 
-                    // Process frames through CPU workers for cropping, batch to GPU for analysis
-                    let pendingCrops = [];
-                    let croppedBatch = [];
+                    // Map bayer choice to GPU pattern index
+                    const bayerPattern = bayerChoiceToGpuPattern(bayerChoice);
 
-                    for (let i = 0; i < frameCount; i++) {
-                        if (stopDispatching) break;
-
-                        const offset = 178 + (i * frameSize);
-                        if (offset + frameSize > file.size) break;
-
-                        await acquireSlot();
-                        const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
-
-                        // Pick a worker that's not currently recycling
-                        let workerIndex = i % numWorkers;
-                        let attempts = 0;
-                        while (recyclingWorkers.has(workerIndex) && attempts < numWorkers) {
-                            workerIndex = (workerIndex + 1) % numWorkers;
-                            attempts++;
-                        }
-                        // If all workers are recycling, wait a bit for one to finish
-                        if (attempts >= numWorkers) {
-                            await new Promise(r => setTimeout(r, 100));
-                        }
-
-                        // Determine if this frame should capture pre-crop for comparison video
-                        const preCropSampleInterval = Math.max(1, Math.floor(frameCount / 10));
-                        const shouldCapturePreCrop = (i % preCropSampleInterval === 0);
-
-                        // Send to CPU worker for crop-only processing
-                        const cropPromise = processFrameWithWorker(workerIndex, {
-                            type: 'crop-only',
-                            frameBuffer,
-                            header: headerForWorker,
-                            bayerChoice,
-                            cropRegion,
-                            capturePreCrop: shouldCapturePreCrop,
-                            index: i
-                        }, [frameBuffer]).then(result => {
-                            releaseSlot();
-                            checkWorkerRecycle(workerIndex);  // Staggered worker recycling
-
-                            // Capture pre-crop frame if available (for comparison video)
-                            if (result.preCropRgbaBuffer && result.preCropWidth && result.preCropHeight) {
-                                capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, frameCount);
-                            }
-
-                            return result;
-                        }).catch(err => {
-                            releaseSlot();
-                            // Check for heap corruption and force immediate recycle if detected
-                            if (isHeapCorruptionError(err)) {
-                                forceWorkerRecycle(workerIndex);
+                    // Helper to load a batch of frames from file
+                    async function loadBatch(batchStart, batchEnd) {
+                        const frames = [];
+                        for (let i = batchStart; i < batchEnd; i++) {
+                            const offset = 178 + (i * frameSize);
+                            if (offset + frameSize > file.size) break;
+                            const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+                            let data;
+                            if (header.pixelDepth > 8) {
+                                data = new Uint16Array(frameBuffer);
                             } else {
-                                checkWorkerRecycle(workerIndex);
+                                data = new Uint8Array(frameBuffer);
                             }
-                            console.error(`Hybrid crop error for frame ${i}:`, err.message || err);
-                            return { skipped: true, reason: 'error', index: i };
-                        });
+                            frames.push({ data, index: i });
+                        }
+                        return frames;
+                    }
 
-                        pendingCrops.push(cropPromise);
+                    // Double-buffer: load next batch while GPU processes current
+                    let nextBatchPromise = null;
+                    let batchStart = 0;
 
-                        // When we have enough pending crops or at the end, process them
-                        if (pendingCrops.length >= BATCH_SIZE || i === frameCount - 1) {
-                            const cropResults = await Promise.all(pendingCrops);
-                            pendingCrops = [];
+                    while (batchStart < frameCount && !stopDispatching) {
+                        const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
 
-                            // Filter successful crops and prepare for GPU
-                            const gpuBatchFrames = [];
-                            const gpuBatchMeta = [];
+                        // Get current batch (either pre-loaded or load now)
+                        let batchFrames;
+                        if (nextBatchPromise) {
+                            batchFrames = await nextBatchPromise;
+                        } else {
+                            batchFrames = await loadBatch(batchStart, batchEnd);
+                        }
 
-                            for (const result of cropResults) {
-                                if (result.skipped) {
-                                    if (result.reason === 'cut-off') cutOffFrames++;
-                                    else if (result.reason === 'oversized') oversizedFrames++;
-                                    else {
-                                        skippedFrames++;
-                                    }
+                        if (batchFrames.length === 0) break;
+
+                        // Start loading next batch while GPU processes current
+                        const nextStart = batchEnd;
+                        const nextEnd = Math.min(nextStart + BATCH_SIZE, frameCount);
+                        if (nextStart < frameCount) {
+                            nextBatchPromise = loadBatch(nextStart, nextEnd);
+                        } else {
+                            nextBatchPromise = null;
+                        }
+
+                        try {
+                            // Step 1: GPU bounds detection on full frames to get centers
+                            console.log(`[SER] Batch ${batchStart}-${batchEnd}: sending ${batchFrames.length} frames for bounds detection`);
+                            const boundsResults = await analyzeFrameBatchGpu(
+                                batchFrames, header.width, header.height, bayerPattern, 0.05
+                            );
+                            console.log(`[SER] Batch ${batchStart}-${batchEnd}: received ${boundsResults.length} bounds results`);
+
+                            // Filter frames with valid centers and prepare for crop
+                            const framesToCrop = [];
+                            const centers = [];
+                            let noBoundsCount = 0, cutOffCount = 0, oversizedCount = 0;
+
+                            for (let j = 0; j < boundsResults.length; j++) {
+                                const result = boundsResults[j];
+                                const frame = batchFrames[j];
+
+                                // Check if bounds were detected
+                                if (!result.bounds) {
+                                    skippedFrames++;
                                     completedFrames++;
+                                    noBoundsCount++;
                                     continue;
                                 }
 
-                                // Convert RGBA ArrayBuffer to Uint8Array for GPU
-                                gpuBatchFrames.push({
-                                    data: new Uint8Array(result.rgbaBuffer),
-                                    index: result.index
-                                });
-                                gpuBatchMeta.push({
-                                    index: result.index,
-                                    subPixelOffset: result.subPixelOffset,
-                                    rgbaBuffer: result.rgbaBuffer
-                                });
-                            }
+                                // Check for cut-off (object touching edge)
+                                const margin = Math.max(header.width, header.height) * 0.01;
+                                if (result.bounds.x < margin || result.bounds.y < margin ||
+                                    result.bounds.x + result.bounds.width > header.width - margin ||
+                                    result.bounds.y + result.bounds.height > header.height - margin) {
+                                    cutOffFrames++;
+                                    completedFrames++;
+                                    cutOffCount++;
+                                    continue;
+                                }
 
-                            if (gpuBatchFrames.length > 0) {
-                                try {
-                                    // GPU analyze with bayerPattern=-1 (already RGBA)
-                                    const gpuResults = await analyzeFrameBatchGpu(
-                                        gpuBatchFrames, processWidth, processHeight, -1, 0.1
-                                    );
-
-                                    for (let j = 0; j < gpuResults.length; j++) {
-                                        const gpuResult = gpuResults[j];
-                                        const meta = gpuBatchMeta[j];
-
-                                        const currentFrame = {
-                                            sharpness: gpuResult.sharpness,
-                                            rgbaBuffer: meta.rgbaBuffer,
-                                            width: processWidth,
-                                            height: processHeight,
-                                            index: meta.index,
-                                            subPixelOffset: meta.subPixelOffset,
-                                            circularity: gpuResult.circularity || 0
-                                        };
-
-                                        rankFrame(currentFrame);
-                                        successfulFrames++;
+                                // Check for oversized
+                                if (cropRegion.medianObjectSize) {
+                                    const size = Math.max(result.bounds.width, result.bounds.height);
+                                    const sizeRatio = size / cropRegion.medianObjectSize;
+                                    if (sizeRatio > 1.3) {  // Slightly more lenient than CPU
+                                        oversizedFrames++;
                                         completedFrames++;
-
-                                        if (successfulFrames === 1) {
-                                            addLog(`First hybrid frame: sharpness ${gpuResult.sharpness?.toFixed(2)}, circularity ${gpuResult.circularity?.toFixed(2)}`);
-                                        }
+                                        oversizedCount++;
+                                        continue;
                                     }
-                                } catch (gpuError) {
-                                    addLog(`GPU batch error: ${gpuError.message}, falling back to CPU`);
-                                    usedGpuPath = false;
-                                    completedFrames = 0;
-                                    successfulFrames = 0;
-                                    rankedFrames.length = 0;
-                                    bestFrameSoFar = null;
-                                    refCandidateSoFar = null;
-                                    break;
                                 }
+
+                                framesToCrop.push(frame);
+                                centers.push({
+                                    x: result.bounds.centroidX,
+                                    y: result.bounds.centroidY
+                                });
                             }
 
-                            // Update progress
-                            emit('update-loading', {
-                                progress: (completedFrames / frameCount) * 100,
-                                current: completedFrames,
-                                total: frameCount
-                            });
+                            console.log(`[SER] Batch ${batchStart}-${batchEnd}: ${framesToCrop.length} passed filters (noBounds=${noBoundsCount}, cutOff=${cutOffCount}, oversized=${oversizedCount})`);
 
-                            if (completedFrames % 100 === 0 || completedFrames === frameCount) {
-                                addLog(`Hybrid analyzed ${completedFrames}/${frameCount} frames`);
-                                if (bestFrameSoFar) {
-                                    await ensureBlob(bestFrameSoFar);
-                                    emit('best-frame-updated', bestFrameSoFar);
+                            if (framesToCrop.length > 0) {
+                                // Step 2: GPU crop + analyze
+                                const cropResults = await cropAndAnalyzeGpu(
+                                    framesToCrop, header.width, header.height, cropSize, centers, bayerPattern, 0.1
+                                );
+                                console.log(`[SER] Batch ${batchStart}-${batchEnd}: received ${cropResults.length} crop results`);
+
+                                // DEBUG: Check sharpness distribution
+                                const zeroSharpness = cropResults.filter(r => !r.sharpness || r.sharpness === 0).length;
+                                const validSharpness = cropResults.filter(r => r.sharpness > 0).length;
+                                if (zeroSharpness > 0) {
+                                    console.warn(`[SER] Batch ${batchStart}-${batchEnd}: ${zeroSharpness} frames with zero sharpness, ${validSharpness} with valid sharpness`);
                                 }
-                                if (refCandidateSoFar) {
-                                    await ensureBlob(refCandidateSoFar);
-                                    emit('ref-candidate-updated', refCandidateSoFar);
+
+                                for (const gpuResult of cropResults) {
+                                    const currentFrame = {
+                                        sharpness: gpuResult.sharpness,
+                                        float32Buffer: gpuResult.float32Buffer,
+                                        width: cropSize,
+                                        height: cropSize,
+                                        index: gpuResult.index,
+                                        subPixelOffset: { x: 0, y: 0 },
+                                        circularity: gpuResult.circularity || 0
+                                    };
+
+                                    rankFrame(currentFrame);
+                                    successfulFrames++;
+                                    completedFrames++;
+
+                                    if (successfulFrames === 1) {
+                                        addLog(`First GPU frame: sharpness ${gpuResult.sharpness?.toFixed(2)}, circularity ${gpuResult.circularity?.toFixed(2)}`);
+                                    }
                                 }
+                            }
+                        } catch (gpuError) {
+                            addLog(`GPU batch error: ${gpuError.message}, falling back to CPU`);
+                            usedGpuPath = false;
+                            completedFrames = 0;
+                            successfulFrames = 0;
+                            allAnalyzedFrames.length = 0;
+                            bestFramesForStacking.length = 0;
+                            bestFrameSoFar = null;
+                            refCandidateSoFar = null;
+                            break;
+                        }
+
+                        // Update progress
+                        emit('update-loading', {
+                            progress: (completedFrames / frameCount) * 100,
+                            current: completedFrames,
+                            total: frameCount
+                        });
+
+                        if (completedFrames % 100 === 0 || completedFrames === frameCount) {
+                            addLog(`GPU analyzed ${completedFrames}/${frameCount} frames`);
+                            if (bestFrameSoFar) {
+                                await ensureBlob(bestFrameSoFar);
+                                emit('best-frame-updated', bestFrameSoFar);
+                            }
+                            if (refCandidateSoFar) {
+                                await ensureBlob(refCandidateSoFar);
+                                emit('ref-candidate-updated', refCandidateSoFar);
                             }
                         }
+
+                        // Move to next batch
+                        batchStart = batchEnd;
                     }
+                    console.log(`[SER] GPU crop path complete: successfulFrames=${successfulFrames}, skippedFrames=${skippedFrames}, cutOffFrames=${cutOffFrames}, oversizedFrames=${oversizedFrames}, allAnalyzedFrames.length=${allAnalyzedFrames.length}`);
                 } else {
                     // PURE GPU PATH: No cropping needed
                     addLog('Using WebGPU for frame analysis (no cropping)');
@@ -984,28 +1177,53 @@ export function useSerReader() {
                     const processWidth = header.width;
                     const processHeight = header.height;
 
-                    for (let batchStart = 0; batchStart < frameCount; batchStart += BATCH_SIZE) {
-                        const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
-                        const batchFrames = [];
-
+                    // Helper to load a batch
+                    async function loadBatchNoCrop(batchStart, batchEnd) {
+                        const frames = [];
                         for (let i = batchStart; i < batchEnd; i++) {
                             const offset = 178 + (i * frameSize);
                             if (offset + frameSize > file.size) break;
-
                             const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
                             const frameData = bpp === 2
                                 ? new Uint16Array(frameBuffer)
                                 : new Uint8Array(frameBuffer);
+                            frames.push({ data: frameData, index: i });
+                        }
+                        return frames;
+                    }
 
-                            batchFrames.push({ data: frameData, index: i });
+                    // Double-buffer: load next batch while GPU processes current
+                    let nextBatchPromise = null;
+                    let batchStart = 0;
+
+                    while (batchStart < frameCount && !stopDispatching) {
+                        const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
+
+                        // Get current batch
+                        let batchFrames;
+                        if (nextBatchPromise) {
+                            batchFrames = await nextBatchPromise;
+                        } else {
+                            batchFrames = await loadBatchNoCrop(batchStart, batchEnd);
                         }
 
                         if (batchFrames.length === 0) break;
 
+                        // Start loading next batch while GPU processes
+                        const nextStart = batchEnd;
+                        const nextEnd = Math.min(nextStart + BATCH_SIZE, frameCount);
+                        if (nextStart < frameCount) {
+                            nextBatchPromise = loadBatchNoCrop(nextStart, nextEnd);
+                        } else {
+                            nextBatchPromise = null;
+                        }
+
                         try {
+                            console.log(`[SER] No-crop batch ${batchStart}-${batchEnd}: sending ${batchFrames.length} frames`);
                             const results = await analyzeFrameBatchGpu(
                                 batchFrames, processWidth, processHeight, gpuBayerPattern, 0.1
                             );
+                            console.log(`[SER] No-crop batch ${batchStart}-${batchEnd}: received ${results.length} results`);
 
                             for (let j = 0; j < results.length; j++) {
                                 const result = results[j];
@@ -1013,7 +1231,7 @@ export function useSerReader() {
 
                                 const currentFrame = {
                                     sharpness: result.sharpness,
-                                    rgbaBuffer: result.rgbaBuffer,
+                                    float32Buffer: result.float32Buffer,
                                     width: processWidth,
                                     height: processHeight,
                                     index: frameIndex,
@@ -1052,12 +1270,17 @@ export function useSerReader() {
                             usedGpuPath = false;
                             completedFrames = 0;
                             successfulFrames = 0;
+                            allAnalyzedFrames.length = 0;
                             bestFramesForStacking.length = 0;
                             bestFrameSoFar = null;
                             refCandidateSoFar = null;
                             break;
                         }
+
+                        // Move to next batch
+                        batchStart = batchEnd;
                     }
+                    console.log(`[SER] GPU no-crop path complete: successfulFrames=${successfulFrames}, allAnalyzedFrames.length=${allAnalyzedFrames.length}`);
                 }
 
                 terminateGpuAnalyzeWorker();
@@ -1138,7 +1361,7 @@ export function useSerReader() {
                         sharpness: result.sharpness,
                         blob: result.pngBlob,
                         croppedBuffer: result.croppedBuffer,
-                        rgbaBuffer: result.rgbaBuffer,
+                        float32Buffer: result.float32Buffer,
                         width: result.width,
                         height: result.height,
                         index: result.index,
@@ -1190,7 +1413,6 @@ export function useSerReader() {
                 })
                 .finally(() => {
                     releaseSlot();  // Always release slot when done
-                    checkWorkerRecycle(workerIndex);  // Staggered worker recycling
                 });
             workerPromises.push(promise);
         }
@@ -1227,11 +1449,11 @@ export function useSerReader() {
             addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
-                workers: unifiedAnalyzeWorkers, // Pass workers for later stacking
+                workers: useWebGPU ? [] : unifiedAnalyzeWorkers, // GPU mode creates its own workers
                 noiseRobustAlignment,
                 useWebGPU
             });
-            // Don't terminate workers yet - they'll be used for stacking after selection
+            // Don't terminate workers yet - they'll be used for stacking after selection (CPU mode only)
             return;
         } else if (clientSideStacking) {
             // Client-side stacking: use one of the existing workers (before terminating them)
@@ -1241,13 +1463,18 @@ export function useSerReader() {
             // Emit for debug frame access
             emit('debug-frames-available', { frames: bestFramesForStacking });
 
-            // Use the first worker for stacking (it's already initialized with OpenCV)
-            const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
+            // Use the first worker for stacking (GPU mode creates its own, CPU mode uses existing)
+            const stackingWorker = useWebGPU ? null : unifiedAnalyzeWorkers[0];
+            const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
-            if (stackedBlob) {
+            if (stackResult && stackResult.blob) {
                 addLog('Client-side stacking complete');
-                emit('stacked-image-ready', { blob: stackedBlob });
+                emit('stacked-image-ready', {
+                    blob: stackResult.blob,
+                    float32Data: stackResult.float32Data,
+                    width: stackResult.width,
+                    height: stackResult.height
+                });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
                 emit('stop-loading');
@@ -1262,9 +1489,11 @@ export function useSerReader() {
             await uploadFrames(pngBlobs);
         }
 
-        // Terminate workers after all tasks are done (including stacking)
-        unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
-        unifiedAnalyzeWorkers.length = 0;
+        // Terminate workers after all tasks are done (CPU mode only - GPU creates/terminates its own)
+        if (unifiedAnalyzeWorkers.length > 0) {
+            unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
+            unifiedAnalyzeWorkers.length = 0;
+        }
         pendingFrames.clear();
         workersReady = false;
     }
@@ -1324,6 +1553,154 @@ export function useSerReader() {
         }
 
         return new Blob([buffer], { type: 'application/octet-stream' });
+    }
+
+    // GPU-accelerated crop region detection across multiple files
+    async function detectCropRegionMultiFileGpu(fileInfos, bayerChoice, cropMarginPercent = 10) {
+        emit('set-caption', 'Detecting planet position across files (GPU)...');
+
+        // Initialize GPU worker
+        const gpuReady = await initGpuAnalyzeWorker();
+        if (!gpuReady) {
+            addLog('GPU not available, falling back to CPU detection');
+            return detectCropRegionMultiFile(fileInfos, bayerChoice, cropMarginPercent);
+        }
+
+        const totalFrames = fileInfos.reduce((sum, info) => sum + info.frameCount, 0);
+        const targetSamples = 50; // Total samples across all files
+
+        emit('update-loading', { progress: 0, current: 0, total: targetSamples });
+
+        // Map bayer choice to pattern index for GPU
+        // bayerChoice comes from ColorProfileSelector as OpenCV constants
+        // GPU shader: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
+        const bayerPatternMap = {
+            // Short names (for backwards compat)
+            'RGGB': 0, 'BGGR': 1, 'GRBG': 2, 'GBRG': 3, 'MONO': -1,
+            // OpenCV constants from ColorProfileSelector (note: OpenCV naming is inverted)
+            'COLOR_BayerBG2RGB': 0,  // OpenCV BG = camera RGGB
+            'COLOR_BayerRG2RGB': 1,  // OpenCV RG = camera BGGR
+            'COLOR_BayerGB2RGB': 2,  // OpenCV GB = camera GRBG
+            'COLOR_BayerGR2RGB': 3,  // OpenCV GR = camera GBRG
+        };
+        const bayerPattern = bayerPatternMap[bayerChoice] ?? -1;
+
+        // Collect sample frame indices from all files
+        const sampleFrames = [];
+        for (const info of fileInfos) {
+            const { file, header, frameSize, frameCount } = info;
+
+            // Sample proportionally based on this file's contribution to total
+            const samplesForThisFile = Math.max(1, Math.round((frameCount / totalFrames) * targetSamples));
+            const sampleInterval = Math.max(1, Math.floor(frameCount / samplesForThisFile));
+
+            for (let i = 0; i < frameCount; i += sampleInterval) {
+                const offset = 178 + (i * frameSize);
+                if (offset + frameSize > file.size) break;
+
+                sampleFrames.push({
+                    file,
+                    header,
+                    frameSize,
+                    frameIndex: i,
+                    offset
+                });
+            }
+        }
+
+        addLog(`GPU sampling ${sampleFrames.length} frames for crop detection across ${fileInfos.length} files...`);
+
+        // Process frames in batches for GPU
+        const batchSize = 16;
+        let maxSize = 0;
+        let canCropCount = 0;
+        const detectedCenters = [];
+        const detectedSizes = [];
+
+        for (let batchStart = 0; batchStart < sampleFrames.length; batchStart += batchSize) {
+            const batchEnd = Math.min(batchStart + batchSize, sampleFrames.length);
+            const batchItems = sampleFrames.slice(batchStart, batchEnd);
+
+            // All frames must have same dimensions for GPU batch processing
+            // Use first file's header as reference (already validated same in readSerFiles)
+            const referenceHeader = fileInfos[0].header;
+
+            // Load frame data for this batch
+            const frames = [];
+            for (const item of batchItems) {
+                const frameBuffer = await item.file.slice(item.offset, item.offset + item.frameSize).arrayBuffer();
+
+                // Convert to appropriate typed array based on pixel depth
+                let data;
+                if (item.header.pixelDepth > 8) {
+                    data = new Uint16Array(frameBuffer);
+                } else {
+                    data = new Uint8Array(frameBuffer);
+                }
+                frames.push({ data, index: item.frameIndex });
+            }
+
+            try {
+                // GPU analyze with threshold ~0.05 (matching CPU threshold)
+                const results = await analyzeFrameBatchGpu(frames, referenceHeader.width, referenceHeader.height, bayerPattern, 0.05);
+
+                for (const result of results) {
+                    if (result.bounds) {
+                        canCropCount++;
+                        // Add 20% margin on each side (1.4x) to match CPU's detectObjectBounds
+                        const rawSize = Math.max(result.bounds.width, result.bounds.height);
+                        const size = rawSize * 1.4;
+                        maxSize = Math.max(maxSize, size);
+                        detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
+                        detectedSizes.push(size);
+                    }
+                }
+            } catch (err) {
+                console.error('GPU multi-file crop detection batch error:', err);
+                // Continue with other batches
+            }
+
+            emit('update-loading', {
+                progress: (batchEnd / sampleFrames.length) * 100,
+                current: batchEnd,
+                total: sampleFrames.length
+            });
+        }
+
+        // Only need 50% of frames to be croppable
+        const cropThreshold = sampleFrames.length * 0.5;
+        if (canCropCount < cropThreshold) {
+            addLog(`Only ${canCropCount}/${sampleFrames.length} frames can be cropped across files. Skipping auto-crop.`);
+            return null;
+        }
+
+        // Add margin and round to even
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        let finalSize = Math.ceil(maxSize * marginMultiplier / 2) * 2;
+
+        // Limit to smallest frame dimensions across all files
+        const maxAllowedSize = Math.min(...fileInfos.map(info => Math.min(info.header.width, info.header.height)));
+        if (finalSize > maxAllowedSize) {
+            addLog(`Crop size ${finalSize} exceeds smallest frame size ${maxAllowedSize}, skipping auto-crop`);
+            return null;
+        }
+
+        if (detectedCenters.length === 0) {
+            addLog(`GPU detected crop size: ${finalSize}x${finalSize} (${canCropCount}/${sampleFrames.length} frames croppable)`);
+            return { size: finalSize };
+        }
+
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
+
+        addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleFrames.length} frames croppable across ${fileInfos.length} files)`);
+
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
     // Detect crop region across multiple files
@@ -1389,6 +1766,9 @@ export function useSerReader() {
                         });
                     })
                     .catch(error => {
+                        if (isHeapCorruptionError(error)) {
+                            forceWorkerRecycle(workerIndex);
+                        }
                         console.error(`Error detecting bounds for sample ${currentSampleIndex}:`, error);
                     });
 
@@ -1603,7 +1983,12 @@ export function useSerReader() {
 
         if (enableAutoCrop && allQualifyForCrop) {
             addLog(`All files qualify for auto-crop (min ${MIN_SIZE_FOR_CROP}x${MIN_SIZE_FOR_CROP})`);
-            cropRegion = await detectCropRegionMultiFile(fileInfos, bayerChoice, cropMarginPercent);
+            // Use GPU detection when WebGPU is enabled, falls back to CPU automatically
+            if (useWebGPU) {
+                cropRegion = await detectCropRegionMultiFileGpu(fileInfos, bayerChoice, cropMarginPercent);
+            } else {
+                cropRegion = await detectCropRegionMultiFile(fileInfos, bayerChoice, cropMarginPercent);
+            }
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
@@ -1625,8 +2010,8 @@ export function useSerReader() {
         // Streaming rank function - keeps only top N frames in memory
         function rankFrame(frame) {
             // Capture post-crop frames for comparison export (sample evenly)
-            if (frame.rgbaBuffer && frame.width && frame.height) {
-                capturePostCropFrame(frame.rgbaBuffer, frame.width, frame.height, frame.index, totalFramesToProcess);
+            if (frame.float32Buffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.float32Buffer, frame.width, frame.height, frame.index, totalFramesToProcess);
             }
 
             // For manual threshold, we need all frames (may still crash on large sets)
@@ -1799,7 +2184,7 @@ export function useSerReader() {
                             sharpness: result.sharpness,
                             blob: result.pngBlob,
                             croppedBuffer: result.croppedBuffer,
-                            rgbaBuffer: result.rgbaBuffer,
+                            float32Buffer: result.float32Buffer,
                             width: result.width,
                             height: result.height,
                             index: result.index,
@@ -1852,7 +2237,6 @@ export function useSerReader() {
                     })
                     .finally(() => {
                         releaseSlot();
-                        checkWorkerRecycle(workerIndex);  // Staggered worker recycling
                     });
 
                 workerPromises.push(promise);
@@ -1891,7 +2275,7 @@ export function useSerReader() {
             addLog(`Ready for manual threshold selection with ${allAnalyzedFrames.length} frames`);
             emit('quality-selection-ready', {
                 frames: allAnalyzedFrames,
-                workers: unifiedAnalyzeWorkers,
+                workers: useWebGPU ? [] : unifiedAnalyzeWorkers, // GPU mode creates its own workers
                 noiseRobustAlignment,
                 useWebGPU
             });
@@ -1900,21 +2284,28 @@ export function useSerReader() {
             emit('set-caption', 'Stacking frames locally...');
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
-            const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackedBlob = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
+            const stackingWorker = useWebGPU ? null : unifiedAnalyzeWorkers[0];
+            const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
-            if (stackedBlob) {
+            if (stackResult && stackResult.blob) {
                 addLog('Client-side stacking complete');
-                emit('stacked-image-ready', { blob: stackedBlob });
+                emit('stacked-image-ready', {
+                    blob: stackResult.blob,
+                    float32Data: stackResult.float32Data,
+                    width: stackResult.width,
+                    height: stackResult.height
+                });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
                 emit('stop-loading');
             }
         }
 
-        // Terminate workers after all tasks are done
-        unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
-        unifiedAnalyzeWorkers.length = 0;
+        // Terminate workers after all tasks are done (CPU mode only)
+        if (unifiedAnalyzeWorkers.length > 0) {
+            unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
+            unifiedAnalyzeWorkers.length = 0;
+        }
         pendingFrames.clear();
         workersReady = false;
     }

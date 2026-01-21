@@ -91,7 +91,15 @@ async function handleMessage(e) {
             const { frames, drizzleScale = 1.0, noiseRobustAlignment = false } = e.data;
             try {
                 const result = await stackFramesLocally(frames, drizzleScale, noiseRobustAlignment);
-                self.postMessage({ type: 'stack-complete', blob: result.blob, width: result.width, height: result.height });
+                // Transfer float32Data buffer for zero-copy
+                const transferables = result.float32Data ? [result.float32Data.buffer] : [];
+                self.postMessage({
+                    type: 'stack-complete',
+                    blob: result.blob,
+                    width: result.width,
+                    height: result.height,
+                    float32Buffer: result.float32Data ? result.float32Data.buffer : null
+                }, transferables);
             } catch (stackError) {
                 console.error('Stacking error:', stackError);
                 self.postMessage({ type: 'stack-error', error: stackError.message || String(stackError) });
@@ -125,7 +133,15 @@ async function handleMessage(e) {
             const { frames, frameShifts, alignmentPoints, refIndex, drizzleScale = 1.0, patchSize = 64 } = e.data;
             try {
                 const result = await stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, refIndex, drizzleScale, patchSize);
-                self.postMessage({ type: 'stack-complete', blob: result.blob, width: result.width, height: result.height });
+                // Transfer float32Data buffer for zero-copy
+                const transferables = result.float32Data ? [result.float32Data.buffer] : [];
+                self.postMessage({
+                    type: 'stack-complete',
+                    blob: result.blob,
+                    width: result.width,
+                    height: result.height,
+                    float32Buffer: result.float32Data ? result.float32Data.buffer : null
+                }, transferables);
             } catch (stackError) {
                 console.error('Stacking error:', stackError);
                 self.postMessage({ type: 'stack-error', error: stackError.message || String(stackError) });
@@ -163,11 +179,11 @@ async function handleMessage(e) {
                 index,
                 circularity: result.circularity || 0
             };
-            if (includeRgba && result.rgbaBuffer) {
-                response.rgbaBuffer = result.rgbaBuffer;
+            if (includeRgba && result.float32Buffer) {
+                response.float32Buffer = result.float32Buffer;
                 response.width = result.width;
                 response.height = result.height;
-                self.postMessage(response, [result.rgbaBuffer]);
+                self.postMessage(response, [result.float32Buffer]);
             } else {
                 self.postMessage(response);
             }
@@ -264,7 +280,7 @@ async function handleMessage(e) {
             const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index, false, true, capturePreCrop);
 
             const response = {
-                rgbaBuffer: result.rgbaBuffer,
+                float32Buffer: result.float32Buffer,
                 width: result.width,
                 height: result.height,
                 subPixelOffset: actualCropRegion?.subPixelOffset || { x: 0, y: 0 },
@@ -272,7 +288,7 @@ async function handleMessage(e) {
             };
 
             // Include pre-crop RGBA if captured (for comparison video)
-            const transferables = [result.rgbaBuffer];
+            const transferables = [result.float32Buffer];
             if (result.preCropRgbaBuffer) {
                 response.preCropRgbaBuffer = result.preCropRgbaBuffer;
                 response.preCropWidth = result.preCropWidth;
@@ -397,6 +413,12 @@ async function handleMessage(e) {
             const shouldCapturePreCrop = capturePreCrop && actualCropRegion; // Only makes sense if cropping
             const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index, includeRgba, false, shouldCapturePreCrop);
 
+            // Check for skipped frame (e.g., bayer artifact)
+            if (result.skipped) {
+                self.postMessage({ skipped: true, reason: result.reason, index });
+                return;
+            }
+
             const response = {
                 sharpness: result.sharpness,
                 pngBlob: result.pngBlob,
@@ -406,9 +428,9 @@ async function handleMessage(e) {
                 circularity: bounds.circularity || 0
             };
 
-            // Only include RGBA data when client-side stacking is enabled
-            if (includeRgba && result.rgbaBuffer) {
-                response.rgbaBuffer = result.rgbaBuffer;
+            // Only include float32 data when client-side stacking is enabled
+            if (includeRgba && result.float32Buffer) {
+                response.float32Buffer = result.float32Buffer;
                 response.width = result.width;
                 response.height = result.height;
             }
@@ -422,7 +444,7 @@ async function handleMessage(e) {
 
             // Transfer buffers for zero-copy
             const transferables = [];
-            if (response.rgbaBuffer) transferables.push(response.rgbaBuffer);
+            if (response.float32Buffer) transferables.push(response.float32Buffer);
             if (response.preCropRgbaBuffer) transferables.push(response.preCropRgbaBuffer);
 
             if (transferables.length > 0) {
@@ -452,21 +474,35 @@ async function handleMessage(e) {
             let grayMat = new _cv.Mat();
             _cv.cvtColor(imgMat, grayMat, _cv.COLOR_RGBA2GRAY);
             sharpness = calculateSharpnessFromMat(grayMat, index);
-            pngBlob = blob; // Reuse the blob we created
 
             imgMat.delete();
             grayMat.delete();
             imageBitmap.close();
 
-            // Return with rgbaBuffer if client-side stacking is enabled
+            // Check for Bayer artifact detection (-1 signals skip)
+            if (sharpness < 0) {
+                self.postMessage({ skipped: true, reason: 'bayer-artifact', index });
+                return;
+            }
+
+            pngBlob = blob; // Reuse the blob we created
+
+            // Return with float32Buffer if client-side stacking is enabled
             if (includeRgba) {
-                const rgbaBuffer = imageData.data.buffer.slice(0); // Copy the buffer
+                // Convert 8-bit RGBA to Float32 (0.0-1.0 range)
+                const uint8Data = imageData.data;
+                const float32Data = new Float32Array(uint8Data.length);
+                const scale = 1.0 / 255.0;
+                for (let i = 0; i < uint8Data.length; i++) {
+                    float32Data[i] = uint8Data[i] * scale;
+                }
+                const float32Buffer = float32Data.buffer;
                 self.postMessage({
                     sharpness, pngBlob, index,
-                    rgbaBuffer: rgbaBuffer,
+                    float32Buffer: float32Buffer,
                     width: imageData.width,
                     height: imageData.height
-                }, [rgbaBuffer]);
+                }, [float32Buffer]);
                 return;
             }
         } else if (type === 'ser' || type === 'avi') {
@@ -482,20 +518,27 @@ async function handleMessage(e) {
 
             const includeRgba = e.data.clientSideStacking === true;
             const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, null, index, includeRgba);
+
+            // Check for skipped frame (e.g., bayer artifact)
+            if (result.skipped) {
+                self.postMessage({ skipped: true, reason: result.reason, index });
+                return;
+            }
+
             sharpness = result.sharpness;
             pngBlob = result.pngBlob;
 
             // Include circularity for reference frame selection (1.0 = perfect circle)
             circularity = bounds.circularity || 0;
 
-            // Return with rgbaBuffer if client-side stacking is enabled
-            if (includeRgba && result.rgbaBuffer) {
+            // Return with float32Buffer if client-side stacking is enabled
+            if (includeRgba && result.float32Buffer) {
                 self.postMessage({
                     sharpness, pngBlob, index, circularity,
-                    rgbaBuffer: result.rgbaBuffer,
+                    float32Buffer: result.float32Buffer,
                     width: result.width,
                     height: result.height
-                }, [result.rgbaBuffer]);
+                }, [result.float32Buffer]);
                 return;
             }
 
@@ -612,7 +655,16 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
                     demosaiced = new _cv.Mat();
                     _cv.demosaicing(rawMat, demosaiced, _cv[demosaicMethod]);
 
-                    // Convert to 8-bit RGB after demosaicing
+                    // Validate demosaic output - should be 3 channels (RGB)
+                    if (demosaiced.channels() !== 3) {
+                        throw new Error(`Demosaic produced ${demosaiced.channels()} channels instead of 3 - heap likely corrupted`);
+                    }
+                    if (demosaiced.rows !== height || demosaiced.cols !== width) {
+                        throw new Error(`Demosaic produced wrong dimensions ${demosaiced.cols}x${demosaiced.rows} instead of ${width}x${height}`);
+                    }
+
+                    // Convert to 8-bit RGB after demosaicing (needed for OpenCV operations)
+                    // TODO: For true 16-bit preservation, extract float32 before this conversion
                     if (pixelDepth > 8) {
                         demosaiced8 = new _cv.Mat();
                         demosaiced.convertTo(demosaiced8, _cv.CV_8UC3, 1/256);
@@ -700,6 +752,13 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
                 const demosaicMethod = _cv[vngChoice] !== undefined ? vngChoice : bayerChoice;
                 const demosaiced = new _cv.Mat();
                 _cv.demosaicing(rawMat, demosaiced, _cv[demosaicMethod]);
+
+                // Validate demosaic output
+                if (demosaiced.channels() !== 3) {
+                    demosaiced.delete();
+                    throw new Error(`AVI demosaic produced ${demosaiced.channels()} channels instead of 3 - heap likely corrupted`);
+                }
+
                 rgbaMat = new _cv.Mat();
                 _cv.cvtColor(demosaiced, rgbaMat, _cv.COLOR_BGR2RGBA);
                 demosaiced.delete();
@@ -760,6 +819,10 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
         let sharpness = 0;
         if (!skipAnalysis) {
             sharpness = calculateSharpnessFromMat(grayMat, frameIndex);
+            // Check for Bayer artifact detection (-1 signals skip)
+            if (sharpness < 0) {
+                return { skipped: true, reason: 'bayer-artifact' };
+            }
         }
 
         // --- Step 4: Create PNG Blob (optional - skip if only cropping) ---
@@ -777,21 +840,28 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
                 pngBlob = await safeConvertToBlob(tempOffscreenCanvas, { type: 'image/png' });
             } catch (pngErr) {
                 // PNG creation failed (likely out of memory) - continue without it
-                // The rgbaBuffer can still be used for stacking and preview generation
+                // The float32Buffer can still be used for stacking and preview generation
                 if (frameIndex !== undefined && frameIndex % 500 === 0) {
                     console.warn(`PNG creation skipped for frame ${frameIndex} (memory): ${pngErr.message || pngErr}`);
                 }
             }
         }
 
-        // --- Step 5: Get RGBA buffer for client-side stacking (copy before mat is deleted) ---
-        let rgbaBuffer = null;
+        // --- Step 5: Get Float32 RGBA buffer for client-side stacking (0.0-1.0 range) ---
+        let float32Buffer = null;
         if (includeRgba || skipAnalysis) {
             // Always include RGBA when skipAnalysis (crop-only mode needs it for GPU)
-            rgbaBuffer = new Uint8ClampedArray(rgbaMat.data).buffer;
+            // Convert 8-bit RGBA to Float32 (0.0-1.0 range) for 16-bit precision pipeline
+            const uint8Data = rgbaMat.data;
+            const float32Data = new Float32Array(uint8Data.length);
+            const scale = 1.0 / 255.0;
+            for (let i = 0; i < uint8Data.length; i++) {
+                float32Data[i] = uint8Data[i] * scale;
+            }
+            float32Buffer = float32Data.buffer;
         }
 
-        return { sharpness, pngBlob, croppedBuffer, rgbaBuffer, width: actualWidth, height: actualHeight, preCropRgbaBuffer, preCropWidth, preCropHeight };
+        return { sharpness, pngBlob, croppedBuffer, float32Buffer, width: actualWidth, height: actualHeight, preCropRgbaBuffer, preCropWidth, preCropHeight };
 
     } finally {
         if (rawMat) rawMat.delete();
@@ -882,6 +952,13 @@ function calculateSharpnessFromMat(grayMat, frameIndex) {
         // Log first frame only for debugging
         if (frameIndex === 0) {
             console.log(`Frame analysis: ${grayMat.cols}x${grayMat.rows}, Tenengrad sharpness=${sharpness.toFixed(2)}`);
+        }
+
+        // Sanity check: abnormally high sharpness (>50000) indicates raw Bayer data that wasn't demosaiced
+        // Raw Bayer patterns have extreme contrast between adjacent R/G/B pixels, producing very high sharpness
+        if (sharpness > 50000) {
+            console.warn(`Frame ${frameIndex}: sharpness ${sharpness.toFixed(0)} is abnormally high - likely un-demosaiced Bayer data, skipping`);
+            return -1; // Return -1 to signal frame should be skipped entirely
         }
 
         return sharpness;
@@ -1342,6 +1419,13 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
         // Calculate sharpness
         const sharpness = calculateSharpnessFromMat(grayMat, frameIndex);
 
+        // Check for Bayer artifact detection (-1 signals skip)
+        if (sharpness < 0) {
+            rawMat.delete();
+            grayMat.delete();
+            return { skipped: true, reason: 'bayer-artifact' };
+        }
+
         // Create PNG blob from (cropped) RGBA data
         const outputCanvas = new OffscreenCanvas(actualWidth, actualHeight);
         const outputCtx = outputCanvas.getContext('2d');
@@ -1349,16 +1433,22 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
         outputCtx.putImageData(outputImageData, 0, 0);
         const pngBlob = await safeConvertToBlob(outputCanvas, { type: 'image/png' });
 
-        // Get RGBA buffer if needed
-        let rgbaBuffer = null;
+        // Get Float32 buffer if needed (0.0-1.0 range)
+        let float32Buffer = null;
         if (includeRgba) {
-            rgbaBuffer = new Uint8ClampedArray(rawMat.data).buffer;
+            const uint8Data = rawMat.data;
+            const float32Data = new Float32Array(uint8Data.length);
+            const scale = 1.0 / 255.0;
+            for (let i = 0; i < uint8Data.length; i++) {
+                float32Data[i] = uint8Data[i] * scale;
+            }
+            float32Buffer = float32Data.buffer;
         }
 
         rawMat.delete();
         grayMat.delete();
 
-        return { sharpness, pngBlob, rgbaBuffer, width: actualWidth, height: actualHeight, circularity: bounds.circularity || 0 };
+        return { sharpness, pngBlob, float32Buffer, width: actualWidth, height: actualHeight, circularity: bounds.circularity || 0 };
 
     } catch (error) {
         if (rawMat) try { rawMat.delete(); } catch(e) {}
@@ -1376,12 +1466,17 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
  * Returns AP grid and reference grayscale for use by WebGPU worker
  */
 async function prepareAlignmentData(refFrame) {
-    if (!refFrame || !refFrame.rgbaBuffer || !refFrame.width || !refFrame.height) {
+    if (!refFrame || !refFrame.float32Buffer || !refFrame.width || !refFrame.height) {
         throw new Error('Invalid reference frame');
     }
 
     const { width, height } = refFrame;
-    const refData = new Uint8ClampedArray(refFrame.rgbaBuffer);
+    // Convert Float32 to Uint8 for OpenCV
+    const float32Data = new Float32Array(refFrame.float32Buffer);
+    const refData = new Uint8ClampedArray(float32Data.length);
+    for (let i = 0; i < float32Data.length; i++) {
+        refData[i] = Math.round(float32Data[i] * 255);
+    }
 
     // Create AP grid
     const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height);
@@ -1423,7 +1518,7 @@ async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, 
     try {
         self.postMessage({ type: 'stack-progress', stage: 'Stacking with GPU shifts...', progress: 50 });
 
-        const validFrames = frames.filter(f => f.rgbaBuffer && f.width && f.height && f.sharpness > 0);
+        const validFrames = frames.filter(f => f.float32Buffer && f.width && f.height && f.sharpness > 0);
         const { width, height } = validFrames[0];
         const frameCount = validFrames.length;
 
@@ -1432,18 +1527,18 @@ async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, 
         const outHeight = Math.round(height * drizzleScale);
         const isDrizzle = drizzleScale > 1.0;
 
-        // Accumulator arrays
+        // Accumulator arrays (accumulate in 0.0-1.0 range)
         const accumR = new Float32Array(outWidth * outHeight);
         const accumG = new Float32Array(outWidth * outHeight);
         const accumB = new Float32Array(outWidth * outHeight);
         const accumWeight = new Float32Array(outWidth * outHeight);
 
         const totalSharpness = validFrames.reduce((sum, f) => sum + f.sharpness, 0);
-        const blackCutoff = 4;
+        const blackCutoff = 0.016; // ~4/255 in 0.0-1.0 range
 
-        // Brightness normalization helper
-        function calcMeanBrightness(rgbaBuffer, width, height, blackCutoff) {
-            const data = new Uint8ClampedArray(rgbaBuffer);
+        // Brightness normalization helper (works with Float32 data in 0.0-1.0 range)
+        function calcMeanBrightness(float32Buffer, width, height, blackCutoff) {
+            const data = new Float32Array(float32Buffer);
             let sum = 0, count = 0;
             for (let y = 0; y < height; y += 8) {
                 for (let x = 0; x < width; x += 8) {
@@ -1458,9 +1553,19 @@ async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, 
             return count > 0 ? sum / count : 1;
         }
 
+        // Helper to convert Float32 (0.0-1.0) to Uint8 for OpenCV
+        function float32ToUint8(float32Buffer) {
+            const float32Data = new Float32Array(float32Buffer);
+            const uint8Data = new Uint8ClampedArray(float32Data.length);
+            for (let i = 0; i < float32Data.length; i++) {
+                uint8Data[i] = Math.round(float32Data[i] * 255);
+            }
+            return uint8Data;
+        }
+
         // Calculate reference brightness
         const referenceFrame = validFrames[refIndex];
-        const refBrightness = calcMeanBrightness(referenceFrame.rgbaBuffer, width, height, blackCutoff);
+        const refBrightness = calcMeanBrightness(referenceFrame.float32Buffer, width, height, blackCutoff);
 
         // Pre-allocate displacement maps at OUTPUT resolution (for drizzle upscaling)
         mapX = new _cv.Mat(outHeight, outWidth, _cv.CV_32FC1);
@@ -1471,10 +1576,10 @@ async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, 
             const frame = validFrames[f];
             const shifts = frameShifts[f];
             const frameWeight = frame.sharpness / totalSharpness;
-            const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
+            const frameData = float32ToUint8(frame.float32Buffer); // Convert for OpenCV
 
             // Brightness correction
-            const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, width, height, blackCutoff);
+            const frameBrightness = calcMeanBrightness(frame.float32Buffer, width, height, blackCutoff);
             const brightnessScale = refBrightness / frameBrightness;
 
             // Sub-pixel offset for global alignment
@@ -1531,12 +1636,32 @@ async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, 
         self.postMessage({ type: 'stack-progress', stage: 'Creating final image...', progress: 95 });
 
         const outputData = new Uint8ClampedArray(outWidth * outHeight * 4);
+        // Also create Float32Array for 16-bit post-processing (RGBA, 0.0-1.0 range)
+        const float32Data = new Float32Array(outWidth * outHeight * 4);
+
         for (let i = 0; i < outWidth * outHeight; i++) {
             const w = accumWeight[i];
             if (w > 0) {
-                outputData[i * 4] = Math.min(255, Math.max(0, Math.round(accumR[i] / w)));
-                outputData[i * 4 + 1] = Math.min(255, Math.max(0, Math.round(accumG[i] / w)));
-                outputData[i * 4 + 2] = Math.min(255, Math.max(0, Math.round(accumB[i] / w)));
+                // Normalized float values (0.0-1.0) - preserves full accumulator precision
+                const r = accumR[i] / w / 255.0;
+                const g = accumG[i] / w / 255.0;
+                const b = accumB[i] / w / 255.0;
+
+                // Float32 output (full precision)
+                float32Data[i * 4 + 0] = r;
+                float32Data[i * 4 + 1] = g;
+                float32Data[i * 4 + 2] = b;
+                float32Data[i * 4 + 3] = 1.0;
+
+                // 8-bit output (for preview/compatibility)
+                outputData[i * 4] = Math.min(255, Math.max(0, Math.round(r * 255)));
+                outputData[i * 4 + 1] = Math.min(255, Math.max(0, Math.round(g * 255)));
+                outputData[i * 4 + 2] = Math.min(255, Math.max(0, Math.round(b * 255)));
+            } else {
+                float32Data[i * 4 + 0] = 0;
+                float32Data[i * 4 + 1] = 0;
+                float32Data[i * 4 + 2] = 0;
+                float32Data[i * 4 + 3] = 1.0;
             }
             outputData[i * 4 + 3] = 255;
         }
@@ -1548,7 +1673,7 @@ async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, 
         ctx.putImageData(imageData, 0, 0);
         const blob = await safeConvertToBlob(canvas, { type: 'image/png' });
 
-        return { blob, width: outWidth, height: outHeight };
+        return { blob, width: outWidth, height: outHeight, float32Data };
 
     } catch (error) {
         if (mapX) try { mapX.delete(); } catch(e) {}
@@ -1569,11 +1694,11 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
     try {
         self.postMessage({ type: 'stack-progress', stage: 'Preparing frames...', progress: 0 });
 
-        // Filter frames that have valid rgbaBuffer and sharpness
-        let validFrames = frames.filter(f => f.rgbaBuffer && f.width && f.height && f.sharpness > 0);
+        // Filter frames that have valid float32Buffer and sharpness
+        let validFrames = frames.filter(f => f.float32Buffer && f.width && f.height && f.sharpness > 0);
 
         if (validFrames.length === 0) {
-            throw new Error('No valid frames with RGBA data for stacking');
+            throw new Error('No valid frames with float32 data for stacking');
         }
 
         const { width, height } = validFrames[0];
@@ -1594,9 +1719,9 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
                 console.warn(`Skipping frame ${i}: dimensions ${f.width}x${f.height} don't match expected ${width}x${height}`);
                 return false;
             }
-            const expectedBytes = f.width * f.height * 4;
-            if (!f.rgbaBuffer || f.rgbaBuffer.byteLength !== expectedBytes) {
-                console.warn(`Skipping frame ${i}: buffer size ${f.rgbaBuffer?.byteLength || 0} doesn't match expected ${expectedBytes}`);
+            const expectedBytes = f.width * f.height * 4 * 4; // Float32 = 4 bytes per value
+            if (!f.float32Buffer || f.float32Buffer.byteLength !== expectedBytes) {
+                console.warn(`Skipping frame ${i}: buffer size ${f.float32Buffer?.byteLength || 0} doesn't match expected ${expectedBytes}`);
                 return false;
             }
             return true;
@@ -1616,10 +1741,20 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
 
         console.log(`Stacking ${frameCount} frames (${width}x${height}) with local alignment`);
 
+        // Helper to convert Float32 (0.0-1.0) to Uint8 for OpenCV
+        function float32ToUint8(float32Buffer) {
+            const float32Data = new Float32Array(float32Buffer);
+            const uint8Data = new Uint8ClampedArray(float32Data.length);
+            for (let i = 0; i < float32Data.length; i++) {
+                uint8Data[i] = Math.round(float32Data[i] * 255);
+            }
+            return uint8Data;
+        }
+
         // Sort frames by sharpness and use best as reference
         const sortedFrames = [...validFrames].sort((a, b) => b.sharpness - a.sharpness);
         const referenceFrame = sortedFrames[0];
-        const refData = new Uint8ClampedArray(referenceFrame.rgbaBuffer);
+        const refData = float32ToUint8(referenceFrame.float32Buffer); // Convert for OpenCV
         const refSubPixelOffset = referenceFrame.subPixelOffset || { x: 0, y: 0 };
         console.log(`Reference frame: sharpness ${referenceFrame.sharpness.toFixed(2)}, subPixelOffset=(${refSubPixelOffset.x.toFixed(3)}, ${refSubPixelOffset.y.toFixed(3)})`);
 
@@ -1633,7 +1768,7 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         const frameShifts = []; // frameShifts[frameIdx][apIdx] = {dx, dy, quality}
 
         // Create reference Mat once (reused for all frames)
-        if (!referenceFrame.rgbaBuffer || referenceFrame.rgbaBuffer.byteLength === 0) {
+        if (!referenceFrame.float32Buffer || referenceFrame.float32Buffer.byteLength === 0) {
             throw new Error(`Reference frame buffer is detached or empty`);
         }
 
@@ -1697,18 +1832,18 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
             }
 
             // Validate frame data
-            if (!frame.rgbaBuffer || frame.rgbaBuffer.byteLength === 0) {
-                console.error(`Frame ${f}: Invalid or detached rgbaBuffer`);
-                throw new Error(`Frame ${f} has invalid RGBA buffer (byteLength: ${frame.rgbaBuffer?.byteLength || 0})`);
+            if (!frame.float32Buffer || frame.float32Buffer.byteLength === 0) {
+                console.error(`Frame ${f}: Invalid or detached float32Buffer`);
+                throw new Error(`Frame ${f} has invalid float32 buffer (byteLength: ${frame.float32Buffer?.byteLength || 0})`);
             }
 
-            const expectedSize = width * height * 4;
-            if (frame.rgbaBuffer.byteLength !== expectedSize) {
-                console.error(`Frame ${f}: Buffer size mismatch. Expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
-                throw new Error(`Frame ${f} buffer size mismatch: expected ${expectedSize}, got ${frame.rgbaBuffer.byteLength}`);
+            const expectedSize = width * height * 4 * 4; // Float32 = 4 bytes per value
+            if (frame.float32Buffer.byteLength !== expectedSize) {
+                console.error(`Frame ${f}: Buffer size mismatch. Expected ${expectedSize}, got ${frame.float32Buffer.byteLength}`);
+                throw new Error(`Frame ${f} buffer size mismatch: expected ${expectedSize}, got ${frame.float32Buffer.byteLength}`);
             }
 
-            const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
+            const frameData = float32ToUint8(frame.float32Buffer); // Convert for OpenCV
 
             // CPU path: OpenCV template matching
             let frameMat = null, frameGray = null, frameGrayBlurred = null;
@@ -1780,12 +1915,13 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         // Normalize sharpness for weighting
         const totalSharpness = validFrames.reduce((sum, f) => sum + f.sharpness, 0);
 
-        // === Brightness normalization (PSS-like, black cutoff = 4) ===
-        const blackCutoff = 4;
+        // === Brightness normalization (PSS-like, black cutoff = ~4/255 in 0.0-1.0 range) ===
+        const blackCutoff = 0.016;
 
         // Calculate mean brightness using sparse sampling (every 8th pixel in each direction = 1/64 of pixels)
-        function calcMeanBrightness(rgbaBuffer, width, height, blackCutoff) {
-            const data = new Uint8ClampedArray(rgbaBuffer);
+        // Works with Float32 data in 0.0-1.0 range
+        function calcMeanBrightness(float32Buffer, width, height, blackCutoff) {
+            const data = new Float32Array(float32Buffer);
             let sum = 0;
             let count = 0;
             const step = 8; // Sample every 8th pixel in x and y
@@ -1803,7 +1939,7 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
             return count > 0 ? sum / count : 1;
         }
 
-        const refBrightness = calcMeanBrightness(referenceFrame.rgbaBuffer, width, height, blackCutoff);
+        const refBrightness = calcMeanBrightness(referenceFrame.float32Buffer, width, height, blackCutoff);
 
         // Local de-warping with improved Gaussian weighting to reduce grid artifacts
         const useLocalDewarping = true;
@@ -1818,16 +1954,16 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
             const frame = validFrames[f];
 
             // Re-validate buffer (should still be valid from alignment phase)
-            if (!frame.rgbaBuffer || frame.rgbaBuffer.byteLength === 0) {
+            if (!frame.float32Buffer || frame.float32Buffer.byteLength === 0) {
                 console.error(`Stack frame ${f}: Buffer became invalid`);
                 throw new Error(`Frame ${f} buffer invalid during stacking`);
             }
 
-            const frameData = new Uint8ClampedArray(frame.rgbaBuffer);
+            const frameData = float32ToUint8(frame.float32Buffer); // Convert for OpenCV remap
             const frameWeight = frame.sharpness / totalSharpness * frameCount;
 
             // Calculate brightness normalization factor for this frame
-            const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, width, height, blackCutoff);
+            const frameBrightness = calcMeanBrightness(frame.float32Buffer, width, height, blackCutoff);
             const brightnessScale = refBrightness / frameBrightness;
 
             if (useLocalDewarping) {
@@ -1908,15 +2044,33 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         // === Compute final result (at OUTPUT resolution) ===
         self.postMessage({ type: 'stack-progress', stage: 'Finalizing...', progress: 95 });
         const result = new Uint8ClampedArray(outWidth * outHeight * 4);
+        // Also create Float32Array for 16-bit post-processing (RGBA, 0.0-1.0 range)
+        const float32Data = new Float32Array(outWidth * outHeight * 4);
 
         for (let i = 0; i < outWidth * outHeight; i++) {
             const w = accumWeight[i];
             if (w > 0) {
-                result[i * 4 + 0] = Math.round(accumR[i] / w);
-                result[i * 4 + 1] = Math.round(accumG[i] / w);
-                result[i * 4 + 2] = Math.round(accumB[i] / w);
+                // Normalized float values (0.0-1.0) - preserves full accumulator precision
+                const r = accumR[i] / w / 255.0;
+                const g = accumG[i] / w / 255.0;
+                const b = accumB[i] / w / 255.0;
+
+                // Float32 output (full precision)
+                float32Data[i * 4 + 0] = r;
+                float32Data[i * 4 + 1] = g;
+                float32Data[i * 4 + 2] = b;
+                float32Data[i * 4 + 3] = 1.0;
+
+                // 8-bit output (for preview/compatibility)
+                result[i * 4 + 0] = Math.round(r * 255);
+                result[i * 4 + 1] = Math.round(g * 255);
+                result[i * 4 + 2] = Math.round(b * 255);
             } else {
                 // Fallback to black if no data (edge case for drizzle borders)
+                float32Data[i * 4 + 0] = 0;
+                float32Data[i * 4 + 1] = 0;
+                float32Data[i * 4 + 2] = 0;
+                float32Data[i * 4 + 3] = 1.0;
                 result[i * 4 + 0] = 0;
                 result[i * 4 + 1] = 0;
                 result[i * 4 + 2] = 0;
@@ -1934,7 +2088,7 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         console.log(`Stacked image: ${outWidth}x${outHeight}${isDrizzle ? ` (${drizzleScale}x drizzle from ${width}x${height})` : ''}, ${(blob.size / 1024).toFixed(1)} KB`);
 
         self.postMessage({ type: 'stack-progress', stage: 'Stacking complete', progress: 100 });
-        return { blob, width: outWidth, height: outHeight };
+        return { blob, width: outWidth, height: outHeight, float32Data };
 
     } catch (error) {
         // Convert OpenCV error codes to meaningful messages
