@@ -126,20 +126,6 @@
 				<button v-if="rotation !== 0 || hasAppliedRotation" class="reset-rotation" @click="resetRotation">Reset</button>
 			</div>
 
-			<h4>Save lossless image</h4>
-
-			<button class="download" @click="downloadUnprocessedPNG">Download Unprocessed PNG</button>
-			<button class="download" @click="downloadCanvasAsPNG">Download Processed PNG (8-bit)</button>
-			<button class="download" @click="download16BitProcessedPNG" v-if="use16bit && sharpenedImage16">Download Processed PNG (16-bit)</button>
-			<button v-if="props.croppedSerData" class="download" @click="downloadCroppedSer">Download Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})</button>
-			<button v-if="props.croppedAviData" class="download" @click="downloadCroppedAvi">Download Cropped AVI ({{ props.croppedAviData.frameCount }} frames)</button>
-
-			<h4>Share</h4>
-			<button class="download comparison-btn" @click="downloadComparisonVideo" :disabled="!canExport() || isExportingVideo">
-				{{ isExportingVideo ? exportProgress : 'Download Comparison Video' }}
-			</button>
-			<p v-if="!canExport()" class="export-hint">Comparison video available after auto-crop + GPU stacking</p>
-
 		</div>
 	</div>
 	<div class="content">
@@ -148,11 +134,33 @@
 			<p>Please upload a video (or bunch of files) for analyzing and stacking frames. Upload one image file for direct post processing.</p>
 		</div>
 		<template v-else>
-			<div v-if="isLoadingImage" class="loading-overlay">
-				<div class="loading-spinner"></div>
-				<p>Loading image...</p>
-			</div>
-			<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" :previewRotation="previewRotationAngle" />
+			<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" :previewRotation="previewRotationAngle">
+				<template #overlay>
+					<span v-if="isLoadingImage" class="loading-inline">
+						<span class="spinner"></span> Loading image...
+					</span>
+				</template>
+				<template #toolbar>
+					<!-- Export dropdown -->
+					<div class="export-dropdown-container">
+						<div v-if="exportDropdownOpen" class="dropdown-backdrop" @click="exportDropdownOpen = false"></div>
+						<button class="export-dropdown-btn" @click="exportDropdownOpen = !exportDropdownOpen">
+							⬇ Export ▾
+						</button>
+						<div class="export-dropdown-menu" v-if="exportDropdownOpen" @click="exportDropdownOpen = false">
+							<button @click="downloadCanvasAsPNG">Processed PNG (8-bit)</button>
+							<button v-if="use16bit && sharpenedImage16" @click="download16BitProcessedPNG">Processed PNG (16-bit)</button>
+							<button @click="downloadUnprocessedPNG">Unprocessed PNG</button>
+							<button v-if="props.croppedSerData" @click="downloadCroppedSer">Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})</button>
+							<button v-if="props.croppedAviData" @click="downloadCroppedAvi">Cropped AVI ({{ props.croppedAviData.frameCount }} frames)</button>
+							<div class="dropdown-divider"></div>
+							<button @click="downloadComparisonVideo" :disabled="!canExport() || isExportingVideo" :title="!canExport() ? 'Only available after running the full stack pipeline (not for single image post-processing)' : ''">
+								{{ isExportingVideo ? exportProgress : 'Comparison Video' }}
+							</button>
+						</div>
+					</div>
+				</template>
+			</ZoomableCanvas>
 		</template>
 	</div>
 
@@ -183,6 +191,7 @@ const { captureProcessedImage, canExport, generateComparisonVideo, getExportStat
 // Comparison video export state
 const isExportingVideo = ref(false);
 const exportProgress = ref('');
+const exportDropdownOpen = ref(false);
 
 const { $loadOpenCV, $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
@@ -1784,22 +1793,77 @@ button.download {
 button.download:hover {
 	background-color: #7ABF6E;
 }
-.loading-overlay {
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	justify-content: center;
-	padding: 40px;
-	color: #666;
+.export-dropdown-container {
+	position: relative;
 }
-.loading-spinner {
-	width: 40px;
-	height: 40px;
-	border: 4px solid #ddd;
-	border-top-color: #27587c;
-	border-radius: 50%;
-	animation: spin 0.8s linear infinite;
-	margin-bottom: 15px;
+.dropdown-backdrop {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	z-index: 99;
+}
+.export-dropdown-btn {
+	background-color: #8CCF7E;
+	color: #111;
+	padding: 8px 16px;
+	border: none;
+	border-radius: 5px;
+	cursor: pointer;
+	font-weight: bold;
+	font-size: 14px;
+	position: relative;
+	z-index: 100;
+}
+.export-dropdown-btn:hover {
+	background-color: #7ABF6E;
+}
+.export-dropdown-menu {
+	position: absolute;
+	top: 100%;
+	right: 0;
+	margin-top: 5px;
+	background: white;
+	border-radius: 5px;
+	box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+	min-width: 220px;
+	overflow: hidden;
+	z-index: 100;
+}
+.export-dropdown-menu button {
+	display: block;
+	width: 100%;
+	padding: 10px 15px;
+	border: none;
+	background: none;
+	text-align: left;
+	cursor: pointer;
+	font-size: 13px;
+	color: #333;
+}
+.export-dropdown-menu button:hover:not(:disabled) {
+	background-color: #f0f8ff;
+}
+.export-dropdown-menu button:disabled {
+	color: #aaa;
+	cursor: not-allowed;
+}
+.dropdown-divider {
+	height: 1px;
+	background: #eee;
+	margin: 5px 0;
+}
+.loading-inline {
+	position: absolute;
+	top: 10px;
+	left: 10px;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	color: white;
+	font-size: 13px;
+	z-index: 10;
 }
 .reset-rotation {
 	margin-left: 10px;

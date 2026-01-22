@@ -49,6 +49,23 @@
 			<p>Built with Nuxt/Vue, OpenCV.js (WebAssembly), Web Workers for parallel processing, and FFmpeg.js for video decoding.
 			All processing happens in your browser - works on any OS without installation.</p>
 
+			<h3>Browser Requirements (WebGPU)</h3>
+			<p>eise.app uses WebGPU for fast GPU-accelerated processing. Minimum requirements:</p>
+			<table class="compat-table">
+				<tr><th>Platform</th><th>Minimum Version</th></tr>
+				<tr><td>Chrome</td><td>113+ (Android: 121+)</td></tr>
+				<tr><td>Edge</td><td>113+</td></tr>
+				<tr><td>Safari</td><td>18+ (macOS Sequoia / iOS 18)</td></tr>
+				<tr><td>Firefox</td><td>141+ (Windows only for now)</td></tr>
+				<tr><td>Android</td><td>Chrome 121+ with Android 12+</td></tr>
+				<tr><td>iOS</td><td>Safari 18+ (iOS 18+)</td></tr>
+			</table>
+			<div class="compat-status" :class="{ compatible: webGPUSupported, incompatible: !webGPUSupported }">
+				<strong>Your browser:</strong> {{ detectedBrowser }}<br/>
+				<span v-if="webGPUSupported">WebGPU is supported - you're good to go!</span>
+				<span v-else>WebGPU not available - processing will be slower. Try updating your browser or using Chrome/Edge/Safari.</span>
+			</div>
+
 			<h3>Alternative software</h3>
 			<p>eise.app works well for quick results without installing anything. For more advanced features you might want to try:</p>
 			<ul>
@@ -121,11 +138,73 @@ const croppedSerData = ref(null);
 const croppedAviData = ref(null);
 
 const loadPixel = ref(false)
+const webGPUSupported = ref(false);
+const detectedBrowser = ref('Detecting...');
 
-onMounted(() => {
+// Detect browser and version
+function detectBrowser() {
+	const ua = navigator.userAgent;
+	let browser = 'Unknown browser';
+
+	// Order matters - check more specific patterns first
+	if (/CriOS/.test(ua)) {
+		const match = ua.match(/CriOS\/(\d+)/);
+		browser = `Chrome on iOS ${match ? match[1] : ''}`;
+	} else if (/FxiOS/.test(ua)) {
+		const match = ua.match(/FxiOS\/(\d+)/);
+		browser = `Firefox on iOS ${match ? match[1] : ''}`;
+	} else if (/EdgiOS/.test(ua)) {
+		const match = ua.match(/EdgiOS\/(\d+)/);
+		browser = `Edge on iOS ${match ? match[1] : ''}`;
+	} else if (/Edg\//.test(ua)) {
+		const match = ua.match(/Edg\/(\d+)/);
+		browser = `Edge ${match ? match[1] : ''}`;
+	} else if (/Firefox\//.test(ua)) {
+		const match = ua.match(/Firefox\/(\d+)/);
+		browser = `Firefox ${match ? match[1] : ''}`;
+	} else if (/Chrome\//.test(ua) && !/Chromium/.test(ua)) {
+		const match = ua.match(/Chrome\/(\d+)/);
+		browser = `Chrome ${match ? match[1] : ''}`;
+	} else if (/Safari\//.test(ua) && /Version\//.test(ua)) {
+		const match = ua.match(/Version\/(\d+)/);
+		browser = `Safari ${match ? match[1] : ''}`;
+	}
+
+	// Add platform info
+	if (/Android/.test(ua)) {
+		const androidMatch = ua.match(/Android (\d+)/);
+		browser += ` on Android ${androidMatch ? androidMatch[1] : ''}`;
+	} else if (/iPhone|iPad|iPod/.test(ua)) {
+		const iosMatch = ua.match(/OS (\d+)/);
+		browser += ` on iOS ${iosMatch ? iosMatch[1] : ''}`;
+	} else if (/Mac OS X/.test(ua)) {
+		browser += ' on macOS';
+	} else if (/Windows/.test(ua)) {
+		browser += ' on Windows';
+	} else if (/Linux/.test(ua)) {
+		browser += ' on Linux';
+	}
+
+	return browser;
+}
+
+onMounted(async () => {
 	loadPixel.value = true;
 	track('page_view');
 	trackHumanInteraction();
+
+	// Detect browser
+	detectedBrowser.value = detectBrowser();
+
+	// Check WebGPU support
+	if (navigator.gpu) {
+		try {
+			const adapter = await navigator.gpu.requestAdapter();
+			webGPUSupported.value = !!adapter;
+		} catch (e) {
+			webGPUSupported.value = false;
+		}
+	}
 	on('postProcessing', handlePostProcessing);
 	on('stacked-image-ready', handleStackedImageReady);
 	on('show-color-profile-selector', () => {
@@ -387,5 +466,31 @@ canvas {
 /* Move Sentry feedback button up to avoid blocking expand log button */
 #sentry-feedback {
 	--inset: auto 0 80px auto;
+}
+.compat-table {
+	border-collapse: collapse;
+	margin: 10px 0;
+	font-size: 0.95em;
+}
+.compat-table th, .compat-table td {
+	border: 1px solid rgba(255,255,255,0.2);
+	padding: 6px 12px;
+	text-align: left;
+}
+.compat-table th {
+	background: rgba(255,255,255,0.1);
+}
+.compat-status {
+	margin: 15px 0;
+	padding: 10px 15px;
+	border-radius: 5px;
+}
+.compat-status.compatible {
+	background: rgba(140, 207, 126, 0.2);
+	border: 1px solid #8CCF7E;
+}
+.compat-status.incompatible {
+	background: rgba(255, 193, 7, 0.2);
+	border: 1px solid #ffc107;
 }
 </style>

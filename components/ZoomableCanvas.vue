@@ -1,7 +1,11 @@
 <template>
-	<div>
+	<div class="zoomable-canvas-outer">
+		<div class="canvas-topbar">
+			<span class="zoom-indicator">Zoom: {{ Math.round(zoomLevel * 100) }}%</span>
+			<slot name="toolbar"></slot>
+		</div>
 		<div class="zoomable-canvas-wrapper">
-			<div class="canvas-topbar">Zoom: {{ Math.round(zoomLevel * 100) }}%</div>
+			<slot name="overlay"></slot>
 			<div class="zoomable-canvas-container" @wheel.prevent="handleWheel" @mousedown="startDrag" @dblclick="handleDoubleClick" ref="container">
 				<canvas ref="canvas" :id="id" :style="canvasStyle"></canvas>
 			</div>
@@ -152,14 +156,21 @@ const endDrag = () => {
 </script>
 
 <style scoped>
+.zoomable-canvas-outer {
+	width: calc(100% - 40px);
+}
 .canvas-topbar {
-	line-height: 20px;
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
 	color: white;
-	margin-top:-24px;
+	padding: 8px 0;
+}
+.zoom-indicator {
+	font-size: 13px;
 }
 .zoomable-canvas-wrapper {
 	height: calc(100vh - 240px);
-	width: calc(100% - 40px);
 	position: relative;
 	border: 1px solid white;
 }
