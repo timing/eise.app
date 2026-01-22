@@ -303,7 +303,10 @@ async function warpAndAccumulateFrame(frameRgba, width, height, outWidth, outHei
     globalOffsetX, globalOffsetY) {
 
     if (!isStackingReady) {
-        await initStackingGPU();
+        const initialized = await initStackingGPU();
+        if (!initialized) {
+            throw new Error('WebGPU stacking not available');
+        }
     }
 
     const buffers = getStackingBuffers(width, height, outWidth, outHeight, alignmentPoints.length);
@@ -376,7 +379,7 @@ async function warpAndAccumulateFrame(frameRgba, width, height, outWidth, outHei
  */
 async function clearAccumulators(outWidth, outHeight) {
     const buffers = cachedStackBuffers;
-    if (!buffers) return;
+    if (!buffers || !stackQueue) return;
 
     const size = outWidth * outHeight * 4;
     const zeros = new Float32Array(outWidth * outHeight);
@@ -391,6 +394,9 @@ async function clearAccumulators(outWidth, outHeight) {
  */
 async function readAccumulators(outWidth, outHeight) {
     const buffers = cachedStackBuffers;
+    if (!buffers || !stackDevice || !stackQueue) {
+        throw new Error('WebGPU stacking not initialized');
+    }
     const pixelCount = outWidth * outHeight;
     const size = Math.ceil(pixelCount * 4 / 4) * 4;  // Align to 4 bytes
 

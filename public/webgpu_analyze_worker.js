@@ -1045,6 +1045,9 @@ function cleanupAnalyzeBuffers() {
 }
 
 async function analyzeBatch(frames, width, height, bayerPattern, threshold) {
+    if (!device || !queue) {
+        throw new Error('WebGPU not initialized or device lost');
+    }
     const batchSize = frames.length;
     const pixelCount = width * height;
     const numWorkgroups = Math.ceil(pixelCount / 256);
@@ -1521,6 +1524,9 @@ function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize) {
  * @param {number} threshold - Threshold for moments (default 0.1)
  */
 async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1, metadataOnly = false) {
+    if (!device || !queue) {
+        throw new Error('WebGPU not initialized or device lost');
+    }
     const batchSize = frames.length;
     const srcPixelCount = srcWidth * srcHeight;
     const cropPixelCount = cropSize * cropSize;
@@ -1840,6 +1846,9 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
  * 5. Calculate sharpness on cropped
  */
 async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false) {
+    if (!device || !queue) {
+        throw new Error('WebGPU not initialized or device lost');
+    }
     const batchSize = frames.length;
     const srcPixelCount = srcWidth * srcHeight;
     const cropPixelCount = cropSize * cropSize;
@@ -2164,6 +2173,9 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
  * Used by ColorProfileSelector to show demosaic options without loading OpenCV
  */
 async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth, thumbWidth, thumbHeight) {
+    if (!device || !queue) {
+        throw new Error('WebGPU not initialized or device lost');
+    }
     const patterns = [
         { id: 'COLOR_BayerBG2RGB', pattern: 0 },  // RGGB
         { id: 'COLOR_BayerRG2RGB', pattern: 1 },  // BGGR

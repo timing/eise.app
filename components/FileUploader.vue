@@ -9,6 +9,12 @@
 			<button class="cancel-button" @click="cancelProcessing">Cancel</button>
 		</div>
 
+		<!-- WebGPU warning -->
+		<div v-if="!webGPUSupported" class="webgpu-warning">
+			<strong>WebGPU not available</strong>
+			<p>Your browser doesn't support WebGPU. Processing will be slower. For best performance, use Chrome, Edge, or Safari 18+.</p>
+		</div>
+
 		<!-- Initial state: file selection and settings (hidden during processing) -->
 		<template v-if="!isProcessing">
 			<label for="file-upload">
@@ -177,13 +183,28 @@ function saveSettings() {
 // Watch all settings and save on change
 watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames], saveSettings);
 
-onMounted(() => {
+onMounted(async () => {
 	loadSettings();
+
+	// Check WebGPU support
+	if (!navigator.gpu) {
+		webGPUSupported.value = false;
+	} else {
+		try {
+			const adapter = await navigator.gpu.requestAdapter();
+			if (!adapter) {
+				webGPUSupported.value = false;
+			}
+		} catch (e) {
+			webGPUSupported.value = false;
+		}
+	}
 });
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
 const fileInput = ref(null);
+const webGPUSupported = ref(true); // Assume supported until checked
 
 const emit = defineEmits(['frames', 'postProcessing', 'processing-started', 'showAbout']);
 
@@ -476,6 +497,18 @@ async function processFiles(files) {
 	margin-top: 10px;
 	border-radius: 5px;
 	font-weight: bold;
+}
+.webgpu-warning {
+	background-color: #fff3cd;
+	color: #856404;
+	padding: 10px;
+	margin-bottom: 10px;
+	border-radius: 5px;
+	border: 1px solid #ffc107;
+}
+.webgpu-warning p {
+	margin: 5px 0 0 0;
+	font-size: 0.9em;
 }
 .file-upload-wrapper {
 	display: block;
