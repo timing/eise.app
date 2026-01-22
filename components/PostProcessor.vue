@@ -35,8 +35,8 @@
 			<fieldset class="sharpening-frame">
 				<legend>Sharpening</legend>
 				<div class="sharpening-tabs">
-					<button :class="{ active: sharpeningMethod === 'usm' }" @click="setSharpeningMethod('usm')">Unsharp Mask</button>
 					<button :class="{ active: sharpeningMethod === 'wavelets' }" @click="setSharpeningMethod('wavelets')">Wavelets</button>
+					<button :class="{ active: sharpeningMethod === 'usm' }" @click="setSharpeningMethod('usm')">Unsharp Mask</button>
 					<button :class="{ active: sharpeningMethod === 'deconv' }" @click="setSharpeningMethod('deconv')">Deconvolution</button>
 					<button :class="{ active: sharpeningMethod === 'none' }" @click="setSharpeningMethod('none')" title="None">⊘</button>
 				</div>
@@ -173,7 +173,7 @@ import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import { encodeAvi } from '@/utils/aviEncoder.js'
 import { initWebGL, processWithWebGL, isWebGLAvailable, disposeWebGL } from '@/utils/webglProcessor.js'
-import { deconvolveWebGL, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
+import { deconvolveWebGL, deconvolveWebGL16, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
 import { Image16 } from '@/utils/Image16.js'
 import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2, blurWithWebGL2 } from '@/utils/webgl2Processor.js'
 import { download16BitPNG } from '@/utils/png16Encoder.js'
@@ -388,7 +388,7 @@ const postNoiseReduction = ref(0);
 const blueDown = ref(0);
 const isProcessing = ref(false);
 const isLoadingImage = ref(false);
-const sharpeningMethod = ref('usm'); // 'usm', 'wavelets', 'deconv', or 'none'
+const sharpeningMethod = ref('wavelets'); // 'usm', 'wavelets', 'deconv', or 'none'
 const rotation = ref(0); // degrees (slider value)
 const previewRotationAngle = ref(0); // CSS preview rotation while dragging
 const hasAppliedRotation = ref(false);
@@ -728,13 +728,15 @@ const applyProcessingInternal = async() => {
 				return;
 			}
 		} else if (sharpeningMethod.value === 'deconv' && deconvRadius.value > 0 && deconvIterations.value > 0) {
-			// Deconvolution not yet ported to 16-bit, fall back to 8-bit for this step
-			console.log(`deconvolution (PSF=${deconvRadius.value}, iterations=${deconvIterations.value}) - using 8-bit`);
+			console.log(`deconvolution 16-bit (PSF=${deconvRadius.value}, iterations=${deconvIterations.value})`);
 			try {
-				// Convert to 8-bit, process, convert back
-				const tempImageData = Image16.fromFloat32Array(workingData, width, height).toImageData();
-				const deconvResult = await deconvolveInWorker(tempImageData, parseFloat(deconvRadius.value), parseInt(deconvIterations.value));
-				workingData = Image16.fromImageData(deconvResult).data;
+				workingData = await deconvolveInWorker16(
+					workingData,
+					width,
+					height,
+					parseFloat(deconvRadius.value),
+					parseInt(deconvIterations.value)
+				);
 			} catch (e) {
 				console.log('Deconvolution rejected (newer task running)');
 				isProcessing.value = false;
@@ -894,6 +896,19 @@ async function deconvolveInWorker(imageData, psfRadius, iterations) {
 
 	console.log(`WebGL deconvolution: PSF=${psfRadius}, iterations=${iterations}`);
 	return deconvolveWebGL(imageData, psfRadius, iterations, (progress) => {
+		// Check if superseded
+		if (deconvTaskId !== currentTask) {
+			throw new Error('Deconv task superseded');
+		}
+	});
+}
+
+async function deconvolveInWorker16(floatData, width, height, psfRadius, iterations) {
+	deconvTaskId++;
+	const currentTask = deconvTaskId;
+
+	console.log(`WebGL deconvolution 16-bit: PSF=${psfRadius}, iterations=${iterations}`);
+	return deconvolveWebGL16(floatData, width, height, psfRadius, iterations, (progress) => {
 		// Check if superseded
 		if (deconvTaskId !== currentTask) {
 			throw new Error('Deconv task superseded');

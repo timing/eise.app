@@ -345,18 +345,34 @@ export async function deconvolveWebGL(imageData, psfRadius, iterations, onProgre
 	const width = imageData.width;
 	const height = imageData.height;
 
+	// Convert imageData to float RGBA and use internal 16-bit function
+	const floatData = new Float32Array(width * height * 4);
+	for (let i = 0; i < imageData.data.length; i++) {
+		floatData[i] = imageData.data[i] / 255.0;
+	}
+
+	const resultFloat = await deconvolveWebGL16(floatData, width, height, psfRadius, iterations, onProgress);
+	if (!resultFloat) return null;
+
+	// Convert back to Uint8
+	const resultData = new Uint8ClampedArray(width * height * 4);
+	for (let i = 0; i < resultFloat.length; i++) {
+		resultData[i] = Math.max(0, Math.min(255, Math.round(resultFloat[i] * 255)));
+	}
+
+	return new ImageData(resultData, width, height);
+}
+
+/**
+ * 16-bit deconvolution - accepts and returns Float32Array (0.0-1.0 range)
+ */
+export async function deconvolveWebGL16(floatData, width, height, psfRadius, iterations, onProgress = null) {
 	// Initialize or reinitialize if size changed
 	if (!initialized || width !== currentWidth || height !== currentHeight) {
 		disposeDeconvWebGL();
 		if (!initDeconvWebGL(width, height)) {
 			return null; // Fall back to CPU
 		}
-	}
-
-	// Convert imageData to float RGBA
-	const floatData = new Float32Array(width * height * 4);
-	for (let i = 0; i < imageData.data.length; i++) {
-		floatData[i] = imageData.data[i] / 255.0;
 	}
 
 	// Create PSF textures
@@ -417,12 +433,6 @@ export async function deconvolveWebGL(imageData, psfRadius, iterations, onProgre
 	const resultFloat = new Float32Array(width * height * 4);
 	gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, resultFloat);
 
-	// Convert back to Uint8
-	const resultData = new Uint8ClampedArray(width * height * 4);
-	for (let i = 0; i < resultFloat.length; i++) {
-		resultData[i] = Math.max(0, Math.min(255, Math.round(resultFloat[i] * 255)));
-	}
-
 	// Cleanup working textures (keep context for reuse)
 	gl.deleteTexture(observedTex);
 	gl.deleteTexture(estimateTex);
@@ -440,7 +450,7 @@ export async function deconvolveWebGL(imageData, psfRadius, iterations, onProgre
 
 	if (onProgress) onProgress(1);
 
-	return new ImageData(resultData, width, height);
+	return resultFloat;
 }
 
 export function disposeDeconvWebGL() {
