@@ -504,19 +504,14 @@ export function blurWithWebGL2(data, width, height, kernelSize) {
 	const pixels = new Float32Array(width * height * 4);
 	gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, pixels);
 
-	// WebGL has Y-axis flipped, need to flip it back
-	const flippedPixels = new Float32Array(width * height * 4);
-	const rowSize = width * 4;
-	for (let y = 0; y < height; y++) {
-		const srcRow = (height - 1 - y) * rowSize;
-		const dstRow = y * rowSize;
-		flippedPixels.set(pixels.subarray(srcRow, srcRow + rowSize), dstRow);
-	}
+	// Note: With two passes, the texture coordinate Y-flip happens twice,
+	// canceling out. So the result is already in correct orientation.
+	// No flip needed here (unlike single-pass processWithWebGL2).
 
 	// Unbind framebuffer
 	gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-	return flippedPixels;
+	return pixels;
 }
 
 /**
