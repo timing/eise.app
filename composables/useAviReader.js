@@ -17,6 +17,59 @@ function isEasyAviFourCC(fourCC) {
     return easyFourCCs.includes(fourCC.toUpperCase());
 }
 
+/**
+ * Check if FourCC is MJPEG (Motion JPEG)
+ */
+function isMjpegFourCC(fourCC) {
+    if (!fourCC) return false;
+    return fourCC.toUpperCase() === 'MJPG';
+}
+
+/**
+ * Parse MJPEG frame index from movi list - builds array of {offset, size} for each frame
+ * MJPEG frames have variable sizes, so we need to read chunk headers
+ */
+async function parseMjpegFrameIndex(file, moviListOffset, moviListSize, maxFrames = -1) {
+    const frameIndex = [];
+    const chunkHeaderSize = 8; // 4 bytes FourCC + 4 bytes size
+
+    // Read movi list in chunks to avoid loading entire file
+    const CHUNK_SIZE = 1024 * 1024; // 1MB read buffer
+    let position = moviListOffset;
+    const moviEnd = moviListOffset + moviListSize;
+
+    while (position < moviEnd) {
+        if (maxFrames > 0 && frameIndex.length >= maxFrames) break;
+
+        // Read chunk header
+        const headerSlice = await file.slice(position, position + chunkHeaderSize).arrayBuffer();
+        const headerView = new DataView(headerSlice);
+
+        const chunkId = String.fromCharCode(
+            headerView.getUint8(0),
+            headerView.getUint8(1),
+            headerView.getUint8(2),
+            headerView.getUint8(3)
+        );
+        const chunkSize = headerView.getUint32(4, true);
+
+        // Video chunks are typically '00dc', '01dc', etc. (d=compressed video)
+        // or '00db', '01db' (d=uncompressed video)
+        if (chunkId.match(/^\d\ddc$/i) || chunkId.match(/^\d\ddb$/i)) {
+            frameIndex.push({
+                offset: position + chunkHeaderSize,
+                size: chunkSize
+            });
+        }
+
+        // Move to next chunk (size is padded to word boundary)
+        const paddedSize = (chunkSize + 1) & ~1;
+        position += chunkHeaderSize + paddedSize;
+    }
+
+    return frameIndex;
+}
+
 
 // This function will be called on the main thread for preview rendering and final PNG generation
 // It needs to convert raw AVI frame data (DIB, Y800, YUY2) into an 8-bit PNG blob using OpenCV.js.
@@ -290,7 +343,7 @@ export function useAviReader() {
     }
 
     // Detect bounds for a sample of frames to determine crop region
-    async function detectCropRegion(file, aviHeader, frameCount) {
+    async function detectCropRegion(file, aviHeader, frameCount, cropMarginPercent = 10) {
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: frameCount });
 
@@ -404,8 +457,9 @@ export function useAviReader() {
         const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
         const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
 
-        // Use median size with 5% margin, capped at frame dimensions
-        const desiredSize = Math.ceil(medianSize * 1.05 / 2) * 2;
+        // Use median size with margin, capped at frame dimensions
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(aviHeader.width, aviHeader.height);
         let finalSize = Math.min(desiredSize, maxAllowedSize);
 
@@ -419,7 +473,7 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, max detected: ${maxSize} (${canCropCount}/${sampleIndices.length} frames croppable)`);
+        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, margin: ${cropMarginPercent}% (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
@@ -566,7 +620,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null) {
+    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -592,6 +646,12 @@ export function useAviReader() {
         }
 
         // Check format BEFORE initializing workers to avoid wasting memory on fallback
+        if (isMjpegFourCC(aviHeader.fourCC)) {
+            // MJPEG uses GPU path with native JPEG decoding
+            addLog(`MJPEG AVI detected. Using GPU processing with native JPEG decoding.`);
+            return await readMjpegAviFile(file, aviHeader, maxFrames, enableAutoCrop, clientSideStacking, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment);
+        }
+
         if (!isEasyAviFourCC(aviHeader.fourCC)) {
             addLog(`AVI format '${aviHeader.fourCC || 'unknown'}' is not supported for direct processing.`);
             return 'fallback';
@@ -1235,7 +1295,8 @@ export function useAviReader() {
         const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
 
         // Use median size with 5% margin, capped at frame dimensions
-        const desiredSize = Math.ceil(medianSize * 1.05 / 2) * 2;
+        const marginMultiplier = 1.10; // 10% margin for padding around planet
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(header.width, header.height);
         let finalSize = Math.min(desiredSize, maxAllowedSize);
 
@@ -1254,17 +1315,545 @@ export function useAviReader() {
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY } };
     }
 
+    // GPU worker for MJPEG processing
+    let gpuWorker = null;
+    let gpuReady = false;
+
+    async function initializeGpuWorker() {
+        if (gpuReady) return true;
+
+        gpuWorker = new Worker('/webgpu_analyze_worker.js');
+
+        try {
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('GPU worker timeout')), 30000);
+                gpuWorker.onmessage = (e) => {
+                    if (e.data.type === 'ready') {
+                        clearTimeout(timeout);
+                        resolve();
+                    } else if (e.data.type === 'init-error') {
+                        clearTimeout(timeout);
+                        reject(new Error(e.data.error));
+                    }
+                };
+                gpuWorker.postMessage({ type: 'init' });
+            });
+            gpuReady = true;
+            addLog('GPU worker initialized for MJPEG');
+            return true;
+        } catch (error) {
+            console.error('GPU worker init failed:', error);
+            gpuWorker.terminate();
+            gpuWorker = null;
+            return false;
+        }
+    }
+
+    // Decode JPEG data to RGBA using native browser decoding (hardware accelerated)
+    async function decodeJpegToRgba(jpegData, width, height) {
+        const blob = new Blob([jpegData], { type: 'image/jpeg' });
+        const bitmap = await createImageBitmap(blob);
+
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        return {
+            data: imageData.data,
+            width: canvas.width,
+            height: canvas.height
+        };
+    }
+
+    // GPU batch analysis for RGBA frames
+    async function analyzeRgbaBatchGpu(frames, width, height) {
+        return new Promise((resolve, reject) => {
+            const requestId = Date.now() + Math.random();
+            const handler = (e) => {
+                if (e.data.requestId !== requestId) return;
+                gpuWorker.removeEventListener('message', handler);
+                if (e.data.type === 'analyze-result') {
+                    resolve(e.data.results);
+                } else if (e.data.type === 'analyze-error') {
+                    reject(new Error(e.data.error));
+                }
+            };
+            gpuWorker.addEventListener('message', handler);
+            gpuWorker.postMessage({
+                type: 'analyze-batch',
+                frames,
+                width,
+                height,
+                bayerPattern: -1, // RGBA input, no demosaic
+                threshold: 0.1,
+                requestId
+            });
+        });
+    }
+
+    // GPU crop and analyze for RGBA frames
+    async function cropAndAnalyzeRgbaGpu(frames, srcWidth, srcHeight, cropSize, centers, metadataOnly = false) {
+        return new Promise((resolve, reject) => {
+            const requestId = Date.now() + Math.random();
+            const handler = (e) => {
+                if (e.data.requestId !== requestId) return;
+                gpuWorker.removeEventListener('message', handler);
+                if (e.data.type === 'crop-analyze-result') {
+                    resolve(e.data.results);
+                } else if (e.data.type === 'crop-analyze-error') {
+                    reject(new Error(e.data.error));
+                }
+            };
+            gpuWorker.addEventListener('message', handler);
+            gpuWorker.postMessage({
+                type: 'crop-analyze-batch',
+                frames,
+                srcWidth,
+                srcHeight,
+                cropSize,
+                centers,
+                bayerPattern: -1, // RGBA input
+                threshold: 0.1,
+                requestId,
+                metadataOnly
+            });
+        });
+    }
+
+    // Detect crop region for MJPEG using GPU
+    async function detectCropRegionMjpegGpu(file, frameIndex, width, height, cropMarginPercent = 10) {
+        emit('set-caption', 'Detecting planet position...');
+        emit('update-loading', { progress: 0, current: 0, total: frameIndex.length });
+
+        // Sample every Nth frame
+        const sampleInterval = Math.max(1, Math.floor(frameIndex.length / 50));
+        const sampleIndices = [];
+        for (let i = 0; i < frameIndex.length; i += sampleInterval) {
+            sampleIndices.push(i);
+        }
+
+        addLog(`Sampling ${sampleIndices.length} MJPEG frames for crop detection (GPU)...`);
+
+        const BATCH_SIZE = 32;
+        let canCropCount = 0;
+        const detectedCenters = [];
+        const detectedSizes = [];
+
+        for (let batchStart = 0; batchStart < sampleIndices.length; batchStart += BATCH_SIZE) {
+            const batchEnd = Math.min(batchStart + BATCH_SIZE, sampleIndices.length);
+            const batch = [];
+
+            // Decode JPEG frames for this batch
+            for (let i = batchStart; i < batchEnd; i++) {
+                const frameIdx = sampleIndices[i];
+                const frame = frameIndex[frameIdx];
+
+                try {
+                    const jpegData = await file.slice(frame.offset, frame.offset + frame.size).arrayBuffer();
+                    const rgba = await decodeJpegToRgba(new Uint8Array(jpegData), width, height);
+                    batch.push({ data: rgba.data, index: frameIdx });
+                } catch (e) {
+                    console.warn(`Failed to decode MJPEG frame ${frameIdx}:`, e);
+                }
+            }
+
+            if (batch.length === 0) continue;
+
+            const results = await analyzeRgbaBatchGpu(batch, width, height);
+
+            for (const result of results) {
+                if (result.bounds) {
+                    canCropCount++;
+                    detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
+                    detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
+                }
+            }
+
+            emit('update-loading', {
+                progress: (batchEnd / sampleIndices.length) * 100,
+                current: batchEnd,
+                total: sampleIndices.length
+            });
+        }
+
+        const cropThreshold = sampleIndices.length * 0.5;
+        if (canCropCount < cropThreshold) {
+            addLog(`Only ${canCropCount}/${sampleIndices.length} frames can be cropped. Skipping auto-crop.`);
+            return null;
+        }
+
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
+
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
+        const maxAllowedSize = Math.min(width, height);
+        let finalSize = Math.min(desiredSize, maxAllowedSize);
+
+        if (desiredSize > maxAllowedSize) {
+            addLog(`Crop size ${desiredSize} exceeds frame size ${maxAllowedSize}, clamping`);
+        }
+
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+    }
+
+    // Process MJPEG AVI file with GPU acceleration
+    async function readMjpegAviFile(file, aviHeader, maxFrames, enableAutoCrop, clientSideStacking, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment) {
+        resetCaptures();
+
+        // Initialize GPU worker
+        const gpuOk = await initializeGpuWorker();
+        if (!gpuOk) {
+            addLog('GPU not available for MJPEG processing, falling back to FFmpeg');
+            return 'fallback';
+        }
+
+        // Parse MJPEG frame index
+        emit('set-caption', 'Parsing MJPEG frame index...');
+        const frameIndex = await parseMjpegFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
+
+        if (frameIndex.length === 0) {
+            addLog('No MJPEG frames found in file');
+            emit('upload-error', 'No video frames found in MJPEG file.');
+            emit('stop-loading');
+            return;
+        }
+
+        addLog(`Found ${frameIndex.length} MJPEG frames`);
+
+        const frameCount = frameIndex.length;
+        const { width, height } = aviHeader;
+
+        // Detect crop region
+        const MIN_SIZE_FOR_CROP = 300;
+        let cropRegion = null;
+
+        if (enableAutoCrop && width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
+            addLog(`Frame size ${width}x${height} qualifies for auto-crop`);
+            cropRegion = await detectCropRegionMjpegGpu(file, frameIndex, width, height, cropMarginPercent);
+
+            if (cropRegion) {
+                addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
+            }
+        }
+
+        emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
+
+        const bestFramesCapacity = Math.max(1, Math.floor(frameCount * stackPercentage / 100));
+        const bestFramesForStacking = [];
+        let bestFrameSoFar = null;
+        let refCandidateSoFar = null;
+        const allAnalyzedFrames = [];
+        const frameCenters = new Map();
+
+        function rankFrame(frame) {
+            if (manualThreshold) {
+                allAnalyzedFrames.push(frame);
+            }
+
+            if (!bestFrameSoFar || frame.sharpness > bestFrameSoFar.sharpness) {
+                bestFrameSoFar = frame;
+            }
+
+            if (!refCandidateSoFar || (frame.circularity || 0) > (refCandidateSoFar.circularity || 0)) {
+                refCandidateSoFar = frame;
+            }
+
+            if (bestFramesForStacking.length < bestFramesCapacity) {
+                bestFramesForStacking.push(frame);
+            } else {
+                const minIdx = bestFramesForStacking.reduce((minI, f, i, arr) =>
+                    f.sharpness < arr[minI].sharpness ? i : minI, 0);
+                if (frame.sharpness > bestFramesForStacking[minIdx].sharpness) {
+                    bestFramesForStacking[minIdx] = frame;
+                }
+            }
+        }
+
+        let completedFrames = 0;
+        let skippedFrames = 0;
+        let cutOffFrames = 0;
+        let oversizedFrames = 0;
+
+        const BATCH_SIZE = 64; // Larger batches for better GPU throughput
+
+        // Helper to decode a batch of frames
+        async function decodeBatch(start, end) {
+            const decodePromises = [];
+            for (let i = start; i < end; i++) {
+                const frame = frameIndex[i];
+                const frameIdx = i;
+                decodePromises.push(
+                    file.slice(frame.offset, frame.offset + frame.size).arrayBuffer()
+                        .then(jpegData => decodeJpegToRgba(new Uint8Array(jpegData), width, height))
+                        .then(rgba => ({ data: rgba.data, index: frameIdx, success: true }))
+                        .catch(e => {
+                            console.warn(`Failed to decode MJPEG frame ${frameIdx}:`, e);
+                            return { index: frameIdx, success: false };
+                        })
+                );
+            }
+            return Promise.all(decodePromises);
+        }
+
+        // Pipeline: start decoding next batch while GPU processes current batch
+        let nextDecodePromise = decodeBatch(0, Math.min(BATCH_SIZE, frameCount));
+
+        for (let batchStart = 0; batchStart < frameCount; batchStart += BATCH_SIZE) {
+            const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
+
+            // Wait for this batch's decode (started in previous iteration or before loop)
+            const decodeResults = await nextDecodePromise;
+
+            // Immediately start decoding NEXT batch while we process this one on GPU
+            const nextBatchStart = batchStart + BATCH_SIZE;
+            if (nextBatchStart < frameCount) {
+                const nextBatchEnd = Math.min(nextBatchStart + BATCH_SIZE, frameCount);
+                nextDecodePromise = decodeBatch(nextBatchStart, nextBatchEnd);
+            }
+
+            // Process decoded frames
+            const batchFrames = [];
+            const batchIndices = [];
+            for (const result of decodeResults) {
+                if (result.success) {
+                    batchFrames.push({ data: result.data, index: result.index });
+                    batchIndices.push(result.index);
+                } else {
+                    skippedFrames++;
+                    completedFrames++;
+                }
+            }
+
+            if (batchFrames.length === 0) continue;
+
+            try {
+                if (cropRegion) {
+                    // First get bounds to find centers
+                    const boundsResults = await analyzeRgbaBatchGpu(batchFrames, width, height);
+
+                    const framesToCrop = [];
+                    const centers = [];
+                    const cropIndices = [];
+
+                    for (let j = 0; j < boundsResults.length; j++) {
+                        const result = boundsResults[j];
+                        const frameIdx = batchIndices[j];
+
+                        if (!result.bounds) {
+                            skippedFrames++;
+                            completedFrames++;
+                            continue;
+                        }
+
+                        // Check cut-off
+                        const margin = Math.max(width, height) * 0.01;
+                        if (result.bounds.x < margin || result.bounds.y < margin ||
+                            result.bounds.x + result.bounds.width > width - margin ||
+                            result.bounds.y + result.bounds.height > height - margin) {
+                            cutOffFrames++;
+                            completedFrames++;
+                            continue;
+                        }
+
+                        // Check oversized
+                        if (cropRegion.medianObjectSize) {
+                            const size = Math.max(result.bounds.width, result.bounds.height);
+                            if (size / cropRegion.medianObjectSize > 1.3) {
+                                oversizedFrames++;
+                                completedFrames++;
+                                continue;
+                            }
+                        }
+
+                        const center = { x: result.bounds.centroidX, y: result.bounds.centroidY };
+                        framesToCrop.push(batchFrames[j]);
+                        centers.push(center);
+                        cropIndices.push(frameIdx);
+                        frameCenters.set(frameIdx, center);
+                    }
+
+                    if (framesToCrop.length > 0) {
+                        // GPU crop + analyze (metadataOnly=true for two-pass)
+                        const cropResults = await cropAndAnalyzeRgbaGpu(
+                            framesToCrop, width, height, cropRegion.size, centers, true
+                        );
+
+                        for (let k = 0; k < cropResults.length; k++) {
+                            const gpuResult = cropResults[k];
+                            const frameIdx = cropIndices[k];
+                            const center = centers[k];
+
+                            const currentFrame = {
+                                sharpness: gpuResult.sharpness,
+                                width: cropRegion.size,
+                                height: cropRegion.size,
+                                index: frameIdx,
+                                centerX: center.x,
+                                centerY: center.y,
+                                circularity: gpuResult.circularity || 0
+                            };
+
+                            rankFrame(currentFrame);
+
+                            // Create preview blob if this became new best
+                            if (bestFrameSoFar === currentFrame && gpuResult.uint8Buffer) {
+                                try {
+                                    const uint8Data = new Uint8ClampedArray(gpuResult.uint8Buffer);
+                                    const imageData = new ImageData(uint8Data, cropRegion.size, cropRegion.size);
+                                    const canvas = new OffscreenCanvas(cropRegion.size, cropRegion.size);
+                                    const ctx = canvas.getContext('2d');
+                                    ctx.putImageData(imageData, 0, 0);
+                                    currentFrame.blob = await canvas.convertToBlob({ type: 'image/png' });
+                                    emit('best-frame-updated', currentFrame);
+                                } catch (e) {
+                                    console.warn('Failed to create preview:', e);
+                                }
+                            }
+
+                            completedFrames++;
+                        }
+                    }
+                } else {
+                    // No crop - analyze full frames
+                    const results = await analyzeRgbaBatchGpu(batchFrames, width, height);
+
+                    for (let j = 0; j < results.length; j++) {
+                        const result = results[j];
+                        const frameIdx = batchIndices[j];
+
+                        const currentFrame = {
+                            sharpness: result.sharpness || 0,
+                            width: width,
+                            height: height,
+                            index: frameIdx,
+                            centerX: width / 2,
+                            centerY: height / 2,
+                            circularity: result.circularity || 0
+                        };
+
+                        frameCenters.set(frameIdx, { x: width / 2, y: height / 2 });
+                        rankFrame(currentFrame);
+                        completedFrames++;
+                    }
+                }
+            } catch (error) {
+                addLog(`GPU batch error: ${error.message}`);
+                completedFrames += batchFrames.length;
+            }
+
+            emit('update-loading', {
+                progress: (completedFrames / frameCount) * 100,
+                current: completedFrames,
+                total: frameCount
+            });
+
+            if (bestFrameSoFar && completedFrames % 100 === 0) {
+                emit('best-frame-updated', bestFrameSoFar);
+            }
+        }
+
+        const skipMsgs = [];
+        if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
+        if (oversizedFrames > 0) skipMsgs.push(`${oversizedFrames} oversized`);
+        if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} decode-failed`);
+        const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
+        addLog(`Analyzed ${frameCount} MJPEG frames. Valid: ${allAnalyzedFrames.length || bestFramesForStacking.length}${skippedMsg}`);
+
+        // Create frameReReader for two-pass stacking
+        const frameReReader = {
+            fileType: 'image', // Use 'image' type since MJPEG produces RGBA like images
+            file,
+            frameIndex,
+            frameCenters,
+            cropRegion,
+            srcWidth: width,
+            srcHeight: height,
+
+            async getFrame(frameIdx) {
+                const frame = this.frameIndex[frameIdx];
+                if (!frame) return null;
+
+                const center = this.frameCenters.get(frameIdx);
+                if (!center) return null;
+
+                try {
+                    const jpegData = await this.file.slice(frame.offset, frame.offset + frame.size).arrayBuffer();
+                    const rgba = await decodeJpegToRgba(new Uint8Array(jpegData), this.srcWidth, this.srcHeight);
+
+                    return {
+                        data: rgba.data,
+                        width: rgba.width,
+                        height: rgba.height,
+                        centerX: center.x,
+                        centerY: center.y
+                    };
+                } catch (e) {
+                    console.warn(`Failed to re-read MJPEG frame ${frameIdx}:`, e);
+                    return null;
+                }
+            }
+        };
+
+        // Manual threshold mode
+        if (manualThreshold) {
+            const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
+            addLog(`Ready for manual threshold selection with ${allFramesSorted.length} MJPEG frames`);
+            emit('quality-selection-ready', {
+                frames: allFramesSorted,
+                workers: null,
+                noiseRobustAlignment,
+                useWebGPU: true,
+                frameReReader
+            });
+            return;
+        }
+
+        // Automatic stacking
+        const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, frameReReader);
+
+        // Cleanup
+        gpuWorker.terminate();
+        gpuWorker = null;
+        gpuReady = false;
+
+        if (stackResult && stackResult.blob) {
+            addLog('MJPEG GPU stacking complete');
+            emit('stacked-image-ready', {
+                blob: stackResult.blob,
+                float32Data: stackResult.float32Data,
+                width: stackResult.width,
+                height: stackResult.height
+            });
+        } else {
+            addLog('MJPEG stacking failed - no valid frames');
+            emit('stop-loading');
+        }
+    }
+
     // Quick format check - only parses header, doesn't initialize workers
     async function checkAviFormat(headerBuffer) {
         const aviHeader = await parseFullAviHeader(headerBuffer);
 
         if (!aviHeader) {
-            return { isEasy: false, fourCC: 'unknown', error: 'Failed to parse header' };
+            return { isEasy: false, isMjpeg: false, fourCC: 'unknown', error: 'Failed to parse header' };
         }
 
         const isEasy = isEasyAviFourCC(aviHeader.fourCC);
+        const isMjpeg = isMjpegFourCC(aviHeader.fourCC);
         return {
             isEasy,
+            isMjpeg,
+            isSupported: isEasy || isMjpeg,
             fourCC: aviHeader.fourCC,
             width: aviHeader.width,
             height: aviHeader.height,

@@ -196,7 +196,13 @@ export function useStacker() {
                     }
                 } else if (isImageFile) {
                     for (const frame of batchFrames) {
-                        const rgba = frameReReader.rgbaFrames[frame.index];
+                        // Support both pre-loaded rgbaFrames array and getFrame() function (for MJPEG)
+                        let rgba;
+                        if (frameReReader.getFrame) {
+                            rgba = await frameReReader.getFrame(frame.index);
+                        } else if (frameReReader.rgbaFrames) {
+                            rgba = frameReReader.rgbaFrames[frame.index];
+                        }
                         if (rgba) {
                             frames.push({ data: rgba.data, index: frame.index });
                             centers.push({ x: frame.centerX, y: frame.centerY });

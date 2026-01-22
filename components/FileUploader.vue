@@ -364,12 +364,12 @@ async function processFiles(files) {
 
 			const formatInfo = await checkAviFormat(headerBuffer);
 
-			if (formatInfo.isEasy) {
-				// Can process directly - readAviFile will read frames as needed
+			if (formatInfo.isSupported) {
+				// Can process directly - readAviFile handles both uncompressed and MJPEG
 				emit('processing-started');
 				const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 				const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
+				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -414,6 +414,7 @@ async function processFiles(files) {
 		const totalFramesTarget = enableMaxFrames.value ? selectedMaxFrames.value : expectedFrameCount;
 		$ffmpeg.setLogger(({ type, message }) => {
 			// Parse frame count from FFmpeg output: "frame=  304 fps= 36 ..."
+			if (typeof message !== 'string') return;
 			const frameMatch = message.match(/frame=\s*(\d+)/);
 			if (frameMatch) {
 				const currentFrame = parseInt(frameMatch[1], 10);
@@ -433,7 +434,8 @@ async function processFiles(files) {
 
 		try {
 			const frameLimit = enableMaxFrames.value ? ['-vframes', '' + selectedMaxFrames.value + ''] : [];
-			await $ffmpeg.run('-i', videoFiles[0].name, ...frameLimit, 'out%d.png');
+			// Output uncompressed AVI (DIB format) instead of PNGs - more efficient and reuses AVI reader
+			await $ffmpeg.run('-i', videoFiles[0].name, ...frameLimit, '-c:v', 'rawvideo', '-pix_fmt', 'bgr24', 'output.avi');
 		} catch(err){
 			console.log(err);
 			addLog('FFmpeg forcefully exited, but continuing!');
@@ -442,15 +444,20 @@ async function processFiles(files) {
 		// Clear the logger after FFmpeg completes
 		$ffmpeg.setLogger(({ message }) => {});
 
-		addLog('Cleaning up ffmpeg memory');
-		const filesInternal = $ffmpeg.FS('readdir', '.').filter(file => file.endsWith('.png'));
+		// Free source video memory immediately after conversion
 		$ffmpeg.FS('unlink', videoFiles[0].name);
-		addLog('Cleanup done. Processing frames through AVI reader.');
 
-		// Route FFmpeg frames through AVI reader for unified processing (including cropping)
-		const { processFFmpegFrames } = useAviReader();
+		addLog('Reading converted AVI from FFmpeg');
+		const aviData = $ffmpeg.FS('readFile', 'output.avi');
+		$ffmpeg.FS('unlink', 'output.avi');
+		addLog('Cleanup done. Processing through AVI reader.');
+
+		// Route through AVI reader - same path as direct AVI files
+		const { readAviFile } = useAviReader();
 		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		await processFFmpegFrames($ffmpeg, filesInternal, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
+		// Create a File object from the buffer for readAviFile
+		const aviFile = new File([aviData.buffer], 'converted.avi', { type: 'video/avi' });
+		await readAviFile(aviFile, enableMaxFrames.value ? selectedMaxFrames.value : -1, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
