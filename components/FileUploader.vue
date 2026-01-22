@@ -106,6 +106,7 @@
 		<p>When stacking, eise.app analyzes all frames by sharpness, then you select which ones to include using a quality graph or percentage threshold.</p>
 		<h3>More information, bugs and feature requests?</h3>
 		<p>Read more about Eise.app on the <a href="#" @click.prevent="showAbout">About page</a>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>.</p>
+		<p>Have feedback or running into issues? <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
 	</div>
 </div>
 </template>
@@ -119,7 +120,9 @@ import { useAviReader } from '@/composables/useAviReader';
 import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
+import { useFeedback } from '@/composables/useFeedback';
 
+const { openFeedback } = useFeedback();
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
 const enableMaxFrames = ref(false);

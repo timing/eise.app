@@ -61,6 +61,7 @@
 
 			<h3>Bugs or feature requests?</h3>
 			<p>Head over to <a href="https://github.com/timing/eise.app" target="_blank">eise.app on GitHub</a> for suggestions or bug reports.</p>
+			<p>Or <a href="#" @click.prevent="openFeedback()">send me feedback directly</a> - I'd love to hear about your experience!</p>
 
 			<p>Happy Stacking,<br/> Tijmen</p>
 			</div>
@@ -94,10 +95,12 @@ import { ref, watch } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
 import { useTracking } from '@/composables/useTracking';
+import { useFeedback } from '@/composables/useFeedback';
 
 const { on, emit: eventBusEmit, addLog } = useEventBus();
 const { stackFramesLocally } = useStacker();
 const { track, trackHumanInteraction } = useTracking();
+const { openFeedback } = useFeedback();
 
 const frames = ref([]);
 const currentFrame = ref(null);

@@ -173,8 +173,10 @@ import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { useComparisonExport } from '@/composables/useComparisonExport';
+import { useFeedback } from '@/composables/useFeedback';
 
 const { track } = useTracking();
+const { openFeedbackAfterDownload } = useFeedback();
 const { getOutputFilename } = useProcessingState();
 const { captureProcessedImage, canExport, generateComparisonVideo, getExportStatus } = useComparisonExport();
 
@@ -212,6 +214,7 @@ const downloadCanvasAsPNG = () => {
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
 	document.body.removeChild(link);
+	openFeedbackAfterDownload();
 };
 
 const downloadUnprocessedPNG = () => {
@@ -232,6 +235,7 @@ const downloadUnprocessedPNG = () => {
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
 	document.body.removeChild(link);
+	openFeedbackAfterDownload();
 };
 
 const downloadComparisonVideo = async () => {
@@ -264,6 +268,7 @@ const downloadComparisonVideo = async () => {
 		link.click();
 		document.body.removeChild(link);
 		URL.revokeObjectURL(url);
+		openFeedbackAfterDownload();
 
 	} catch (error) {
 		console.error('Comparison video export failed:', error);
@@ -286,6 +291,7 @@ const downloadCroppedSer = () => {
 	a.click();
 	document.body.removeChild(a);
 	URL.revokeObjectURL(url);
+	openFeedbackAfterDownload();
 };
 
 const downloadCroppedAvi = () => {
@@ -302,6 +308,7 @@ const downloadCroppedAvi = () => {
 		a.click();
 		document.body.removeChild(a);
 		URL.revokeObjectURL(url);
+		openFeedbackAfterDownload();
 	} catch (e) {
 		console.error('AVI encoding error:', e);
 	}
@@ -318,6 +325,7 @@ const download16BitProcessedPNG = async () => {
 			sharpenedImage16.height,
 			getOutputFilename('stacked_processed_16bit', 'png')
 		);
+		openFeedbackAfterDownload();
 	} catch (e) {
 		console.error('16-bit PNG export error:', e);
 	}
