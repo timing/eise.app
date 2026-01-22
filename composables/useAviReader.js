@@ -71,72 +71,203 @@ async function parseMjpegFrameIndex(file, moviListOffset, moviListSize, maxFrame
 }
 
 
-// This function will be called on the main thread for preview rendering and final PNG generation
-// It needs to convert raw AVI frame data (DIB, Y800, YUY2) into an 8-bit PNG blob using OpenCV.js.
+// Convert raw AVI frame data to RGBA for canvas display - no OpenCV needed
+// Supports DIB (BGR24), Y800 (grayscale/Bayer), YUY2/UYVY
 async function renderAviFrameToBlob(canvas, frameDataBuffer, aviHeader, fourCC, bayerChoice) {
-    // Check if cv is available in the global scope
-    if (typeof cv === 'undefined') {
-        console.error("OpenCV.js (cv) not loaded for renderAviFrameToBlob.");
-        return null;
-    }
-
     const { width, height } = aviHeader;
+    const src = new Uint8Array(frameDataBuffer);
+    const rgba = new Uint8ClampedArray(width * height * 4);
 
-    // Create Mat from raw frameDataBuffer based on FourCC
-    let mat;
-    if (fourCC === 'DIB ' || fourCC === 'RGB ') { // Raw RGB24 - DIB is often BGR
-        mat = new cv.Mat(height, width, cv.CV_8UC3);
-        mat.data.set(new Uint8Array(frameDataBuffer));
-    } else if (fourCC === 'Y800') { // 8-bit Greyscale / Raw Bayer
-        mat = new cv.Mat(height, width, cv.CV_8UC1);
-        mat.data.set(new Uint8Array(frameDataBuffer));
-    } else if (fourCC === 'YUY2' || fourCC === 'UYVY') { // YUV 4:2:2 Packed
-        mat = new cv.Mat(height, width, cv.CV_8UC2);
-        mat.data.set(new Uint8Array(frameDataBuffer));
+    if (fourCC === 'DIB ' || fourCC === 'RGB ') {
+        // BGR24 → RGBA (swap B and R)
+        for (let i = 0, j = 0; i < src.length; i += 3, j += 4) {
+            rgba[j] = src[i + 2];     // R ← B
+            rgba[j + 1] = src[i + 1]; // G
+            rgba[j + 2] = src[i];     // B ← R
+            rgba[j + 3] = 255;        // A
+        }
+    } else if (fourCC === 'Y800') {
+        if (bayerChoice && bayerChoice !== "MONO") {
+            // Bayer demosaic - simple bilinear for preview (fast, good enough for preview)
+            demosaicBayerToRgba(src, rgba, width, height, bayerChoice);
+        } else {
+            // Grayscale → RGBA
+            for (let i = 0, j = 0; i < src.length; i++, j += 4) {
+                rgba[j] = rgba[j + 1] = rgba[j + 2] = src[i];
+                rgba[j + 3] = 255;
+            }
+        }
+    } else if (fourCC === 'YUY2') {
+        // YUY2 (YUYV) → RGBA: Y0 U Y1 V pattern
+        for (let i = 0, j = 0; i < src.length; i += 4, j += 8) {
+            const y0 = src[i], u = src[i + 1], y1 = src[i + 2], v = src[i + 3];
+            yuvToRgba(y0, u, v, rgba, j);
+            yuvToRgba(y1, u, v, rgba, j + 4);
+        }
+    } else if (fourCC === 'UYVY') {
+        // UYVY → RGBA: U Y0 V Y1 pattern
+        for (let i = 0, j = 0; i < src.length; i += 4, j += 8) {
+            const u = src[i], y0 = src[i + 1], v = src[i + 2], y1 = src[i + 3];
+            yuvToRgba(y0, u, v, rgba, j);
+            yuvToRgba(y1, u, v, rgba, j + 4);
+        }
     } else {
         console.error(`Unsupported FourCC for direct AVI rendering: ${fourCC}`);
         return null;
     }
 
-    // Convert to BGR/RGBA for consistent processing
-    let displayMat;
-    if (fourCC === 'DIB ' || fourCC === 'RGB ') { // Already 3-channel BGR
-        displayMat = mat;
-    } else if (fourCC === 'Y800') {
-        if (bayerChoice && bayerChoice !== "MONO" && cv[bayerChoice]) {
-             displayMat = new cv.Mat();
-             cv.demosaicing(mat, displayMat, cv[bayerChoice]); // Demosaic to BGR
-        } else {
-            displayMat = new cv.Mat();
-            cv.cvtColor(mat, displayMat, cv.COLOR_GRAY2BGR); // Convert grayscale to BGR
-        }
-    } else if (fourCC === 'YUY2' || fourCC === 'UYVY') {
-        displayMat = new cv.Mat();
-        cv.cvtColor(mat, displayMat, cv.COLOR_YUV2BGR_YUYV); // Convert YUY2 to BGR
-    }
+    // Auto-stretch (normalize to 0-255 range)
+    autoStretchRgba(rgba);
 
-    // Convert BGR to RGBA for canvas
-    let rgbaMat = new cv.Mat();
-    cv.cvtColor(displayMat, rgbaMat, cv.COLOR_BGR2RGBA);
-    
-    // Auto-Stretch and Show (optional, but consistent with SER)
-    let stretched = new cv.Mat();
-    cv.normalize(rgbaMat, stretched, 0, 255, cv.NORM_MINMAX, cv.CV_8U);
-    
+    // Render to canvas
     canvas.width = width;
     canvas.height = height;
-    cv.imshow(canvas, stretched);
-    
-    // Cleanup
-    const matsToDelete = new Set([mat, displayMat, rgbaMat, stretched]);
-    matsToDelete.forEach(m => {
-        // Check if the mat exists and has not been deleted already
-        if (m && !m.isDeleted()) {
-            m.delete();
-        }
-    });
+    const ctx = canvas.getContext('2d');
+    const imageData = new ImageData(rgba, width, height);
+    ctx.putImageData(imageData, 0, 0);
 
     return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+}
+
+// YUV to RGBA conversion (BT.601)
+function yuvToRgba(y, u, v, rgba, offset) {
+    const c = y - 16;
+    const d = u - 128;
+    const e = v - 128;
+    rgba[offset] = Math.max(0, Math.min(255, (298 * c + 409 * e + 128) >> 8));           // R
+    rgba[offset + 1] = Math.max(0, Math.min(255, (298 * c - 100 * d - 208 * e + 128) >> 8)); // G
+    rgba[offset + 2] = Math.max(0, Math.min(255, (298 * c + 516 * d + 128) >> 8));       // B
+    rgba[offset + 3] = 255; // A
+}
+
+// Simple bilinear Bayer demosaic for preview
+function demosaicBayerToRgba(src, rgba, width, height, bayerChoice) {
+    // Determine pattern: bayerChoice is like 'COLOR_BayerBG2RGB'
+    // BG = Blue at (0,0), Green at (0,1) and (1,0), Red at (1,1)
+    // RG = Red at (0,0), etc.
+    const pattern = bayerChoice.includes('BG') ? 'BGGR' :
+                    bayerChoice.includes('GB') ? 'GBRG' :
+                    bayerChoice.includes('RG') ? 'RGGB' :
+                    bayerChoice.includes('GR') ? 'GRBG' : 'RGGB';
+
+    // For each pixel, determine what color it is and interpolate the others
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const i = y * width + x;
+            const j = i * 4;
+            const raw = src[i];
+
+            // Determine position in 2x2 Bayer pattern
+            const px = x % 2, py = y % 2;
+            let r, g, b;
+
+            // Get neighboring pixels (clamped to edges)
+            const getPixel = (dx, dy) => {
+                const nx = Math.max(0, Math.min(width - 1, x + dx));
+                const ny = Math.max(0, Math.min(height - 1, y + dy));
+                return src[ny * width + nx];
+            };
+
+            if (pattern === 'RGGB') {
+                if (px === 0 && py === 0) { // R
+                    r = raw;
+                    g = (getPixel(1, 0) + getPixel(0, 1)) >> 1;
+                    b = getPixel(1, 1);
+                } else if (px === 1 && py === 1) { // B
+                    r = getPixel(-1, -1);
+                    g = (getPixel(-1, 0) + getPixel(0, -1)) >> 1;
+                    b = raw;
+                } else if (px === 1 && py === 0) { // G (R row)
+                    r = getPixel(-1, 0);
+                    g = raw;
+                    b = getPixel(0, 1);
+                } else { // G (B row)
+                    r = getPixel(0, -1);
+                    g = raw;
+                    b = getPixel(1, 0);
+                }
+            } else if (pattern === 'BGGR') {
+                if (px === 0 && py === 0) { // B
+                    b = raw;
+                    g = (getPixel(1, 0) + getPixel(0, 1)) >> 1;
+                    r = getPixel(1, 1);
+                } else if (px === 1 && py === 1) { // R
+                    b = getPixel(-1, -1);
+                    g = (getPixel(-1, 0) + getPixel(0, -1)) >> 1;
+                    r = raw;
+                } else if (px === 1 && py === 0) { // G (B row)
+                    b = getPixel(-1, 0);
+                    g = raw;
+                    r = getPixel(0, 1);
+                } else { // G (R row)
+                    b = getPixel(0, -1);
+                    g = raw;
+                    r = getPixel(1, 0);
+                }
+            } else if (pattern === 'GBRG') {
+                if (px === 0 && py === 0) { // G (B row)
+                    b = getPixel(1, 0);
+                    g = raw;
+                    r = getPixel(0, 1);
+                } else if (px === 1 && py === 1) { // G (R row)
+                    b = getPixel(0, -1);
+                    g = raw;
+                    r = getPixel(-1, 0);
+                } else if (px === 1 && py === 0) { // B
+                    b = raw;
+                    g = (getPixel(-1, 0) + getPixel(0, 1)) >> 1;
+                    r = getPixel(-1, 1);
+                } else { // R
+                    b = getPixel(1, -1);
+                    g = (getPixel(1, 0) + getPixel(0, -1)) >> 1;
+                    r = raw;
+                }
+            } else { // GRBG
+                if (px === 0 && py === 0) { // G (R row)
+                    r = getPixel(1, 0);
+                    g = raw;
+                    b = getPixel(0, 1);
+                } else if (px === 1 && py === 1) { // G (B row)
+                    r = getPixel(0, -1);
+                    g = raw;
+                    b = getPixel(-1, 0);
+                } else if (px === 1 && py === 0) { // R
+                    r = raw;
+                    g = (getPixel(-1, 0) + getPixel(0, 1)) >> 1;
+                    b = getPixel(-1, 1);
+                } else { // B
+                    r = getPixel(1, -1);
+                    g = (getPixel(1, 0) + getPixel(0, -1)) >> 1;
+                    b = raw;
+                }
+            }
+
+            rgba[j] = r;
+            rgba[j + 1] = g;
+            rgba[j + 2] = b;
+            rgba[j + 3] = 255;
+        }
+    }
+}
+
+// Auto-stretch RGBA to use full 0-255 range
+function autoStretchRgba(rgba) {
+    let min = 255, max = 0;
+    // Find min/max across RGB (skip alpha)
+    for (let i = 0; i < rgba.length; i += 4) {
+        for (let c = 0; c < 3; c++) {
+            const v = rgba[i + c];
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+    }
+    if (max <= min) return; // No stretch needed
+    const scale = 255 / (max - min);
+    for (let i = 0; i < rgba.length; i += 4) {
+        for (let c = 0; c < 3; c++) {
+            rgba[i + c] = Math.round((rgba[i + c] - min) * scale);
+        }
+    }
 }
 
 export function useAviReader() {
