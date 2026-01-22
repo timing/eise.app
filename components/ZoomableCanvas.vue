@@ -14,7 +14,7 @@
 </template>
 
 <script setup>
-import { defineEmits, ref, onMounted, nextTick, computed } from 'vue';
+import { defineEmits, ref, onMounted, onUnmounted, nextTick, computed } from 'vue';
 
 const emit = defineEmits(['canvasReady']);
 
@@ -152,6 +152,21 @@ onUnmounted(() => {
 const endDrag = () => {
 	isDragging.value = false;
 };
+
+// Center the canvas within the container
+const centerCanvas = () => {
+	if (!canvas.value || !container.value) return;
+	const containerRect = container.value.getBoundingClientRect();
+	const canvasWidth = canvas.value.width * zoomLevel.value;
+	const canvasHeight = canvas.value.height * zoomLevel.value;
+	position.value = {
+		x: (containerRect.width - canvasWidth) / 2,
+		y: (containerRect.height - canvasHeight) / 2
+	};
+};
+
+// Expose centerCanvas so parent can call it after loading an image
+defineExpose({ centerCanvas });
 
 </script>
 

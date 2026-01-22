@@ -7,9 +7,12 @@
 
 let gl = null;
 let program = null;
+let blurProgram = null;
 let inputTexture = null;
 let outputTexture = null;
+let blurTempTexture = null;
 let framebuffer = null;
+let blurFramebuffer = null;
 let positionBuffer = null;
 let texCoordBuffer = null;
 let canvas = null;
@@ -25,6 +28,33 @@ const vertexShaderSource = `#version 300 es
 	void main() {
 		gl_Position = vec4(a_position, 0, 1);
 		v_texCoord = a_texCoord;
+	}
+`;
+
+// Separable Gaussian blur fragment shader
+// Uses a 1D kernel in either horizontal or vertical direction
+const blurFragmentShaderSource = `#version 300 es
+	precision highp float;
+	in vec2 v_texCoord;
+	out vec4 fragColor;
+
+	uniform sampler2D u_image;
+	uniform vec2 u_direction; // (1/width, 0) for horizontal, (0, 1/height) for vertical
+	uniform int u_kernelSize; // Must be odd (3, 5, 7, etc.)
+	uniform float u_weights[64]; // Pre-computed Gaussian weights
+
+	void main() {
+		vec4 sum = vec4(0.0);
+		int halfSize = u_kernelSize / 2;
+
+		for (int i = 0; i < u_kernelSize; i++) {
+			if (i >= 64) break; // Safety limit
+			float offset = float(i - halfSize);
+			vec2 sampleCoord = v_texCoord + u_direction * offset;
+			sum += texture(u_image, sampleCoord) * u_weights[i];
+		}
+
+		fragColor = sum;
 	}
 `;
 
@@ -155,6 +185,15 @@ export function initWebGL2(width, height) {
 	gl.deleteShader(vertexShader);
 	gl.deleteShader(fragmentShader);
 
+	// Create blur shaders and program
+	const blurVertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+	const blurFragmentShader = createShader(gl, gl.FRAGMENT_SHADER, blurFragmentShaderSource);
+	if (blurVertexShader && blurFragmentShader) {
+		blurProgram = createProgram(gl, blurVertexShader, blurFragmentShader);
+		gl.deleteShader(blurVertexShader);
+		gl.deleteShader(blurFragmentShader);
+	}
+
 	// Set up position buffer (full-screen quad)
 	positionBuffer = gl.createBuffer();
 	gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -202,6 +241,22 @@ export function initWebGL2(width, height) {
 	framebuffer = gl.createFramebuffer();
 	gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
 	gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, outputTexture, 0);
+
+	// Create temp texture for blur (intermediate horizontal pass result)
+	blurTempTexture = gl.createTexture();
+	gl.bindTexture(gl.TEXTURE_2D, blurTempTexture);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+	gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+	gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.FLOAT, null);
+
+	// Create blur framebuffer for intermediate pass
+	blurFramebuffer = gl.createFramebuffer();
+	gl.bindFramebuffer(gl.FRAMEBUFFER, blurFramebuffer);
+	gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, blurTempTexture, 0);
+
+	gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
 
 	// Check framebuffer status
 	const fbStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
@@ -352,6 +407,119 @@ export function processWithWebGL2ToImageData(data, width, height, gain, contrast
 }
 
 /**
+ * Compute Gaussian weights for a 1D kernel
+ * @param {number} kernelSize - Kernel size (must be odd)
+ * @returns {Float32Array} Normalized Gaussian weights
+ */
+function computeGaussianWeights(kernelSize) {
+	const sigma = kernelSize / 6.0; // Standard approximation
+	const halfSize = Math.floor(kernelSize / 2);
+	const weights = new Float32Array(kernelSize);
+	let sum = 0;
+
+	for (let i = 0; i < kernelSize; i++) {
+		const x = i - halfSize;
+		weights[i] = Math.exp(-(x * x) / (2 * sigma * sigma));
+		sum += weights[i];
+	}
+
+	// Normalize
+	for (let i = 0; i < kernelSize; i++) {
+		weights[i] /= sum;
+	}
+
+	return weights;
+}
+
+/**
+ * Apply Gaussian blur using WebGL2 (separable - horizontal then vertical pass)
+ * @param {Float32Array} data - RGBA float data (0.0-1.0 range)
+ * @param {number} width - Image width
+ * @param {number} height - Image height
+ * @param {number} kernelSize - Blur kernel size (will be made odd if even)
+ * @returns {Float32Array|null} Blurred RGBA float data, or null on failure
+ */
+export function blurWithWebGL2(data, width, height, kernelSize) {
+	if (!initialized || !gl || !blurProgram) {
+		return null;
+	}
+
+	// Ensure kernel size is odd and within limits
+	kernelSize = Math.max(3, Math.min(63, kernelSize | 1));
+
+	// Reinitialize if dimensions changed
+	if (width !== currentWidth || height !== currentHeight) {
+		if (!initWebGL2(width, height)) {
+			return null;
+		}
+	}
+
+	const weights = computeGaussianWeights(kernelSize);
+
+	// Upload input data
+	gl.bindTexture(gl.TEXTURE_2D, inputTexture);
+	gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.FLOAT, data);
+
+	// Use blur program
+	gl.useProgram(blurProgram);
+
+	// Set up position attribute
+	const positionLocation = gl.getAttribLocation(blurProgram, 'a_position');
+	gl.enableVertexAttribArray(positionLocation);
+	gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+	gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+	// Set up texCoord attribute
+	const texCoordLocation = gl.getAttribLocation(blurProgram, 'a_texCoord');
+	gl.enableVertexAttribArray(texCoordLocation);
+	gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+	gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 0, 0);
+
+	// Get uniform locations
+	const imageLocation = gl.getUniformLocation(blurProgram, 'u_image');
+	const directionLocation = gl.getUniformLocation(blurProgram, 'u_direction');
+	const kernelSizeLocation = gl.getUniformLocation(blurProgram, 'u_kernelSize');
+	const weightsLocation = gl.getUniformLocation(blurProgram, 'u_weights');
+
+	gl.uniform1i(imageLocation, 0);
+	gl.uniform1i(kernelSizeLocation, kernelSize);
+	gl.uniform1fv(weightsLocation, weights);
+
+	gl.viewport(0, 0, width, height);
+
+	// === PASS 1: Horizontal blur (input -> blurTemp) ===
+	gl.bindFramebuffer(gl.FRAMEBUFFER, blurFramebuffer);
+	gl.activeTexture(gl.TEXTURE0);
+	gl.bindTexture(gl.TEXTURE_2D, inputTexture);
+	gl.uniform2f(directionLocation, 1.0 / width, 0.0);
+	gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+	// === PASS 2: Vertical blur (blurTemp -> output) ===
+	gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+	gl.bindTexture(gl.TEXTURE_2D, blurTempTexture);
+	gl.uniform2f(directionLocation, 0.0, 1.0 / height);
+	gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+	// Read back pixels as float
+	const pixels = new Float32Array(width * height * 4);
+	gl.readPixels(0, 0, width, height, gl.RGBA, gl.FLOAT, pixels);
+
+	// WebGL has Y-axis flipped, need to flip it back
+	const flippedPixels = new Float32Array(width * height * 4);
+	const rowSize = width * 4;
+	for (let y = 0; y < height; y++) {
+		const srcRow = (height - 1 - y) * rowSize;
+		const dstRow = y * rowSize;
+		flippedPixels.set(pixels.subarray(srcRow, srcRow + rowSize), dstRow);
+	}
+
+	// Unbind framebuffer
+	gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+	return flippedPixels;
+}
+
+/**
  * Check if WebGL2 with float textures is available
  * @returns {boolean} True if WebGL2 with required extensions is available
  */
@@ -374,16 +542,22 @@ export function disposeWebGL2() {
 	if (gl) {
 		if (inputTexture) gl.deleteTexture(inputTexture);
 		if (outputTexture) gl.deleteTexture(outputTexture);
+		if (blurTempTexture) gl.deleteTexture(blurTempTexture);
 		if (framebuffer) gl.deleteFramebuffer(framebuffer);
+		if (blurFramebuffer) gl.deleteFramebuffer(blurFramebuffer);
 		if (positionBuffer) gl.deleteBuffer(positionBuffer);
 		if (texCoordBuffer) gl.deleteBuffer(texCoordBuffer);
 		if (program) gl.deleteProgram(program);
+		if (blurProgram) gl.deleteProgram(blurProgram);
 	}
 	gl = null;
 	program = null;
+	blurProgram = null;
 	inputTexture = null;
 	outputTexture = null;
+	blurTempTexture = null;
 	framebuffer = null;
+	blurFramebuffer = null;
 	positionBuffer = null;
 	texCoordBuffer = null;
 	canvas = null;

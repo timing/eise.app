@@ -134,7 +134,7 @@
 			<p>Please upload a video (or bunch of files) for analyzing and stacking frames. Upload one image file for direct post processing.</p>
 		</div>
 		<template v-else>
-			<ZoomableCanvas id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" :previewRotation="previewRotationAngle">
+			<ZoomableCanvas ref="zoomableCanvasRef" id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" :previewRotation="previewRotationAngle">
 				<template #overlay>
 					<span v-if="isLoadingImage" class="loading-inline">
 						<span class="spinner"></span> Loading image...
@@ -168,14 +168,14 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, defineProps, reactive, onUnmounted, computed } from 'vue';
+import { ref, onMounted, watch, defineProps, reactive, onUnmounted, computed, nextTick } from 'vue';
 import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import { encodeAvi } from '@/utils/aviEncoder.js'
 import { initWebGL, processWithWebGL, isWebGLAvailable, disposeWebGL } from '@/utils/webglProcessor.js'
 import { deconvolveWebGL, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
 import { Image16 } from '@/utils/Image16.js'
-import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2 } from '@/utils/webgl2Processor.js'
+import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2, blurWithWebGL2 } from '@/utils/webgl2Processor.js'
 import { download16BitPNG } from '@/utils/png16Encoder.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 import { useTracking } from '@/composables/useTracking';
@@ -193,10 +193,10 @@ const isExportingVideo = ref(false);
 const exportProgress = ref('');
 const exportDropdownOpen = ref(false);
 
-const { $loadOpenCV, $ffmpeg, $loadFFmpeg } = useNuxtApp();
+const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
+const zoomableCanvasRef = ref(null);
 let canvas;
-let opencvLoaded = false;
 let useWebGL = false;
 let useWebGL2 = false;
 
@@ -473,12 +473,6 @@ async function loadImage(file) {
 	// Lazy-load workers when first image is loaded
 	initializeWorkers();
 
-	// Lazy-load OpenCV for post-processing effects
-	if (!opencvLoaded) {
-		await $loadOpenCV();
-		opencvLoaded = true;
-	}
-
 	console.log(file);
 
 	// Check if we have 16-bit float32 data from stacking
@@ -536,6 +530,11 @@ async function loadImage(file) {
 		}
 
 		isLoadingImage.value = false;
+
+		// Center the canvas in its container
+		nextTick(() => {
+			zoomableCanvasRef.value?.centerCanvas();
+		});
 
 		// give a small processing improvement
 		applyProcessing();
@@ -783,24 +782,16 @@ const applyProcessingInternal = async() => {
 			workingData = applyColorAdjustments16(workingData, width, height, gain.value, contrast.value, gamma.value, saturation.value, vibrance.value);
 		}
 
-		// STEP 3: Noise reduction (only with wavelets) - still uses 8-bit OpenCV
+		// STEP 3: Noise reduction (only with wavelets) - WebGL2 Gaussian blur
 		if (sharpeningMethod.value === 'wavelets' && postNoiseReduction.value >= 3) {
-			console.log('noise reduction (8-bit OpenCV)');
-			// Convert to ImageData for OpenCV
-			const tempImage16 = Image16.fromFloat32Array(workingData, width, height);
-			const tempImageData = tempImage16.toImageData();
-			const srcMat = imageDataToMat(tempImageData);
-			const dstMat = new cv.Mat();
-			cv.cvtColor(srcMat, srcMat, cv.COLOR_RGBA2RGB, 0);
 			const ksize = parseInt(postNoiseReduction.value, 10) | 1;
-			cv.GaussianBlur(srcMat, dstMat, new cv.Size(ksize, ksize), 0, 0, cv.BORDER_DEFAULT);
-			const rgbaMat = new cv.Mat();
-			cv.cvtColor(dstMat, rgbaMat, cv.COLOR_RGB2RGBA);
-			const resultImageData = new ImageData(new Uint8ClampedArray(rgbaMat.data), width, height);
-			workingData = Image16.fromImageData(resultImageData).data;
-			srcMat.delete();
-			dstMat.delete();
-			rgbaMat.delete();
+			console.log('noise reduction (WebGL2, kernel=' + ksize + ')');
+			const blurResult = blurWithWebGL2(workingData, width, height, ksize);
+			if (blurResult) {
+				workingData = blurResult;
+			} else {
+				console.warn('WebGL2 blur failed, skipping noise reduction');
+			}
 		}
 
 		// Store 16-bit result
@@ -857,20 +848,26 @@ const applyProcessingInternal = async() => {
 		console.log('color adjustments', useWebGL ? '(WebGL)' : '(CPU)');
 		workingImage = doColorAdjustments(workingImage);
 
-		// STEP 3: Noise reduction (only with wavelets)
+		// STEP 3: Noise reduction (only with wavelets) - WebGL2 Gaussian blur
 		if (sharpeningMethod.value === 'wavelets' && postNoiseReduction.value >= 3) {
-			console.log('noise reduction');
-			const srcMat = imageDataToMat(workingImage);
-			const dstMat = new cv.Mat();
-			cv.cvtColor(srcMat, srcMat, cv.COLOR_RGBA2RGB, 0);
 			const ksize = parseInt(postNoiseReduction.value, 10) | 1;
-			cv.GaussianBlur(srcMat, dstMat, new cv.Size(ksize, ksize), 0, 0, cv.BORDER_DEFAULT);
-			const rgbaMat = new cv.Mat();
-			cv.cvtColor(dstMat, rgbaMat, cv.COLOR_RGB2RGBA);
-			workingImage = new ImageData(new Uint8ClampedArray(rgbaMat.data), workingImage.width, workingImage.height);
-			srcMat.delete();
-			dstMat.delete();
-			rgbaMat.delete();
+			console.log('noise reduction (WebGL2, kernel=' + ksize + ')');
+			// Convert ImageData to Float32Array for WebGL2
+			const floatData = new Float32Array(workingImage.width * workingImage.height * 4);
+			for (let i = 0; i < workingImage.data.length; i++) {
+				floatData[i] = workingImage.data[i] / 255.0;
+			}
+			const blurResult = blurWithWebGL2(floatData, workingImage.width, workingImage.height, ksize);
+			if (blurResult) {
+				// Convert back to ImageData
+				const pixels = new Uint8ClampedArray(blurResult.length);
+				for (let i = 0; i < blurResult.length; i++) {
+					pixels[i] = Math.round(Math.max(0, Math.min(1, blurResult[i])) * 255);
+				}
+				workingImage = new ImageData(pixels, workingImage.width, workingImage.height);
+			} else {
+				console.warn('WebGL2 blur failed, skipping noise reduction');
+			}
 		}
 
 		// Store and display result
@@ -887,12 +884,6 @@ const applyProcessingInternal = async() => {
 
 // Debounce: wait 50ms after last input before processing (prevents memory buildup)
 const applyProcessing = debounce(applyProcessingInternal, 50);
-
-function imageDataToMat(imageData) {
-	let mat = new cv.Mat(imageData.height, imageData.width, cv.CV_8UC4);
-	mat.data.set(imageData.data);
-	return mat;
-}
 
 // WebGL-accelerated deconvolution
 let deconvTaskId = 0;
