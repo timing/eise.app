@@ -43,10 +43,11 @@
 import { onMounted, ref, watch, defineProps, onBeforeUpdate, nextTick } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
-import { track } from '@/composables/useTracking';
+import { useTracking } from '@/composables/useTracking';
 
 const { on, addLog, emit } = useEventBus();
 const { uploadFrames } = useUploader();
+const { track } = useTracking();
 
 const { $ffmpeg } = useNuxtApp();
 

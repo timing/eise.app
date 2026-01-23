@@ -24,6 +24,24 @@
 
 			<div v-if="selectedFiles.length > 0" class="selected-files">
 				<p><strong>Selected:</strong> {{ selectedFilesDescription }}</p>
+
+				<div v-if="showMemoryOptimization" class="memory-optimization-box">
+					<p class="optimization-hint">
+						Memory optimization options:
+					</p>
+					<label class="checkbox-option">
+						<input type="checkbox" v-model="enablePreCrop" />
+						Pre-crop video
+						<span v-if="preCropAutoEnabled" class="auto-badge">auto</span>
+					</label>
+					<label class="checkbox-option">
+						<input type="checkbox" v-model="enableMaxFrames" />
+						Limit to
+						<input type="number" v-model.number="selectedMaxFrames" min="100" max="5000" step="100" class="inline-number" :disabled="!enableMaxFrames" />
+						frames
+					</label>
+				</div>
+
 				<div class="action-buttons">
 					<button class="start-button" @click="startProcessing">{{ startButtonText }}</button>
 					<button class="clear-button" @click="clearSelection">Clear</button>
@@ -81,14 +99,16 @@
 
 			<div class="separator"></div>
 
-			<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
-			<label>
-				<input type="checkbox" v-model="enableMaxFrames" />
-				Limit frames
-			</label>
-			<input type="range" min="2" max="5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
-			{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
-			<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
+			<template v-if="!showMemoryOptimization">
+				<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
+				<label>
+					<input type="checkbox" v-model="enableMaxFrames" />
+					Limit frames
+				</label>
+				<input type="range" min="2" max="5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
+				{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
+				<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
+			</template>
 		</template>
 	</div>
 
@@ -129,7 +149,7 @@ const { openFeedback } = useFeedback();
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
 const enableMaxFrames = ref(false);
-const selectedMaxFrames = ref(5000);
+const selectedMaxFrames = ref(100);
 
 // Always enable auto-crop and client-side stacking
 const enableAutoCrop = true;
@@ -140,6 +160,7 @@ const errorMessage = ref(null);
 // Info toggle state
 const showMaxFramesInfo = ref(false);
 const showCropMarginInfo = ref(false);
+const showPreCropInfo = ref(false);
 
 // Crop margin setting (percentage of detected object size to add as margin)
 const cropMarginPercent = ref(10);
@@ -149,6 +170,10 @@ const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 const noiseRobustAlignment = ref(false);
+
+// Memory optimized pre-crop for mobile videos
+const enablePreCrop = ref(false);
+const preCropAutoEnabled = ref(false); // Track if it was auto-enabled
 // Load settings from localStorage
 function loadSettings() {
 	try {
@@ -230,6 +255,39 @@ const startButtonText = computed(() => {
 	return 'Stack';
 });
 
+// Show pre-crop option for video files that might need FFmpeg (not SER)
+const showPreCropOption = computed(() => {
+	if (selectedFiles.value.length !== 1) return false;
+	const file = selectedFiles.value[0];
+	if (file.name.toLowerCase().endsWith('.ser')) return false;
+	// Show for any video file (including AVI that might need FFmpeg)
+	return file.type.startsWith('video/') || file.name.toLowerCase().endsWith('.avi');
+});
+
+// Detect mobile device
+const isMobileDevice = computed(() => {
+	if (typeof navigator === 'undefined') return false;
+	return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+});
+
+// Show memory optimization box when appropriate
+const showMemoryOptimization = computed(() => {
+	if (!showPreCropOption.value) return false;
+	// Show if on mobile, or if file is large (>500MB), or if already enabled
+	const file = selectedFiles.value[0];
+	return isMobileDevice.value || file?.size > 500 * 1024 * 1024 || enablePreCrop.value || enableMaxFrames.value;
+});
+
+// Auto-enable pre-crop for mobile devices with video files
+watch([selectedFiles, isMobileDevice], () => {
+	if (showPreCropOption.value && isMobileDevice.value) {
+		enablePreCrop.value = true;
+		preCropAutoEnabled.value = true;
+	} else {
+		preCropAutoEnabled.value = false;
+	}
+}, { immediate: true });
+
 const { addLog, emit: eventBusEmit, on, logs } = useEventBus();
 
 // Listen for upload errors to display them
@@ -241,6 +299,157 @@ function onFileChanged(event){
 	errorMessage.value = null; // Clear previous error
 	selectedFiles.value = Array.from(event.target.files);
 	eventBusEmit('stop-loading');
+}
+
+// Pre-crop detection: sample frames and find planet bounds
+async function detectPreCropRegion(filename) {
+	addLog('Sampling frames to detect crop region...');
+	eventBusEmit('set-caption', 'Detecting crop region...');
+
+	// Get video info from FFmpeg output
+	let videoWidth = 0;
+	let videoHeight = 0;
+	let duration = 0;
+
+	// Probe video by running FFmpeg briefly
+	$ffmpeg.setLogger(({ type, message }) => {
+		if (typeof message !== 'string') return;
+		// Parse resolution: "Stream #0:0: Video: h264, 1920x1080"
+		const resMatch = message.match(/(\d{3,4})x(\d{3,4})/);
+		if (resMatch && !videoWidth) {
+			videoWidth = parseInt(resMatch[1], 10);
+			videoHeight = parseInt(resMatch[2], 10);
+		}
+		// Parse duration: "Duration: 00:01:30.50"
+		const durMatch = message.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/);
+		if (durMatch) {
+			duration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+		}
+	});
+
+	// Run brief probe
+	try {
+		await $ffmpeg.run('-i', filename, '-f', 'null', '-t', '0.001', '-');
+	} catch (e) {
+		// FFmpeg exits with error for -f null, that's fine
+	}
+
+	addLog(`Video: ${videoWidth}x${videoHeight}, duration: ${duration.toFixed(1)}s`);
+
+	if (!videoWidth || !videoHeight) {
+		addLog('Could not detect video dimensions, skipping pre-crop');
+		return null;
+	}
+
+	// Sample 10 frames spread across the video
+	const sampleCount = 10;
+	const allBounds = [];
+
+	for (let i = 1; i <= sampleCount; i++) {
+		const timestamp = (duration * i / (sampleCount + 1)).toFixed(2);
+		const sampleFile = `sample_${i}.png`;
+
+		eventBusEmit('update-loading', { progress: (i / sampleCount) * 50, current: i, total: sampleCount });
+
+		try {
+			await $ffmpeg.run('-ss', timestamp, '-i', filename, '-vframes', '1', '-f', 'image2', sampleFile);
+
+			// Read the sample frame
+			const pngData = $ffmpeg.FS('readFile', sampleFile);
+			$ffmpeg.FS('unlink', sampleFile);
+
+			// Decode PNG and detect bounds using canvas
+			const blob = new Blob([pngData], { type: 'image/png' });
+			const bitmap = await createImageBitmap(blob);
+
+			// Create canvas to get pixel data
+			const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+			const ctx = canvas.getContext('2d');
+			ctx.drawImage(bitmap, 0, 0);
+			const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+
+			// Simple bright object detection
+			const bounds = detectBrightObjectBounds(imageData.data, bitmap.width, bitmap.height);
+			if (bounds) {
+				allBounds.push(bounds);
+				addLog(`Sample ${i}: planet at (${bounds.x}, ${bounds.y}) size ${bounds.width}x${bounds.height}`);
+			}
+		} catch (e) {
+			addLog(`Sample ${i} failed: ${e.message}`);
+		}
+	}
+
+	if (allBounds.length === 0) {
+		addLog('No planet detected in samples, skipping pre-crop');
+		return null;
+	}
+
+	// Calculate encompassing region with margin
+	const minX = Math.min(...allBounds.map(b => b.x));
+	const minY = Math.min(...allBounds.map(b => b.y));
+	const maxX = Math.max(...allBounds.map(b => b.x + b.width));
+	const maxY = Math.max(...allBounds.map(b => b.y + b.height));
+
+	const regionWidth = maxX - minX;
+	const regionHeight = maxY - minY;
+	const margin = Math.max(regionWidth, regionHeight) * (cropMarginPercent.value / 100);
+
+	// Calculate crop with margin, ensuring it stays within bounds and is even (for video codecs)
+	let cropX = Math.max(0, Math.floor(minX - margin));
+	let cropY = Math.max(0, Math.floor(minY - margin));
+	let cropW = Math.min(videoWidth - cropX, Math.ceil(regionWidth + margin * 2));
+	let cropH = Math.min(videoHeight - cropY, Math.ceil(regionHeight + margin * 2));
+
+	// Make dimensions even for video codec compatibility
+	cropW = Math.floor(cropW / 2) * 2;
+	cropH = Math.floor(cropH / 2) * 2;
+
+	addLog(`Pre-crop region: ${cropW}x${cropH} at (${cropX}, ${cropY})`);
+	addLog(`Memory reduction: ${((1 - (cropW * cropH) / (videoWidth * videoHeight)) * 100).toFixed(0)}%`);
+
+	return { x: cropX, y: cropY, width: cropW, height: cropH };
+}
+
+// Simple bright object detection for pre-crop sampling
+function detectBrightObjectBounds(pixels, width, height) {
+	// Convert to grayscale and find threshold
+	const gray = new Uint8Array(width * height);
+	let maxVal = 0;
+
+	for (let i = 0; i < width * height; i++) {
+		const r = pixels[i * 4];
+		const g = pixels[i * 4 + 1];
+		const b = pixels[i * 4 + 2];
+		gray[i] = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+		if (gray[i] > maxVal) maxVal = gray[i];
+	}
+
+	// Threshold at 30% of max brightness
+	const threshold = maxVal * 0.3;
+
+	let minX = width, minY = height, maxX = 0, maxY = 0;
+	let found = false;
+
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			if (gray[y * width + x] > threshold) {
+				found = true;
+				if (x < minX) minX = x;
+				if (x > maxX) maxX = x;
+				if (y < minY) minY = y;
+				if (y > maxY) maxY = y;
+			}
+		}
+	}
+
+	if (!found || maxX <= minX || maxY <= minY) return null;
+
+	return {
+		x: minX,
+		y: minY,
+		width: maxX - minX,
+		height: maxY - minY
+	};
 }
 
 async function startProcessing() {
@@ -425,6 +634,12 @@ async function processFiles(files) {
 		// Only switch to processing view after we know the file loaded successfully
 		emit('processing-started');
 
+		// Run pre-crop detection if enabled
+		let preCropRegion = null;
+		if (enablePreCrop.value) {
+			preCropRegion = await detectPreCropRegion(fileToProcess.name);
+		}
+
 		// Set up progress tracking for FFmpeg
 		let lastFrameCount = 0;
 		// Use max frames limit if set, otherwise use frame count from AVI header if available
@@ -449,10 +664,20 @@ async function processFiles(files) {
 			}
 		});
 
+		eventBusEmit('set-caption', 'Extracting frames from video');
+
 		try {
 			const frameLimit = enableMaxFrames.value ? ['-vframes', '' + selectedMaxFrames.value + ''] : [];
+
+			// Build video filter chain
+			const videoFilters = [];
+			if (preCropRegion) {
+				videoFilters.push(`crop=${preCropRegion.width}:${preCropRegion.height}:${preCropRegion.x}:${preCropRegion.y}`);
+			}
+			const vfArgs = videoFilters.length > 0 ? ['-vf', videoFilters.join(',')] : [];
+
 			// Output uncompressed AVI (DIB format) instead of PNGs - more efficient and reuses AVI reader
-			await $ffmpeg.run('-i', videoFiles[0].name, ...frameLimit, '-c:v', 'rawvideo', '-pix_fmt', 'bgr24', 'output.avi');
+			await $ffmpeg.run('-i', videoFiles[0].name, ...vfArgs, ...frameLimit, '-c:v', 'rawvideo', '-pix_fmt', 'bgr24', 'output.avi');
 		} catch(err){
 			console.log(err);
 			addLog('FFmpeg forcefully exited, but continuing!');
@@ -467,14 +692,16 @@ async function processFiles(files) {
 		addLog('Reading converted AVI from FFmpeg');
 		const aviData = $ffmpeg.FS('readFile', 'output.avi');
 		$ffmpeg.FS('unlink', 'output.avi');
-		addLog('Cleanup done. Processing through AVI reader.');
+		addLog(`Converted AVI size: ${(aviData.length / 1024 / 1024).toFixed(1)}MB`);
 
 		// Route through AVI reader - same path as direct AVI files
 		const { readAviFile } = useAviReader();
 		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		// Create a File object from the buffer for readAviFile
-		const aviFile = new File([aviData.buffer], 'converted.avi', { type: 'video/avi' });
-		await readAviFile(aviFile, enableMaxFrames.value ? selectedMaxFrames.value : -1, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
+		// Create a File object from the Uint8Array (not .buffer which can have wrong offset)
+		const aviFile = new File([aviData], 'converted.avi', { type: 'video/avi' });
+		// Skip auto-crop if we already pre-cropped via FFmpeg
+		const skipAutoCrop = preCropRegion !== null;
+		await readAviFile(aviFile, enableMaxFrames.value ? selectedMaxFrames.value : -1, enableAutoCrop && !skipAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
@@ -659,6 +886,43 @@ async function processFiles(files) {
 	text-align: center;
 }
 .percentage-input:disabled {
+	background: #eee;
+	color: #999;
+}
+.memory-optimization-box {
+	background: #fff8e1;
+	border: 1px solid #ffcc80;
+	border-radius: 5px;
+	padding: 10px;
+	margin: 10px 0;
+}
+.memory-optimization-box .checkbox-option {
+	margin: 5px 0;
+}
+.optimization-hint {
+	margin: 0 0 8px 0;
+	font-size: 0.9em;
+	color: #e65100;
+	font-weight: 500;
+}
+.auto-badge {
+	font-size: 0.7em;
+	background: #4caf50;
+	color: white;
+	padding: 2px 5px;
+	border-radius: 3px;
+	margin-left: 5px;
+	vertical-align: middle;
+}
+.inline-number {
+	width: 60px;
+	padding: 4px 6px;
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	text-align: center;
+	margin: 0 4px;
+}
+.inline-number:disabled {
 	background: #eee;
 	color: #999;
 }

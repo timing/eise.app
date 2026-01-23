@@ -25,6 +25,44 @@
         <div class="separator"></div>
 
         <div class="tool-section">
+            <h3>FFmpeg FS Access Test</h3>
+            <p class="tool-description">Test if we can read files from FFmpeg's filesystem during encoding.</p>
+
+            <div class="file-input-wrapper">
+                <input
+                    type="file"
+                    accept="video/*,.mp4,.mov,.avi,.mkv,.webm"
+                    @change="handleVideoSelect"
+                    ref="videoInput"
+                    id="video-file-input"
+                />
+                <label for="video-file-input" class="file-label">
+                    {{ selectedVideo ? selectedVideo.name : 'Select video file...' }}
+                </label>
+            </div>
+
+            <button
+                @click="runFfmpegFsTest"
+                :disabled="ffmpegTestRunning || !selectedVideo"
+                class="test-button"
+            >
+                {{ ffmpegTestRunning ? 'Testing...' : 'Run FFmpeg FS Test' }}
+            </button>
+
+            <div v-if="ffmpegTestLog.length > 0" class="test-results ffmpeg-log">
+                <div
+                    v-for="(entry, idx) in ffmpegTestLog"
+                    :key="idx"
+                    :class="['test-result', entry.type]"
+                >
+                    <span class="message">{{ entry.message }}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="separator"></div>
+
+        <div class="tool-section">
             <h3>Trim SER File</h3>
             <p class="tool-description">Extract a range of frames from a SER file without re-encoding.</p>
 
@@ -113,6 +151,8 @@
 import { ref, computed } from 'vue';
 import { parseSerHeader } from '@/composables/useSerReader';
 
+const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
+
 // Worker test state
 const workerTestRunning = ref(false);
 const workerTestResults = ref([]);
@@ -196,6 +236,137 @@ async function runWorkerTests() {
     }
 
     workerTestRunning.value = false;
+}
+
+// FFmpeg FS test state
+const videoInput = ref(null);
+const selectedVideo = ref(null);
+const ffmpegTestRunning = ref(false);
+const ffmpegTestLog = ref([]);
+
+function handleVideoSelect(event) {
+    const file = event.target.files[0];
+    if (file) {
+        selectedVideo.value = file;
+        ffmpegTestLog.value = [];
+    }
+}
+
+function logFfmpeg(message, type = 'info') {
+    ffmpegTestLog.value.push({ message, type });
+}
+
+async function runFfmpegFsTest() {
+    if (!selectedVideo.value) return;
+
+    ffmpegTestRunning.value = true;
+    ffmpegTestLog.value = [];
+
+    try {
+        logFfmpeg('Loading FFmpeg...');
+        await $loadFFmpeg();
+        logFfmpeg('FFmpeg loaded', 'success');
+
+        // Write video to FFmpeg filesystem
+        logFfmpeg(`Writing ${selectedVideo.value.name} to FFmpeg FS...`);
+        const videoData = await selectedVideo.value.arrayBuffer();
+        $ffmpeg.FS('writeFile', 'input.mp4', new Uint8Array(videoData));
+        logFfmpeg('Video written to FS', 'success');
+
+        // Track files we've seen and read
+        const seenFiles = new Set();
+        const readFiles = [];
+        let lastReportedFrame = 0;
+
+        // Set up logger to test FS access during encoding
+        $ffmpeg.setLogger(({ type, message }) => {
+            if (typeof message !== 'string') return;
+
+            const frameMatch = message.match(/frame=\s*(\d+)/);
+            if (frameMatch) {
+                const currentFrame = parseInt(frameMatch[1], 10);
+                if (currentFrame === lastReportedFrame) return;
+                lastReportedFrame = currentFrame;
+
+                // Try to read directory during callback
+                try {
+                    const files = $ffmpeg.FS('readdir', '/');
+                    const pngFiles = files.filter(f => f.endsWith('.png'));
+
+                    // Log new files found
+                    for (const file of pngFiles) {
+                        if (!seenFiles.has(file)) {
+                            seenFiles.add(file);
+                        }
+                    }
+
+                    // Only log every 20 frames to avoid flooding
+                    if (currentFrame % 20 === 0) {
+                        logFfmpeg(`Frame ${currentFrame}: ${pngFiles.length} PNG files exist`, 'info');
+                    }
+
+                    // Try to read ANY available file we haven't read yet
+                    for (const filename of pngFiles) {
+                        if (readFiles.includes(filename)) continue;
+
+                        try {
+                            const data = $ffmpeg.FS('readFile', filename);
+                            readFiles.push(filename);
+                            logFfmpeg(`READ SUCCESS: ${filename} (${data.length} bytes) at frame ${currentFrame}`, 'success');
+
+                            // Try to delete it
+                            try {
+                                $ffmpeg.FS('unlink', filename);
+                                logFfmpeg(`DELETE SUCCESS: ${filename}`, 'success');
+                            } catch (delErr) {
+                                logFfmpeg(`DELETE FAILED: ${filename} - ${delErr.message}`, 'error');
+                            }
+
+                            // Only try one file per callback to avoid blocking too long
+                            break;
+                        } catch (readErr) {
+                            // Don't log every failure - file might not be fully written
+                        }
+                    }
+                } catch (e) {
+                    logFfmpeg(`FS access failed at frame ${currentFrame}: ${e.message}`, 'error');
+                }
+            }
+        });
+
+        // Run FFmpeg to extract frames as PNGs
+        logFfmpeg('Starting FFmpeg encoding...');
+        try {
+            await $ffmpeg.run('-i', 'input.mp4', 'frame_%04d.png');
+        } catch (e) {
+            logFfmpeg(`FFmpeg run error (may be normal): ${e.message}`, 'info');
+        }
+
+        // Clear logger
+        $ffmpeg.setLogger(() => {});
+
+        // Final summary
+        logFfmpeg(`--- Test Complete ---`, 'info');
+        logFfmpeg(`Total files seen during encoding: ${seenFiles.size}`, 'info');
+        logFfmpeg(`Files successfully read during encoding: ${readFiles.length}`, readFiles.length > 0 ? 'success' : 'error');
+
+        // Cleanup
+        try {
+            $ffmpeg.FS('unlink', 'input.mp4');
+            const remainingFiles = $ffmpeg.FS('readdir', '/').filter(f => f.endsWith('.png'));
+            for (const f of remainingFiles) {
+                $ffmpeg.FS('unlink', f);
+            }
+            logFfmpeg(`Cleanup complete, removed ${remainingFiles.length} remaining files`, 'info');
+        } catch (e) {
+            logFfmpeg(`Cleanup error: ${e.message}`, 'error');
+        }
+
+    } catch (error) {
+        logFfmpeg(`Test failed: ${error.message}`, 'error');
+    } finally {
+        ffmpegTestRunning.value = false;
+    }
 }
 
 // SER trimmer state
@@ -552,5 +723,22 @@ async function createTrimmedSerFile() {
 .test-result .message {
     color: #666;
     word-break: break-word;
+}
+
+.test-result.info {
+    background: #e3f2fd;
+    border-left: 3px solid #2196f3;
+}
+
+.ffmpeg-log {
+    max-height: 300px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 11px;
+}
+
+.ffmpeg-log .test-result {
+    padding: 4px 8px;
+    margin-bottom: 2px;
 }
 </style>

@@ -13,6 +13,8 @@ import { useComparisonExport } from '@/composables/useComparisonExport';
  */
 function isEasyAviFourCC(fourCC) {
     if (!fourCC) return false;
+    // Null fourCC (\0\0\0\0) is used by FFmpeg rawvideo for uncompressed BGR - treat as DIB
+    if (fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00') return true;
     const easyFourCCs = ['DIB ', 'Y800', 'YUY2', 'UYVY', 'RGB ', 'RAW ']; // 'RGB ' and 'RAW ' are sometimes used
     return easyFourCCs.includes(fourCC.toUpperCase());
 }
@@ -78,7 +80,9 @@ async function renderAviFrameToBlob(canvas, frameDataBuffer, aviHeader, fourCC, 
     const src = new Uint8Array(frameDataBuffer);
     const rgba = new Uint8ClampedArray(width * height * 4);
 
-    if (fourCC === 'DIB ' || fourCC === 'RGB ') {
+    // Null fourCC from FFmpeg rawvideo is also uncompressed BGR
+    const isUncompressedBGR = fourCC === 'DIB ' || fourCC === 'RGB ' || fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00' || !fourCC;
+    if (isUncompressedBGR) {
         // BGR24 → RGBA (swap B and R)
         for (let i = 0, j = 0; i < src.length; i += 3, j += 4) {
             rgba[j] = src[i + 2];     // R ← B
@@ -710,14 +714,18 @@ export function useAviReader() {
             let fourCC = isCompressionNull ? readFourCC(view, strhData.offset + 4) : compression;
             addLog(`Determined FourCC: '${fourCC}' (compression: '${compression}', handler: '${readFourCC(view, strhData.offset + 4)}')`);
 
-            if (!width || !height || !frameCount || !fourCC || moviListOffset === -1) {
+            // Null fourCC is valid (FFmpeg rawvideo uses it)
+            const hasValidFourCC = fourCC !== undefined;
+            if (!width || !height || !frameCount || !hasValidFourCC || moviListOffset === -1) {
                 addLog(`Incomplete header info: w=${width}, h=${height}, f=${frameCount}, fourCC='${fourCC}', movi=${moviListOffset}`);
                 throw new Error(`Incomplete AVI header info`);
             }
 
             addLog("Header parsed successfully. Calculating frame data size...");
             let frameDataSize = 0;
-            if (fourCC === 'DIB ' || fourCC === 'RGB ') {
+            // Null fourCC from FFmpeg rawvideo is uncompressed BGR like DIB
+            const isUncompressedBGR = fourCC === 'DIB ' || fourCC === 'RGB ' || fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00';
+            if (isUncompressedBGR) {
                 frameDataSize = width * height * (bpp / 8);
             } else if (fourCC === 'Y800') {
                 frameDataSize = width * height;
