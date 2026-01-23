@@ -570,6 +570,7 @@ export function useSerReader() {
             gpuAnalyzeWorker.onerror = (err) => {
                 clearTimeout(timeout);
                 console.error('GPU analyze worker error:', err);
+                reportError(err, { component: 'useSerReader', action: 'initGpuAnalyzeWorker' });
                 addLog(`WebGPU analyze worker crashed: ${err.message}`);
                 gpuAnalyzeWorker.terminate();
                 gpuAnalyzeWorker = null;
@@ -1356,6 +1357,7 @@ export function useSerReader() {
                 });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
+                emit('stack-failed', { component: 'useSerReader', reason: 'no valid frames', filename: file?.name || files?.[0]?.name });
                 emit('stop-loading');
             }
         } else {
@@ -2177,6 +2179,7 @@ export function useSerReader() {
                 });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
+                emit('stack-failed', { component: 'useSerReader', reason: 'no valid frames', filename: file?.name || files?.[0]?.name });
                 emit('stop-loading');
             }
         }

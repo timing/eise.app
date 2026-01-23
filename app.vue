@@ -113,8 +113,9 @@ import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
 import { useTracking } from '@/composables/useTracking';
 import { useFeedback } from '@/composables/useFeedback';
+import { reportError } from '@/composables/useSentryReporting';
 
-const { on, emit: eventBusEmit, addLog } = useEventBus();
+const { on, emit: eventBusEmit, addLog, logs } = useEventBus();
 const { stackFramesLocally } = useStacker();
 const { track, trackHumanInteraction } = useTracking();
 const { openFeedback } = useFeedback();
@@ -219,6 +220,18 @@ onMounted(async () => {
 	});
 	on('cropped-avi-ready', (data) => {
 		croppedAviData.value = data;
+	});
+	on('stack-failed', (data) => {
+		track('stack_failed');
+		isProcessing.value = false;
+		// Create synthetic error if none provided, so we always get a stack trace
+		const error = data?.error || new Error(`Stacking failed: ${data?.reason || 'unknown reason'}`);
+		reportError(error, {
+			component: data?.component || 'unknown',
+			action: 'stacking',
+			filename: data?.filename,
+			logs: logs.value
+		});
 	});
 });
 

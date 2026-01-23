@@ -39,6 +39,7 @@ export function useImageReader() {
             return true;
         } catch (error) {
             console.error('GPU worker init failed:', error);
+            reportError(error, { component: 'useImageReader', action: 'initializeGpuWorker' });
             gpuWorker.terminate();
             gpuWorker = null;
             return false;
@@ -596,6 +597,7 @@ export function useImageReader() {
             });
         } else {
             addLog('Stacking failed - no valid frames');
+            emit('stack-failed', { component: 'useImageReader', reason: 'no valid frames', filename: files?.[0]?.name });
             emit('stop-loading');
         }
     }

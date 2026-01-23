@@ -121,6 +121,9 @@ import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
 import { useFeedback } from '@/composables/useFeedback';
+import { useTracking } from '@/composables/useTracking';
+
+const { track } = useTracking();
 
 const { openFeedback } = useFeedback();
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
@@ -227,7 +230,7 @@ const startButtonText = computed(() => {
 	return 'Stack';
 });
 
-const { addLog, emit: eventBusEmit, on } = useEventBus();
+const { addLog, emit: eventBusEmit, on, logs } = useEventBus();
 
 // Listen for upload errors to display them
 on('upload-error', (message) => {
@@ -249,7 +252,14 @@ async function startProcessing() {
 		await processFiles(selectedFiles.value);
 	} catch (error) {
 		console.error('Processing error:', error);
-		reportError(error, { component: 'FileUploader', action: 'processFiles' });
+		const filename = selectedFiles.value?.[0]?.name;
+		reportError(error, {
+			component: 'FileUploader',
+			action: 'processFiles',
+			filename,
+			logs: logs.value
+		});
+		track('stack_failed');
 		errorMessage.value = error.message || 'An error occurred during processing';
 		isProcessing.value = false;
 		eventBusEmit('show-error');
@@ -384,7 +394,7 @@ async function processFiles(files) {
 		try {
 			await $loadFFmpeg();
 		} catch (err) {
-			reportError(err, { component: 'FileUploader', action: 'loadFFmpeg' });
+			reportError(err, { component: 'FileUploader', action: 'loadFFmpeg', logs: logs.value });
 			eventBusEmit('upload-error', err.message || 'Failed to load FFmpeg. Please refresh and try again.');
 			eventBusEmit('show-error');
 			return;
@@ -397,7 +407,13 @@ async function processFiles(files) {
 			$ffmpeg.FS('writeFile', fileToProcess.name, await fetchFile(fileToProcess));
 		} catch(err) {
 			console.error('FFmpeg writeFile error:', err);
-			reportError(err, { component: 'FileUploader', action: 'ffmpegWriteFile', extra: { fileName: fileToProcess.name, fileSize: fileToProcess.size } });
+			reportError(err, {
+				component: 'FileUploader',
+				action: 'ffmpegWriteFile',
+				filename: fileToProcess.name,
+				logs: logs.value,
+				extra: { fileSize: fileToProcess.size }
+			});
 			addLog(`ffmpeg: Storing video in memory failed: ${err.message || err}`);
 			eventBusEmit('upload-error', 'Failed to load video into memory. The file may be too large. Try using a SER file instead, or enable frame limiting.');
 			eventBusEmit('show-error');
