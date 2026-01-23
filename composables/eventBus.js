@@ -127,3 +127,6 @@ export const useEventBus = () => {
 	return { logs, addLog, onLogAdded, emit, on, off, caption, setCaption, registerWorker, unregisterWorker };
 };
 
+// Direct export for use outside Vue components (e.g., error reporting)
+export { logs };
+

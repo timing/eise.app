@@ -4,6 +4,8 @@
  */
 
 import * as Sentry from '@sentry/vue';
+import { useProcessingState } from './useProcessingState';
+import { logs } from './eventBus';
 
 /**
  * Report an error to Sentry with optional context
@@ -11,11 +13,18 @@ import * as Sentry from '@sentry/vue';
  * @param {Object} context - Optional context to add to the error
  * @param {string} context.component - Component or function where error occurred
  * @param {string} context.action - What action was being performed
- * @param {string} context.filename - The file being processed
- * @param {string[]} context.logs - Log messages from the session
+ * @param {string} context.filename - The file being processed (auto-fetched if not provided)
+ * @param {string[]} context.logs - Log messages from the session (auto-fetched if not provided)
  * @param {Object} context.extra - Additional data to include
  */
 export function reportError(error, context = {}) {
+    // Auto-fetch filename from processing state if not provided
+    const { getInputFilename } = useProcessingState();
+    const filename = context.filename || getInputFilename();
+
+    // Auto-fetch logs from eventBus if not provided
+    const sessionLogs = context.logs || logs.value;
+
     Sentry.withScope((scope) => {
         if (context.component) {
             scope.setTag('component', context.component);
@@ -23,20 +32,20 @@ export function reportError(error, context = {}) {
         if (context.action) {
             scope.setTag('action', context.action);
         }
-        if (context.filename) {
-            scope.setTag('filename', context.filename);
+        if (filename) {
+            scope.setTag('filename', filename);
             // Extract file extension for easier filtering
-            const ext = context.filename.split('.').pop()?.toLowerCase();
+            const ext = filename.split('.').pop()?.toLowerCase();
             if (ext) {
                 scope.setTag('file_extension', ext);
             }
         }
-        if (context.logs && context.logs.length > 0) {
+        if (sessionLogs && sessionLogs.length > 0) {
             // Include last 50 log entries to avoid huge payloads
-            const recentLogs = context.logs.slice(-50);
+            const recentLogs = sessionLogs.slice(-50);
             scope.setContext('session_logs', {
                 logs: recentLogs,
-                total_log_count: context.logs.length
+                total_log_count: sessionLogs.length
             });
         }
         if (context.extra) {

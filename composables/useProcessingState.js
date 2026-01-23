@@ -4,10 +4,13 @@
 import { ref } from 'vue';
 
 const inputFilename = ref('');
+const inputFilenameWithExt = ref('');
 
 export function useProcessingState() {
     function setInputFilename(filename) {
-        // Strip extension and store base name
+        // Store full filename for error reporting
+        inputFilenameWithExt.value = filename;
+        // Strip extension and store base name for output naming
         inputFilename.value = filename.replace(/\.[^/.]+$/, '');
     }
 
@@ -16,9 +19,14 @@ export function useProcessingState() {
         return `${base}_${suffix}.${extension}`;
     }
 
+    function getInputFilename() {
+        return inputFilenameWithExt.value;
+    }
+
     return {
         inputFilename,
         setInputFilename,
-        getOutputFilename
+        getOutputFilename,
+        getInputFilename
     };
 }
