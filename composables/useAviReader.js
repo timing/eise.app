@@ -616,19 +616,50 @@ export function useAviReader() {
     // Robust AVI header parser
     async function parseFullAviHeader(buffer) {
         const view = new DataView(buffer);
-        const readFourCC = (v, o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3));
-        
+        const fileEnd = buffer.byteLength;
+
+        // Safe read helpers with bounds checking
+        const safeReadFourCC = (v, o) => {
+            if (o < 0 || o + 4 > fileEnd) {
+                throw new Error(`Cannot read FourCC at offset ${o} (buffer size: ${fileEnd})`);
+            }
+            return String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3));
+        };
+        const safeGetUint32 = (v, o, littleEndian = true) => {
+            if (o < 0 || o + 4 > fileEnd) {
+                throw new Error(`Cannot read Uint32 at offset ${o} (buffer size: ${fileEnd})`);
+            }
+            return v.getUint32(o, littleEndian);
+        };
+        const safeGetInt32 = (v, o, littleEndian = true) => {
+            if (o < 0 || o + 4 > fileEnd) {
+                throw new Error(`Cannot read Int32 at offset ${o} (buffer size: ${fileEnd})`);
+            }
+            return v.getInt32(o, littleEndian);
+        };
+        const safeGetUint16 = (v, o, littleEndian = true) => {
+            if (o < 0 || o + 2 > fileEnd) {
+                throw new Error(`Cannot read Uint16 at offset ${o} (buffer size: ${fileEnd})`);
+            }
+            return v.getUint16(o, littleEndian);
+        };
+
         addLog("Starting AVI header parsing...");
 
         try {
-            if (readFourCC(view, 0) !== 'RIFF' || readFourCC(view, 8) !== 'AVI ') {
+            // Minimum AVI file size check (RIFF header + AVI signature)
+            if (fileEnd < 12) {
+                addLog(`File too small to be valid AVI (${fileEnd} bytes)`);
+                throw new Error('File too small to be a valid AVI file');
+            }
+
+            if (safeReadFourCC(view, 0) !== 'RIFF' || safeReadFourCC(view, 8) !== 'AVI ') {
                 addLog("File is not a valid RIFF AVI file.");
                 throw new Error('Not a valid AVI file');
             }
             addLog("File identified as RIFF AVI.");
 
             let offset = 12;
-            const fileEnd = buffer.byteLength;
 
             let avihData = null;
             let strhData = null;
@@ -638,37 +669,49 @@ export function useAviReader() {
 
             addLog("Scanning for RIFF chunks...");
             while (offset < fileEnd - 8) {
-                const chunkId = readFourCC(view, offset);
-                let chunkSize = view.getUint32(offset + 4, true);
+                // Bounds check before reading chunk header
+                if (offset + 8 > fileEnd) {
+                    addLog(`Reached end of file while scanning chunks at offset ${offset}`);
+                    break;
+                }
+                const chunkId = safeReadFourCC(view, offset);
+                let chunkSize = safeGetUint32(view, offset + 4, true);
                 const chunkDataOffset = offset + 8;
                 addLog(`Found chunk '${chunkId}' at offset ${offset} with size ${chunkSize}`);
 
+                // Sanity check chunk size
+                if (chunkSize > fileEnd - chunkDataOffset) {
+                    addLog(`Chunk '${chunkId}' size ${chunkSize} exceeds remaining file size, truncating`);
+                    chunkSize = fileEnd - chunkDataOffset;
+                }
+
                 if (chunkId === 'LIST') {
-                    const listType = readFourCC(view, chunkDataOffset);
+                    if (chunkDataOffset + 4 > fileEnd) break;
+                    const listType = safeReadFourCC(view, chunkDataOffset);
                     addLog(`  - It's a LIST chunk with type '${listType}'`);
                     if (listType === 'hdrl') {
                         let hdrlOffset = chunkDataOffset + 4;
                         let videoStreamFound = false;
                         addLog("  - Parsing 'hdrl' list...");
-                        while (hdrlOffset < chunkDataOffset + chunkSize - 4) {
-                            const subChunkId = readFourCC(view, hdrlOffset);
-                            const subChunkSize = view.getUint32(hdrlOffset + 4, true);
+                        while (hdrlOffset < chunkDataOffset + chunkSize - 4 && hdrlOffset + 8 <= fileEnd) {
+                            const subChunkId = safeReadFourCC(view, hdrlOffset);
+                            const subChunkSize = safeGetUint32(view, hdrlOffset + 4, true);
                             const subChunkPaddedSize = (subChunkSize + 1) & ~1;
                             addLog(`    - Found sub-chunk '${subChunkId}' of size ${subChunkSize}`);
 
                             if (subChunkId === 'avih') {
                                 avihData = { offset: hdrlOffset + 8, size: subChunkSize };
                                 addLog("      - Found 'avih' chunk.");
-                            } else if (subChunkId === 'LIST' && readFourCC(view, hdrlOffset + 8) === 'strl') {
+                            } else if (subChunkId === 'LIST' && hdrlOffset + 12 <= fileEnd && safeReadFourCC(view, hdrlOffset + 8) === 'strl') {
                                 addLog("      - Found 'strl' list.");
                                 if (!videoStreamFound) {
                                     let streamOffset = hdrlOffset + 12;
-                                    while (streamOffset < hdrlOffset + 8 + subChunkSize) {
-                                        const streamChunkId = readFourCC(view, streamOffset);
-                                        const streamChunkSize = view.getUint32(streamOffset + 4, true);
+                                    while (streamOffset < hdrlOffset + 8 + subChunkSize && streamOffset + 8 <= fileEnd) {
+                                        const streamChunkId = safeReadFourCC(view, streamOffset);
+                                        const streamChunkSize = safeGetUint32(view, streamOffset + 4, true);
                                         const streamChunkPaddedSize = (streamChunkSize + 1) & ~1;
 
-                                        if (streamChunkId === 'strh' && readFourCC(view, streamOffset + 8) === 'vids') {
+                                        if (streamChunkId === 'strh' && streamOffset + 12 <= fileEnd && safeReadFourCC(view, streamOffset + 8) === 'vids') {
                                             videoStreamFound = true;
                                             strhData = { offset: streamOffset + 8, size: streamChunkSize };
                                             addLog("        - Found video 'strh' chunk.");
@@ -699,20 +742,31 @@ export function useAviReader() {
             }
             addLog("All critical header chunks found.");
 
-            let frameCount = view.getUint32(avihData.offset + 16, true);
+            // Verify chunk data is within bounds before reading
+            if (avihData.offset + 20 > fileEnd) {
+                throw new Error(`avih chunk data extends beyond file (offset ${avihData.offset}, file size ${fileEnd})`);
+            }
+            if (strhData.offset + 36 > fileEnd) {
+                throw new Error(`strh chunk data extends beyond file (offset ${strhData.offset}, file size ${fileEnd})`);
+            }
+            if (strfData.offset + 20 > fileEnd) {
+                throw new Error(`strf chunk data extends beyond file (offset ${strfData.offset}, file size ${fileEnd})`);
+            }
+
+            let frameCount = safeGetUint32(view, avihData.offset + 16, true);
             if (frameCount === 0) {
-                frameCount = view.getUint32(strhData.offset + 32, true); // Fallback to dwLength from stream header
+                frameCount = safeGetUint32(view, strhData.offset + 32, true); // Fallback to dwLength from stream header
                 addLog(`Frame count from avih was 0, using count from strh: ${frameCount}`);
             }
 
-            const width = view.getUint32(strfData.offset + 4, true);
-            const height = Math.abs(view.getInt32(strfData.offset + 8, true));
-            const bpp = view.getUint16(strfData.offset + 14, true);
+            const width = safeGetUint32(view, strfData.offset + 4, true);
+            const height = Math.abs(safeGetInt32(view, strfData.offset + 8, true));
+            const bpp = safeGetUint16(view, strfData.offset + 14, true);
 
-            const compression = readFourCC(view, strfData.offset + 16);
+            const compression = safeReadFourCC(view, strfData.offset + 16);
             const isCompressionNull = compression.charCodeAt(0) === 0 && compression.charCodeAt(1) === 0 && compression.charCodeAt(2) === 0 && compression.charCodeAt(3) === 0;
-            let fourCC = isCompressionNull ? readFourCC(view, strhData.offset + 4) : compression;
-            addLog(`Determined FourCC: '${fourCC}' (compression: '${compression}', handler: '${readFourCC(view, strhData.offset + 4)}')`);
+            let fourCC = isCompressionNull ? safeReadFourCC(view, strhData.offset + 4) : compression;
+            addLog(`Determined FourCC: '${fourCC}' (compression: '${compression}', handler: '${safeReadFourCC(view, strhData.offset + 4)}')`);
 
             // Null fourCC is valid (FFmpeg rawvideo uses it)
             const hasValidFourCC = fourCC !== undefined;

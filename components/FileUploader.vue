@@ -638,26 +638,51 @@ async function processFiles(files) {
 		let preCropRegion = null;
 		if (enablePreCrop.value) {
 			preCropRegion = await detectPreCropRegion(fileToProcess.name);
+
+			// Exit and reload FFmpeg to clear WASM memory after pre-crop sampling
+			// Pre-crop runs FFmpeg 11 times which accumulates internal state
+			addLog('Reloading FFmpeg to free memory after pre-crop...');
+			try {
+				$ffmpeg.exit();
+			} catch (e) {
+				// exit() may throw if not fully initialized, that's ok
+			}
+			await $loadFFmpeg();
+			// Re-write the input file to the fresh FFmpeg instance
+			$ffmpeg.FS('writeFile', fileToProcess.name, await fetchFile(fileToProcess));
+			addLog('FFmpeg reloaded');
 		}
 
 		// Set up progress tracking for FFmpeg
 		let lastFrameCount = 0;
-		// Use max frames limit if set, otherwise use frame count from AVI header if available
+		let lastLoggedFrame = 0;
 		const totalFramesTarget = enableMaxFrames.value ? selectedMaxFrames.value : expectedFrameCount;
+
 		$ffmpeg.setLogger(({ type, message }) => {
-			// Parse frame count from FFmpeg output: "frame=  304 fps= 36 ..."
 			if (typeof message !== 'string') return;
+
+			// Log important FFmpeg messages
+			if (type === 'fferr') {
+				if (message.includes('Stream') || message.includes('Duration') || message.includes('Output') || message.includes('Error') || message.includes('error')) {
+					addLog(`[ffmpeg] ${message}`);
+				}
+			}
+
+			// Parse frame count from FFmpeg output: "frame=  304 fps= 36 ..."
 			const frameMatch = message.match(/frame=\s*(\d+)/);
 			if (frameMatch) {
 				const currentFrame = parseInt(frameMatch[1], 10);
 				if (currentFrame !== lastFrameCount) {
 					lastFrameCount = currentFrame;
+					// Log approximately every 500 frames (handles jumps in frame count)
+					if (currentFrame - lastLoggedFrame >= 500) {
+						addLog(`Extracting frame ${currentFrame}...`);
+						lastLoggedFrame = currentFrame;
+					}
 					if (totalFramesTarget) {
-						// Show percentage if we have a target
 						const progress = Math.min((currentFrame / totalFramesTarget) * 100, 100);
 						eventBusEmit('update-loading', { progress, current: currentFrame, total: totalFramesTarget });
 					} else {
-						// Just show frame count without percentage
 						eventBusEmit('update-loading', { progress: -1, current: currentFrame, total: '?' });
 					}
 				}
@@ -676,32 +701,44 @@ async function processFiles(files) {
 			}
 			const vfArgs = videoFilters.length > 0 ? ['-vf', videoFilters.join(',')] : [];
 
-			// Output uncompressed AVI (DIB format) instead of PNGs - more efficient and reuses AVI reader
-			await $ffmpeg.run('-i', videoFiles[0].name, ...vfArgs, ...frameLimit, '-c:v', 'rawvideo', '-pix_fmt', 'bgr24', 'output.avi');
+			// Output PNG files
+			const ffmpegArgs = ['-i', videoFiles[0].name, ...vfArgs, ...frameLimit, 'out%d.png'];
+			addLog(`FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
+
+			await $ffmpeg.run(...ffmpegArgs);
 		} catch(err){
 			console.log(err);
 			addLog('FFmpeg forcefully exited, but continuing!');
 		}
 
-		// Clear the logger after FFmpeg completes
+		// Clear the logger
 		$ffmpeg.setLogger(({ message }) => {});
 
-		// Free source video memory immediately after conversion
+		// Get list of PNG files created by FFmpeg
+		const pngFiles = $ffmpeg.FS('readdir', '/').filter(f => f.endsWith('.png')).sort((a, b) => {
+			const numA = parseInt(a.match(/\d+/)?.[0] || '0');
+			const numB = parseInt(b.match(/\d+/)?.[0] || '0');
+			return numA - numB;
+		});
+
+		// Free source video memory
 		$ffmpeg.FS('unlink', videoFiles[0].name);
 
-		addLog('Reading converted AVI from FFmpeg');
-		const aviData = $ffmpeg.FS('readFile', 'output.avi');
-		$ffmpeg.FS('unlink', 'output.avi');
-		addLog(`Converted AVI size: ${(aviData.length / 1024 / 1024).toFixed(1)}MB`);
+		addLog(`Extracted ${pngFiles.length} PNG frames`);
 
-		// Route through AVI reader - same path as direct AVI files
-		const { readAviFile } = useAviReader();
+		if (pngFiles.length === 0) {
+			addLog('No frames extracted from video');
+			eventBusEmit('upload-error', 'Failed to extract frames from video. The file may be corrupted or unsupported.');
+			eventBusEmit('show-error');
+			return;
+		}
+
+		// Route PNG frames through AVI reader - it will read and delete files from $ffmpeg
+		const { processFFmpegFrames } = useAviReader();
 		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		// Create a File object from the Uint8Array (not .buffer which can have wrong offset)
-		const aviFile = new File([aviData], 'converted.avi', { type: 'video/avi' });
-		// Skip auto-crop if we already pre-cropped via FFmpeg
 		const skipAutoCrop = preCropRegion !== null;
-		await readAviFile(aviFile, enableMaxFrames.value ? selectedMaxFrames.value : -1, enableAutoCrop && !skipAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
+
+		await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
