@@ -43,6 +43,7 @@
 import { onMounted, ref, watch, defineProps, onBeforeUpdate, nextTick } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
+import { track } from '@/composables/useTracking';
 
 const { on, addLog, emit } = useEventBus();
 const { uploadFrames } = useUploader();
@@ -202,6 +203,7 @@ onMounted(async () => {
 
 
 function cancelProcessing() {
+	track('stack_cancelled');
 	// Reload the page to reset everything
 	window.location.reload();
 }

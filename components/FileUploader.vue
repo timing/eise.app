@@ -267,6 +267,7 @@ async function startProcessing() {
 }
 
 function cancelProcessing() {
+	track('stack_cancelled');
 	isProcessing.value = false;
 	selectedFiles.value = [];
 	if (fileInput.value) {
