@@ -269,19 +269,20 @@ const isMobileDevice = computed(() => {
 	return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 });
 
-// Show memory optimization box only on mobile
+// Show memory optimization box only on mobile (hidden in lite mode - already constrained)
 const showMemoryOptimization = computed(() => {
+	if (liteMode.value) return false;
 	if (!showPreCropOption.value) return false;
 	return isMobileDevice.value;
 });
 
-// Auto-enable pre-crop for mobile devices with video files
-watch([selectedFiles, isMobileDevice], () => {
-	if (showPreCropOption.value && isMobileDevice.value) {
+// Auto-enable pre-crop for mobile devices OR lite mode (saves memory)
+watch([selectedFiles, isMobileDevice, liteMode], () => {
+	if (showPreCropOption.value && (isMobileDevice.value || liteMode.value)) {
 		enablePreCrop.value = true;
 		preCropAutoEnabled.value = true;
 	} else {
-		// Reset pre-crop when not on mobile
+		// Reset pre-crop when not needed
 		if (preCropAutoEnabled.value) {
 			enablePreCrop.value = false;
 		}
@@ -342,42 +343,61 @@ async function detectPreCropRegion(filename) {
 		return null;
 	}
 
-	// Sample 10 frames spread across the video
+	// Sample 10 frames spread across the video in ONE FFmpeg command
 	const sampleCount = 10;
 	const allBounds = [];
 
-	for (let i = 1; i <= sampleCount; i++) {
-		const timestamp = (duration * i / (sampleCount + 1)).toFixed(2);
-		const sampleFile = `sample_${i}.png`;
+	// Calculate fps to get ~10 evenly spaced frames
+	// fps = sampleCount / duration, but we skip first/last 10%
+	const effectiveDuration = duration * 0.8;
+	const fpsRate = sampleCount / effectiveDuration;
+	const startTime = duration * 0.1; // Skip first 10%
 
-		eventBusEmit('update-loading', { progress: (i / sampleCount) * 50, current: i, total: sampleCount });
+	eventBusEmit('update-loading', { progress: 10, current: 0, total: sampleCount });
+	addLog(`Extracting ${sampleCount} sample frames in one pass...`);
 
-		try {
-			await $ffmpeg.run('-ss', timestamp, '-i', filename, '-vframes', '1', '-f', 'image2', sampleFile);
+	try {
+		// Single FFmpeg command to extract all samples
+		await $ffmpeg.run(
+			'-ss', startTime.toFixed(2),
+			'-i', filename,
+			'-vf', `fps=${fpsRate.toFixed(4)}`,
+			'-vframes', `${sampleCount}`,
+			'sample_%d.png'
+		);
 
-			// Read the sample frame
-			const pngData = $ffmpeg.FS('readFile', sampleFile);
-			$ffmpeg.FS('unlink', sampleFile);
+		// Process all extracted samples
+		for (let i = 1; i <= sampleCount; i++) {
+			const sampleFile = `sample_${i}.png`;
+			eventBusEmit('update-loading', { progress: 10 + (i / sampleCount) * 40, current: i, total: sampleCount });
 
-			// Decode PNG and detect bounds using canvas
-			const blob = new Blob([pngData], { type: 'image/png' });
-			const bitmap = await createImageBitmap(blob);
+			try {
+				const pngData = $ffmpeg.FS('readFile', sampleFile);
+				$ffmpeg.FS('unlink', sampleFile);
 
-			// Create canvas to get pixel data
-			const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-			const ctx = canvas.getContext('2d');
-			ctx.drawImage(bitmap, 0, 0);
-			const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+				// Decode PNG and detect bounds using canvas
+				const blob = new Blob([pngData], { type: 'image/png' });
+				const bitmap = await createImageBitmap(blob);
 
-			// Simple bright object detection
-			const bounds = detectBrightObjectBounds(imageData.data, bitmap.width, bitmap.height);
-			if (bounds) {
-				allBounds.push(bounds);
-				addLog(`Sample ${i}: planet at (${bounds.x}, ${bounds.y}) size ${bounds.width}x${bounds.height}`);
+				// Create canvas to get pixel data
+				const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+				const ctx = canvas.getContext('2d');
+				ctx.drawImage(bitmap, 0, 0);
+				const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+
+				// Simple bright object detection
+				const bounds = detectBrightObjectBounds(imageData.data, bitmap.width, bitmap.height);
+				if (bounds) {
+					allBounds.push(bounds);
+					addLog(`Sample ${i}: planet at (${bounds.x}, ${bounds.y}) size ${bounds.width}x${bounds.height}`);
+				}
+			} catch (e) {
+				// Sample file might not exist if video was shorter than expected
+				if (i <= 3) addLog(`Sample ${i} not found`);
 			}
-		} catch (e) {
-			addLog(`Sample ${i} failed: ${e.message}`);
 		}
+	} catch (e) {
+		addLog(`Sample extraction failed: ${e.message}`);
 	}
 
 	if (allBounds.length === 0) {
@@ -647,19 +667,7 @@ async function processFiles(files) {
 		let preCropRegion = null;
 		if (enablePreCrop.value) {
 			preCropRegion = await detectPreCropRegion(fileToProcess.name);
-
-			// Exit and reload FFmpeg to clear WASM memory after pre-crop sampling
-			// Pre-crop runs FFmpeg 11 times which accumulates internal state
-			addLog('Reloading FFmpeg to free memory after pre-crop...');
-			try {
-				$ffmpeg.exit();
-			} catch (e) {
-				// exit() may throw if not fully initialized, that's ok
-			}
-			await $loadFFmpeg();
-			// Re-write the input file to the fresh FFmpeg instance
-			$ffmpeg.FS('writeFile', fileToProcess.name, await fetchFile(fileToProcess));
-			addLog('FFmpeg reloaded');
+			addLog('Pre-crop detection complete, continuing with extraction...');
 		}
 
 		// Set up progress tracking for FFmpeg
@@ -670,9 +678,12 @@ async function processFiles(files) {
 		$ffmpeg.setLogger(({ type, message }) => {
 			if (typeof message !== 'string') return;
 
+			// Log ALL FFmpeg output for debugging
+			console.log(`[ffmpeg ${type}] ${message}`);
+
 			// Log important FFmpeg messages
 			if (type === 'fferr') {
-				if (message.includes('Stream') || message.includes('Duration') || message.includes('Output') || message.includes('Error') || message.includes('error')) {
+				if (message.includes('Stream') || message.includes('Duration') || message.includes('Output') || message.includes('Error') || message.includes('error') || message.includes('crop')) {
 					addLog(`[ffmpeg] ${message}`);
 				}
 			}
@@ -699,6 +710,7 @@ async function processFiles(files) {
 		});
 
 		eventBusEmit('set-caption', 'Extracting frames from video');
+		eventBusEmit('update-loading', { progress: 0, current: 0, total: effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : '?' });
 
 		try {
 			const frameLimit = effectiveMaxFrames.value > 0 ? ['-vframes', '' + effectiveMaxFrames.value + ''] : [];
@@ -714,7 +726,9 @@ async function processFiles(files) {
 			const ffmpegArgs = ['-i', videoFiles[0].name, ...vfArgs, ...frameLimit, 'out%d.png'];
 			addLog(`FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
 
+			addLog('Starting FFmpeg extraction...');
 			await $ffmpeg.run(...ffmpegArgs);
+			addLog('FFmpeg extraction completed');
 		} catch(err){
 			console.log(err);
 			addLog('FFmpeg forcefully exited, but continuing!');
