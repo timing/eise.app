@@ -88,9 +88,9 @@ async function handleMessage(e) {
 
         // Frame stacking with local alignment (CPU path)
         if (type === 'stack-frames') {
-            const { frames, drizzleScale = 1.0, noiseRobustAlignment = false } = e.data;
+            const { frames, drizzleScale = 1.0, noiseRobustAlignment = false, surfaceMode = false } = e.data;
             try {
-                const result = await stackFramesLocally(frames, drizzleScale, noiseRobustAlignment);
+                const result = await stackFramesLocally(frames, drizzleScale, noiseRobustAlignment, surfaceMode);
                 // Transfer float32Data buffer for zero-copy
                 const transferables = result.float32Data ? [result.float32Data.buffer] : [];
                 self.postMessage({
@@ -109,9 +109,9 @@ async function handleMessage(e) {
 
         // Prepare alignment data for external GPU processing
         if (type === 'prepare-alignment') {
-            const { refFrame, refIndex } = e.data;
+            const { refFrame, refIndex, surfaceMode = false } = e.data;
             try {
-                const result = await prepareAlignmentData(refFrame);
+                const result = await prepareAlignmentData(refFrame, surfaceMode);
                 self.postMessage({
                     type: 'alignment-prepared',
                     alignmentPoints: result.alignmentPoints,
@@ -196,8 +196,8 @@ async function handleMessage(e) {
                     bounds = { canCrop: false, reason: 'detection-error' };
                 }
 
-                // Check for cut-off frames
-                if (bounds.reason === 'cut-off') {
+                // Check for cut-off frames (skip this check for Sun/Moon targets)
+                if (bounds.reason === 'cut-off' && !e.data.surfaceMode) {
                     self.postMessage({ type: 'metadata', skipped: true, reason: 'cut-off', is_cut_off: true, index });
                     return;
                 }
@@ -340,8 +340,8 @@ async function handleMessage(e) {
 
         // Analyze PNG with cropping (for image files)
         if (type === 'analyze-cropped-png') {
-            const { pngData, cropRegion, includeRgba } = e.data;
-            const result = await analyzeAndCropPng(pngData, cropRegion, index, includeRgba);
+            const { pngData, cropRegion, includeRgba, surfaceMode } = e.data;
+            const result = await analyzeAndCropPng(pngData, cropRegion, index, includeRgba, surfaceMode);
             if (result.skipped) {
                 self.postMessage({ skipped: true, reason: result.reason, index });
                 return;
@@ -389,8 +389,8 @@ async function handleMessage(e) {
                 bounds = { canCrop: false, reason: 'detection-error' };
             }
 
-            // Skip frames where the object is cut-off
-            if (bounds.reason === 'cut-off') {
+            // Skip frames where the object is cut-off (unless surfaceMode for Sun/Moon)
+            if (bounds.reason === 'cut-off' && !e.data.surfaceMode) {
                 self.postMessage({ skipped: true, reason: 'cut-off', index });
                 return;
             }
@@ -499,8 +499,8 @@ async function handleMessage(e) {
                 bounds = { canCrop: false, reason: 'detection-error' };
             }
 
-            // Skip frames where the object is cut-off (partially outside frame)
-            if (bounds.reason === 'cut-off') {
+            // Skip frames where the object is cut-off (unless surfaceMode for Sun/Moon)
+            if (bounds.reason === 'cut-off' && !e.data.surfaceMode) {
                 self.postMessage({ skipped: true, reason: 'cut-off', index });
                 return;
             }
@@ -682,9 +682,9 @@ async function handleMessage(e) {
             const header = type === 'ser' ? e.data.header : e.data.aviHeader;
             const { frameBuffer, bayerChoice } = e.data;
 
-            // Check for cut-off even in non-crop mode
+            // Check for cut-off even in non-crop mode (unless surfaceMode for Sun/Moon)
             const bounds = await detectObjectBounds(frameBuffer, header, bayerChoice);
-            if (bounds.reason === 'cut-off' || bounds.reason === 'touches-edge') {
+            if ((bounds.reason === 'cut-off' || bounds.reason === 'touches-edge') && !e.data.surfaceMode) {
                 self.postMessage({ skipped: true, reason: 'cut-off', index });
                 return;
             }
@@ -1567,7 +1567,7 @@ async function detectObjectBoundsFromPng(pngData) {
 /**
  * Analyze and crop PNG data
  */
-async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
+async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba, surfaceMode = false) {
     let rawMat = null, grayMat = null, rgbaMat = null;
 
     try {
@@ -1591,7 +1591,7 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
         _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
 
         const bounds = await detectObjectBoundsFromPng(pngData);
-        if (bounds.reason === 'cut-off') {
+        if (bounds.reason === 'cut-off' && !surfaceMode) {
             rawMat.delete();
             grayMat.delete();
             return { skipped: true, reason: 'cut-off' };
@@ -1716,8 +1716,9 @@ async function analyzeAndCropPng(pngData, cropRegion, frameIndex, includeRgba) {
 /**
  * Prepare alignment data for external GPU processing
  * Returns AP grid and reference grayscale for use by WebGPU worker
+ * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
  */
-async function prepareAlignmentData(refFrame) {
+async function prepareAlignmentData(refFrame, surfaceMode = false) {
     if (!refFrame || !refFrame.float32Buffer || !refFrame.width || !refFrame.height) {
         throw new Error('Invalid reference frame');
     }
@@ -1730,8 +1731,8 @@ async function prepareAlignmentData(refFrame) {
         refData[i] = Math.round(float32Data[i] * 255);
     }
 
-    // Create AP grid
-    const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height);
+    // Create AP grid (surfaceMode uses larger search radius for Moon/Sun)
+    const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode);
 
     // Create reference grayscale
     const refMat = new _cv.Mat(height, width, _cv.CV_8UC4);
@@ -1938,8 +1939,9 @@ async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, 
  * Stack frames with local alignment using Alignment Points (APs) - CPU only
  * @param frames - Array of frame objects
  * @param drizzleScale - Output scale factor (1.0 = normal, 1.5 = drizzle)
+ * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
  */
-async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignment = false) {
+async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignment = false, surfaceMode = false) {
     // Track resources for cleanup on error
     let refMat = null, refGray = null, refGrayBlurred = null, mapX = null, mapY = null;
 
@@ -2011,13 +2013,13 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         console.log(`Reference frame: sharpness ${referenceFrame.sharpness.toFixed(2)}, subPixelOffset=(${refSubPixelOffset.x.toFixed(3)}, ${refSubPixelOffset.y.toFixed(3)})`);
 
         // === Create Alignment Points Grid ===
-        const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height);
-        console.log(`Created ${alignmentPoints.length} alignment points (${patchSize}px patches, ${searchRadius}px search)`);
+        const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode);
+        console.log(`Created ${alignmentPoints.length} alignment points (${patchSize}px patches, ${searchRadius}px search, surfaceMode=${surfaceMode})`);
 
         // === Find local shifts for each frame at each AP ===
         const refIndex = validFrames.findIndex(f => f === referenceFrame);
         self.postMessage({ type: 'stack-progress', stage: `Aligning frame 1/${frameCount}...`, progress: 5 });
-        const frameShifts = []; // frameShifts[frameIdx][apIdx] = {dx, dy, quality}
+        const frameShifts = new Array(frameCount); // frameShifts[frameIdx][apIdx] = {dx, dy, quality}
 
         // Create reference Mat once (reused for all frames)
         if (!referenceFrame.float32Buffer || referenceFrame.float32Buffer.byteLength === 0) {
@@ -2073,13 +2075,31 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         // Use filtered APs for alignment
         const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
 
-        for (let f = 0; f < frameCount; f++) {
+        // Surface mode: sort frames by original index for proper drift tracking
+        // Quality selector may pick frames out of temporal order, but drift tracking
+        // needs frames processed in sequence (frame 10 → 50 → 100, not 100 → 10 → 50)
+        let processingOrder = validFrames.map((f, i) => i); // Default: original array order
+        if (surfaceMode) {
+            // Sort by original frame index (temporal order)
+            processingOrder = validFrames
+                .map((f, i) => ({ arrayIdx: i, frameIdx: f.index || i }))
+                .sort((a, b) => a.frameIdx - b.frameIdx)
+                .map(x => x.arrayIdx);
+            console.log(`Surface mode: processing ${frameCount} frames in temporal order`);
+        }
+
+        // Surface mode: track cumulative drift across frames (PSS-like)
+        // This helps when the object (Moon/Sun) drifts across the frame
+        let cumulativeDrift = { dx: 0, dy: 0 };
+
+        for (let p = 0; p < frameCount; p++) {
+            const f = processingOrder[p]; // Map to actual frame index in validFrames
             const frame = validFrames[f];
 
             // Skip alignment for reference frame - it has zero shift by definition
             if (f === refIndex) {
                 const zeroShifts = activeAPs.map(() => ({ dx: 0, dy: 0, quality: 1 }));
-                frameShifts.push(zeroShifts);
+                frameShifts[f] = zeroShifts;
                 continue;
             }
 
@@ -2122,13 +2142,37 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
                 }
 
                 const shifts = [];
+                // Surface mode: pass expected drift to offset search regions
+                const expectedShift = surfaceMode ? cumulativeDrift : null;
+
                 for (let a = 0; a < activeAPs.length; a++) {
                     const ap = activeAPs[a];
                     // Two-phase alignment: coarse on blurred, fine on original
-                    const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius, refGrayBlurred, frameGrayBlurred);
+                    const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius, refGrayBlurred, frameGrayBlurred, expectedShift);
                     shifts.push(shift);
                 }
-                frameShifts.push(shifts);
+                frameShifts[f] = shifts;
+
+                // Surface mode: update cumulative drift using median of good shifts
+                if (surfaceMode && shifts.length > 0) {
+                    // Filter for good quality matches (quality > 0.3)
+                    const goodShifts = shifts.filter(s => s.quality > 0.3);
+                    if (goodShifts.length > 3) {
+                        // Calculate median dx/dy as this frame's global drift
+                        const sortedDx = goodShifts.map(s => s.dx).sort((a, b) => a - b);
+                        const sortedDy = goodShifts.map(s => s.dy).sort((a, b) => a - b);
+                        const medianIdx = Math.floor(goodShifts.length / 2);
+                        const frameDriftDx = sortedDx[medianIdx];
+                        const frameDriftDy = sortedDy[medianIdx];
+
+                        // Update cumulative drift (add this frame's drift to running total)
+                        cumulativeDrift = {
+                            dx: cumulativeDrift.dx + frameDriftDx,
+                            dy: cumulativeDrift.dy + frameDriftDy
+                        };
+                        previousFrameDrift = { dx: frameDriftDx, dy: frameDriftDy };
+                    }
+                }
             } catch (cvError) {
                 const errMsg = typeof cvError === 'number' ? `OpenCV error code: ${cvError}` : (cvError.message || String(cvError));
                 console.error(`Frame ${f}: OpenCV error during alignment:`, errMsg);
@@ -2153,7 +2197,11 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         if (refGrayBlurred) { refGrayBlurred.delete(); refGrayBlurred = null; }
         if (refGray) { refGray.delete(); refGray = null; }
         if (refMat) { refMat.delete(); refMat = null; }
-        console.log(`Alignment complete${noiseRobustAlignment ? ' (two-phase: blur + sharp)' : ''}`);
+        const modeInfo = [
+            noiseRobustAlignment ? 'two-phase' : null,
+            surfaceMode ? `surface mode, total drift: ${cumulativeDrift.dx.toFixed(1)},${cumulativeDrift.dy.toFixed(1)}px` : null
+        ].filter(Boolean).join(', ');
+        console.log(`Alignment complete${modeInfo ? ` (${modeInfo})` : ''}`);
 
         // === Stack with LOCAL de-warping ===
         self.postMessage({ type: 'stack-progress', stage: isDrizzle ? 'Drizzle stacking...' : 'De-warping frames...', progress: 50 });
@@ -2361,12 +2409,13 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
 /**
  * Create a grid of alignment points
  * Parameters matched to PSS (Planetary System Stacker) defaults
+ * @param surfaceMode - If true, use larger search radius for Moon/Sun surface (handles drift)
  */
-function createAPGrid(width, height) {
+function createAPGrid(width, height, surfaceMode = false) {
     // PSS default: alignment box width = 20px
     const patchSize = 20;
-    // PSS default: max alignment search width = 8px
-    const searchRadius = 8;
+    // PSS default: max alignment search width = 8px for planets, 34px for surface (Moon/Sun)
+    const searchRadius = surfaceMode ? 34 : 8;
 
     // Adaptive spacing based on image size
     // For small images (<500px), use larger spacing to avoid too many APs
@@ -2523,15 +2572,21 @@ function buildDisplacementMaps(mapX, mapY, outWidth, outHeight, alignmentPoints,
  * Two-phase AP alignment (PSS-style):
  * Phase 1: Match on blurred images (robust to noise, finds coarse shift)
  * Phase 2: Refine on original images (precise alignment)
+ * @param expectedShift - Optional {dx, dy} for surface mode drift tracking (offsets search region)
  */
-function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius, refGrayBlurred = null, frameGrayBlurred = null) {
+function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius, refGrayBlurred = null, frameGrayBlurred = null, expectedShift = null) {
     const halfPatch = Math.floor(patchSize / 2);
 
+    // Apply expected shift offset for drift tracking (surface mode)
+    const offsetX = expectedShift ? Math.round(expectedShift.dx) : 0;
+    const offsetY = expectedShift ? Math.round(expectedShift.dy) : 0;
+
     // Define template region (from reference) and search region (from frame)
+    // Search region is offset by expected drift to center search around likely position
     const templateX = ap.x - halfPatch;
     const templateY = ap.y - halfPatch;
-    const searchX = ap.x - halfPatch - searchRadius;
-    const searchY = ap.y - halfPatch - searchRadius;
+    const searchX = ap.x - halfPatch - searchRadius + offsetX;
+    const searchY = ap.y - halfPatch - searchRadius + offsetY;
     const searchSize = patchSize + searchRadius * 2;
 
     // Bounds check

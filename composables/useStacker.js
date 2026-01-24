@@ -106,8 +106,9 @@ export function useStacker() {
      * Does: load batch → align → stack, while loading next batch
      *
      * Supports both SER files (raw Bayer) and image files (RGBA)
+     * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
      */
-    async function stackWithGpuPipelined(frameMetadata, frameReReader, drizzleScale, addLog, emit) {
+    async function stackWithGpuPipelined(frameMetadata, frameReReader, drizzleScale, addLog, emit, surfaceMode = false) {
         const frameCount = frameMetadata.length;
 
         // Detect frameReReader type and extract parameters
@@ -292,7 +293,7 @@ export function useStacker() {
                         reject(new Error(e.data.error));
                     }
                 };
-                cvWorker.postMessage({ type: 'prepare-alignment', refFrame: refFrameData, refIndex: 0 });
+                cvWorker.postMessage({ type: 'prepare-alignment', refFrame: refFrameData, refIndex: 0, surfaceMode });
             });
 
             const { alignmentPoints, refGrayData, patchSize, searchRadius } = alignmentData;
@@ -331,13 +332,23 @@ export function useStacker() {
             const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
             let processedCount = 0;
 
+            // For surface mode, sort frames by original index for temporal drift tracking
+            let framesToProcess = [...frameMetadata];
+            if (surfaceMode) {
+                framesToProcess.sort((a, b) => (a.index || 0) - (b.index || 0));
+                addLog('Surface mode: processing frames in temporal order for drift tracking');
+            }
+
+            // Cumulative drift tracking for surface mode
+            let cumulativeDrift = { dx: 0, dy: 0 };
+
             // Pre-load first batch
             let batchStart = 0;
             let nextBatchPromise = null;
 
             while (batchStart < frameCount) {
                 const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
-                const batchFrames = frameMetadata.slice(batchStart, batchEnd);
+                const batchFrames = framesToProcess.slice(batchStart, batchEnd);
 
                 // Get current batch (pre-loaded or load now)
                 let rawBatch;
@@ -351,7 +362,7 @@ export function useStacker() {
                 const nextStart = batchEnd;
                 if (nextStart < frameCount) {
                     const nextEnd = Math.min(nextStart + BATCH_SIZE, frameCount);
-                    const nextFrames = frameMetadata.slice(nextStart, nextEnd);
+                    const nextFrames = framesToProcess.slice(nextStart, nextEnd);
                     nextBatchPromise = loadRawBatch(nextFrames);
                 } else {
                     nextBatchPromise = null;
@@ -376,6 +387,11 @@ export function useStacker() {
                     rgbaToGrayscale(r.float32Buffer, cropSize, cropSize, true)
                 );
 
+                // For surface mode, pass searchOffset to shift search region without affecting template extraction
+                const searchOffset = surfaceMode && (cumulativeDrift.dx !== 0 || cumulativeDrift.dy !== 0)
+                    ? { dx: cumulativeDrift.dx, dy: cumulativeDrift.dy }
+                    : null;
+
                 const batchShifts = await new Promise((resolve, reject) => {
                     const requestId = batchStart;
                     const handler = (e) => {
@@ -394,9 +410,26 @@ export function useStacker() {
                         height: cropSize,
                         alignmentPoints,
                         patchSize,
-                        searchRadius
+                        searchRadius,
+                        searchOffset
                     });
                 });
+
+                // Update cumulative drift from last frame's shifts (surface mode)
+                if (surfaceMode && batchShifts.length > 0) {
+                    const lastFrameShifts = batchShifts[batchShifts.length - 1];
+                    const goodShifts = lastFrameShifts.filter(s => s.quality > 0.3);
+                    if (goodShifts.length >= 3) {
+                        // Use median of good shifts as current drift estimate
+                        const dxValues = goodShifts.map(s => s.dx).sort((a, b) => a - b);
+                        const dyValues = goodShifts.map(s => s.dy).sort((a, b) => a - b);
+                        const medianIdx = Math.floor(goodShifts.length / 2);
+                        cumulativeDrift = {
+                            dx: dxValues[medianIdx],
+                            dy: dyValues[medianIdx]
+                        };
+                    }
+                }
 
                 // Send batch to GPU stacker
                 const batchForStacker = gpuResults.map((r, i) => ({
@@ -484,8 +517,9 @@ export function useStacker() {
      * @param noiseRobustAlignment - Enable noise-robust alignment
      * @param useWebGPU - Use WebGPU for stacking
      * @param frameReReader - Optional: two-pass mode - re-read frames on demand instead of using pre-loaded buffers
+     * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
      */
-    async function stackFramesLocally(frames, existingWorker = null, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, frameReReader = null) {
+    async function stackFramesLocally(frames, existingWorker = null, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, frameReReader = null, surfaceMode = false) {
         emit('set-caption', 'Preparing for stacking...');
         emit('update-loading', { progress: 0, current: 0, total: 0 });
 
@@ -495,7 +529,7 @@ export function useStacker() {
 
         if (hasTwoPassFrames && useWebGPU) {
             // Use pipelined approach: load batch → align → stack, while loading next batch
-            return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit);
+            return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode);
         }
 
         // Filter frames that have valid buffer (float32Buffer preferred, rgbaBuffer for legacy) and sharpness
@@ -615,17 +649,18 @@ export function useStacker() {
 
         // WebGPU path: orchestrate GPU worker directly from main thread
         if (useWebGPU) {
-            return await stackWithWebGPU(frameData, drizzleScale, addLog, emit);
+            return await stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode);
         }
 
         // CPU path: send everything to unified_analyze_worker
-        return await stackWithCPU(frameData, drizzleScale, noiseRobustAlignment, addLog, emit);
+        return await stackWithCPU(frameData, drizzleScale, noiseRobustAlignment, addLog, emit, surfaceMode);
     }
 
     /**
      * Stack using WebGPU for template matching (main thread orchestrates)
+     * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
      */
-    async function stackWithWebGPU(frameData, drizzleScale, addLog, emit) {
+    async function stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode = false) {
         const { width, height } = frameData[0];
 
         // Step 1: Initialize OpenCV worker and prepare alignment data
@@ -700,7 +735,7 @@ export function useStacker() {
                         reject(new Error(e.data.error));
                     }
                 };
-                cvWorker.postMessage({ type: 'prepare-alignment', refFrame: refFrameData, refIndex });
+                cvWorker.postMessage({ type: 'prepare-alignment', refFrame: refFrameData, refIndex, surfaceMode });
             });
 
             const { alignmentPoints, refGrayData, patchSize, searchRadius } = alignmentData;
@@ -722,12 +757,26 @@ export function useStacker() {
             frameShifts[refIndex] = alignmentPoints.map(() => ({ dx: 0, dy: 0, quality: 1 }));
 
             // Build list of frames to process (excluding reference)
-            const framesToProcess = [];
+            let framesToProcess = [];
             for (let f = 0; f < frameCount; f++) {
                 if (f !== refIndex) {
                     framesToProcess.push(f);
                 }
             }
+
+            // Surface mode: sort frames by original index for proper drift tracking
+            // Quality selector may pick frames out of temporal order
+            if (surfaceMode) {
+                framesToProcess.sort((a, b) => {
+                    const idxA = frameData[a].index || a;
+                    const idxB = frameData[b].index || b;
+                    return idxA - idxB;
+                });
+                addLog('Surface mode: processing frames in temporal order for drift tracking');
+            }
+
+            // Surface mode: track cumulative drift across batches
+            let cumulativeDrift = { dx: 0, dy: 0 };
 
             // Process in batches
             let processedCount = 0;
@@ -742,7 +791,13 @@ export function useStacker() {
                     return rgbaToGrayscale(buffer, width, height, frame.isFloat32);
                 });
 
-                // Send batch to GPU
+                // Send batch to GPU with searchOffset for drift tracking
+                // searchOffset tells GPU to search around expected drifted position while
+                // keeping template extraction at original AP positions
+                const searchOffset = surfaceMode && (cumulativeDrift.dx !== 0 || cumulativeDrift.dy !== 0)
+                    ? { dx: cumulativeDrift.dx, dy: cumulativeDrift.dy }
+                    : null;
+
                 const batchShifts = await new Promise((resolve, reject) => {
                     const requestId = batchStart;
                     const handler = (e) => {
@@ -761,7 +816,8 @@ export function useStacker() {
                         height,
                         alignmentPoints,
                         patchSize,
-                        searchRadius
+                        searchRadius,
+                        searchOffset
                     });
                 });
 
@@ -770,13 +826,33 @@ export function useStacker() {
                     frameShifts[batchIndices[i]] = batchShifts[i];
                 }
 
+                // Surface mode: update cumulative drift from this batch's results
+                if (surfaceMode && batchShifts.length > 0) {
+                    // Use median of last frame's shifts as the drift update
+                    const lastFrameShifts = batchShifts[batchShifts.length - 1];
+                    const goodShifts = lastFrameShifts.filter(s => s.quality > 0.3);
+                    if (goodShifts.length > 3) {
+                        const sortedDx = goodShifts.map(s => s.dx).sort((a, b) => a - b);
+                        const sortedDy = goodShifts.map(s => s.dy).sort((a, b) => a - b);
+                        const medianIdx = Math.floor(goodShifts.length / 2);
+                        cumulativeDrift = {
+                            dx: sortedDx[medianIdx],
+                            dy: sortedDy[medianIdx]
+                        };
+                    }
+                }
+
                 processedCount += batchIndices.length;
                 const progress = 5 + (processedCount / framesToProcess.length) * 45;
                 emit('set-caption', `Aligning frames ${processedCount}/${framesToProcess.length} (GPU batch)...`);
                 emit('update-loading', { progress, current: Math.round(progress), total: 100 });
             }
 
-            addLog('GPU batch alignment complete');
+            if (surfaceMode) {
+                addLog(`GPU batch alignment complete (total drift: ${cumulativeDrift.dx.toFixed(1)}, ${cumulativeDrift.dy.toFixed(1)} px)`);
+            } else {
+                addLog('GPU batch alignment complete');
+            }
 
             // Step 4: GPU Stacking - stream frames in batches to avoid memory issues
             emit('set-caption', 'GPU stacking...');
@@ -914,8 +990,9 @@ export function useStacker() {
 
     /**
      * Stack using CPU (OpenCV) for template matching
+     * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
      */
-    async function stackWithCPU(frameData, drizzleScale, noiseRobustAlignment, addLog, emit) {
+    async function stackWithCPU(frameData, drizzleScale, noiseRobustAlignment, addLog, emit, surfaceMode = false) {
         return new Promise((resolve, reject) => {
             addLog('Creating fresh worker for stacking...');
             const worker = new Worker('/unified_analyze_worker.js');
@@ -991,7 +1068,8 @@ export function useStacker() {
                     type: 'stack-frames',
                     frames: frameData,
                     drizzleScale: drizzleScale,
-                    noiseRobustAlignment: noiseRobustAlignment
+                    noiseRobustAlignment: noiseRobustAlignment,
+                    surfaceMode: surfaceMode
                 }, transferables);
             }
         });

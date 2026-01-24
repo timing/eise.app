@@ -752,7 +752,7 @@ export function useSerReader() {
         return cropped;
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false) {
+    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -1046,14 +1046,16 @@ export function useSerReader() {
                                     continue;
                                 }
 
-                                // Check for cut-off (object touching edge)
-                                const margin = Math.max(header.width, header.height) * 0.01;
-                                if (gpuResult.bounds.x < margin || gpuResult.bounds.y < margin ||
-                                    gpuResult.bounds.x + gpuResult.bounds.width > header.width - margin ||
-                                    gpuResult.bounds.y + gpuResult.bounds.height > header.height - margin) {
-                                    cutOffFrames++;
-                                    completedFrames++;
-                                    continue;
+                                // Check for cut-off (object touching edge) - skip for Sun/Moon
+                                if (!surfaceMode) {
+                                    const margin = Math.max(header.width, header.height) * 0.01;
+                                    if (gpuResult.bounds.x < margin || gpuResult.bounds.y < margin ||
+                                        gpuResult.bounds.x + gpuResult.bounds.width > header.width - margin ||
+                                        gpuResult.bounds.y + gpuResult.bounds.height > header.height - margin) {
+                                        cutOffFrames++;
+                                        completedFrames++;
+                                        continue;
+                                    }
                                 }
 
                                 // Check for oversized
@@ -1345,7 +1347,7 @@ export function useSerReader() {
             emit('debug-frames-available', { frames: bestFramesForStacking });
 
             // Two-pass mode: pass frameReReader for on-demand frame loading
-            const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, frameReReader);
+            const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, frameReReader, surfaceMode);
 
             if (stackResult && stackResult.blob) {
                 addLog('Client-side stacking complete');
@@ -1690,7 +1692,7 @@ export function useSerReader() {
 
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
-    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
+    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -2031,7 +2033,8 @@ export function useSerReader() {
                     bayerChoice: bayerChoice,
                     cropRegion: cropRegion,
                     capturePreCrop: shouldCapturePreCrop,
-                    index: currentGlobalIndex
+                    index: currentGlobalIndex,
+                    surfaceMode: surfaceMode
                 };
 
                 const promise = processFrameWithWorker(workerIndex, dataToWorker, [frameBuffer])
@@ -2159,7 +2162,7 @@ export function useSerReader() {
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
             const stackingWorker = useWebGPU ? null : unifiedAnalyzeWorkers[0];
-            const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
+            const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU, null, surfaceMode);
 
             if (stackResult && stackResult.blob) {
                 addLog('Client-side stacking complete');

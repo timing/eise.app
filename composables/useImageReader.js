@@ -252,7 +252,7 @@ export function useImageReader() {
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
-    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, enableAutoCrop = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
+    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, enableAutoCrop = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         // Initialize GPU worker
         const gpuOk = await initializeGpuWorker();
         if (!gpuOk) {
@@ -420,14 +420,16 @@ export function useImageReader() {
                             continue;
                         }
 
-                        // Check cut-off
-                        const margin = Math.max(firstWidth, firstHeight) * 0.01;
-                        if (result.bounds.x < margin || result.bounds.y < margin ||
-                            result.bounds.x + result.bounds.width > firstWidth - margin ||
-                            result.bounds.y + result.bounds.height > firstHeight - margin) {
-                            cutOffFrames++;
-                            completedFrames++;
-                            continue;
+                        // Check cut-off - skip for Sun/Moon
+                        if (!surfaceMode) {
+                            const margin = Math.max(firstWidth, firstHeight) * 0.01;
+                            if (result.bounds.x < margin || result.bounds.y < margin ||
+                                result.bounds.x + result.bounds.width > firstWidth - margin ||
+                                result.bounds.y + result.bounds.height > firstHeight - margin) {
+                                cutOffFrames++;
+                                completedFrames++;
+                                continue;
+                            }
                         }
 
                         // Check oversized
@@ -580,7 +582,7 @@ export function useImageReader() {
         }
 
         // Automatic stacking
-        const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, frameReReader);
+        const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, frameReReader, surfaceMode);
 
         // Cleanup
         gpuWorker.terminate();

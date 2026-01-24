@@ -40,14 +40,22 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 
 ## Key Technical Details
 
+**IMPORTANT: WebGPU Path is Primary**: When making changes to stacking/alignment code, always prioritize the WebGPU path first. It's the most commonly used path and provides the best performance. The CPU path (OpenCV in worker) is a fallback. Key WebGPU files:
+- `public/webgpu_template_match.js` - GPU template matching for alignment
+- `public/webgpu_stacking.js` - GPU frame accumulation
+- `composables/useStacker.js` - `stackWithWebGPU()` and `stackWithGpuPipelined()` orchestrate the GPU path
+
 **WebWorker Frame Analysis**: Workers use Tenengrad (Sobel-based) sharpness calculation. Pool size based on `navigator.hardwareConcurrency` (max 4 to prevent memory issues). Workers handle both FFmpeg-extracted PNG frames and raw SER/AVI frames.
 
-**Client-Side Stacking**: The `stackFramesLocally()` function in `unified_analyze_worker.js` implements:
-- Alignment point grid creation (PSS-like parameters: 20px patches, 8px search, 50% overlap)
+**Client-Side Stacking** has two paths:
+1. **WebGPU Path** (primary): `useStacker.js` → `webgpu_template_match.js` for alignment → `webgpu_stacking.js` for accumulation
+2. **CPU Path** (fallback): `unified_analyze_worker.js` → `stackFramesLocally()` using OpenCV `cv.matchTemplate`
+
+Both paths use `createAPGrid()` to generate alignment point coordinates (lightweight - just creates ~100-300 {x,y} pairs). Parameters:
+- 20px patches, 8px search radius (planetary) or 34px search radius (surface/Moon/Sun)
 - AP quality filtering by minimum structure (0.02) and brightness (5)
-- Template matching for local shift detection (`cv.matchTemplate`)
 - Gaussian-weighted displacement map interpolation
-- De-warping via `cv.remap()` with bilinear interpolation
+- De-warping via `cv.remap()` (CPU) or GPU shader (WebGPU)
 - Sharpness-weighted frame accumulation
 
 **Bayer Demosaicing**: Raw Bayer frames are demosaiced using OpenCV's `cv.demosaicing()` with VNG (Variable Number of Gradients) interpolation for better quality on fine detail. The demosaicing happens BEFORE stacking (frames are stacked as RGB, not raw Bayer).

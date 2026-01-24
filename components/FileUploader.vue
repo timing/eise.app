@@ -48,6 +48,21 @@
 				<p>{{ errorMessage }}</p>
 			</div>
 
+			<div class="separator"></div>
+
+			<h4>Target</h4>
+			<div class="radio-group">
+				<label class="radio-option">
+					<input type="radio" v-model="targetType" value="planet" />
+					Planet (or Moon fully in frame)
+				</label>
+				<label class="radio-option">
+					<input type="radio" v-model="targetType" value="sun-moon" />
+					Surface: Closeup of Sun or Moon
+				</label>
+			</div>
+			<p v-if="targetType === 'sun-moon'" class="info-text">Edge cut-off detection disabled - frames won't be rejected for touching the frame edge.</p>
+
 			<!-- Frame selection hidden in lite mode (defaults to 30%) -->
 			<template v-if="!liteMode">
 				<div class="separator"></div>
@@ -176,6 +191,10 @@ const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 const noiseRobustAlignment = ref(false);
 
+// Target type: 'planet' or 'sun-moon' - affects cut-off frame detection
+const targetType = ref('planet');
+const surfaceMode = computed(() => targetType.value === 'sun-moon');
+
 // Lite mode enforced settings
 const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMode.value === '1.5x' ? 1.5 : 1.0));
 const effectiveMaxFrames = computed(() => liteMode.value ? 100 : (enableMaxFrames.value ? selectedMaxFrames.value : -1));
@@ -200,6 +219,7 @@ function loadSettings() {
 			if (settings.cropMarginPercent) cropMarginPercent.value = settings.cropMarginPercent;
 			if (settings.enableMaxFrames !== undefined) enableMaxFrames.value = settings.enableMaxFrames;
 			if (settings.selectedMaxFrames) selectedMaxFrames.value = settings.selectedMaxFrames;
+			if (settings.targetType) targetType.value = settings.targetType;
 		}
 	} catch (e) {
 		console.warn('Failed to load settings:', e);
@@ -216,7 +236,8 @@ function saveSettings() {
 			noiseRobustAlignment: noiseRobustAlignment.value,
 			cropMarginPercent: cropMarginPercent.value,
 			enableMaxFrames: enableMaxFrames.value,
-			selectedMaxFrames: selectedMaxFrames.value
+			selectedMaxFrames: selectedMaxFrames.value,
+			targetType: targetType.value
 		};
 		localStorage.setItem('eise-settings', JSON.stringify(settings));
 	} catch (e) {
@@ -225,7 +246,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType], saveSettings);
 
 onMounted(async () => {
 	loadSettings();
@@ -566,7 +587,7 @@ async function processFiles(files) {
 		emit('processing-started');
 		const { readSerFiles } = useSerReader();
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		await readSerFiles(serFiles, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true);
+		await readSerFiles(serFiles, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true, surfaceMode.value);
 		return;
 	} else if (serFiles.length > 1 && liteMode.value) {
 		alert('Multiple SER files are not supported in Lite Mode. Please select a single file.');
@@ -591,7 +612,7 @@ async function processFiles(files) {
 		if (fileToProcess.name.endsWith('.ser') && !liteMode.value) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
-			await readSerFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value);
+			await readSerFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value);
 			return;
 		}
 
@@ -612,7 +633,7 @@ async function processFiles(files) {
 			if (formatInfo.isSupported) {
 				// Can process directly - readAviFile handles both uncompressed and MJPEG
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true, null, surfaceMode.value);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -738,7 +759,8 @@ async function processFiles(files) {
 				manualThreshold: effectiveQualityMode.value === 'manual',
 				stackPercentage: effectiveStackPercentage.value,
 				drizzleScale: effectiveDrizzleScale.value,
-				noiseRobustAlignment: effectiveNoiseRobust.value
+				noiseRobustAlignment: effectiveNoiseRobust.value,
+				surfaceMode: surfaceMode.value
 			});
 
 		} else {
@@ -794,7 +816,7 @@ async function processFiles(files) {
 			const { processFFmpegFrames } = useAviReader();
 			const skipAutoCrop = preCropRegion !== null;
 
-			await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value);
+			await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value, surfaceMode.value);
 		}
 	
 	} else if (imageFiles.length > 1) {
@@ -803,7 +825,7 @@ async function processFiles(files) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', false, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', false, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value, surfaceMode.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing

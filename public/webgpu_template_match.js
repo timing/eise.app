@@ -264,8 +264,10 @@ async function initWebGPU() {
 /**
  * Match templates for a batch of frames at once
  * Much more efficient than calling matchTemplatesGPU for each frame
+ * @param searchOffset - Optional {dx, dy} to offset search region in frames (for drift tracking)
+ *                       Templates are always extracted from original AP positions in reference
  */
-async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius) {
+async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset = null) {
     if (!isInitialized) {
         const ok = await initWebGPU();
         if (!ok) return null;
@@ -278,15 +280,23 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
     const resultsPerAP = gridSize * gridSize;
     const frameSize = width * height;
 
-    // Extract reference templates (once for all frames)
+    // Extract reference templates (once for all frames) - always from original AP positions
     const refTemplates = new Float32Array(numAPs * templateSize);
     const apPositions = new Uint32Array(numAPs);
     const halfPatch = Math.floor(patchSize / 2);
 
+    // Apply search offset for drift tracking (shifts where we search in frames, not where templates come from)
+    const offsetX = searchOffset ? Math.round(searchOffset.dx) : 0;
+    const offsetY = searchOffset ? Math.round(searchOffset.dy) : 0;
+
     for (let i = 0; i < numAPs; i++) {
         const ap = alignmentPoints[i];
-        apPositions[i] = (ap.x & 0xFFFF) | ((ap.y & 0xFFFF) << 16);
+        // Search positions are offset by drift, templates are extracted from original positions
+        const searchX = ap.x + offsetX;
+        const searchY = ap.y + offsetY;
+        apPositions[i] = (searchX & 0xFFFF) | ((searchY & 0xFFFF) << 16);
 
+        // Extract template from ORIGINAL position (not offset)
         const tx0 = ap.x - halfPatch;
         const ty0 = ap.y - halfPatch;
         for (let py = 0; py < patchSize; py++) {
@@ -382,6 +392,7 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
     readbackBuffer.unmap();
 
     // Find best match for each (frame, AP)
+    // If search was offset, add that offset to shifts so they're relative to original AP position
     const allShifts = [];
     for (let f = 0; f < numFrames; f++) {
         const frameShifts = [];
@@ -401,7 +412,8 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
                     }
                 }
             }
-            frameShifts.push({ dx: bestDx, dy: bestDy, quality: bestScore });
+            // Add search offset to get shift relative to original AP position
+            frameShifts.push({ dx: bestDx + offsetX, dy: bestDy + offsetY, quality: bestScore });
         }
         allShifts.push(frameShifts);
     }
