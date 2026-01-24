@@ -1044,13 +1044,23 @@ function cleanupAnalyzeBuffers() {
     }
 }
 
-async function analyzeBatch(frames, width, height, bayerPattern, threshold) {
+async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
     const batchSize = frames.length;
     const pixelCount = width * height;
     const numWorkgroups = Math.ceil(pixelCount / 256);
+
+    // Memory safeguard: prevent allocations that would likely fail
+    // metadataOnly: Uint8 RGBA only (4 bytes/px)
+    // full mode: Float32 RGBA (16 bytes/px) + Uint8 RGBA copy (4 bytes/px) = 20 bytes/px
+    const bytesPerPixel = metadataOnly ? 4 : 20;
+    const estimatedMemory = batchSize * pixelCount * bytesPerPixel;
+    const maxMemory = 512 * 1024 * 1024; // 512MB limit
+    if (estimatedMemory > maxMemory) {
+        throw new Error(`Batch too large: ${batchSize} frames of ${width}x${height} would need ${Math.round(estimatedMemory / 1024 / 1024)}MB. Reduce batch size.`);
+    }
 
     // Get cached buffers (creates if needed, reuses if possible)
     const buffers = getAnalyzeBuffers(batchSize, width, height);
@@ -1381,19 +1391,31 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold) {
         // Extract RGBA for this frame
         const frameRgba = rgbaData.slice(i * pixelCount * 4, (i + 1) * pixelCount * 4);
 
-        // Convert to Float32 (0.0-1.0) for 16-bit pipeline compatibility
-        const float32Data = new Float32Array(frameRgba.length);
-        for (let j = 0; j < frameRgba.length; j++) {
-            float32Data[j] = frameRgba[j] / 255.0;
-        }
+        if (metadataOnly) {
+            // Analyze phase: return only metadata + 8-bit data for preview
+            results.push({
+                sharpness,
+                circularity,
+                bounds,
+                uint8Buffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
+                width,
+                height
+            });
+        } else {
+            // Stacking phase: Convert to Float32 (0.0-1.0) for full precision
+            const float32Data = new Float32Array(frameRgba.length);
+            for (let j = 0; j < frameRgba.length; j++) {
+                float32Data[j] = frameRgba[j] / 255.0;
+            }
 
-        results.push({
-            sharpness,
-            circularity,
-            bounds,
-            rgbaBuffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
-            float32Buffer: float32Data.buffer
-        });
+            results.push({
+                sharpness,
+                circularity,
+                bounds,
+                rgbaBuffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
+                float32Buffer: float32Data.buffer
+            });
+        }
     }
 
     // Buffers are cached and reused - no cleanup here
@@ -2372,12 +2394,13 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, width, height, bayerPattern, threshold, requestId } = e.data;
+        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly } = e.data;
 
         try {
-            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold);
-            self.postMessage({ type: 'analyze-result', requestId, results },
-                results.map(r => r.float32Buffer));
+            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly);
+            // Transfer uint8Buffer or float32Buffer depending on mode
+            const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
+            self.postMessage({ type: 'analyze-result', requestId, results }, transferables);
         } catch (err) {
             console.error(`[GPU] analyze-batch error:`, err);
             self.postMessage({ type: 'analyze-error', requestId, error: err.message });

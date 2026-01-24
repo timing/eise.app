@@ -837,7 +837,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null, surfaceMode = false) {
+    async function readAviFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null, surfaceMode = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -866,7 +866,7 @@ export function useAviReader() {
         if (isMjpegFourCC(aviHeader.fourCC)) {
             // MJPEG uses GPU path with native JPEG decoding
             addLog(`MJPEG AVI detected. Using GPU processing with native JPEG decoding.`);
-            return await readMjpegAviFile(file, aviHeader, maxFrames, enableAutoCrop, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode);
+            return await readMjpegAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode);
         }
 
         if (!isEasyAviFourCC(aviHeader.fourCC)) {
@@ -891,14 +891,14 @@ export function useAviReader() {
         const MIN_SIZE_FOR_CROP = 300;
         let cropRegion = null;
 
-        if (enableAutoCrop && aviHeader.width >= MIN_SIZE_FOR_CROP && aviHeader.height >= MIN_SIZE_FOR_CROP) {
+        if (aviHeader.width >= MIN_SIZE_FOR_CROP && aviHeader.height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${aviHeader.width}x${aviHeader.height} qualifies for auto-crop`);
             cropRegion = await detectCropRegion(file, aviHeader, frameCount);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
             }
-        } else if (enableAutoCrop) {
+        } else {
             addLog(`Frame size ${aviHeader.width}x${aviHeader.height} too small for auto-crop (min ${MIN_SIZE_FOR_CROP}x${MIN_SIZE_FOR_CROP})`);
         }
 
@@ -1150,7 +1150,7 @@ export function useAviReader() {
     }
 
     // Process FFmpeg-extracted PNG frames through the same pipeline as AVI
-    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
+    async function processFFmpegFrames(ffmpeg, pngFilenames, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -1189,14 +1189,14 @@ export function useAviReader() {
         const MIN_SIZE_FOR_CROP = 300;
         let cropRegion = null;
 
-        if (enableAutoCrop && width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
+        if (width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${width}x${height} qualifies for auto-crop`);
             cropRegion = await detectCropRegionFromPngs(ffmpeg, pngFilenames, header);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
             }
-        } else if (enableAutoCrop) {
+        } else {
             addLog(`Frame size ${width}x${height} too small for auto-crop (min ${MIN_SIZE_FOR_CROP}x${MIN_SIZE_FOR_CROP})`);
         }
 
@@ -1742,7 +1742,7 @@ export function useAviReader() {
     }
 
     // Process MJPEG AVI file with GPU acceleration
-    async function readMjpegAviFile(file, aviHeader, maxFrames, enableAutoCrop, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode = false) {
+    async function readMjpegAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode = false) {
         resetCaptures();
 
         // Initialize GPU worker
@@ -1772,7 +1772,7 @@ export function useAviReader() {
         const MIN_SIZE_FOR_CROP = 300;
         let cropRegion = null;
 
-        if (enableAutoCrop && width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
+        if (width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${width}x${height} qualifies for auto-crop`);
             cropRegion = await detectCropRegionMjpegGpu(file, frameIndex, width, height, cropMarginPercent);
 
@@ -1819,7 +1819,10 @@ export function useAviReader() {
         let cutOffFrames = 0;
         let oversizedFrames = 0;
 
-        const BATCH_SIZE = 64; // Larger batches for better GPU throughput
+        // Dynamic batch size based on frame dimensions to avoid memory issues
+        const frameBytes = width * height * 16; // Float32 RGBA = 16 bytes/pixel
+        const targetBatchMemory = 256 * 1024 * 1024; // 256MB
+        const BATCH_SIZE = Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
 
         // Helper to decode a batch of frames
         async function decodeBatch(start, end) {
@@ -2097,7 +2100,6 @@ export function useAviReader() {
     async function processBatchedVideoFrames(ffmpeg, videoFilename, totalFrames, videoDuration, options = {}) {
         const {
             preCropRegion = null,
-            enableAutoCrop = false,
             manualThreshold = false,
             stackPercentage = 30,
             drizzleScale = 1.0,
@@ -2332,9 +2334,9 @@ export function useAviReader() {
 
                     addLog(`Frame dimensions: ${frameWidth}x${frameHeight}`);
 
-                    // Detect crop from first 5 frames
+                    // Detect crop from first 5 frames (skip if already pre-cropped)
                     const MIN_SIZE_FOR_CROP = 300;
-                    if (enableAutoCrop && frameWidth >= MIN_SIZE_FOR_CROP && frameHeight >= MIN_SIZE_FOR_CROP) {
+                    if (!preCropRegion && frameWidth >= MIN_SIZE_FOR_CROP && frameHeight >= MIN_SIZE_FOR_CROP) {
                         emit('set-caption', 'Detecting crop region...');
                         // Extract 4 more frames for crop detection
                         const cropSampleData = [pngData];

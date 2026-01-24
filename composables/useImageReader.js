@@ -252,7 +252,7 @@ export function useImageReader() {
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
-    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, enableAutoCrop = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
+    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         // Initialize GPU worker
         const gpuOk = await initializeGpuWorker();
         if (!gpuOk) {
@@ -365,7 +365,7 @@ export function useImageReader() {
         const MIN_SIZE_FOR_CROP = 300;
         let cropRegion = null;
 
-        if (enableAutoCrop && firstWidth >= MIN_SIZE_FOR_CROP && firstHeight >= MIN_SIZE_FOR_CROP) {
+        if (firstWidth >= MIN_SIZE_FOR_CROP && firstHeight >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${firstWidth}x${firstHeight} qualifies for auto-crop`);
             const validRgba = rgbaFrames.filter(f => f !== null);
             cropRegion = await detectCropRegionGpu(validRgba, firstWidth, firstHeight);

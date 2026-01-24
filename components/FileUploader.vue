@@ -50,7 +50,7 @@
 
 			<div class="separator"></div>
 
-			<h4>Target</h4>
+			<h4>Target <span class="info-icon" @click="showTargetInfo = !showTargetInfo">ⓘ</span></h4>
 			<div class="radio-group">
 				<label class="radio-option">
 					<input type="radio" v-model="targetType" value="planet" />
@@ -61,13 +61,13 @@
 					Surface: Closeup of Sun or Moon
 				</label>
 			</div>
-			<p v-if="targetType === 'sun-moon'" class="info-text">Edge cut-off detection disabled - frames won't be rejected for touching the frame edge.</p>
+			<p v-if="showTargetInfo" class="info-text"><strong>Planet:</strong> For full-disk planets or Moon. Rejects frames where the object touches the edge.<br><strong>Surface:</strong> For Moon/Sun closeups. Disables edge detection and uses drift tracking for larger frame-to-frame motion.</p>
 
 			<!-- Frame selection hidden in lite mode (defaults to 30%) -->
 			<template v-if="!liteMode">
 				<div class="separator"></div>
 
-				<h4>Frame selection</h4>
+				<h4>Frame selection <span class="info-icon" @click="showFrameSelectionInfo = !showFrameSelectionInfo">ⓘ</span></h4>
 				<div class="radio-group">
 					<label class="radio-option">
 						<input type="radio" v-model="qualityMode" value="manual" />
@@ -79,15 +79,14 @@
 						<input type="number" v-model.number="stackPercentage" min="1" max="100" class="percentage-input" :disabled="qualityMode !== 'percentage'" />%
 					</label>
 				</div>
-				<p v-if="qualityMode === 'manual'" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack.</p>
-				<p v-if="qualityMode === 'percentage'" class="info-text">Stack best is recommended if you run into memory issues.</p>
+				<p v-if="showFrameSelectionInfo" class="info-text"><strong>Manual:</strong> After analysis, you'll see a quality graph and can choose which frames to stack.<br><strong>Percentage:</strong> Automatically selects the sharpest frames. Recommended if you run into memory issues.</p>
 			</template>
 
 			<!-- Advanced options hidden in lite mode -->
 			<template v-if="!liteMode">
 				<div class="separator"></div>
 
-				<h4>Stacking mode</h4>
+				<h4>Stacking mode <span class="info-icon" @click="showStackingModeInfo = !showStackingModeInfo">ⓘ</span></h4>
 				<div class="radio-group">
 					<label class="radio-option">
 						<input type="radio" v-model="drizzleMode" value="1.5x" />
@@ -98,20 +97,23 @@
 						Normal (1x)
 					</label>
 				</div>
-				<p class="info-text">Drizzle uses sub-pixel offsets to increase resolution. Best with 100+ frames.</p>
+				<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.</p>
 
 				<label class="checkbox-option">
 					<input type="checkbox" v-model="noiseRobustAlignment" />
 					Pre-blur alignment
 				</label>
-				<p class="info-text">Aligns on blurred frames first, then refines. Better for turbulent seeing, slower.</p>
+				<span class="info-icon" @click="showAlignmentInfo = !showAlignmentInfo">ⓘ</span>
+				<p v-if="showAlignmentInfo" class="info-text">Aligns on blurred frames first, then refines on original. Better for turbulent seeing conditions, but slower.</p>
 
-				<div class="separator"></div>
+				<template v-if="targetType !== 'sun-moon'">
+					<div class="separator"></div>
 
-				<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
-				<input type="range" min="5" max="50" step="5" v-model="cropMarginPercent" />
-				{{ cropMarginPercent }}%
-				<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
+					<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
+					<input type="range" min="5" max="50" step="5" v-model="cropMarginPercent" />
+					{{ cropMarginPercent }}%
+					<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
+				</template>
 
 				<div class="separator"></div>
 
@@ -132,8 +134,8 @@
 	<!-- Welcome content: only show when not processing -->
 	<div class="content" v-if="!isProcessing">
 		<h2>Welcome to eise.app</h2>
-		<h3>An easy planetary image stacker for astrophotography</h3>
-		<p>Turn your blurry and shaky videos of planets into one stacked and sharp image using <em>lucky imaging</em>.</p>
+		<h3>An easy image stacker for planetary astrophotography</h3>
+		<p>Turn your blurry and shaky videos of planets, Moon, or Sun into one stacked and sharp image using <em>lucky imaging</em>.</p>
 		<ul>
 			<li>Select one or more SER files for stacking followed by post processing. (Multiple SER files will be combined)</li>
 			<li>Select one video file (AVI, MP4, etc.) for stacking followed by post processing.</li>
@@ -141,6 +143,7 @@
 			<li>Select one image file for post processing only.</li>
 		</ul>
 		<p>When stacking, eise.app analyzes all frames by sharpness, then you select which ones to include using a quality graph or percentage threshold.</p>
+		<p><strong>Tip:</strong> For Moon or Sun surface closeups, select "Surface" mode above to handle larger frame-to-frame drift.</p>
 		<h3>More information, bugs and feature requests?</h3>
 		<p>Read more about Eise.app on the <a href="#" @click.prevent="showAbout">About page</a>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>.</p>
 		<p>Have feedback or running into issues? <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
@@ -172,15 +175,16 @@ const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 const enableMaxFrames = ref(false);
 const selectedMaxFrames = ref(100);
 
-// Always enable auto-crop (client-side stacking is always on)
-const enableAutoCrop = true;
-
 const errorMessage = ref(null);
 
 // Info toggle state
 const showMaxFramesInfo = ref(false);
 const showCropMarginInfo = ref(false);
 const showPreCropInfo = ref(false);
+const showTargetInfo = ref(false);
+const showFrameSelectionInfo = ref(false);
+const showStackingModeInfo = ref(false);
+const showAlignmentInfo = ref(false);
 
 // Crop margin setting (percentage of detected object size to add as margin)
 const cropMarginPercent = ref(10);
@@ -587,7 +591,7 @@ async function processFiles(files) {
 		emit('processing-started');
 		const { readSerFiles } = useSerReader();
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		await readSerFiles(serFiles, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true, surfaceMode.value);
+		await readSerFiles(serFiles, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true, surfaceMode.value);
 		return;
 	} else if (serFiles.length > 1 && liteMode.value) {
 		alert('Multiple SER files are not supported in Lite Mode. Please select a single file.');
@@ -612,7 +616,7 @@ async function processFiles(files) {
 		if (fileToProcess.name.endsWith('.ser') && !liteMode.value) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
-			await readSerFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value);
+			await readSerFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value);
 			return;
 		}
 
@@ -633,7 +637,7 @@ async function processFiles(files) {
 			if (formatInfo.isSupported) {
 				// Can process directly - readAviFile handles both uncompressed and MJPEG
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true, null, surfaceMode.value);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true, null, surfaceMode.value);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -751,11 +755,9 @@ async function processFiles(files) {
 
 			const { processBatchedVideoFrames } = useAviReader();
 			const totalFrames = effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : 100;
-			const skipAutoCrop = preCropRegion !== null;
 
 			await processBatchedVideoFrames($ffmpeg, fileToProcess.name, totalFrames, videoDuration, {
 				preCropRegion,
-				enableAutoCrop: enableAutoCrop && !skipAutoCrop,
 				manualThreshold: effectiveQualityMode.value === 'manual',
 				stackPercentage: effectiveStackPercentage.value,
 				drizzleScale: effectiveDrizzleScale.value,
@@ -816,7 +818,7 @@ async function processFiles(files) {
 			const { processFFmpegFrames } = useAviReader();
 			const skipAutoCrop = preCropRegion !== null;
 
-			await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value, surfaceMode.value);
+			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value, surfaceMode.value);
 		}
 	
 	} else if (imageFiles.length > 1) {
@@ -825,7 +827,7 @@ async function processFiles(files) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', false, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value, surfaceMode.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value, surfaceMode.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing

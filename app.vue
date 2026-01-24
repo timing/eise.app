@@ -15,7 +15,7 @@
 				<img src="/public/EiseApp-NoCopyright-L.webp" width="260" />
 			</div>
 			<div class="content">
-			<h2>About eise.app - Planetary Image Stacker</h2>
+			<h2>About eise.app - Image Stacker for Planets, Moon & Sun</h2>
 			<h3>100% browser-based - no uploads, no installs</h3>
 			<p>eise.app is the first fully browser-based planetary image stacking tool.
 			Everything runs locally on your machine using WebAssembly and Web Workers - your data never leaves your computer.
@@ -29,8 +29,8 @@
 			<ul>
 				<li><strong>File support:</strong> SER files (recommended), AVI (uncompressed), or any video format via FFmpeg.js</li>
 				<li><strong>Frame ranking:</strong> Laplacian variance calculates sharpness for each frame. Manual threshold selection with quality graph.</li>
-				<li><strong>Auto-crop:</strong> Detects and centers the planet in each frame, rejects cut-off or smeared frames</li>
-				<li><strong>Global alignment:</strong> Cross-correlation finds sub-pixel offset between frames</li>
+				<li><strong>Auto-crop:</strong> Detects and centers the target in each frame. For planets, rejects cut-off frames.</li>
+				<li><strong>Surface mode:</strong> For Moon/Sun closeups with drift tracking to handle larger frame-to-frame motion</li>
 				<li><strong>Local alignment:</strong> Alignment Points (APs) track motion across the frame using OpenCV's matchTemplate</li>
 				<li><strong>De-warping:</strong> Displacement maps correct atmospheric wobble using inverse distance weighted interpolation</li>
 				<li><strong>Drizzle:</strong> 1.5x output resolution using sub-pixel frame offsets</li>

@@ -447,7 +447,10 @@ export function useSerReader() {
         const bayerPattern = bayerPatternMap[bayerChoice] ?? -1;
 
         // Load all sample frames in batches for GPU processing
-        const batchSize = 16; // Process 16 frames at a time on GPU
+        // Dynamic batch size based on frame dimensions to avoid memory issues
+        const frameBytes = header.width * header.height * 16; // Float32 RGBA
+        const targetMemory = 256 * 1024 * 1024; // 256MB
+        const batchSize = Math.max(2, Math.min(16, Math.floor(targetMemory / frameBytes)));
         let maxSize = 0;
         let canCropCount = 0;
         const detectedCenters = [];
@@ -598,7 +601,7 @@ export function useSerReader() {
      * @param bayerPattern - GPU pattern index (0-3) or -1 for MONO/RGB
      * @param threshold - Threshold for circularity (0-1, typically 0.1)
      */
-    async function analyzeFrameBatchGpu(frames, width, height, bayerPattern, threshold = 0.1) {
+    async function analyzeFrameBatchGpu(frames, width, height, bayerPattern, threshold = 0.1, metadataOnly = false) {
         if (!gpuAnalyzeWorker || !gpuWorkerReady) {
             throw new Error('GPU worker not initialized');
         }
@@ -625,7 +628,8 @@ export function useSerReader() {
                 height,
                 bayerPattern,
                 threshold,
-                requestId
+                requestId,
+                metadataOnly
             });
         });
     }
@@ -752,7 +756,7 @@ export function useSerReader() {
         return cropped;
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false) {
+    async function readSerFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -817,14 +821,14 @@ export function useSerReader() {
         let cropRegion = null;
         let croppedFrameBuffers = []; // Store cropped raw data for SER export
 
-        if (enableAutoCrop && header.width >= MIN_SIZE_FOR_CROP && header.height >= MIN_SIZE_FOR_CROP) {
+        if (header.width >= MIN_SIZE_FOR_CROP && header.height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${header.width}x${header.height} qualifies for auto-crop`);
             cropRegion = await detectCropRegionGpu(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
             }
-        } else if (enableAutoCrop) {
+        } else {
             addLog(`Frame size ${header.width}x${header.height} too small for auto-crop (min ${MIN_SIZE_FOR_CROP}x${MIN_SIZE_FOR_CROP})`);
         }
 
@@ -839,13 +843,19 @@ export function useSerReader() {
         // Lazy blob creation - only when needed for display
         async function ensureBlob(frame) {
             if (frame.blob) return frame;
-            if (!frame.float32Buffer) return frame;
+            if (!frame.float32Buffer && !frame.uint8Buffer) return frame;
             try {
-                // Convert Float32 (0.0-1.0) to Uint8 (0-255) for display
-                const float32Data = new Float32Array(frame.float32Buffer);
-                const rgba = new Uint8ClampedArray(float32Data.length);
-                for (let i = 0; i < float32Data.length; i++) {
-                    rgba[i] = Math.round(float32Data[i] * 255);
+                let rgba;
+                if (frame.uint8Buffer) {
+                    // Already Uint8 from metadataOnly mode
+                    rgba = new Uint8ClampedArray(frame.uint8Buffer);
+                } else {
+                    // Convert Float32 (0.0-1.0) to Uint8 (0-255) for display
+                    const float32Data = new Float32Array(frame.float32Buffer);
+                    rgba = new Uint8ClampedArray(float32Data.length);
+                    for (let i = 0; i < float32Data.length; i++) {
+                        rgba[i] = Math.round(float32Data[i] * 255);
+                    }
                 }
                 const imageData = new ImageData(rgba, frame.width, frame.height);
                 const canvas = new OffscreenCanvas(frame.width, frame.height);
@@ -861,17 +871,19 @@ export function useSerReader() {
         function rankFrame(frame) {
             // Validate frame has usable data:
             // - float32Buffer (GPU mode with buffer), OR
+            // - uint8Buffer (GPU metadataOnly mode), OR
             // - valid blob (CPU mode), OR
-            // - centerX/centerY (two-pass mode - will be re-read during stacking)
-            const hasTwoPassData = frame.centerX !== undefined && frame.centerY !== undefined;
-            if (!frame.float32Buffer && !hasTwoPassData && (!frame.blob || !(frame.blob instanceof Blob) || frame.blob.size === 0)) {
+            // - index with frameReReader (two-pass mode - will be re-read during stacking)
+            const hasTwoPassData = frame.index !== undefined;
+            if (!frame.float32Buffer && !frame.uint8Buffer && !hasTwoPassData && (!frame.blob || !(frame.blob instanceof Blob) || frame.blob.size === 0)) {
                 console.warn(`Skipping frame ${frame.index}: no valid data`);
                 return;
             }
 
             // Capture post-crop frames for comparison export (sample evenly)
-            if (frame.float32Buffer && frame.width && frame.height) {
-                capturePostCropFrame(frame.float32Buffer, frame.width, frame.height, frame.index, frameCount);
+            const bufferForCapture = frame.float32Buffer || frame.uint8Buffer;
+            if (bufferForCapture && frame.width && frame.height) {
+                capturePostCropFrame(bufferForCapture, frame.width, frame.height, frame.index, frameCount);
             }
 
             // Keep all frames when manual threshold is enabled
@@ -879,25 +891,60 @@ export function useSerReader() {
                 allAnalyzedFrames.push(frame);
             }
 
-            // Update best frame for preview
+            // Update best frame for preview (keep buffer for preview only)
             if (bestFrameSoFar === null || frame.sharpness > bestFrameSoFar.sharpness) {
+                // Clear buffer from old best frame if it's not also the refCandidate
+                if (bestFrameSoFar && bestFrameSoFar !== refCandidateSoFar) {
+                    clearFrameBuffer(bestFrameSoFar);
+                }
                 bestFrameSoFar = frame;
+            } else {
+                // This frame is not the best - clear its buffer unless needed elsewhere
+                // Buffer will be cleared after checking if it's added to bestFramesForStacking
             }
 
             // Keep track of best frames for stacking (still needed for non-manual mode)
+            let frameAdded = false;
+            let evictedFrame = null;
             if (bestFramesForStacking.length < bestFramesCapacity) {
                 bestFramesForStacking.push(frame);
+                frameAdded = true;
             } else {
                 let minSharpnessIndex = bestFramesForStacking.reduce((minIdx, currFrame, idx, arr) =>
                     (currFrame.sharpness < arr[minIdx].sharpness) ? idx : minIdx, 0);
 
                 if (frame.sharpness > bestFramesForStacking[minSharpnessIndex].sharpness) {
+                    evictedFrame = bestFramesForStacking[minSharpnessIndex];
                     bestFramesForStacking[minSharpnessIndex] = frame;
+                    frameAdded = true;
+                }
+            }
+
+            // Clear buffers from frames not needed for preview
+            // Only bestFrameSoFar and refCandidateSoFar need buffers (for display)
+            // All other frames will be re-read during stacking
+            // EXCEPT: when manualThreshold is enabled, keep buffers for quality selector preview
+            if (!manualThreshold) {
+                if (evictedFrame && evictedFrame !== bestFrameSoFar && evictedFrame !== refCandidateSoFar) {
+                    clearFrameBuffer(evictedFrame);
+                }
+                // Clear buffer from current frame if it's not a preview frame
+                // (we'll re-read it during stacking if it's in bestFramesForStacking)
+                if (frame !== bestFrameSoFar && frame !== refCandidateSoFar) {
+                    clearFrameBuffer(frame);
                 }
             }
 
             // Update reference candidate: most circular from top 1% of sharpest frames
             updateRefCandidate();
+        }
+
+        // Helper to clear frame buffer to free memory
+        function clearFrameBuffer(frame) {
+            if (frame) {
+                frame.float32Buffer = null;
+                frame.uint8Buffer = null;
+            }
         }
 
         function updateRefCandidate() {
@@ -911,7 +958,11 @@ export function useSerReader() {
                 (f.circularity || 0) > (best.circularity || 0) ? f : best
             );
 
-            if (!refCandidateSoFar || mostCircular.blob !== refCandidateSoFar.blob) {
+            if (!refCandidateSoFar || mostCircular.index !== refCandidateSoFar.index) {
+                // Clear buffer from old refCandidate if it's not also bestFrameSoFar
+                if (refCandidateSoFar && refCandidateSoFar !== bestFrameSoFar) {
+                    clearFrameBuffer(refCandidateSoFar);
+                }
                 refCandidateSoFar = mostCircular;
             }
         }
@@ -965,9 +1016,14 @@ export function useSerReader() {
             throw new Error('WebGPU initialization failed - GPU is required for processing');
         }
 
-        // Batch size for GPU: start smaller for quick first preview, then increase
-        const INITIAL_BATCH_SIZE = 16;  // Quick first preview
-        const BATCH_SIZE = 64;          // Larger for better throughput
+        // Batch size for GPU: dynamic based on frame size to avoid memory issues
+        // Target ~256MB of Float32 data per batch (width * height * 4 channels * 4 bytes * batchSize)
+        const frameBytes = header.width * header.height * 16; // Float32 RGBA = 16 bytes/pixel
+        const targetBatchMemory = 256 * 1024 * 1024; // 256MB
+        const maxBatchSize = Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
+        const INITIAL_BATCH_SIZE = Math.min(8, maxBatchSize);
+        const BATCH_SIZE = maxBatchSize;
+        addLog(`Using batch size ${BATCH_SIZE} for ${header.width}x${header.height} frames`);
 
         if (cropRegion) {
                     // TWO-PASS GPU PATH: GPU detects centers + analyzes, stores only metadata
@@ -1198,8 +1254,8 @@ export function useSerReader() {
                     }
 
                 } else {
-                    // PURE GPU PATH: No cropping needed
-                    addLog('Using WebGPU for frame analysis (no cropping)');
+                    // PURE GPU PATH: No cropping needed (two-pass mode for memory efficiency)
+                    addLog('Using WebGPU for frame analysis (no cropping, two-pass mode)');
                     const gpuBayerPattern = bayerChoiceToGpuPattern(bayerChoice);
                     const processWidth = header.width;
                     const processHeight = header.height;
@@ -1246,20 +1302,25 @@ export function useSerReader() {
                         }
 
                         try {
+                            // Use metadataOnly=true to avoid creating Float32 buffers during analyze
                             const results = await analyzeFrameBatchGpu(
-                                batchFrames, processWidth, processHeight, gpuBayerPattern, 0.1
+                                batchFrames, processWidth, processHeight, gpuBayerPattern, 0.1, true
                             );
 
                             for (let j = 0; j < results.length; j++) {
                                 const result = results[j];
                                 const frameIndex = batchFrames[j].index;
 
+                                // Two-pass mode: store only metadata, re-read frames during stacking
+                                // For no-crop mode, center is fixed at frame center
                                 const currentFrame = {
                                     sharpness: result.sharpness,
-                                    float32Buffer: result.float32Buffer,
+                                    uint8Buffer: result.uint8Buffer, // 8-bit for preview only
                                     width: processWidth,
                                     height: processHeight,
                                     index: frameIndex,
+                                    centerX: processWidth / 2,
+                                    centerY: processHeight / 2,
                                     subPixelOffset: { x: 0, y: 0 },
                                     circularity: result.circularity || 0
                                 };
@@ -1300,6 +1361,40 @@ export function useSerReader() {
                         // Move to next batch
                         batchStart = batchEnd;
                     }
+
+                    // Create frameReReader for two-pass stacking (no cropping needed)
+                    frameReReader = {
+                        header,
+                        file,
+                        frameSize,
+                        bpp,
+                        bayerPattern: gpuBayerPattern,
+                        width: processWidth,
+                        height: processHeight,
+                        noCrop: true, // Flag to indicate no cropping needed
+
+                        // Re-read a single frame by index
+                        async getFrame(frameIndex) {
+                            const offset = 178 + (frameIndex * this.frameSize);
+                            const frameBuffer = await this.file.slice(offset, offset + this.frameSize).arrayBuffer();
+
+                            return {
+                                frameBuffer,
+                                // No center needed for no-crop mode
+                                centerX: this.width / 2,
+                                centerY: this.height / 2
+                            };
+                        },
+
+                        // Re-read multiple frames in parallel (for batch processing)
+                        async getFrames(frameIndices) {
+                            const results = await Promise.all(
+                                frameIndices.map(idx => this.getFrame(idx))
+                            );
+                            return results.filter(r => r !== null);
+                        }
+                    };
+                    addLog(`Created frameReReader for two-pass stacking (no-crop mode, ${processWidth}x${processHeight})`);
                 }
 
         terminateGpuAnalyzeWorker();
@@ -1485,8 +1580,11 @@ export function useSerReader() {
 
         addLog(`GPU sampling ${sampleFrames.length} frames for crop detection across ${fileInfos.length} files...`);
 
-        // Process frames in batches for GPU
-        const batchSize = 16;
+        // Process frames in batches for GPU - dynamic size based on dimensions
+        const referenceHeader = fileInfos[0].header;
+        const frameBytes = referenceHeader.width * referenceHeader.height * 16; // Float32 RGBA
+        const targetMemory = 256 * 1024 * 1024; // 256MB
+        const batchSize = Math.max(2, Math.min(16, Math.floor(targetMemory / frameBytes)));
         let maxSize = 0;
         let canCropCount = 0;
         const detectedCenters = [];
@@ -1692,7 +1790,7 @@ export function useSerReader() {
 
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
-    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
+    async function readSerFiles(files, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -1781,7 +1879,7 @@ export function useSerReader() {
         let previewHeader = firstHeader;
         const MIN_SIZE_FOR_CROP = 300;
 
-        if (enableAutoCrop && firstHeader.width >= MIN_SIZE_FOR_CROP && firstHeader.height >= MIN_SIZE_FOR_CROP) {
+        if (firstHeader.width >= MIN_SIZE_FOR_CROP && firstHeader.height >= MIN_SIZE_FOR_CROP) {
             emit('set-caption', 'Detecting planet for preview...');
             try {
                 const headerForWorker = {
@@ -1857,7 +1955,7 @@ export function useSerReader() {
             info.header.width >= MIN_SIZE_FOR_CROP && info.header.height >= MIN_SIZE_FOR_CROP
         );
 
-        if (enableAutoCrop && allQualifyForCrop) {
+        if (allQualifyForCrop) {
             addLog(`All files qualify for auto-crop (min ${MIN_SIZE_FOR_CROP}x${MIN_SIZE_FOR_CROP})`);
             // Use GPU detection when WebGPU is enabled, falls back to CPU automatically
             if (useWebGPU) {
@@ -1869,7 +1967,7 @@ export function useSerReader() {
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
             }
-        } else if (enableAutoCrop) {
+        } else {
             addLog(`Some files too small for auto-crop, skipping crop detection`);
         }
 
@@ -1883,11 +1981,20 @@ export function useSerReader() {
         let bestFrameSoFar = null;
         let refCandidateSoFar = null;
 
+        // Helper to clear frame buffer to free memory
+        function clearFrameBuffer(frame) {
+            if (frame) {
+                frame.float32Buffer = null;
+                frame.uint8Buffer = null;
+            }
+        }
+
         // Streaming rank function - keeps only top N frames in memory
         function rankFrame(frame) {
             // Capture post-crop frames for comparison export (sample evenly)
-            if (frame.float32Buffer && frame.width && frame.height) {
-                capturePostCropFrame(frame.float32Buffer, frame.width, frame.height, frame.index, totalFramesToProcess);
+            const bufferForCapture = frame.float32Buffer || frame.uint8Buffer;
+            if (bufferForCapture && frame.width && frame.height) {
+                capturePostCropFrame(bufferForCapture, frame.width, frame.height, frame.index, totalFramesToProcess);
             }
 
             // For manual threshold, we need all frames (may still crash on large sets)
@@ -1895,12 +2002,17 @@ export function useSerReader() {
                 allAnalyzedFrames.push(frame);
             }
 
-            // Track best frame for preview
+            // Track best frame for preview (keep buffer for preview only)
             if (bestFrameSoFar === null || frame.sharpness > bestFrameSoFar.sharpness) {
+                // Clear buffer from old best frame if it's not also the refCandidate
+                if (bestFrameSoFar && bestFrameSoFar !== refCandidateSoFar) {
+                    clearFrameBuffer(bestFrameSoFar);
+                }
                 bestFrameSoFar = frame;
             }
 
             // Streaming top-N: only keep best frames
+            let evictedFrame = null;
             if (bestFramesForStacking.length < bestFramesCapacity) {
                 bestFramesForStacking.push(frame);
             } else {
@@ -1914,9 +2026,24 @@ export function useSerReader() {
 
                 // Replace if current frame is better
                 if (frame.sharpness > bestFramesForStacking[minSharpnessIndex].sharpness) {
+                    evictedFrame = bestFramesForStacking[minSharpnessIndex];
                     bestFramesForStacking[minSharpnessIndex] = frame;
                 }
                 // Otherwise frame is discarded (not kept in memory)
+            }
+
+            // Clear buffers from frames not needed for preview
+            // Only bestFrameSoFar and refCandidateSoFar need buffers (for display)
+            // All other frames will be re-read during stacking
+            // EXCEPT: when manualThreshold is enabled, keep buffers for quality selector preview
+            if (!manualThreshold) {
+                if (evictedFrame && evictedFrame !== bestFrameSoFar && evictedFrame !== refCandidateSoFar) {
+                    clearFrameBuffer(evictedFrame);
+                }
+                // Clear buffer from current frame if it's not a preview frame
+                if (frame !== bestFrameSoFar && frame !== refCandidateSoFar) {
+                    clearFrameBuffer(frame);
+                }
             }
 
             // Update reference candidate: most circular from top 1% of sharpest frames
@@ -1934,7 +2061,11 @@ export function useSerReader() {
                 (f.circularity || 0) > (best.circularity || 0) ? f : best
             );
 
-            if (!refCandidateSoFar || mostCircular.blob !== refCandidateSoFar.blob) {
+            if (!refCandidateSoFar || mostCircular.index !== refCandidateSoFar.index) {
+                // Clear buffer from old refCandidate if it's not also bestFrameSoFar
+                if (refCandidateSoFar && refCandidateSoFar !== bestFrameSoFar) {
+                    clearFrameBuffer(refCandidateSoFar);
+                }
                 refCandidateSoFar = mostCircular;
             }
         }

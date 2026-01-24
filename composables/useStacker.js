@@ -123,15 +123,19 @@ export function useStacker() {
             srcWidth = header.width;
             srcHeight = header.height;
 
-            // Map bayer choice to GPU pattern
-            const bayerMap = {
-                'COLOR_BayerBG2RGB': 0, 'COLOR_BayerGB2RGB': 1,
-                'COLOR_BayerRG2RGB': 2, 'COLOR_BayerGR2RGB': 3,
-                'COLOR_BayerBG2RGB_VNG': 0, 'COLOR_BayerGB2RGB_VNG': 1,
-                'COLOR_BayerRG2RGB_VNG': 2, 'COLOR_BayerGR2RGB_VNG': 3,
-                'MONO': -1
-            };
-            bayerPattern = bayerMap[bayerChoice] ?? -1;
+            // Use direct bayerPattern if available (no-crop mode), otherwise map from bayerChoice
+            if (frameReReader.bayerPattern !== undefined) {
+                bayerPattern = frameReReader.bayerPattern;
+            } else {
+                const bayerMap = {
+                    'COLOR_BayerBG2RGB': 0, 'COLOR_BayerGB2RGB': 1,
+                    'COLOR_BayerRG2RGB': 2, 'COLOR_BayerGR2RGB': 3,
+                    'COLOR_BayerBG2RGB_VNG': 0, 'COLOR_BayerGB2RGB_VNG': 1,
+                    'COLOR_BayerRG2RGB_VNG': 2, 'COLOR_BayerGR2RGB_VNG': 3,
+                    'MONO': -1
+                };
+                bayerPattern = bayerMap[bayerChoice] ?? -1;
+            }
         } else if (isImageFile) {
             cropSize = frameReReader.cropRegion?.size || frameReReader.srcWidth;
             srcWidth = frameReReader.srcWidth;
@@ -328,7 +332,10 @@ export function useStacker() {
 
             // Step 4: Process frames in pipelined batches
             emit('set-caption', 'Stacking...');
-            const BATCH_SIZE = 32;
+            // Dynamic batch size based on crop size to avoid memory issues
+            const frameBytes = cropSize * cropSize * 16; // Float32 RGBA = 16 bytes/pixel
+            const targetBatchMemory = 256 * 1024 * 1024; // 256MB
+            const BATCH_SIZE = Math.max(4, Math.min(32, Math.floor(targetBatchMemory / frameBytes)));
             const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
             let processedCount = 0;
 
