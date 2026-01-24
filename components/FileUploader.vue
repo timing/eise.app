@@ -342,61 +342,60 @@ async function detectPreCropRegion(filename) {
 		return null;
 	}
 
-	// Sample 10 frames spread across the video in ONE FFmpeg command
+	// Sample 10 frames spread across the video, extracting ONE AT A TIME to minimize memory
 	const sampleCount = 10;
 	const allBounds = [];
 
-	// Calculate fps to get ~10 evenly spaced frames
-	// fps = sampleCount / duration, but we skip first/last 10%
-	const effectiveDuration = duration * 0.8;
-	const fpsRate = sampleCount / effectiveDuration;
-	const startTime = duration * 0.1; // Skip first 10%
+	// Calculate time positions for each sample (skip first/last 10% of video)
+	const startTime = duration * 0.1;
+	const endTime = duration * 0.9;
+	const timeStep = (endTime - startTime) / (sampleCount - 1);
 
 	eventBusEmit('update-loading', { progress: 10, current: 0, total: sampleCount });
-	addLog(`Extracting ${sampleCount} sample frames in one pass...`);
 
-	try {
-		// Single FFmpeg command to extract all samples
-		await $ffmpeg.run(
-			'-ss', startTime.toFixed(2),
-			'-i', filename,
-			'-vf', `fps=${fpsRate.toFixed(4)}`,
-			'-vframes', `${sampleCount}`,
-			'sample_%d.png'
-		);
+	// Suppress FFmpeg info output during sampling
+	$ffmpeg.setLogger(() => {});
 
-		// Process all extracted samples
-		for (let i = 1; i <= sampleCount; i++) {
-			const sampleFile = `sample_${i}.png`;
-			eventBusEmit('update-loading', { progress: 10 + (i / sampleCount) * 40, current: i, total: sampleCount });
+	// Extract and process one frame at a time to minimize peak memory
+	for (let i = 0; i < sampleCount; i++) {
+		const seekTime = startTime + (i * timeStep);
+		const sampleFile = 'sample.png';
 
-			try {
-				const pngData = $ffmpeg.FS('readFile', sampleFile);
-				$ffmpeg.FS('unlink', sampleFile);
+		eventBusEmit('set-caption', `Sampling frame ${i + 1}/${sampleCount}...`);
+		eventBusEmit('update-loading', { progress: 10 + ((i + 1) / sampleCount) * 40, current: i + 1, total: sampleCount });
 
-				// Decode PNG and detect bounds using canvas
-				const blob = new Blob([pngData], { type: 'image/png' });
-				const bitmap = await createImageBitmap(blob);
+		try {
+			// Extract single frame at this time position
+			await $ffmpeg.run(
+				'-ss', seekTime.toFixed(2),
+				'-i', filename,
+				'-vframes', '1',
+				'-y',  // Overwrite previous sample
+				sampleFile
+			);
 
-				// Create canvas to get pixel data
-				const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-				const ctx = canvas.getContext('2d');
-				ctx.drawImage(bitmap, 0, 0);
-				const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+			const pngData = $ffmpeg.FS('readFile', sampleFile);
+			$ffmpeg.FS('unlink', sampleFile);
 
-				// Simple bright object detection
-				const bounds = detectBrightObjectBounds(imageData.data, bitmap.width, bitmap.height);
-				if (bounds) {
-					allBounds.push(bounds);
-					addLog(`Sample ${i}: planet at (${bounds.x}, ${bounds.y}) size ${bounds.width}x${bounds.height}`);
-				}
-			} catch (e) {
-				// Sample file might not exist if video was shorter than expected
-				if (i <= 3) addLog(`Sample ${i} not found`);
+			// Decode PNG and detect bounds using canvas
+			const blob = new Blob([pngData], { type: 'image/png' });
+			const bitmap = await createImageBitmap(blob);
+
+			// Create canvas to get pixel data
+			const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+			const ctx = canvas.getContext('2d');
+			ctx.drawImage(bitmap, 0, 0);
+			const imageData = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+
+			// Simple bright object detection
+			const bounds = detectBrightObjectBounds(imageData.data, bitmap.width, bitmap.height);
+			if (bounds) {
+				allBounds.push(bounds);
+				addLog(`Sample ${i + 1}: planet at (${bounds.x}, ${bounds.y}) size ${bounds.width}x${bounds.height}`);
 			}
+		} catch (e) {
+			addLog(`Sample ${i + 1} extraction failed: ${e.message}`);
 		}
-	} catch (e) {
-		addLog(`Sample extraction failed: ${e.message}`);
 	}
 
 	if (allBounds.length === 0) {
