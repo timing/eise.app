@@ -597,7 +597,7 @@ export function useImageReader() {
             });
         } else {
             addLog('Stacking failed - no valid frames');
-            emit('stack-failed', { component: 'useImageReader', reason: 'no valid frames', filename: files?.[0]?.name });
+            emit('stack-failed', { component: 'useImageReader', reason: 'no valid frames' });
             emit('stop-loading');
         }
     }

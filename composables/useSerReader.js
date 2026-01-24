@@ -1357,7 +1357,7 @@ export function useSerReader() {
                 });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
-                emit('stack-failed', { component: 'useSerReader', reason: 'no valid frames', filename: file?.name || files?.[0]?.name });
+                emit('stack-failed', { component: 'useSerReader', reason: 'no valid frames' });
                 emit('stop-loading');
             }
         } else {
@@ -2179,7 +2179,7 @@ export function useSerReader() {
                 });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
-                emit('stack-failed', { component: 'useSerReader', reason: 'no valid frames', filename: file?.name || files?.[0]?.name });
+                emit('stack-failed', { component: 'useSerReader', reason: 'no valid frames' });
                 emit('stop-loading');
             }
         }

@@ -228,9 +228,7 @@ onMounted(async () => {
 		const error = data?.error || new Error(`Stacking failed: ${data?.reason || 'unknown reason'}`);
 		reportError(error, {
 			component: data?.component || 'unknown',
-			action: 'stacking',
-			filename: data?.filename,
-			logs: logs.value
+			action: 'stacking'
 		});
 	});
 });

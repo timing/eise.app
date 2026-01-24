@@ -1142,7 +1142,7 @@ export function useAviReader() {
                 });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
-                emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames', filename: file.name });
+                emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames' });
                 emit('stop-loading');
             }
         } else {
@@ -1413,7 +1413,7 @@ export function useAviReader() {
                 });
             } else {
                 addLog('Client-side stacking failed - no valid frames');
-                emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames', filename: file.name });
+                emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames (FFmpeg)' });
                 emit('stop-loading');
             }
         } else {
@@ -2058,7 +2058,7 @@ export function useAviReader() {
             });
         } else {
             addLog('MJPEG stacking failed - no valid frames');
-            emit('stack-failed', { component: 'useAviReader', reason: 'MJPEG no valid frames', filename: file.name });
+            emit('stack-failed', { component: 'useAviReader', reason: 'MJPEG no valid frames' });
             emit('stop-loading');
         }
     }
