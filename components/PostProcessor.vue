@@ -37,7 +37,7 @@
 				<div class="sharpening-tabs">
 					<button :class="{ active: sharpeningMethod === 'wavelets' }" @click="setSharpeningMethod('wavelets')">Wavelets</button>
 					<button :class="{ active: sharpeningMethod === 'usm' }" @click="setSharpeningMethod('usm')">Unsharp Mask</button>
-					<button :class="{ active: sharpeningMethod === 'deconv' }" @click="setSharpeningMethod('deconv')">Deconvolution</button>
+					<button v-if="!liteMode" :class="{ active: sharpeningMethod === 'deconv' }" @click="setSharpeningMethod('deconv')">Deconvolution</button>
 					<button :class="{ active: sharpeningMethod === 'none' }" @click="setSharpeningMethod('none')" title="None">⊘</button>
 				</div>
 
@@ -168,7 +168,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, defineProps, reactive, onUnmounted, computed, nextTick } from 'vue';
+import { ref, onMounted, watch, defineProps, reactive, onUnmounted, computed, nextTick, inject } from 'vue';
 import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import { encodeAvi } from '@/utils/aviEncoder.js'
@@ -182,6 +182,9 @@ import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useFeedback } from '@/composables/useFeedback';
+
+// Lite mode: deconvolution disabled (too slow on CPU)
+const liteMode = inject('liteMode', ref(false));
 
 const { track } = useTracking();
 const { openFeedbackAfterDownload } = useFeedback();

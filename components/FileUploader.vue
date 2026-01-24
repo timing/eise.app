@@ -9,11 +9,7 @@
 			<button class="cancel-button" @click="cancelProcessing">Cancel</button>
 		</div>
 
-		<!-- WebGPU warning -->
-		<div v-if="!webGPUSupported" class="webgpu-warning">
-			<strong>WebGPU not available</strong>
-			<p>Your browser doesn't support WebGPU. Processing will be slower. For best performance, use Chrome, Edge, or Safari 18+.</p>
-		</div>
+		<!-- Lite mode info (WebGPU warning is now shown in app.vue banner) -->
 
 		<!-- Initial state: file selection and settings (hidden during processing) -->
 		<template v-if="!isProcessing">
@@ -52,62 +48,68 @@
 				<p>{{ errorMessage }}</p>
 			</div>
 
-			<div class="separator"></div>
+			<!-- Frame selection hidden in lite mode (defaults to 30%) -->
+			<template v-if="!liteMode">
+				<div class="separator"></div>
 
-			<h4>Frame selection</h4>
-			<div class="radio-group">
-				<label class="radio-option">
-					<input type="radio" v-model="qualityMode" value="manual" />
-					Manually pick best frames threshold
+				<h4>Frame selection</h4>
+				<div class="radio-group">
+					<label class="radio-option">
+						<input type="radio" v-model="qualityMode" value="manual" />
+						Manually pick best frames threshold
+					</label>
+					<label class="radio-option">
+						<input type="radio" v-model="qualityMode" value="percentage" />
+						Stack best
+						<input type="number" v-model.number="stackPercentage" min="1" max="100" class="percentage-input" :disabled="qualityMode !== 'percentage'" />%
+					</label>
+				</div>
+				<p v-if="qualityMode === 'manual'" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack.</p>
+				<p v-if="qualityMode === 'percentage'" class="info-text">Stack best is recommended if you run into memory issues.</p>
+			</template>
+
+			<!-- Advanced options hidden in lite mode -->
+			<template v-if="!liteMode">
+				<div class="separator"></div>
+
+				<h4>Stacking mode</h4>
+				<div class="radio-group">
+					<label class="radio-option">
+						<input type="radio" v-model="drizzleMode" value="1.5x" />
+						1.5x Drizzle (recommended)
+					</label>
+					<label class="radio-option">
+						<input type="radio" v-model="drizzleMode" value="1x" />
+						Normal (1x)
+					</label>
+				</div>
+				<p class="info-text">Drizzle uses sub-pixel offsets to increase resolution. Best with 100+ frames.</p>
+
+				<label class="checkbox-option">
+					<input type="checkbox" v-model="noiseRobustAlignment" />
+					Pre-blur alignment
 				</label>
-				<label class="radio-option">
-					<input type="radio" v-model="qualityMode" value="percentage" />
-					Stack best
-					<input type="number" v-model.number="stackPercentage" min="1" max="100" class="percentage-input" :disabled="qualityMode !== 'percentage'" />%
-				</label>
-			</div>
-			<p v-if="qualityMode === 'manual'" class="info-text">After analysis, you'll see a quality graph and can choose which frames to stack.</p>
-			<p v-if="qualityMode === 'percentage'" class="info-text">Stack best is recommended if you run into memory issues.</p>
+				<p class="info-text">Aligns on blurred frames first, then refines. Better for turbulent seeing, slower.</p>
 
-			<div class="separator"></div>
+				<div class="separator"></div>
 
-			<h4>Stacking mode</h4>
-			<div class="radio-group">
-				<label class="radio-option">
-					<input type="radio" v-model="drizzleMode" value="1.5x" />
-					1.5x Drizzle (recommended)
-				</label>
-				<label class="radio-option">
-					<input type="radio" v-model="drizzleMode" value="1x" />
-					Normal (1x)
-				</label>
-			</div>
-			<p class="info-text">Drizzle uses sub-pixel offsets to increase resolution. Best with 100+ frames.</p>
+				<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
+				<input type="range" min="5" max="50" step="5" v-model="cropMarginPercent" />
+				{{ cropMarginPercent }}%
+				<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
 
-			<label class="checkbox-option">
-				<input type="checkbox" v-model="noiseRobustAlignment" />
-				Pre-blur alignment
-			</label>
-			<p class="info-text">Aligns on blurred frames first, then refines. Better for turbulent seeing, slower.</p>
+				<div class="separator"></div>
 
-			<div class="separator"></div>
-
-			<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
-			<input type="range" min="5" max="50" step="5" v-model="cropMarginPercent" />
-			{{ cropMarginPercent }}%
-			<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
-
-			<div class="separator"></div>
-
-			<template v-if="!showMemoryOptimization">
-				<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
-				<label>
-					<input type="checkbox" v-model="enableMaxFrames" />
-					Limit frames
-				</label>
-				<input type="range" min="2" max="5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
-				{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
-				<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
+				<template v-if="!showMemoryOptimization">
+					<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
+					<label>
+						<input type="checkbox" v-model="enableMaxFrames" />
+						Limit frames
+					</label>
+					<input type="range" min="2" max="5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
+					{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
+					<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
+				</template>
 			</template>
 		</template>
 	</div>
@@ -133,7 +135,7 @@
 
 <script setup>
 import { fetchFile } from '@ffmpeg/ffmpeg';
-import { computed, defineEmits, ref, onMounted, watch } from 'vue';
+import { computed, defineEmits, ref, onMounted, watch, inject } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useSerReader } from '@/composables/useSerReader';
 import { useAviReader } from '@/composables/useAviReader';
@@ -142,6 +144,10 @@ import { useProcessingState } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
 import { useFeedback } from '@/composables/useFeedback';
 import { useTracking } from '@/composables/useTracking';
+
+// Lite mode: auto-enabled when WebGPU unavailable
+// Limitations: max 100 frames, no drizzle, 8-bit, FFmpeg path for all files
+const liteMode = inject('liteMode', ref(false));
 
 const { track } = useTracking();
 
@@ -170,6 +176,14 @@ const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 const noiseRobustAlignment = ref(false);
+
+// Lite mode enforced settings
+const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMode.value === '1.5x' ? 1.5 : 1.0));
+const effectiveMaxFrames = computed(() => liteMode.value ? 100 : (enableMaxFrames.value ? selectedMaxFrames.value : -1));
+const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPercent.value);
+const effectiveNoiseRobust = computed(() => liteMode.value ? false : noiseRobustAlignment.value);
+const effectiveQualityMode = computed(() => liteMode.value ? 'percentage' : qualityMode.value);
+const effectiveStackPercentage = computed(() => liteMode.value ? 30 : stackPercentage.value);
 
 // Memory optimized pre-crop for mobile videos
 const enablePreCrop = ref(false);
@@ -216,26 +230,11 @@ watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarg
 
 onMounted(async () => {
 	loadSettings();
-
-	// Check WebGPU support
-	if (!navigator.gpu) {
-		webGPUSupported.value = false;
-	} else {
-		try {
-			const adapter = await navigator.gpu.requestAdapter();
-			if (!adapter) {
-				webGPUSupported.value = false;
-			}
-		} catch (e) {
-			webGPUSupported.value = false;
-		}
-	}
 });
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
 const fileInput = ref(null);
-const webGPUSupported = ref(true); // Assume supported until checked
 
 const emit = defineEmits(['frames', 'postProcessing', 'processing-started', 'showAbout']);
 
@@ -459,6 +458,11 @@ async function startProcessing() {
 	errorMessage.value = null;
 	isProcessing.value = true;
 	eventBusEmit('start-loading', 'Preparing...');
+
+	if (liteMode.value) {
+		addLog('Lite Mode: max 100 frames, best 30%, 1x stacking, CPU processing');
+	}
+
 	try {
 		await processFiles(selectedFiles.value);
 	} catch (error) {
@@ -539,14 +543,17 @@ async function processFiles(files) {
 		return;
 	}
 
-	// Handle multiple SER files (combined stacking)
-	if (serFiles.length > 1) {
+	// Handle multiple SER files (combined stacking) - not available in lite mode
+	if (serFiles.length > 1 && !liteMode.value) {
 		emit('processing-started');
 		const { readSerFiles } = useSerReader();
-		const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		await readSerFiles(serFiles, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
+		await readSerFiles(serFiles, effectiveMaxFrames.value, enableAutoCrop, enableClientSideStacking, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true);
+		return;
+	} else if (serFiles.length > 1 && liteMode.value) {
+		alert('Multiple SER files are not supported in Lite Mode. Please select a single file.');
+		isProcessing.value = false;
+		eventBusEmit('stop-loading');
 		return;
 	}
 
@@ -562,20 +569,18 @@ async function processFiles(files) {
 			}
 		}
 
-		// Handle SER files with direct reader
-		if (fileToProcess.name.endsWith('.ser')) {
+		// Handle SER files with direct reader (not in lite mode - lite mode uses FFmpeg)
+		if (fileToProcess.name.endsWith('.ser') && !liteMode.value) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
-			const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-			const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-			await readSerFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value);
+			await readSerFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, enableClientSideStacking, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value);
 			return;
 		}
 
 		let needsFfmpeg = !fileToProcess.name.endsWith('.avi'); // Non-AVI always needs FFmpeg
 		let expectedFrameCount = null; // From AVI header if available
 
-		if (fileToProcess.name.endsWith('.avi')) {
+		if (fileToProcess.name.endsWith('.avi') && !liteMode.value) {
 			// First, just check the header (only 5MB) to see if we can process directly
 			const { readAviFile, checkAviFormat } = useAviReader();
 
@@ -589,15 +594,17 @@ async function processFiles(files) {
 			if (formatInfo.isSupported) {
 				// Can process directly - readAviFile handles both uncompressed and MJPEG
 				emit('processing-started');
-				const maxFramesValue = enableMaxFrames.value ? selectedMaxFrames.value : -1;
-				const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-				await readAviFile(fileToProcess, maxFramesValue, enableAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', cropMarginPercent.value, stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, enableClientSideStacking, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
 				needsFfmpeg = true;
 				expectedFrameCount = formatInfo.frameCount; // Use frame count from header
 			}
+		} else if (fileToProcess.name.endsWith('.avi') && liteMode.value) {
+			// Lite mode: force FFmpeg for AVI files too
+			addLog('Lite mode: using FFmpeg for AVI processing');
+			needsFfmpeg = true;
 		}
 
 		if (!needsFfmpeg) return;
@@ -658,7 +665,7 @@ async function processFiles(files) {
 		// Set up progress tracking for FFmpeg
 		let lastFrameCount = 0;
 		let lastLoggedFrame = 0;
-		const totalFramesTarget = enableMaxFrames.value ? selectedMaxFrames.value : expectedFrameCount;
+		const totalFramesTarget = effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : expectedFrameCount;
 
 		$ffmpeg.setLogger(({ type, message }) => {
 			if (typeof message !== 'string') return;
@@ -694,7 +701,7 @@ async function processFiles(files) {
 		eventBusEmit('set-caption', 'Extracting frames from video');
 
 		try {
-			const frameLimit = enableMaxFrames.value ? ['-vframes', '' + selectedMaxFrames.value + ''] : [];
+			const frameLimit = effectiveMaxFrames.value > 0 ? ['-vframes', '' + effectiveMaxFrames.value + ''] : [];
 
 			// Build video filter chain
 			const videoFilters = [];
@@ -737,10 +744,9 @@ async function processFiles(files) {
 
 		// Route PNG frames through AVI reader - it will read and delete files from $ffmpeg
 		const { processFFmpegFrames } = useAviReader();
-		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
 		const skipAutoCrop = preCropRegion !== null;
 
-		await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, enableClientSideStacking, qualityMode.value === 'manual', stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
+		await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, enableClientSideStacking, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
@@ -748,8 +754,7 @@ async function processFiles(files) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		const drizzleScale = drizzleMode.value === '1.5x' ? 1.5 : 1.0;
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, qualityMode.value === 'manual', false, stackPercentage.value, drizzleScale, noiseRobustAlignment.value, true);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', false, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing
@@ -790,18 +795,6 @@ async function processFiles(files) {
 	margin-top: 10px;
 	border-radius: 5px;
 	font-weight: bold;
-}
-.webgpu-warning {
-	background-color: #fff3cd;
-	color: #856404;
-	padding: 10px;
-	margin-bottom: 10px;
-	border-radius: 5px;
-	border: 1px solid #ffc107;
-}
-.webgpu-warning p {
-	margin: 5px 0 0 0;
-	font-size: 0.9em;
 }
 .file-upload-wrapper {
 	display: block;

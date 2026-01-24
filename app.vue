@@ -60,9 +60,10 @@
 				<tr><td>Android</td><td>Chrome 121+ with Android 12+</td></tr>
 				<tr><td>iOS</td><td>Safari 18+ (iOS 18+)</td></tr>
 			</table>
-			<div class="compat-status" :class="{ compatible: webGPUSupported, incompatible: !webGPUSupported }">
+			<div class="compat-status" :class="{ compatible: webGPUSupported === true, incompatible: webGPUSupported === false, checking: webGPUSupported === null }">
 				<strong>Your browser:</strong> {{ detectedBrowser }}<br/>
-				<span v-if="webGPUSupported">WebGPU is supported - you're good to go!</span>
+				<span v-if="webGPUSupported === null">Checking WebGPU support...</span>
+				<span v-else-if="webGPUSupported">WebGPU is supported - you're good to go!</span>
 				<span v-else>WebGPU not available - processing will be slower. Try updating your browser or using Chrome/Edge/Safari.</span>
 			</div>
 
@@ -85,6 +86,11 @@
 		</div>
 	
 		<Tools v-show="currentTab === 'Tools'" />
+
+		<div v-if="liteMode && currentTab === 'FileUploader'" class="lite-mode-banner">
+			<strong>Lite Mode</strong> - <span v-if="forceLiteMode">(forced via URL)</span><span v-else>Your device doesn't support WebGPU.</span> Processing limited to 100 frames with basic stacking.
+		</div>
+
 		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing && !isSelectingQuality" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" @showAbout="currentTab = 'About'" />
 		<ColorProfileSelector v-show="currentTab === 'FileUploader' && isSelectingColorProfile" />
 		<QualitySelector v-show="currentTab === 'FileUploader' && isSelectingQuality" :frames="qualityFrames" @threshold-selected="handleThresholdSelected" />
@@ -108,7 +114,7 @@ import Tools from './components/Tools.vue';
 import Logger from './components/Logger.vue';
 import ColorProfileSelector from './components/ColorProfileSelector.vue';
 import QualitySelector from './components/QualitySelector.vue';
-import { ref, watch } from 'vue';
+import { ref, watch, computed, provide } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
 import { useTracking } from '@/composables/useTracking';
@@ -139,8 +145,15 @@ const croppedSerData = ref(null);
 const croppedAviData = ref(null);
 
 const loadPixel = ref(false)
-const webGPUSupported = ref(false);
+const webGPUSupported = ref(null); // null = not yet checked, true/false = result
 const detectedBrowser = ref('Detecting...');
+const forceLiteMode = ref(false); // ?lite=1 URL param for testing
+
+// Lite mode: auto-enabled when WebGPU is explicitly unavailable (not during detection)
+// Can also be forced via ?lite=1 URL parameter for testing
+// Limitations: max 100 frames, no drizzle, 8-bit output, always pre-crop
+const liteMode = computed(() => forceLiteMode.value || webGPUSupported.value === false);
+provide('liteMode', liteMode);
 
 // Detect browser and version
 function detectBrowser() {
@@ -194,6 +207,12 @@ onMounted(async () => {
 	track('page_view');
 	trackHumanInteraction();
 
+	// Check for ?lite=1 URL param to force lite mode for testing
+	const urlParams = new URLSearchParams(window.location.search);
+	if (urlParams.get('lite') === '1' || urlParams.get('lite') === 'true') {
+		forceLiteMode.value = true;
+	}
+
 	// Detect browser
 	detectedBrowser.value = detectBrowser();
 
@@ -205,6 +224,8 @@ onMounted(async () => {
 		} catch (e) {
 			webGPUSupported.value = false;
 		}
+	} else {
+		webGPUSupported.value = false;
 	}
 	on('postProcessing', handlePostProcessing);
 	on('stacked-image-ready', handleStackedImageReady);
@@ -503,5 +524,18 @@ canvas {
 .compat-status.incompatible {
 	background: rgba(255, 193, 7, 0.2);
 	border: 1px solid #ffc107;
+}
+.compat-status.checking {
+	background: rgba(200, 200, 200, 0.2);
+	border: 1px solid #999;
+}
+.lite-mode-banner {
+	background: rgba(255, 193, 7, 0.2);
+	border: 1px solid #ffc107;
+	color: #fff;
+	padding: 10px 15px;
+	margin: 10px 50px;
+	border-radius: 5px;
+	font-size: 13px;
 }
 </style>
