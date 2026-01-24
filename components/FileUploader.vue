@@ -157,9 +157,8 @@ const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 const enableMaxFrames = ref(false);
 const selectedMaxFrames = ref(100);
 
-// Always enable auto-crop and client-side stacking
+// Always enable auto-crop (client-side stacking is always on)
 const enableAutoCrop = true;
-const enableClientSideStacking = true;
 
 const errorMessage = ref(null);
 
@@ -568,7 +567,7 @@ async function processFiles(files) {
 		emit('processing-started');
 		const { readSerFiles } = useSerReader();
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		await readSerFiles(serFiles, effectiveMaxFrames.value, enableAutoCrop, enableClientSideStacking, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true);
+		await readSerFiles(serFiles, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true);
 		return;
 	} else if (serFiles.length > 1 && liteMode.value) {
 		alert('Multiple SER files are not supported in Lite Mode. Please select a single file.');
@@ -593,7 +592,7 @@ async function processFiles(files) {
 		if (fileToProcess.name.endsWith('.ser') && !liteMode.value) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
-			await readSerFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, enableClientSideStacking, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value);
+			await readSerFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value);
 			return;
 		}
 
@@ -614,7 +613,7 @@ async function processFiles(files) {
 			if (formatInfo.isSupported) {
 				// Can process directly - readAviFile handles both uncompressed and MJPEG
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, enableClientSideStacking, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, enableAutoCrop, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -760,7 +759,7 @@ async function processFiles(files) {
 		const { processFFmpegFrames } = useAviReader();
 		const skipAutoCrop = preCropRegion !== null;
 
-		await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, enableClientSideStacking, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value);
+		await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them

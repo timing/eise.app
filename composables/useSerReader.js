@@ -752,7 +752,7 @@ export function useSerReader() {
         return cropped;
     }
 
-    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false) {
+    async function readSerFile(file, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -1336,8 +1336,8 @@ export function useSerReader() {
                 frameReReader // Two-pass: include frameReReader for on-demand frame loading
             });
             return;
-        } else if (clientSideStacking) {
-            // Client-side stacking
+        } else {
+            // Client-side stacking (always on)
             emit('set-caption', 'Stacking frames locally...');
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
@@ -1360,14 +1360,6 @@ export function useSerReader() {
                 emit('stack-failed', { component: 'useSerReader', reason: 'no valid frames' });
                 emit('stop-loading');
             }
-        } else {
-            // Server-side stacking: upload PNGs
-            emit('set-caption', 'Uploading best frames for stacking...');
-
-            // Blobs are already available from worker processing, no need to re-render
-            const pngBlobs = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
-
-            await uploadFrames(pngBlobs);
         }
 
         // Terminate workers after all tasks are done (CPU mode only - GPU creates/terminates its own)
@@ -1698,7 +1690,7 @@ export function useSerReader() {
 
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
-    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
+    async function readSerFiles(files, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -2038,7 +2030,6 @@ export function useSerReader() {
                     header: headerForWorker,
                     bayerChoice: bayerChoice,
                     cropRegion: cropRegion,
-                    clientSideStacking: clientSideStacking,
                     capturePreCrop: shouldCapturePreCrop,
                     index: currentGlobalIndex
                 };
@@ -2162,7 +2153,8 @@ export function useSerReader() {
                 useWebGPU
             });
             return;
-        } else if (clientSideStacking) {
+        } else {
+            // Client-side stacking (always on)
             emit('set-caption', 'Stacking frames locally...');
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 

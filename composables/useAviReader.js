@@ -837,7 +837,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null) {
+    async function readAviFile(file, maxFrames = -1, enableAutoCrop = false, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -866,7 +866,7 @@ export function useAviReader() {
         if (isMjpegFourCC(aviHeader.fourCC)) {
             // MJPEG uses GPU path with native JPEG decoding
             addLog(`MJPEG AVI detected. Using GPU processing with native JPEG decoding.`);
-            return await readMjpegAviFile(file, aviHeader, maxFrames, enableAutoCrop, clientSideStacking, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment);
+            return await readMjpegAviFile(file, aviHeader, maxFrames, enableAutoCrop, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment);
         }
 
         if (!isEasyAviFourCC(aviHeader.fourCC)) {
@@ -1028,7 +1028,6 @@ export function useAviReader() {
                 header: headerForWorker,
                 bayerChoice: aviHeader.bayerChoice,
                 cropRegion: cropRegion,
-                clientSideStacking: clientSideStacking,
                 capturePreCrop: shouldCapturePreCrop,
                 index: i
             };
@@ -1124,32 +1123,25 @@ export function useAviReader() {
             return; // Don't terminate workers yet - they'll be used for stacking
         }
 
-        if (clientSideStacking) {
-            // Client-side stacking: use one of the existing workers (before terminating them)
-            emit('set-caption', 'Stacking frames locally...');
-            addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
+        // Client-side stacking (always on)
+        emit('set-caption', 'Stacking frames locally...');
+        addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
-            const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
+        const stackingWorker = unifiedAnalyzeWorkers[0];
+        const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
-            if (stackResult && stackResult.blob) {
-                addLog('Client-side stacking complete');
-                emit('stacked-image-ready', {
-                    blob: stackResult.blob,
-                    float32Data: stackResult.float32Data,
-                    width: stackResult.width,
-                    height: stackResult.height
-                });
-            } else {
-                addLog('Client-side stacking failed - no valid frames');
-                emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames' });
-                emit('stop-loading');
-            }
+        if (stackResult && stackResult.blob) {
+            addLog('Client-side stacking complete');
+            emit('stacked-image-ready', {
+                blob: stackResult.blob,
+                float32Data: stackResult.float32Data,
+                width: stackResult.width,
+                height: stackResult.height
+            });
         } else {
-            emit('set-caption', 'Uploading best frames for stacking...');
-
-            const pngBlobsForUpload = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
-            await uploadFrames(pngBlobsForUpload);
+            addLog('Client-side stacking failed - no valid frames');
+            emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames' });
+            emit('stop-loading');
         }
 
         // Terminate workers after all tasks are done (including stacking)
@@ -1157,7 +1149,7 @@ export function useAviReader() {
     }
 
     // Process FFmpeg-extracted PNG frames through the same pipeline as AVI
-    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, clientSideStacking = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
+    async function processFFmpegFrames(ffmpeg, pngFilenames, enableAutoCrop = false, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -1306,7 +1298,6 @@ export function useAviReader() {
                     header: header,
                     bayerChoice: 'MONO',
                     cropRegion: cropRegion,
-                    clientSideStacking: clientSideStacking,
                     capturePreCrop: shouldCapturePreCrop,
                     index: i
                 };
@@ -1395,32 +1386,25 @@ export function useAviReader() {
             return; // Don't terminate workers yet - they'll be used for stacking
         }
 
-        if (clientSideStacking) {
-            // Client-side stacking: use one of the existing workers (before terminating them)
-            emit('set-caption', 'Stacking frames locally...');
-            addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
+        // Client-side stacking: use one of the existing workers (before terminating them)
+        emit('set-caption', 'Stacking frames locally...');
+        addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
-            const stackingWorker = unifiedAnalyzeWorkers[0];
-            const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
+        const stackingWorker = unifiedAnalyzeWorkers[0];
+        const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU);
 
-            if (stackResult && stackResult.blob) {
-                addLog('Client-side stacking complete');
-                emit('stacked-image-ready', {
-                    blob: stackResult.blob,
-                    float32Data: stackResult.float32Data,
-                    width: stackResult.width,
-                    height: stackResult.height
-                });
-            } else {
-                addLog('Client-side stacking failed - no valid frames');
-                emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames (FFmpeg)' });
-                emit('stop-loading');
-            }
+        if (stackResult && stackResult.blob) {
+            addLog('Client-side stacking complete');
+            emit('stacked-image-ready', {
+                blob: stackResult.blob,
+                float32Data: stackResult.float32Data,
+                width: stackResult.width,
+                height: stackResult.height
+            });
         } else {
-            emit('set-caption', 'Uploading best frames for stacking...');
-
-            const pngBlobsForUpload = bestFramesForStacking.map(f => ({ pngFile: [f.blob] }));
-            await uploadFrames(pngBlobsForUpload);
+            addLog('Client-side stacking failed - no valid frames');
+            emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames (FFmpeg)' });
+            emit('stop-loading');
         }
 
         // Terminate workers after all tasks are done (including stacking)
@@ -1727,7 +1711,7 @@ export function useAviReader() {
     }
 
     // Process MJPEG AVI file with GPU acceleration
-    async function readMjpegAviFile(file, aviHeader, maxFrames, enableAutoCrop, clientSideStacking, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment) {
+    async function readMjpegAviFile(file, aviHeader, maxFrames, enableAutoCrop, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment) {
         resetCaptures();
 
         // Initialize GPU worker

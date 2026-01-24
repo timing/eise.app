@@ -582,7 +582,7 @@ async function handleMessage(e) {
                 return;
             }
 
-            const includeRgba = e.data.clientSideStacking === true;
+            const includeRgba = true;
             const shouldCapturePreCrop = capturePreCrop && actualCropRegion; // Only makes sense if cropping
             const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, actualCropRegion, index, includeRgba, false, shouldCapturePreCrop);
 
@@ -689,7 +689,7 @@ async function handleMessage(e) {
                 return;
             }
 
-            const includeRgba = e.data.clientSideStacking === true;
+            const includeRgba = true;
             const result = await processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, null, index, includeRgba);
 
             // Check for skipped frame (e.g., bayer artifact)
