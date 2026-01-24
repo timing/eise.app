@@ -1626,6 +1626,35 @@ export function useAviReader() {
         });
     }
 
+    // Combined detect + crop + analyze in ONE GPU pass for RGBA frames
+    // Same as SER's detectCropAnalyzeGpu but for already-decoded RGBA input
+    async function detectCropAnalyzeRgbaGpu(frames, srcWidth, srcHeight, cropSize, threshold = 0.1, metadataOnly = false) {
+        return new Promise((resolve, reject) => {
+            const requestId = Date.now() + Math.random();
+            const handler = (e) => {
+                if (e.data.requestId !== requestId) return;
+                gpuWorker.removeEventListener('message', handler);
+                if (e.data.type === 'detect-crop-analyze-result') {
+                    resolve(e.data.results);
+                } else if (e.data.type === 'detect-crop-analyze-error') {
+                    reject(new Error(e.data.error));
+                }
+            };
+            gpuWorker.addEventListener('message', handler);
+            gpuWorker.postMessage({
+                type: 'detect-crop-analyze-batch',
+                frames,
+                srcWidth,
+                srcHeight,
+                cropSize,
+                bayerPattern: -1, // RGBA input, no demosaic
+                threshold,
+                requestId,
+                metadataOnly
+            });
+        });
+    }
+
     // Detect crop region for MJPEG using GPU
     async function detectCropRegionMjpegGpu(file, frameIndex, width, height, cropMarginPercent = 10) {
         emit('set-caption', 'Detecting planet position...');
@@ -1842,28 +1871,26 @@ export function useAviReader() {
 
             try {
                 if (cropRegion) {
-                    // First get bounds to find centers
-                    const boundsResults = await analyzeRgbaBatchGpu(batchFrames, width, height);
+                    // Combined detect + crop + analyze in ONE GPU pass (same as SER flow)
+                    const combinedResults = await detectCropAnalyzeRgbaGpu(
+                        batchFrames, width, height, cropRegion.size, 0.1, true
+                    );
 
-                    const framesToCrop = [];
-                    const centers = [];
-                    const cropIndices = [];
-
-                    for (let j = 0; j < boundsResults.length; j++) {
-                        const result = boundsResults[j];
+                    for (let j = 0; j < combinedResults.length; j++) {
+                        const gpuResult = combinedResults[j];
                         const frameIdx = batchIndices[j];
 
-                        if (!result.bounds) {
+                        // Check if bounds were detected
+                        if (!gpuResult.bounds) {
                             skippedFrames++;
                             completedFrames++;
                             continue;
                         }
 
-                        // Check if crop region would fit within frame bounds
-                        // Crop is centered on centroid, so check if cropSize/2 fits on all sides
+                        // Check for cut-off (crop region would exceed frame bounds)
                         const halfCrop = cropRegion.size / 2;
-                        const cx = result.bounds.centroidX;
-                        const cy = result.bounds.centroidY;
+                        const cx = gpuResult.centerX;
+                        const cy = gpuResult.centerY;
                         if (cx - halfCrop < 0 || cy - halfCrop < 0 ||
                             cx + halfCrop > width || cy + halfCrop > height) {
                             cutOffFrames++;
@@ -1873,7 +1900,7 @@ export function useAviReader() {
 
                         // Check oversized
                         if (cropRegion.medianObjectSize) {
-                            const size = Math.max(result.bounds.width, result.bounds.height);
+                            const size = Math.max(gpuResult.bounds.width, gpuResult.bounds.height);
                             if (size / cropRegion.medianObjectSize > 1.3) {
                                 oversizedFrames++;
                                 completedFrames++;
@@ -1881,53 +1908,38 @@ export function useAviReader() {
                             }
                         }
 
-                        const center = { x: result.bounds.centroidX, y: result.bounds.centroidY };
-                        framesToCrop.push(batchFrames[j]);
-                        centers.push(center);
-                        cropIndices.push(frameIdx);
+                        const center = { x: gpuResult.centerX, y: gpuResult.centerY };
                         frameCenters.set(frameIdx, center);
-                    }
 
-                    if (framesToCrop.length > 0) {
-                        // GPU crop + analyze (metadataOnly=true for two-pass)
-                        const cropResults = await cropAndAnalyzeRgbaGpu(
-                            framesToCrop, width, height, cropRegion.size, centers, true
-                        );
+                        const currentFrame = {
+                            sharpness: gpuResult.sharpness,
+                            width: cropRegion.size,
+                            height: cropRegion.size,
+                            index: frameIdx,
+                            centerX: center.x,
+                            centerY: center.y,
+                            circularity: gpuResult.circularity || 0,
+                            uint8Buffer: gpuResult.uint8Buffer // For QualitySelector preview
+                        };
 
-                        for (let k = 0; k < cropResults.length; k++) {
-                            const gpuResult = cropResults[k];
-                            const frameIdx = cropIndices[k];
-                            const center = centers[k];
+                        rankFrame(currentFrame);
 
-                            const currentFrame = {
-                                sharpness: gpuResult.sharpness,
-                                width: cropRegion.size,
-                                height: cropRegion.size,
-                                index: frameIdx,
-                                centerX: center.x,
-                                centerY: center.y,
-                                circularity: gpuResult.circularity || 0
-                            };
-
-                            rankFrame(currentFrame);
-
-                            // Create preview blob if this became new best
-                            if (bestFrameSoFar === currentFrame && gpuResult.uint8Buffer) {
-                                try {
-                                    const uint8Data = new Uint8ClampedArray(gpuResult.uint8Buffer);
-                                    const imageData = new ImageData(uint8Data, cropRegion.size, cropRegion.size);
-                                    const canvas = new OffscreenCanvas(cropRegion.size, cropRegion.size);
-                                    const ctx = canvas.getContext('2d');
-                                    ctx.putImageData(imageData, 0, 0);
-                                    currentFrame.blob = await canvas.convertToBlob({ type: 'image/png' });
-                                    emit('best-frame-updated', currentFrame);
-                                } catch (e) {
-                                    console.warn('Failed to create preview:', e);
-                                }
+                        // Create preview blob if this became new best
+                        if (bestFrameSoFar === currentFrame && gpuResult.uint8Buffer) {
+                            try {
+                                const uint8Data = new Uint8ClampedArray(gpuResult.uint8Buffer);
+                                const imageData = new ImageData(uint8Data, cropRegion.size, cropRegion.size);
+                                const canvas = new OffscreenCanvas(cropRegion.size, cropRegion.size);
+                                const ctx = canvas.getContext('2d');
+                                ctx.putImageData(imageData, 0, 0);
+                                currentFrame.blob = await canvas.convertToBlob({ type: 'image/png' });
+                                emit('best-frame-updated', currentFrame);
+                            } catch (e) {
+                                console.warn('Failed to create preview:', e);
                             }
-
-                            completedFrames++;
                         }
+
+                        completedFrames++;
                     }
                 } else {
                     // No crop - analyze full frames

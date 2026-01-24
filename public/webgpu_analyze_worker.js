@@ -1780,24 +1780,26 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
             m02 += momentsData[idx + 5];
         }
 
-        let circularity = 1.0;
+        let circularity = 0;
         if (m00 > 0) {
             const cx = m10 / m00;
             const cy = m01 / m00;
+
+            // Central moments
             const mu20 = m20 / m00 - cx * cx;
             const mu02 = m02 / m00 - cy * cy;
+            const mu11 = m11 / m00 - cx * cy;
+
+            // Eigenvalues of covariance matrix
             const trace = mu20 + mu02;
-            if (trace > 0) {
-                const det = mu20 * mu02;
-                const discrim = trace * trace - 4 * det;
-                if (discrim >= 0) {
-                    const sqrtDiscrim = Math.sqrt(discrim);
-                    const lambda1 = (trace + sqrtDiscrim) / 2;
-                    const lambda2 = (trace - sqrtDiscrim) / 2;
-                    if (lambda1 > 0) {
-                        circularity = Math.min(lambda2, lambda1) / Math.max(lambda2, lambda1);
-                    }
-                }
+            const det = mu20 * mu02 - mu11 * mu11;
+            const discriminant = Math.sqrt(Math.max(0, trace * trace - 4 * det));
+            const lambda1 = (trace + discriminant) / 2;
+            const lambda2 = (trace - discriminant) / 2;
+
+            // Circularity = ratio of eigenvalues (1 = perfect circle)
+            if (lambda1 > 0) {
+                circularity = Math.min(lambda2, lambda1) / Math.max(lambda2, lambda1);
             }
         }
 
