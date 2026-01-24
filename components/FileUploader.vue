@@ -707,58 +707,95 @@ async function processFiles(files) {
 			}
 		});
 
-		eventBusEmit('set-caption', 'Extracting frames from video');
-		eventBusEmit('update-loading', { progress: 0, current: 0, total: effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : '?' });
+		// Lite mode: use memory-optimized batched extraction + analysis
+		if (liteMode.value) {
+			// Get video duration for batched processing
+			let videoDuration = 0;
+			$ffmpeg.setLogger(({ type, message }) => {
+				if (typeof message !== 'string') return;
+				const durMatch = message.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/);
+				if (durMatch) {
+					videoDuration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+				}
+			});
+			try {
+				await $ffmpeg.run('-i', fileToProcess.name, '-f', 'null', '-t', '0.001', '-');
+			} catch (e) { /* FFmpeg exits with error for -f null */ }
 
-		try {
-			const frameLimit = effectiveMaxFrames.value > 0 ? ['-vframes', '' + effectiveMaxFrames.value + ''] : [];
-
-			// Build video filter chain
-			const videoFilters = [];
-			if (preCropRegion) {
-				videoFilters.push(`crop=${preCropRegion.width}:${preCropRegion.height}:${preCropRegion.x}:${preCropRegion.y}`);
+			if (videoDuration <= 0) {
+				addLog('Could not determine video duration, using fallback');
+				videoDuration = 60; // Assume 1 minute
 			}
-			const vfArgs = videoFilters.length > 0 ? ['-vf', videoFilters.join(',')] : [];
+			addLog(`Video duration: ${videoDuration.toFixed(1)}s`);
 
-			// Output PNG files
-			const ffmpegArgs = ['-i', videoFiles[0].name, ...vfArgs, ...frameLimit, 'out%d.png'];
-			addLog(`FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
+			const { processBatchedVideoFrames } = useAviReader();
+			const totalFrames = effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : 100;
+			const skipAutoCrop = preCropRegion !== null;
 
-			addLog('Starting FFmpeg extraction...');
-			await $ffmpeg.run(...ffmpegArgs);
-			addLog('FFmpeg extraction completed');
-		} catch(err){
-			console.log(err);
-			addLog('FFmpeg forcefully exited, but continuing!');
+			await processBatchedVideoFrames($ffmpeg, fileToProcess.name, totalFrames, videoDuration, {
+				preCropRegion,
+				enableAutoCrop: enableAutoCrop && !skipAutoCrop,
+				manualThreshold: effectiveQualityMode.value === 'manual',
+				stackPercentage: effectiveStackPercentage.value,
+				drizzleScale: effectiveDrizzleScale.value,
+				noiseRobustAlignment: effectiveNoiseRobust.value
+			});
+
+		} else {
+			// Normal mode: extract all frames first, then process
+			eventBusEmit('set-caption', 'Extracting frames from video');
+			eventBusEmit('update-loading', { progress: 0, current: 0, total: effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : '?' });
+
+			try {
+				const frameLimit = effectiveMaxFrames.value > 0 ? ['-vframes', '' + effectiveMaxFrames.value + ''] : [];
+
+				// Build video filter chain
+				const videoFilters = [];
+				if (preCropRegion) {
+					videoFilters.push(`crop=${preCropRegion.width}:${preCropRegion.height}:${preCropRegion.x}:${preCropRegion.y}`);
+				}
+				const vfArgs = videoFilters.length > 0 ? ['-vf', videoFilters.join(',')] : [];
+
+				// Output PNG files
+				const ffmpegArgs = ['-i', videoFiles[0].name, ...vfArgs, ...frameLimit, 'out%d.png'];
+				addLog(`FFmpeg command: ffmpeg ${ffmpegArgs.join(' ')}`);
+
+				addLog('Starting FFmpeg extraction...');
+				await $ffmpeg.run(...ffmpegArgs);
+				addLog('FFmpeg extraction completed');
+			} catch(err){
+				console.log(err);
+				addLog('FFmpeg forcefully exited, but continuing!');
+			}
+
+			// Clear the logger
+			$ffmpeg.setLogger(({ message }) => {});
+
+			// Get list of PNG files created by FFmpeg
+			const pngFiles = $ffmpeg.FS('readdir', '/').filter(f => f.endsWith('.png')).sort((a, b) => {
+				const numA = parseInt(a.match(/\d+/)?.[0] || '0');
+				const numB = parseInt(b.match(/\d+/)?.[0] || '0');
+				return numA - numB;
+			});
+
+			// Free source video memory
+			$ffmpeg.FS('unlink', videoFiles[0].name);
+
+			addLog(`Extracted ${pngFiles.length} PNG frames`);
+
+			if (pngFiles.length === 0) {
+				addLog('No frames extracted from video');
+				eventBusEmit('upload-error', 'Failed to extract frames from video. The file may be corrupted or unsupported.');
+				eventBusEmit('show-error');
+				return;
+			}
+
+			// Route PNG frames through AVI reader - it will read and delete files from $ffmpeg
+			const { processFFmpegFrames } = useAviReader();
+			const skipAutoCrop = preCropRegion !== null;
+
+			await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value);
 		}
-
-		// Clear the logger
-		$ffmpeg.setLogger(({ message }) => {});
-
-		// Get list of PNG files created by FFmpeg
-		const pngFiles = $ffmpeg.FS('readdir', '/').filter(f => f.endsWith('.png')).sort((a, b) => {
-			const numA = parseInt(a.match(/\d+/)?.[0] || '0');
-			const numB = parseInt(b.match(/\d+/)?.[0] || '0');
-			return numA - numB;
-		});
-
-		// Free source video memory
-		$ffmpeg.FS('unlink', videoFiles[0].name);
-
-		addLog(`Extracted ${pngFiles.length} PNG frames`);
-
-		if (pngFiles.length === 0) {
-			addLog('No frames extracted from video');
-			eventBusEmit('upload-error', 'Failed to extract frames from video. The file may be corrupted or unsupported.');
-			eventBusEmit('show-error');
-			return;
-		}
-
-		// Route PNG frames through AVI reader - it will read and delete files from $ffmpeg
-		const { processFFmpegFrames } = useAviReader();
-		const skipAutoCrop = preCropRegion !== null;
-
-		await processFFmpegFrames($ffmpeg, pngFiles, enableAutoCrop && !skipAutoCrop, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value);
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them

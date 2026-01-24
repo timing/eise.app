@@ -1,7 +1,7 @@
 <template>
 	<div class="logger">
 		<button @click="toggleExpand" class="expand-button">Expand</button>
-		<b>Logs</b>
+		<b>Logs{{ memoryDisplay }}</b>
 		<pre ref="logContent"></pre>
 	</div>
 </template>
@@ -13,6 +13,22 @@ import { useEventBus } from '@/composables/eventBus';
 const { logs, onLogAdded, off } = useEventBus();
 const logContent = ref(null);
 const isExpanded = ref(false);
+const memoryDisplay = ref('');
+let memoryIntervalId = null;
+
+// Update memory display without blocking - uses requestIdleCallback when available
+const updateMemory = () => {
+	if (performance && performance.memory && performance.memory.usedJSHeapSize) {
+		const mb = (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(0);
+		memoryDisplay.value = ` - Mem: ${mb}MB`;
+	}
+	// Schedule next update during idle time
+	if (typeof requestIdleCallback !== 'undefined') {
+		memoryIntervalId = setTimeout(() => requestIdleCallback(updateMemory), 2000);
+	} else {
+		memoryIntervalId = setTimeout(updateMemory, 2000);
+	}
+};
 
 const toggleExpand = () => {
 	isExpanded.value = !isExpanded.value;
@@ -23,12 +39,7 @@ const toggleExpand = () => {
 const handleLogAdded = (log) => {
 	if (!logContent.value) return; // Guard against unmounted component
 
-	let mem = '';
-	if (performance && performance.memory && performance.memory.usedJSHeapSize) {
-		mem = ' Mem:' + (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(2) + 'MB';
-	}
-
-	logContent.value.innerHTML += (new Date()).toLocaleString() + ': ' + log.trim() + mem + '\n';
+	logContent.value.innerHTML += (new Date()).toLocaleString() + ': ' + log.trim() + '\n';
 
 	const shouldScroll = !isExpanded.value || (logContent.value.scrollTop + logContent.value.clientHeight >= logContent.value.scrollHeight - 50);
 	if (shouldScroll) {
@@ -37,17 +48,19 @@ const handleLogAdded = (log) => {
 };
 
 onMounted(() => {
-	let welcomeMem = '';
-	if (performance && performance.memory && performance.memory.usedJSHeapSize) {
-		welcomeMem = ' Mem:' + (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(2) + 'MB';
-	}
-	logContent.value.innerHTML += (new Date()).toLocaleString() + ': Welcome to eise.app!' + welcomeMem + '\n';
+	logContent.value.innerHTML += (new Date()).toLocaleString() + ': Welcome to eise.app!\n';
 
 	onLogAdded(handleLogAdded);
+
+	// Start memory monitoring
+	updateMemory();
 });
 
 onUnmounted(() => {
 	off('log', handleLogAdded);
+	if (memoryIntervalId) {
+		clearTimeout(memoryIntervalId);
+	}
 });
 </script>
 

@@ -2080,5 +2080,396 @@ export function useAviReader() {
         };
     }
 
-    return { readAviFile, processFFmpegFrames, checkAviFormat };
+    /**
+     * Process video frames with batched extraction + immediate analysis (memory-optimized for Lite mode)
+     * Extracts frames in small batches, analyzes them immediately, keeps only best quality frames.
+     * @param ffmpeg - FFmpeg instance with video already loaded
+     * @param videoFilename - Name of video file in FFmpeg FS
+     * @param totalFrames - Total frames to extract (from Lite mode limit)
+     * @param videoDuration - Video duration in seconds
+     * @param options - Processing options
+     */
+    async function processBatchedVideoFrames(ffmpeg, videoFilename, totalFrames, videoDuration, options = {}) {
+        const {
+            preCropRegion = null,      // Pre-crop already applied by FFmpeg filter
+            enableAutoCrop = false,
+            manualThreshold = false,
+            stackPercentage = 30,
+            drizzleScale = 1.0,
+            noiseRobustAlignment = false
+        } = options;
+
+        // Reset comparison export captures
+        resetCaptures();
+
+        await initializeWorkers();
+
+        if (!workersReady) {
+            addLog("Stopping batched processing due to worker initialization failure.");
+            emit('stop-loading');
+            return;
+        }
+
+        const EXTRACT_BATCH_SIZE = 10; // Extract 10 frames at a time
+        const bestFramesCapacity = Math.max(1, Math.floor(totalFrames * stackPercentage / 100));
+        const bestFramesForStacking = [];
+        let bestFrameSoFar = null;
+        const allAnalyzedFrames = []; // For manual threshold selection
+        let minSharpnessInBest = 0; // Track minimum sharpness in best frames for early discard
+
+        // Calculate time positions for evenly spaced frames
+        const timeStep = videoDuration / totalFrames;
+        let frameWidth = 0;
+        let frameHeight = 0;
+        let cropRegion = null;
+
+        // Helper to rank a frame - keeps only best quality frames
+        function rankFrame(frame, frameIndex) {
+            frame.frameIndex = frameIndex;
+
+            // Capture post-crop frames for comparison export
+            if (frame.float32Buffer && frame.width && frame.height) {
+                const float32Data = new Float32Array(frame.float32Buffer);
+                const uint8Data = new Uint8ClampedArray(float32Data.length);
+                for (let i = 0; i < float32Data.length; i++) {
+                    uint8Data[i] = Math.round(float32Data[i] * 255);
+                }
+                capturePostCropFrame(uint8Data.buffer, frame.width, frame.height, frameIndex, totalFrames);
+            }
+
+            if (manualThreshold) {
+                allAnalyzedFrames.push(frame);
+            }
+
+            if (bestFrameSoFar === null || frame.sharpness > bestFrameSoFar.sharpness) {
+                bestFrameSoFar = frame;
+            }
+
+            if (bestFramesForStacking.length < bestFramesCapacity) {
+                bestFramesForStacking.push(frame);
+                // Update min sharpness when we fill the capacity
+                if (bestFramesForStacking.length === bestFramesCapacity) {
+                    minSharpnessInBest = Math.min(...bestFramesForStacking.map(f => f.sharpness));
+                }
+            } else if (frame.sharpness > minSharpnessInBest) {
+                // Replace worst frame
+                const minIdx = bestFramesForStacking.reduce((minI, f, i, arr) =>
+                    f.sharpness < arr[minI].sharpness ? i : minI, 0);
+                bestFramesForStacking[minIdx] = frame;
+                minSharpnessInBest = Math.min(...bestFramesForStacking.map(f => f.sharpness));
+            }
+            // else: frame is below threshold, it will be garbage collected
+        }
+
+        // Suppress FFmpeg logging during extraction
+        ffmpeg.setLogger(() => {});
+
+        let completedFrames = 0;
+        let skippedFrames = 0;
+        let discardedLowQuality = 0;
+
+        addLog(`Batched extraction: ${totalFrames} frames in batches of ${EXTRACT_BATCH_SIZE}`);
+        emit('set-caption', 'Extracting and analyzing frames...');
+
+        // Process in batches
+        for (let batchStart = 0; batchStart < totalFrames; batchStart += EXTRACT_BATCH_SIZE) {
+            const batchEnd = Math.min(batchStart + EXTRACT_BATCH_SIZE, totalFrames);
+            const batchSize = batchEnd - batchStart;
+
+            emit('set-caption', `Extracting frames ${batchStart + 1}-${batchEnd}/${totalFrames}...`);
+
+            // Extract this batch of frames
+            const extractedFiles = [];
+            for (let i = batchStart; i < batchEnd; i++) {
+                const seekTime = i * timeStep;
+                const outFile = `batch_${i}.png`;
+
+                try {
+                    // Build FFmpeg args with optional pre-crop filter
+                    const vfArgs = preCropRegion
+                        ? ['-vf', `crop=${preCropRegion.width}:${preCropRegion.height}:${preCropRegion.x}:${preCropRegion.y}`]
+                        : [];
+
+                    await ffmpeg.run(
+                        '-ss', seekTime.toFixed(3),
+                        '-i', videoFilename,
+                        ...vfArgs,
+                        '-vframes', '1',
+                        '-y',
+                        outFile
+                    );
+                    extractedFiles.push({ file: outFile, index: i });
+                } catch (e) {
+                    // Frame extraction failed, skip this frame
+                    skippedFrames++;
+                }
+            }
+
+            if (extractedFiles.length === 0) {
+                continue; // No frames extracted in this batch
+            }
+
+            // Get dimensions from first frame if not yet known
+            if (frameWidth === 0) {
+                const firstPng = ffmpeg.FS('readFile', extractedFiles[0].file);
+                const firstBlob = new Blob([firstPng], { type: 'image/png' });
+                const firstBitmap = await createImageBitmap(firstBlob);
+                frameWidth = firstBitmap.width;
+                frameHeight = firstBitmap.height;
+                firstBitmap.close();
+
+                addLog(`Frame dimensions: ${frameWidth}x${frameHeight}`);
+
+                // Determine crop region from first batch if auto-crop enabled
+                const MIN_SIZE_FOR_CROP = 300;
+                if (enableAutoCrop && frameWidth >= MIN_SIZE_FOR_CROP && frameHeight >= MIN_SIZE_FOR_CROP) {
+                    emit('set-caption', 'Detecting crop region...');
+                    cropRegion = await detectCropRegionFromBatch(ffmpeg, extractedFiles, frameWidth, frameHeight);
+                    if (cropRegion) {
+                        addLog(`Auto-crop: ${cropRegion.size}x${cropRegion.size}`);
+                    }
+                }
+            }
+
+            emit('set-caption', `Analyzing frames ${batchStart + 1}-${batchEnd}/${totalFrames}...`);
+
+            // Decode and analyze each frame in this batch
+            const decodeCanvas = document.createElement('canvas');
+            decodeCanvas.width = frameWidth;
+            decodeCanvas.height = frameHeight;
+            const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
+
+            const header = { width: frameWidth, height: frameHeight, fourCC: 'RGBA', bpp: 32 };
+
+            const analyzePromises = [];
+
+            for (const { file, index } of extractedFiles) {
+                try {
+                    const pngData = ffmpeg.FS('readFile', file);
+                    ffmpeg.FS('unlink', file); // Free memory immediately
+
+                    const blob = new Blob([pngData], { type: 'image/png' });
+                    const bitmap = await createImageBitmap(blob);
+                    decodeCtx.drawImage(bitmap, 0, 0);
+                    bitmap.close();
+
+                    const imageData = decodeCtx.getImageData(0, 0, frameWidth, frameHeight);
+                    const rgbaBuffer = imageData.data.buffer.slice(0);
+                    decodeCtx.clearRect(0, 0, frameWidth, frameHeight);
+
+                    const workerIndex = index % numWorkers;
+                    const worker = unifiedAnalyzeWorkers[workerIndex];
+
+                    const dataToWorker = {
+                        type: cropRegion ? 'analyze-cropped' : 'avi',
+                        frameBuffer: rgbaBuffer,
+                        aviHeader: header,
+                        header: header,
+                        bayerChoice: 'MONO',
+                        cropRegion: cropRegion,
+                        capturePreCrop: false,
+                        index: index
+                    };
+
+                    const promise = processFrameWithWorker(worker, dataToWorker, [rgbaBuffer])
+                        .then(result => {
+                            if (result.skipped) {
+                                skippedFrames++;
+                                return;
+                            }
+
+                            // Early discard: if we have enough frames and this one is below threshold
+                            if (bestFramesForStacking.length >= bestFramesCapacity &&
+                                result.sharpness < minSharpnessInBest) {
+                                discardedLowQuality++;
+                                return; // Don't store, let GC reclaim memory
+                            }
+
+                            const frame = {
+                                sharpness: result.sharpness,
+                                blob: result.pngBlob,
+                                float32Buffer: result.float32Buffer,
+                                width: result.width,
+                                height: result.height,
+                                index: result.index,
+                                subPixelOffset: result.subPixelOffset || { x: 0, y: 0 },
+                                circularity: result.circularity || 0
+                            };
+                            rankFrame(frame, result.index);
+                        })
+                        .catch(err => {
+                            skippedFrames++;
+                            console.error(`Frame ${index} analysis failed:`, err);
+                        });
+
+                    analyzePromises.push(promise);
+                } catch (e) {
+                    // Clean up file if decode failed
+                    try { ffmpeg.FS('unlink', file); } catch (_) {}
+                    skippedFrames++;
+                }
+            }
+
+            // Wait for batch analysis to complete
+            await Promise.all(analyzePromises);
+
+            completedFrames = batchEnd;
+            emit('update-loading', {
+                progress: (completedFrames / totalFrames) * 100,
+                current: completedFrames,
+                total: totalFrames
+            });
+
+            if (bestFrameSoFar) {
+                emit('best-frame-updated', bestFrameSoFar);
+            }
+        }
+
+        addLog(`Extraction complete. Kept ${bestFramesForStacking.length} best frames, skipped ${skippedFrames}, discarded ${discardedLowQuality} low-quality`);
+
+        // Delete video file to free memory before stacking
+        try { ffmpeg.FS('unlink', videoFilename); } catch (_) {}
+        addLog('Video file freed from memory');
+
+        // Manual threshold: let user select frames
+        if (manualThreshold) {
+            const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
+            emit('quality-selection-ready', {
+                frames: allFramesSorted,
+                workers: unifiedAnalyzeWorkers,
+                noiseRobustAlignment,
+                useWebGPU: false, // Lite mode doesn't use WebGPU
+                frameReReader: null
+            });
+            return;
+        }
+
+        // Stack the best frames
+        emit('set-caption', 'Stacking frames...');
+        addLog(`Stacking ${bestFramesForStacking.length} frames`);
+
+        const stackingWorker = unifiedAnalyzeWorkers[0];
+        const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, false);
+
+        // Terminate workers
+        for (const w of unifiedAnalyzeWorkers) {
+            w.terminate();
+        }
+        unifiedAnalyzeWorkers.length = 0;
+        workersReady = false;
+
+        if (stackResult) {
+            emit('postProcessing', stackResult.blob, stackResult.float32Data, stackResult.width, stackResult.height);
+        } else {
+            addLog('Stacking failed');
+            emit('upload-error', 'Stacking failed. Please try again.');
+        }
+    }
+
+    /**
+     * Detect crop region from a batch of already-extracted PNG files
+     */
+    async function detectCropRegionFromBatch(ffmpeg, files, width, height) {
+        const decodeCanvas = document.createElement('canvas');
+        decodeCanvas.width = width;
+        decodeCanvas.height = height;
+        const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
+
+        let maxSize = 0;
+        const detectedCenters = [];
+        const detectedSizes = [];
+
+        // Sample up to 5 frames from the batch for crop detection
+        const sampleFiles = files.slice(0, Math.min(5, files.length));
+
+        for (const { file } of sampleFiles) {
+            try {
+                const pngData = ffmpeg.FS('readFile', file);
+                const blob = new Blob([pngData], { type: 'image/png' });
+                const bitmap = await createImageBitmap(blob);
+                decodeCtx.drawImage(bitmap, 0, 0);
+                bitmap.close();
+
+                const imageData = decodeCtx.getImageData(0, 0, width, height);
+                const bounds = detectBrightObject(imageData.data, width, height);
+
+                if (bounds && bounds.width > 0 && bounds.height > 0) {
+                    const size = Math.max(bounds.width, bounds.height);
+                    if (size > maxSize) maxSize = size;
+                    detectedSizes.push(size);
+                    detectedCenters.push({
+                        x: bounds.x + bounds.width / 2,
+                        y: bounds.y + bounds.height / 2
+                    });
+                }
+
+                decodeCtx.clearRect(0, 0, width, height);
+            } catch (e) {
+                // Skip frame
+            }
+        }
+
+        if (detectedCenters.length === 0) return null;
+
+        // Calculate median center and size
+        detectedCenters.sort((a, b) => a.x - b.x);
+        detectedSizes.sort((a, b) => a - b);
+
+        const medianX = detectedCenters[Math.floor(detectedCenters.length / 2)].x;
+        detectedCenters.sort((a, b) => a.y - b.y);
+        const medianY = detectedCenters[Math.floor(detectedCenters.length / 2)].y;
+        const medianSize = detectedSizes[Math.floor(detectedSizes.length / 2)];
+
+        // Add 20% margin
+        const finalSize = Math.min(
+            Math.ceil(maxSize * 1.2),
+            Math.min(width, height)
+        );
+
+        return {
+            size: finalSize,
+            referenceCenter: { x: medianX, y: medianY }
+        };
+    }
+
+    /**
+     * Simple bright object detection for crop region
+     */
+    function detectBrightObject(pixels, width, height) {
+        let minX = width, maxX = 0, minY = height, maxY = 0;
+        let maxBrightness = 0;
+
+        // Find max brightness
+        for (let i = 0; i < pixels.length; i += 4) {
+            const brightness = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+            if (brightness > maxBrightness) maxBrightness = brightness;
+        }
+
+        const threshold = maxBrightness * 0.3;
+
+        // Find bounds of bright region
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const i = (y * width + x) * 4;
+                const brightness = (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3;
+                if (brightness > threshold) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+
+        if (maxX <= minX || maxY <= minY) return null;
+
+        return {
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY
+        };
+    }
+
+    return { readAviFile, processFFmpegFrames, processBatchedVideoFrames, checkAviFormat };
 }
