@@ -270,12 +270,10 @@ const isMobileDevice = computed(() => {
 	return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 });
 
-// Show memory optimization box when appropriate
+// Show memory optimization box only on mobile
 const showMemoryOptimization = computed(() => {
 	if (!showPreCropOption.value) return false;
-	// Show if on mobile, or if file is large (>500MB), or if already enabled
-	const file = selectedFiles.value[0];
-	return isMobileDevice.value || file?.size > 500 * 1024 * 1024 || enablePreCrop.value || enableMaxFrames.value;
+	return isMobileDevice.value;
 });
 
 // Auto-enable pre-crop for mobile devices with video files
@@ -284,6 +282,10 @@ watch([selectedFiles, isMobileDevice], () => {
 		enablePreCrop.value = true;
 		preCropAutoEnabled.value = true;
 	} else {
+		// Reset pre-crop when not on mobile
+		if (preCropAutoEnabled.value) {
+			enablePreCrop.value = false;
+		}
 		preCropAutoEnabled.value = false;
 	}
 }, { immediate: true });

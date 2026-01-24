@@ -34,13 +34,18 @@ function isMjpegFourCC(fourCC) {
 async function parseMjpegFrameIndex(file, moviListOffset, moviListSize, maxFrames = -1) {
     const frameIndex = [];
     const chunkHeaderSize = 8; // 4 bytes FourCC + 4 bytes size
+    const fileSize = file.size;
 
-    // Read movi list in chunks to avoid loading entire file
-    const CHUNK_SIZE = 1024 * 1024; // 1MB read buffer
+    // For large AVI files with AVIX extension, scan entire file instead of just first movi chunk
+    // This handles OpenDML/AVI 2.0 files that split data across multiple RIFF chunks
+    const scanWholeFile = fileSize > moviListOffset + moviListSize + 1024;
+
     let position = moviListOffset;
-    const moviEnd = moviListOffset + moviListSize;
+    const scanEnd = scanWholeFile ? fileSize : moviListOffset + moviListSize;
 
-    while (position < moviEnd) {
+    console.log(`MJPEG parser: scanning from ${position} to ${scanEnd} (fileSize=${fileSize}, scanWholeFile=${scanWholeFile})`);
+
+    while (position < scanEnd - chunkHeaderSize) {
         if (maxFrames > 0 && frameIndex.length >= maxFrames) break;
 
         // Read chunk header
@@ -55,6 +60,19 @@ async function parseMjpegFrameIndex(file, moviListOffset, moviListSize, maxFrame
         );
         const chunkSize = headerView.getUint32(4, true);
 
+        // Sanity check chunk size
+        if (chunkSize > fileSize - position || chunkSize > 100 * 1024 * 1024) {
+            // Invalid chunk size - might be RIFF/LIST header, skip 4 bytes and retry
+            if (chunkId === 'RIFF' || chunkId === 'LIST') {
+                // Skip RIFF/LIST type field (4 bytes after size)
+                position += 12;
+                continue;
+            }
+            // Unknown large chunk, skip to next position
+            position += 4;
+            continue;
+        }
+
         // Video chunks are typically '00dc', '01dc', etc. (d=compressed video)
         // or '00db', '01db' (d=uncompressed video)
         if (chunkId.match(/^\d\ddc$/i) || chunkId.match(/^\d\ddb$/i)) {
@@ -67,8 +85,14 @@ async function parseMjpegFrameIndex(file, moviListOffset, moviListSize, maxFrame
         // Move to next chunk (size is padded to word boundary)
         const paddedSize = (chunkSize + 1) & ~1;
         position += chunkHeaderSize + paddedSize;
+
+        // Log progress every 1000 frames
+        if (frameIndex.length % 1000 === 0 && frameIndex.length > 0) {
+            console.log(`MJPEG parser: found ${frameIndex.length} frames so far...`);
+        }
     }
 
+    console.log(`MJPEG parser: finished, found ${frameIndex.length} frames`);
     return frameIndex;
 }
 
@@ -1851,11 +1875,13 @@ export function useAviReader() {
                             continue;
                         }
 
-                        // Check cut-off
-                        const margin = Math.max(width, height) * 0.01;
-                        if (result.bounds.x < margin || result.bounds.y < margin ||
-                            result.bounds.x + result.bounds.width > width - margin ||
-                            result.bounds.y + result.bounds.height > height - margin) {
+                        // Check if crop region would fit within frame bounds
+                        // Crop is centered on centroid, so check if cropSize/2 fits on all sides
+                        const halfCrop = cropRegion.size / 2;
+                        const cx = result.bounds.centroidX;
+                        const cy = result.bounds.centroidY;
+                        if (cx - halfCrop < 0 || cy - halfCrop < 0 ||
+                            cx + halfCrop > width || cy + halfCrop > height) {
                             cutOffFrames++;
                             completedFrames++;
                             continue;
