@@ -168,11 +168,12 @@ async function renderThumbnailsCpu() {
 	const srcScale = pixelDepth > 8 ? 1/256 : 1;
 
 	// Simple bilinear demosaic patterns
+	// OpenCV uses inverted naming: BG=RGGB, RG=BGGR, GB=GRBG, GR=GBRG
 	const patternConfigs = [
-		{ id: 'COLOR_BayerBG2RGB', rX: 0, rY: 0, bX: 1, bY: 1 },  // RGGB
-		{ id: 'COLOR_BayerRG2RGB', rX: 1, rY: 1, bX: 0, bY: 0 },  // BGGR
-		{ id: 'COLOR_BayerGR2RGB', rX: 0, rY: 1, bX: 1, bY: 0 },  // GBRG
-		{ id: 'COLOR_BayerGB2RGB', rX: 1, rY: 0, bX: 0, bY: 1 },  // GRBG
+		{ id: 'COLOR_BayerBG2RGB', rX: 0, rY: 0, bX: 1, bY: 1 },  // Industry RGGB
+		{ id: 'COLOR_BayerRG2RGB', rX: 1, rY: 1, bX: 0, bY: 0 },  // Industry BGGR
+		{ id: 'COLOR_BayerGR2RGB', rX: 0, rY: 1, bX: 1, bY: 0 },  // Industry GBRG
+		{ id: 'COLOR_BayerGB2RGB', rX: 1, rY: 0, bX: 0, bY: 1 },  // Industry GRBG
 		{ id: 'MONO', mono: true }
 	];
 

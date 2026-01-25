@@ -820,7 +820,7 @@ export function useAviReader() {
 
             let bayerChoice = "MONO";
             if (fourCC === 'Y800' && (width % 2 === 0 && height % 2 === 0)) {
-                // Default to RGGB (world convention) = BG (OpenCV convention)
+                // Default to RGGB = BG (OpenCV's inverted naming)
                 bayerChoice = 'COLOR_BayerBG2RGB';
             }
 

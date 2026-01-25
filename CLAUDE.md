@@ -109,17 +109,22 @@ SER files produce moiré artifacts when stacked, but exporting debayered frames 
 - Buffer handling differences (Uint8ClampedArray vs Uint8Array)
 - The RGBA→BGR→RGBA round-trip in AVI somehow reduces artifacts
 
-**OpenCV Bayer Naming Convention Issue (IMPORTANT)**:
-OpenCV's Bayer pattern naming differs from the rest of the industry (camera manufacturers, MATLAB, etc.). According to [OpenCV issue #19629](https://github.com/opencv/opencv/issues/19629):
-- OpenCV uses the 2x2 sub-matrix starting at row 2, column 2 of the CFA
-- What the world calls "RGGB", OpenCV calls "BGGR"
-- This means if a camera is configured to produce "RGGB" images, using `COLOR_BayerRG2BGR` may give unexpected results
+**OpenCV Bayer Naming Convention (INVERTED from industry standard)**:
+OpenCV uses the 2x2 sub-matrix starting at row 2, column 2 of the CFA, while the rest of the industry (camera manufacturers, MATLAB, etc.) uses the top-left 2x2 sub-matrix. See [OpenCV issue #19629](https://github.com/opencv/opencv/issues/19629).
 
-**COLOR_RGB2RGBA vs COLOR_BGR2RGBA** (FIXED):
-- The Bayer pattern mapping was corrected to use OpenCV's naming convention
-- Now using RGB output variants (COLOR_BayerXX2RGB) instead of BGR
-- Mapping: SER RGGB (colorID 8) → OpenCV BG, SER BGGR (colorID 11) → OpenCV RG, etc.
-- Files updated: useSerReader.js (bayerMap), ColorProfileSelector.vue (profiles), useAviReader.js (default)
+This results in inverted naming:
+| Industry Standard | OpenCV Name | OpenCV Code |
+|-------------------|-------------|-------------|
+| RGGB | BayerBG | `COLOR_BayerBG2RGB` |
+| BGGR | BayerRG | `COLOR_BayerRG2RGB` |
+| GRBG | BayerGB | `COLOR_BayerGB2RGB` |
+| GBRG | BayerGR | `COLOR_BayerGR2RGB` |
+
+**SER to OpenCV Bayer Mapping**:
+- SER RGGB (colorID 8) → `COLOR_BayerBG2RGB`
+- SER GRBG (colorID 9) → `COLOR_BayerGB2RGB`
+- SER GBRG (colorID 10) → `COLOR_BayerGR2RGB`
+- SER BGGR (colorID 11) → `COLOR_BayerRG2RGB`
 
 ## Sentry Error Tracking
 

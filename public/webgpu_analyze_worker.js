@@ -2201,10 +2201,10 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
         throw new Error('WebGPU not initialized or device lost');
     }
     const patterns = [
-        { id: 'COLOR_BayerBG2RGB', pattern: 0 },  // RGGB
-        { id: 'COLOR_BayerRG2RGB', pattern: 1 },  // BGGR
-        { id: 'COLOR_BayerGR2RGB', pattern: 3 },  // GBRG
-        { id: 'COLOR_BayerGB2RGB', pattern: 2 },  // GRBG
+        { id: 'COLOR_BayerBG2RGB', pattern: 0 },  // Industry RGGB (OpenCV BG)
+        { id: 'COLOR_BayerRG2RGB', pattern: 1 },  // Industry BGGR (OpenCV RG)
+        { id: 'COLOR_BayerGB2RGB', pattern: 2 },  // Industry GRBG (OpenCV GB)
+        { id: 'COLOR_BayerGR2RGB', pattern: 3 },  // Industry GBRG (OpenCV GR)
         { id: 'MONO', pattern: -1 }
     ];
 
@@ -2363,7 +2363,7 @@ async function demosaicAndScale(rawData, srcWidth, srcHeight, targetWidth, targe
         targetWidth, targetHeight
     );
 
-    // Find the result for our pattern
+    // Find the result for our pattern (indices: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG)
     const patternIds = ['COLOR_BayerBG2RGB', 'COLOR_BayerRG2RGB', 'COLOR_BayerGB2RGB', 'COLOR_BayerGR2RGB', 'MONO'];
     const patternId = bayerPattern < 0 ? 'MONO' : patternIds[bayerPattern] || patternIds[0];
     const result = results.find(r => r.id === patternId);

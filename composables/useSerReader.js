@@ -6,18 +6,17 @@ import { reportError } from '@/composables/useSentryReporting';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 
 // Map OpenCV Bayer pattern names to GPU shader pattern indices
-// The SER format uses: 8=RGGB, 9=GRBG, 10=GBRG, 11=BGGR
-// OpenCV names these counter-intuitively (BG means RGGB, RG means BGGR)
+// OpenCV uses inverted naming: BG = industry RGGB, RG = industry BGGR
 // GPU shader indices: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
 function bayerChoiceToGpuPattern(bayerChoice) {
     const mapping = {
-        'COLOR_BayerBG2RGB': 0,  // RGGB (SER ColorID 8)
+        'COLOR_BayerBG2RGB': 0,  // RGGB (OpenCV BG = industry RGGB)
         'COLOR_BayerBG2BGR': 0,
-        'COLOR_BayerRG2RGB': 1,  // BGGR (SER ColorID 11)
+        'COLOR_BayerRG2RGB': 1,  // BGGR (OpenCV RG = industry BGGR)
         'COLOR_BayerRG2BGR': 1,
-        'COLOR_BayerGB2RGB': 2,  // GRBG (SER ColorID 9)
+        'COLOR_BayerGB2RGB': 2,  // GRBG (OpenCV GB = industry GRBG)
         'COLOR_BayerGB2BGR': 2,
-        'COLOR_BayerGR2RGB': 3,  // GBRG (SER ColorID 10)
+        'COLOR_BayerGR2RGB': 3,  // GBRG (OpenCV GR = industry GBRG)
         'COLOR_BayerGR2BGR': 3,
         'MONO': -1  // No demosaic needed
     };
@@ -342,7 +341,7 @@ export function useSerReader() {
 
             const dataToWorker = {
                 type: 'detect-bounds',
-                frameBuffer: frameBuffer,  // Transfer directly, no copy needed
+                frameBuffer: frameBuffer,
                 header: headerForWorker,
                 bayerChoice: bayerChoice,
                 index: idx
@@ -411,7 +410,7 @@ export function useSerReader() {
     }
 
     // GPU-accelerated crop region detection - uses GPU for bounds detection
-    async function detectCropRegionGpu(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent = 10) {
+    async function detectCropRegionGpu(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent = 10, data16bitScaleFactor = 1) {
         addLog(`Using crop margin: ${cropMarginPercent}%`);
         emit('set-caption', 'Detecting planet position (GPU)...');
         emit('update-loading', { progress: 0, current: 0, total: frameCount });
@@ -438,11 +437,11 @@ export function useSerReader() {
         const bayerPatternMap = {
             // Short names (for backwards compat)
             'RGGB': 0, 'BGGR': 1, 'GRBG': 2, 'GBRG': 3, 'MONO': -1,
-            // OpenCV constants from ColorProfileSelector (note: OpenCV naming is inverted)
-            'COLOR_BayerBG2RGB': 0,  // OpenCV BG = camera RGGB
-            'COLOR_BayerRG2RGB': 1,  // OpenCV RG = camera BGGR
-            'COLOR_BayerGB2RGB': 2,  // OpenCV GB = camera GRBG
-            'COLOR_BayerGR2RGB': 3,  // OpenCV GR = camera GBRG
+            // OpenCV constants (inverted naming: BG=RGGB, RG=BGGR, GB=GRBG, GR=GBRG)
+            'COLOR_BayerBG2RGB': 0,  // Industry RGGB
+            'COLOR_BayerRG2RGB': 1,  // Industry BGGR
+            'COLOR_BayerGB2RGB': 2,  // Industry GRBG
+            'COLOR_BayerGR2RGB': 3,  // Industry GBRG
         };
         const bayerPattern = bayerPatternMap[bayerChoice] ?? -1;
 
@@ -470,6 +469,12 @@ export function useSerReader() {
                 let data;
                 if (header.pixelDepth > 8) {
                     data = new Uint16Array(frameBuffer);
+                    // Scale to full 16-bit range if needed
+                    if (data16bitScaleFactor > 1) {
+                        for (let j = 0; j < data.length; j++) {
+                            data[j] = Math.min(65535, Math.round(data[j] * data16bitScaleFactor));
+                        }
+                    }
                 } else {
                     data = new Uint8Array(frameBuffer);
                 }
@@ -767,14 +772,36 @@ export function useSerReader() {
         const header = parseSerHeader(headerBuf);
 
         // Calculate bytes per pixel and frame size
-        const bpp = header.pixelDepth > 8 ? 2 : 1;
-        const frameSize = header.width * header.height * bpp;
+        let bpp = header.pixelDepth > 8 ? 2 : 1;
+        let frameSize = header.width * header.height * bpp;
+
+        // Detect if header lies about bit depth (says 16-bit but actually 8-bit)
+        // Key check: if 8-bit frameSize matches the header's frame count exactly, it's 8-bit data
+        if (header.pixelDepth > 8) {
+            const frameSize16 = header.width * header.height * 2;
+            const frameSize8 = header.width * header.height * 1;
+            const dataSize = file.size - 178;
+
+            const frameCount16 = Math.floor(dataSize / frameSize16);
+            const frameCount8 = Math.floor(dataSize / frameSize8);
+            const headerFrames = header.frameCount;
+
+            addLog(`Bit depth check: header=${headerFrames} frames, as 16-bit=${frameCount16}, as 8-bit=${frameCount8}`);
+
+            // If 8-bit calculation matches header frame count, it's actually 8-bit data
+            if (frameCount8 === headerFrames && frameCount16 !== headerFrames) {
+                addLog(`Header says 16-bit but file size matches 8-bit (${headerFrames} frames). Treating as 8-bit.`);
+                header.pixelDepth = 8;
+                bpp = 1;
+                frameSize = frameSize8;
+            }
+        }
 
         // Validate header against actual file size
         const expectedFileSize = 178 + (frameSize * header.frameCount);
         const actualFrameCount = Math.floor((file.size - 178) / frameSize);
 
-        addLog(`SER Header: ${header.width}x${header.height}, ${header.frameCount} frames, ${header.pixelDepth}-bit, colorID=${header.colorID}`);
+        addLog(`SER Header: ${header.width}x${header.height}, ${header.frameCount} frames, ${header.pixelDepth}-bit, colorID=${header.colorID}, littleEndian=${header.littleEndian}`);
 
         // Use calculated frame count if header value seems wrong
         if (actualFrameCount !== header.frameCount) {
@@ -783,20 +810,70 @@ export function useSerReader() {
         }
 
         // Determine initial bayer choice from header for auto-detection hint
-        // Using BGR output variants because we later convert BGR->RGBA
+        // SER colorID to OpenCV Bayer patterns (OpenCV uses inverted naming convention)
+        // Industry RGGB → OpenCV BG, Industry BGGR → OpenCV RG, etc.
         const bayerMap = { 0: "MONO", 8: "COLOR_BayerBG2RGB", 9: "COLOR_BayerGB2RGB", 10: "COLOR_BayerGR2RGB", 11: "COLOR_BayerRG2RGB" };
         let autoDetectedProfile = bayerMap[header.colorID];
         if (!autoDetectedProfile) {
-            autoDetectedProfile = "COLOR_BayerRG2BGR";
+            // Default fallback for unknown colorID - use RGGB (most common)
+            autoDetectedProfile = "COLOR_BayerBG2RGB";
         }
 
         // Read first frame for color profile selector
         const firstFrameBuffer = await file.slice(178, 178 + frameSize).arrayBuffer();
 
+        // Detect if 16-bit data doesn't use full range (common: 8-bit, 10-bit, 12-bit in 16-bit container)
+        // Scale factor to expand data to full 16-bit range for proper shader processing
+        let data16bitScaleFactor = 1;
+        if (header.pixelDepth > 8) {
+            const u16 = new Uint16Array(firstFrameBuffer);
+            // Sample pixels across the frame for reliable max detection
+            const sampleSize = Math.min(5000, u16.length);
+            const step = Math.max(1, Math.floor(u16.length / sampleSize));
+            let maxVal = 0;
+            for (let i = 0; i < u16.length && i < sampleSize * step; i += step) {
+                if (u16[i] > maxVal) maxVal = u16[i];
+            }
+            addLog(`16-bit diagnostic: max sampled value=${maxVal}`);
+
+            // Determine scale factor based on actual data range
+            // Common bit depths: 8-bit (255), 10-bit (1023), 12-bit (4095), 14-bit (16383)
+            if (maxVal > 0 && maxVal < 32768) {
+                // Find the likely bit depth and scale to full 16-bit
+                let effectiveBits;
+                if (maxVal <= 255) effectiveBits = 8;
+                else if (maxVal <= 1023) effectiveBits = 10;
+                else if (maxVal <= 4095) effectiveBits = 12;
+                else if (maxVal <= 16383) effectiveBits = 14;
+                else effectiveBits = 16;
+
+                if (effectiveBits < 16) {
+                    const maxForBits = (1 << effectiveBits) - 1;
+                    data16bitScaleFactor = 65535 / maxForBits;
+                    addLog(`Detected ${effectiveBits}-bit data in 16-bit container (max=${maxVal}). Scale factor: ${data16bitScaleFactor.toFixed(2)}`);
+                }
+            }
+        }
+
+        // Helper to scale 16-bit data to full range
+        function scale16bitData(buffer, scaleFactor) {
+            if (scaleFactor === 1) return buffer;
+            const u16 = new Uint16Array(buffer);
+            for (let i = 0; i < u16.length; i++) {
+                u16[i] = Math.min(65535, Math.round(u16[i] * scaleFactor));
+            }
+            return buffer;
+        }
+
         // Minimum frame size for auto-crop to be useful
         const MIN_SIZE_FOR_CROP = 300;
 
         let previewBuffer = firstFrameBuffer;
+        // Scale preview buffer if needed (for color profile selector)
+        if (data16bitScaleFactor > 1) {
+            previewBuffer = firstFrameBuffer.slice(0); // Copy to avoid modifying original
+            scale16bitData(previewBuffer, data16bitScaleFactor);
+        }
         let previewHeader = header;
 
         emit('set-caption', 'Select color profile');
@@ -823,7 +900,7 @@ export function useSerReader() {
 
         if (header.width >= MIN_SIZE_FOR_CROP && header.height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${header.width}x${header.height} qualifies for auto-crop`);
-            cropRegion = await detectCropRegionGpu(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent);
+            cropRegion = await detectCropRegionGpu(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent, data16bitScaleFactor);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
@@ -857,6 +934,28 @@ export function useSerReader() {
                         rgba[i] = Math.round(float32Data[i] * 255);
                     }
                 }
+
+                // Auto-stretch for dark images (common with 16-bit SER files)
+                // Find min/max of RGB channels (skip alpha)
+                let minVal = 255, maxVal = 0;
+                for (let i = 0; i < rgba.length; i += 4) {
+                    const r = rgba[i], g = rgba[i+1], b = rgba[i+2];
+                    minVal = Math.min(minVal, r, g, b);
+                    maxVal = Math.max(maxVal, r, g, b);
+                }
+
+                // Apply stretch if image is dark (max < 128) or has low dynamic range
+                if (maxVal < 128 || (maxVal - minVal) < 64) {
+                    const range = maxVal - minVal || 1;
+                    const scale = 255 / range;
+                    for (let i = 0; i < rgba.length; i += 4) {
+                        rgba[i] = Math.min(255, Math.max(0, Math.round((rgba[i] - minVal) * scale)));
+                        rgba[i+1] = Math.min(255, Math.max(0, Math.round((rgba[i+1] - minVal) * scale)));
+                        rgba[i+2] = Math.min(255, Math.max(0, Math.round((rgba[i+2] - minVal) * scale)));
+                        // rgba[i+3] alpha stays unchanged
+                    }
+                }
+
                 const imageData = new ImageData(rgba, frame.width, frame.height);
                 const canvas = new OffscreenCanvas(frame.width, frame.height);
                 const ctx = canvas.getContext('2d');
@@ -1047,6 +1146,12 @@ export function useSerReader() {
                             let data;
                             if (header.pixelDepth > 8) {
                                 data = new Uint16Array(frameBuffer);
+                                // Scale to full 16-bit range if needed
+                                if (data16bitScaleFactor > 1) {
+                                    for (let j = 0; j < data.length; j++) {
+                                        data[j] = Math.min(65535, Math.round(data[j] * data16bitScaleFactor));
+                                    }
+                                }
                             } else {
                                 data = new Uint8Array(frameBuffer);
                             }
@@ -1267,9 +1372,18 @@ export function useSerReader() {
                             const offset = 178 + (i * frameSize);
                             if (offset + frameSize > file.size) break;
                             const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
-                            const frameData = bpp === 2
-                                ? new Uint16Array(frameBuffer)
-                                : new Uint8Array(frameBuffer);
+                            let frameData;
+                            if (bpp === 2) {
+                                frameData = new Uint16Array(frameBuffer);
+                                // Scale to full 16-bit range if needed
+                                if (data16bitScaleFactor > 1) {
+                                    for (let j = 0; j < frameData.length; j++) {
+                                        frameData[j] = Math.min(65535, Math.round(frameData[j] * data16bitScaleFactor));
+                                    }
+                                }
+                            } else {
+                                frameData = new Uint8Array(frameBuffer);
+                            }
                             frames.push({ data: frameData, index: i });
                         }
                         return frames;
@@ -1547,11 +1661,11 @@ export function useSerReader() {
         const bayerPatternMap = {
             // Short names (for backwards compat)
             'RGGB': 0, 'BGGR': 1, 'GRBG': 2, 'GBRG': 3, 'MONO': -1,
-            // OpenCV constants from ColorProfileSelector (note: OpenCV naming is inverted)
-            'COLOR_BayerBG2RGB': 0,  // OpenCV BG = camera RGGB
-            'COLOR_BayerRG2RGB': 1,  // OpenCV RG = camera BGGR
-            'COLOR_BayerGB2RGB': 2,  // OpenCV GB = camera GRBG
-            'COLOR_BayerGR2RGB': 3,  // OpenCV GR = camera GBRG
+            // OpenCV constants (inverted naming: BG=RGGB, RG=BGGR, GB=GRBG, GR=GBRG)
+            'COLOR_BayerBG2RGB': 0,  // Industry RGGB
+            'COLOR_BayerRG2RGB': 1,  // Industry BGGR
+            'COLOR_BayerGB2RGB': 2,  // Industry GRBG
+            'COLOR_BayerGR2RGB': 3,  // Industry GBRG
         };
         const bayerPattern = bayerPatternMap[bayerChoice] ?? -1;
 
@@ -1607,6 +1721,20 @@ export function useSerReader() {
                 let data;
                 if (item.header.pixelDepth > 8) {
                     data = new Uint16Array(frameBuffer);
+                    // Detect effective bit depth and scale to full 16-bit range
+                    const sampleMax = Math.max(...data.slice(0, Math.min(1000, data.length)));
+                    if (sampleMax > 0 && sampleMax < 32768) {
+                        let scaleFactor = 1;
+                        if (sampleMax <= 255) scaleFactor = 257;        // 8-bit
+                        else if (sampleMax <= 1023) scaleFactor = 64;   // 10-bit
+                        else if (sampleMax <= 4095) scaleFactor = 16;   // 12-bit
+                        else if (sampleMax <= 16383) scaleFactor = 4;   // 14-bit
+                        if (scaleFactor > 1) {
+                            for (let j = 0; j < data.length; j++) {
+                                data[j] = Math.min(65535, data[j] * scaleFactor);
+                            }
+                        }
+                    }
                 } else {
                     data = new Uint8Array(frameBuffer);
                 }
@@ -1869,8 +1997,9 @@ export function useSerReader() {
         // PHASE 3: Color profile selection (using first file's header)
         const firstHeader = fileInfos[0].header;
         const firstFrameSize = fileInfos[0].frameSize;
+        // SER colorID to OpenCV Bayer patterns (OpenCV uses inverted naming convention)
         const bayerMap = { 0: "MONO", 8: "COLOR_BayerBG2RGB", 9: "COLOR_BayerGB2RGB", 10: "COLOR_BayerGR2RGB", 11: "COLOR_BayerRG2RGB" };
-        let autoDetectedProfile = bayerMap[firstHeader.colorID] || "COLOR_BayerRG2BGR";
+        let autoDetectedProfile = bayerMap[firstHeader.colorID] || "COLOR_BayerBG2RGB";
 
         const firstFrameBuffer = await fileInfos[0].file.slice(178, 178 + firstFrameSize).arrayBuffer();
 

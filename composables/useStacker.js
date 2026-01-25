@@ -128,10 +128,11 @@ export function useStacker() {
                 bayerPattern = frameReReader.bayerPattern;
             } else {
                 const bayerMap = {
-                    'COLOR_BayerBG2RGB': 0, 'COLOR_BayerGB2RGB': 1,
-                    'COLOR_BayerRG2RGB': 2, 'COLOR_BayerGR2RGB': 3,
-                    'COLOR_BayerBG2RGB_VNG': 0, 'COLOR_BayerGB2RGB_VNG': 1,
-                    'COLOR_BayerRG2RGB_VNG': 2, 'COLOR_BayerGR2RGB_VNG': 3,
+                    // OpenCV uses inverted naming: BG=RGGB, RG=BGGR, GB=GRBG, GR=GBRG
+                    'COLOR_BayerBG2RGB': 0, 'COLOR_BayerRG2RGB': 1,
+                    'COLOR_BayerGB2RGB': 2, 'COLOR_BayerGR2RGB': 3,
+                    'COLOR_BayerBG2RGB_VNG': 0, 'COLOR_BayerRG2RGB_VNG': 1,
+                    'COLOR_BayerGB2RGB_VNG': 2, 'COLOR_BayerGR2RGB_VNG': 3,
                     'MONO': -1
                 };
                 bayerPattern = bayerMap[bayerChoice] ?? -1;

@@ -280,6 +280,45 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
     const resultsPerAP = gridSize * gridSize;
     const frameSize = width * height;
 
+    // WebGPU limit: max workgroups per dimension is 65535
+    const MAX_WORKGROUPS_Z = 65535;
+    const maxFramesPerBatch = Math.floor(MAX_WORKGROUPS_Z / numAPs);
+
+    // If we can fit all frames in one batch, use the simple path
+    if (numFrames * numAPs <= MAX_WORKGROUPS_Z) {
+        return await matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset);
+    }
+
+    // Need to batch frames to stay within workgroup limits
+    console.log(`Template matching: batching ${numFrames} frames into chunks of ${maxFramesPerBatch} (${numAPs} APs)`);
+
+    const allShifts = [];
+
+    for (let batchStart = 0; batchStart < numFrames; batchStart += maxFramesPerBatch) {
+        const batchEnd = Math.min(batchStart + maxFramesPerBatch, numFrames);
+        const batchFrames = frameGrayDatas.slice(batchStart, batchEnd);
+
+        const batchShifts = await matchTemplatesBatchGPUSimple(
+            refGrayData, batchFrames, width, height, alignmentPoints, patchSize, searchRadius, searchOffset
+        );
+
+        allShifts.push(...batchShifts);
+    }
+
+    return allShifts;
+}
+
+/**
+ * Simple implementation that processes all frames at once (must fit within workgroup limits)
+ */
+async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset = null) {
+    const numFrames = frameGrayDatas.length;
+    const numAPs = alignmentPoints.length;
+    const templateSize = patchSize * patchSize;
+    const gridSize = 2 * searchRadius + 1;
+    const resultsPerAP = gridSize * gridSize;
+    const frameSize = width * height;
+
     // Extract reference templates (once for all frames) - always from original AP positions
     const refTemplates = new Float32Array(numAPs * templateSize);
     const apPositions = new Uint32Array(numAPs);

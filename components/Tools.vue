@@ -63,6 +63,112 @@
         <div class="separator"></div>
 
         <div class="tool-section">
+            <h3>SER Analyzer</h3>
+            <p class="tool-description">Analyze SER file bit depth and Bayer pattern.</p>
+
+            <div class="file-input-wrapper">
+                <input
+                    type="file"
+                    accept=".ser"
+                    @change="handleAnalyzerFileSelect"
+                    ref="analyzerFileInput"
+                    id="analyzer-ser-input"
+                />
+                <label for="analyzer-ser-input" class="file-label">
+                    {{ analyzerFile ? analyzerFile.name : 'Select SER file...' }}
+                </label>
+            </div>
+
+            <div v-if="analyzerHeader" class="file-info">
+                <div class="info-row">
+                    <span class="label">Dimensions:</span>
+                    <span class="value">{{ analyzerHeader.width }} x {{ analyzerHeader.height }}</span>
+                </div>
+                <div class="info-row">
+                    <span class="label">Header bit depth:</span>
+                    <span class="value">{{ analyzerHeader.pixelDepth }}-bit</span>
+                </div>
+                <div class="info-row">
+                    <span class="label">Frames:</span>
+                    <span class="value">{{ analyzerHeader.frameCount }}</span>
+                </div>
+                <div class="info-row">
+                    <span class="label">File size analysis:</span>
+                    <span class="value">{{ fileSizeAnalysis }}</span>
+                </div>
+                <div class="info-row">
+                    <span class="label">Pixel value range:</span>
+                    <span class="value">{{ pixelValueRange }}</span>
+                </div>
+            </div>
+
+            <div v-if="analyzerHeader" class="analyzer-controls">
+                <div class="control-row">
+                    <label>Bit depth:</label>
+                    <div class="toggle-buttons">
+                        <button
+                            :class="{ active: forcedBitDepth === 8 }"
+                            @click="setForcedBitDepth(8)"
+                        >8-bit</button>
+                        <button
+                            :class="{ active: forcedBitDepth === 16 }"
+                            @click="setForcedBitDepth(16)"
+                        >16-bit</button>
+                    </div>
+                </div>
+
+                <div class="control-row" v-if="forcedBitDepth === 16">
+                    <label>Byte swap:</label>
+                    <div class="toggle-buttons">
+                        <button
+                            :class="{ active: !byteSwap }"
+                            @click="setByteSwap(false)"
+                        >Off</button>
+                        <button
+                            :class="{ active: byteSwap }"
+                            @click="setByteSwap(true)"
+                        >On</button>
+                    </div>
+                </div>
+
+                <div class="control-row">
+                    <label>Byte offset: {{ byteOffset }}</label>
+                    <input
+                        type="range"
+                        v-model.number="byteOffset"
+                        min="0"
+                        max="7"
+                        @input="renderAnalyzerThumbnails"
+                    />
+                </div>
+
+                <div class="raw-bytes-preview">
+                    <label>First 32 raw bytes:</label>
+                    <div class="bytes-display">{{ rawBytesPreview }}</div>
+                </div>
+            </div>
+
+            <div v-if="analyzerHeader" class="bayer-thumbnails">
+                <h4>Bayer Pattern Preview</h4>
+                <div v-if="!thumbnailsReady" class="loading-thumbnails">
+                    <p>Rendering previews...</p>
+                </div>
+                <div class="thumbnails-grid" :class="{ hidden: !thumbnailsReady }">
+                    <div
+                        v-for="profile in bayerProfiles"
+                        :key="profile.id"
+                        class="thumbnail-item"
+                    >
+                        <canvas :ref="el => thumbnailCanvases[profile.id] = el" class="thumbnail-canvas"></canvas>
+                        <div class="thumbnail-label">{{ profile.label }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="separator"></div>
+
+        <div class="tool-section">
             <h3>Trim SER File</h3>
             <p class="tool-description">Extract a range of frames from a SER file without re-encoding.</p>
 
@@ -148,7 +254,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue';
+import { ref, computed, nextTick } from 'vue';
 import { parseSerHeader } from '@/composables/useSerReader';
 
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
@@ -367,6 +473,234 @@ async function runFfmpegFsTest() {
     } finally {
         ffmpegTestRunning.value = false;
     }
+}
+
+// SER Analyzer state
+const analyzerFileInput = ref(null);
+const analyzerFile = ref(null);
+const analyzerBuffer = ref(null);
+const analyzerHeader = ref(null);
+const forcedBitDepth = ref(16);
+const byteSwap = ref(false);
+const byteOffset = ref(0);
+const thumbnailCanvases = ref({});
+const thumbnailsReady = ref(false);
+const pixelValueRange = ref('');
+const fileSizeAnalysis = ref('');
+const rawBytesPreview = ref('');
+
+const bayerProfiles = [
+    { id: 'RGGB', label: 'RGGB' },
+    { id: 'BGGR', label: 'BGGR' },
+    { id: 'GBRG', label: 'GBRG' },
+    { id: 'GRBG', label: 'GRBG' },
+    { id: 'MONO', label: 'Mono' }
+];
+
+async function handleAnalyzerFileSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    analyzerFile.value = file;
+    thumbnailsReady.value = false;
+
+    // Read header
+    const headerBuf = await file.slice(0, 178).arrayBuffer();
+    const header = parseSerHeader(headerBuf);
+    analyzerHeader.value = header;
+
+    // Analyze file size
+    const frameSize16 = header.width * header.height * 2;
+    const frameSize8 = header.width * header.height * 1;
+    const dataSize = file.size - 178;
+    const frameCount16 = Math.floor(dataSize / frameSize16);
+    const frameCount8 = Math.floor(dataSize / frameSize8);
+    fileSizeAnalysis.value = `as 16-bit: ${frameCount16} frames, as 8-bit: ${frameCount8} frames`;
+
+    // Set initial bit depth based on header
+    forcedBitDepth.value = header.pixelDepth > 8 ? 16 : 8;
+
+    // Read first frame and analyze pixel values
+    const bpp = header.pixelDepth > 8 ? 2 : 1;
+    const frameSize = header.width * header.height * bpp;
+    const frameBuffer = await file.slice(178, 178 + frameSize).arrayBuffer();
+    analyzerBuffer.value = frameBuffer;
+
+    analyzePixelValues(frameBuffer, header.pixelDepth);
+    updateRawBytesPreview(frameBuffer);
+    await renderAnalyzerThumbnails();
+}
+
+function analyzePixelValues(buffer, headerBitDepth) {
+    let minVal, maxVal;
+
+    if (headerBitDepth > 8) {
+        const u16 = new Uint16Array(buffer);
+        minVal = Infinity;
+        maxVal = 0;
+        for (let i = 0; i < Math.min(10000, u16.length); i++) {
+            if (u16[i] < minVal) minVal = u16[i];
+            if (u16[i] > maxVal) maxVal = u16[i];
+        }
+    } else {
+        const u8 = new Uint8Array(buffer);
+        minVal = Infinity;
+        maxVal = 0;
+        for (let i = 0; i < Math.min(10000, u8.length); i++) {
+            if (u8[i] < minVal) minVal = u8[i];
+            if (u8[i] > maxVal) maxVal = u8[i];
+        }
+    }
+
+    pixelValueRange.value = `${minVal} - ${maxVal}`;
+}
+
+function setForcedBitDepth(depth) {
+    forcedBitDepth.value = depth;
+    renderAnalyzerThumbnails();
+}
+
+function setByteSwap(swap) {
+    byteSwap.value = swap;
+    renderAnalyzerThumbnails();
+}
+
+function updateRawBytesPreview(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const preview = [];
+    for (let i = 0; i < Math.min(32, bytes.length); i++) {
+        preview.push(bytes[i].toString(16).padStart(2, '0'));
+    }
+    rawBytesPreview.value = preview.join(' ');
+}
+
+async function renderAnalyzerThumbnails() {
+    if (!analyzerBuffer.value || !analyzerHeader.value) return;
+
+    thumbnailsReady.value = false;
+    await nextTick();
+
+    const header = analyzerHeader.value;
+    const buffer = analyzerBuffer.value;
+    const useBitDepth = forcedBitDepth.value;
+    const offset = byteOffset.value;
+    const swap = byteSwap.value;
+
+    // Get raw data based on forced bit depth interpretation
+    let width = header.width;
+    let height = header.height;
+    let src;
+
+    // Apply byte offset by creating a shifted view
+    const rawBytes = new Uint8Array(buffer);
+    const offsetBytes = rawBytes.slice(offset);
+
+    if (useBitDepth === 16) {
+        // Create Uint16Array from offset bytes
+        const u16 = new Uint16Array(Math.floor(offsetBytes.length / 2));
+        for (let i = 0; i < u16.length; i++) {
+            if (swap) {
+                // Big-endian: high byte first
+                u16[i] = (offsetBytes[i * 2] << 8) | offsetBytes[i * 2 + 1];
+            } else {
+                // Little-endian: low byte first (default)
+                u16[i] = offsetBytes[i * 2] | (offsetBytes[i * 2 + 1] << 8);
+            }
+        }
+        src = u16;
+    } else {
+        src = offsetBytes;
+    }
+
+    const srcScale = useBitDepth === 16 ? 1/256 : 1;
+    const pixelCount = src.length;
+    const actualWidth = useBitDepth === 8 && header.pixelDepth > 8 ? width : width;
+    const actualHeight = useBitDepth === 8 && header.pixelDepth > 8 ? height * 2 : height;
+
+    // Calculate thumbnail size
+    const maxSize = 120;
+    const scale = Math.min(maxSize / actualWidth, maxSize / actualHeight);
+    const thumbWidth = Math.floor(actualWidth * scale);
+    const thumbHeight = Math.floor(actualHeight * scale);
+
+    // Bayer pattern configs
+    const patternConfigs = [
+        { id: 'RGGB', rX: 0, rY: 0, bX: 1, bY: 1 },
+        { id: 'BGGR', rX: 1, rY: 1, bX: 0, bY: 0 },
+        { id: 'GBRG', rX: 0, rY: 1, bX: 1, bY: 0 },
+        { id: 'GRBG', rX: 1, rY: 0, bX: 0, bY: 1 },
+        { id: 'MONO', mono: true }
+    ];
+
+    for (const config of patternConfigs) {
+        const canvas = thumbnailCanvases.value[config.id];
+        if (!canvas) continue;
+
+        canvas.width = thumbWidth;
+        canvas.height = thumbHeight;
+
+        const ctx = canvas.getContext('2d');
+        const imageData = ctx.createImageData(thumbWidth, thumbHeight);
+        const data = imageData.data;
+
+        const xRatio = actualWidth / thumbWidth;
+        const yRatio = actualHeight / thumbHeight;
+
+        let minVal = 255, maxVal = 0;
+        const tempRgb = new Float32Array(thumbWidth * thumbHeight * 3);
+
+        // First pass: demosaic and find min/max
+        for (let ty = 0; ty < thumbHeight; ty++) {
+            for (let tx = 0; tx < thumbWidth; tx++) {
+                const sx = Math.floor(tx * xRatio);
+                const sy = Math.floor(ty * yRatio);
+                const tidx = (ty * thumbWidth + tx) * 3;
+
+                if (config.mono) {
+                    const idx = sy * actualWidth + sx;
+                    const v = (idx < src.length ? src[idx] : 0) * srcScale;
+                    tempRgb[tidx] = tempRgb[tidx + 1] = tempRgb[tidx + 2] = v;
+                } else {
+                    const bx = sx & ~1;
+                    const by = sy & ~1;
+                    const getVal = (x, y) => {
+                        const idx = Math.min(y, actualHeight-1) * actualWidth + Math.min(x, actualWidth-1);
+                        return (idx < src.length ? src[idx] : 0) * srcScale;
+                    };
+
+                    const rPos = { x: bx + config.rX, y: by + config.rY };
+                    const bPos = { x: bx + config.bX, y: by + config.bY };
+                    const g1 = { x: bx + (1 - config.rX), y: by + config.rY };
+                    const g2 = { x: bx + config.rX, y: by + (1 - config.rY) };
+
+                    tempRgb[tidx] = getVal(rPos.x, rPos.y);
+                    tempRgb[tidx + 1] = (getVal(g1.x, g1.y) + getVal(g2.x, g2.y)) / 2;
+                    tempRgb[tidx + 2] = getVal(bPos.x, bPos.y);
+                }
+
+                const lum = (tempRgb[tidx] + tempRgb[tidx + 1] + tempRgb[tidx + 2]) / 3;
+                minVal = Math.min(minVal, lum);
+                maxVal = Math.max(maxVal, lum);
+            }
+        }
+
+        // Second pass: auto-stretch
+        const range = maxVal - minVal || 1;
+        const stretchScale = 255 / range;
+
+        for (let i = 0; i < thumbWidth * thumbHeight; i++) {
+            const tidx = i * 3;
+            const didx = i * 4;
+            data[didx] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx] - minVal) * stretchScale)));
+            data[didx + 1] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 1] - minVal) * stretchScale)));
+            data[didx + 2] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 2] - minVal) * stretchScale)));
+            data[didx + 3] = 255;
+        }
+
+        ctx.putImageData(imageData, 0, 0);
+    }
+
+    thumbnailsReady.value = true;
 }
 
 // SER trimmer state
@@ -740,5 +1074,112 @@ async function createTrimmedSerFile() {
 .ffmpeg-log .test-result {
     padding: 4px 8px;
     margin-bottom: 2px;
+}
+
+/* SER Analyzer styles */
+.analyzer-controls {
+    margin: 15px 0;
+}
+
+.control-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.control-row label {
+    color: #333;
+    font-weight: bold;
+    min-width: 100px;
+}
+
+.control-row input[type="range"] {
+    flex: 1;
+}
+
+.raw-bytes-preview {
+    margin-top: 10px;
+}
+
+.raw-bytes-preview label {
+    display: block;
+    color: #333;
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.bytes-display {
+    font-family: monospace;
+    font-size: 11px;
+    background: #f0f0f0;
+    padding: 8px;
+    border-radius: 4px;
+    word-break: break-all;
+    color: #333;
+}
+
+.toggle-buttons {
+    display: flex;
+    gap: 5px;
+}
+
+.toggle-buttons button {
+    padding: 8px 16px;
+    border: 2px solid #ccc;
+    background: #f5f5f5;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    transition: all 0.2s;
+}
+
+.toggle-buttons button:hover {
+    border-color: #8CCF7E;
+}
+
+.toggle-buttons button.active {
+    background: #8CCF7E;
+    border-color: #6ab05e;
+    color: #111;
+}
+
+.bayer-thumbnails h4 {
+    margin: 15px 0 10px 0;
+    color: #333;
+}
+
+.thumbnails-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+}
+
+.thumbnails-grid.hidden {
+    display: none;
+}
+
+.thumbnail-item {
+    text-align: center;
+}
+
+.thumbnail-canvas {
+    border: 2px solid #ddd;
+    border-radius: 4px;
+    background: #000;
+    max-width: 100%;
+}
+
+.thumbnail-label {
+    margin-top: 5px;
+    font-size: 12px;
+    font-weight: bold;
+    color: #333;
+}
+
+.loading-thumbnails {
+    text-align: center;
+    padding: 20px;
+    color: #666;
 }
 </style>
