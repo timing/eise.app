@@ -13,13 +13,16 @@ let pendingResults = 3;
 let globalWidth, globalHeight, globalTaskId, globalIs16bit;
 let workersInitialized = false;
 
+// Get cache bust query string from this worker's own URL (passed by parent)
+const cacheBust = self.location.search || '';
+
 // Lazy-load sub-workers on first use
 function initializeSubWorkers() {
 	if (workersInitialized) return;
 	workersInitialized = true;
 
 	for (let i = 0; i < 3; i++) {
-		workers[i] = new Worker('/sharpen_per_channel_worker.js', {type: 'module'});
+		workers[i] = new Worker('/sharpen_per_channel_worker.js' + cacheBust, {type: 'module'});
 		workers[i].addEventListener('message', handleWorkerResponse(i));
 	}
 }

@@ -5,6 +5,7 @@ import { useUploader } from '@/composables/useUploader';
 import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
 import { useComparisonExport } from '@/composables/useComparisonExport';
+import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
 /**
  * Determines if an AVI FourCC represents an "easy" (uncompressed/raw) format.
@@ -303,6 +304,7 @@ export function useAviReader() {
     const { uploadFrames } = useUploader();
     const { stackFramesLocally } = useStacker();
     const { capturePreCropFrame, capturePostCropFrame, resetCaptures } = useComparisonExport();
+    const { workerUrl } = useWorkerUrl();
 
     const previewCanvas = document.createElement('canvas');
 
@@ -318,7 +320,7 @@ export function useAviReader() {
         addLog("Initializing analysis workers...");
 
         for (let i = 0; i < numWorkers; i++) {
-            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
+            unifiedAnalyzeWorkers.push(new Worker(workerUrl('/unified_analyze_worker.js')));
         }
 
         const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
@@ -369,7 +371,7 @@ export function useAviReader() {
 
         // Create fresh workers
         for (let i = 0; i < numWorkers; i++) {
-            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
+            unifiedAnalyzeWorkers.push(new Worker(workerUrl('/unified_analyze_worker.js')));
         }
 
         // Wait for them to initialize
@@ -410,7 +412,7 @@ export function useAviReader() {
         if (oldWorker) oldWorker.terminate();
 
         // Create fresh worker
-        const newWorker = new Worker('/unified_analyze_worker.js');
+        const newWorker = new Worker(workerUrl('/unified_analyze_worker.js'));
         unifiedAnalyzeWorkers[workerIndex] = newWorker;
 
         // Wait for it to initialize
@@ -1579,7 +1581,7 @@ export function useAviReader() {
     async function initializeGpuWorker() {
         if (gpuReady) return true;
 
-        gpuWorker = new Worker('/webgpu_analyze_worker.js');
+        gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
 
         try {
             await new Promise((resolve, reject) => {
@@ -2168,7 +2170,7 @@ export function useAviReader() {
 
         addLog(`Initializing ${LITE_WORKER_COUNT} analysis workers (Lite mode)...`);
         for (let i = 0; i < LITE_WORKER_COUNT; i++) {
-            liteWorkers.push(new Worker('/unified_analyze_worker.js'));
+            liteWorkers.push(new Worker(workerUrl('/unified_analyze_worker.js')));
         }
 
         // Initialize workers

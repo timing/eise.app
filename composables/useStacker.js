@@ -1,9 +1,11 @@
 import { useEventBus } from '@/composables/eventBus';
 import { useComparisonExport } from '@/composables/useComparisonExport';
+import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
 export function useStacker() {
     const { addLog, emit } = useEventBus();
     const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
+    const { workerUrl } = useWorkerUrl();
 
     /**
      * Convert Float32 buffer to Uint8 buffer (for GPU workers that expect Uint8)
@@ -256,8 +258,8 @@ export function useStacker() {
         emit('set-caption', 'Initializing GPU workers...');
 
         // Initialize GPU workers (no OpenCV worker needed - alignment prep is pure JS)
-        const gpuAnalyzeWorker = new Worker('/webgpu_analyze_worker.js');
-        const gpuStackWorker = new Worker('/webgpu_worker.js');
+        const gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
+        const gpuStackWorker = new Worker(workerUrl('/webgpu_worker.js'));
 
         try {
             // Init GPU workers in parallel
@@ -757,7 +759,7 @@ export function useStacker() {
         addLog('Initializing GPU worker...');
         emit('set-caption', 'Initializing GPU worker...');
 
-        const gpuWorker = new Worker('/webgpu_worker.js');
+        const gpuWorker = new Worker(workerUrl('/webgpu_worker.js'));
 
         try {
             // Init WebGPU worker
@@ -1059,7 +1061,7 @@ export function useStacker() {
     async function stackWithCPU(frameData, drizzleScale, noiseRobustAlignment, addLog, emit, surfaceMode = false) {
         return new Promise((resolve, reject) => {
             addLog('Creating fresh worker for stacking...');
-            const worker = new Worker('/unified_analyze_worker.js');
+            const worker = new Worker(workerUrl('/unified_analyze_worker.js'));
 
             const initHandler = (e) => {
                 if (e.data.type === 'ready') {

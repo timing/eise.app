@@ -4,6 +4,7 @@ import { useUploader } from '@/composables/useUploader';
 import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
 import { useComparisonExport } from '@/composables/useComparisonExport';
+import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
 // Helper to detect and provide user-friendly messages for memory errors
 function isMemoryError(error) {
@@ -140,6 +141,7 @@ export function useSerReader() {
     const { uploadFrames } = useUploader();
     const { stackFramesLocally } = useStacker();
     const { capturePreCropFrame, capturePostCropFrame, resetCaptures } = useComparisonExport();
+    const { workerUrl } = useWorkerUrl();
 
     // Create a pool of workers
     // Limit workers to prevent OpenCV WASM memory exhaustion on large frames
@@ -153,7 +155,7 @@ export function useSerReader() {
         addLog("Initializing analysis workers...");
 
         for (let i = 0; i < numWorkers; i++) {
-            unifiedAnalyzeWorkers.push(new Worker('/unified_analyze_worker.js'));
+            unifiedAnalyzeWorkers.push(new Worker(workerUrl('/unified_analyze_worker.js')));
         }
 
         const workerPromises = unifiedAnalyzeWorkers.map((worker, i) => {
@@ -222,7 +224,7 @@ export function useSerReader() {
         if (oldWorker) oldWorker.terminate();
 
         // Create fresh worker
-        const newWorker = new Worker('/unified_analyze_worker.js');
+        const newWorker = new Worker(workerUrl('/unified_analyze_worker.js'));
         unifiedAnalyzeWorkers[workerIndex] = newWorker;
 
         // Wait for it to initialize
@@ -578,7 +580,7 @@ export function useSerReader() {
     async function initGpuAnalyzeWorker() {
         if (gpuAnalyzeWorker && gpuWorkerReady) return true;
 
-        gpuAnalyzeWorker = new Worker('/webgpu_analyze_worker.js');
+        gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
 
         return new Promise((resolve) => {
             const timeout = setTimeout(() => {

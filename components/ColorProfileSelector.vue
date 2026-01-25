@@ -34,9 +34,11 @@
 <script setup>
 import { ref, onMounted, nextTick, onUnmounted } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
+import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import LoadingIndicator from '@/components/LoadingIndicator.vue';
 
 const { on, emit: eventBusEmit } = useEventBus();
+const { workerUrl } = useWorkerUrl();
 
 let gpuWorker = null;
 let gpuReady = false;
@@ -70,7 +72,7 @@ async function initGpuWorker() {
 	if (gpuWorker) return gpuReady;
 
 	return new Promise((resolve) => {
-		gpuWorker = new Worker('/webgpu_analyze_worker.js');
+		gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
 		gpuWorker.onmessage = (e) => {
 			if (e.data.type === 'ready') {
 				gpuReady = true;

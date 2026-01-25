@@ -44,10 +44,12 @@ import { onMounted, ref, watch, defineProps, onBeforeUpdate, nextTick } from 'vu
 import { useEventBus } from '@/composables/eventBus';
 import { useUploader } from '@/composables/useUploader';
 import { useTracking } from '@/composables/useTracking';
+import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
 const { on, addLog, emit } = useEventBus();
 const { uploadFrames } = useUploader();
 const { track } = useTracking();
+const { workerUrl } = useWorkerUrl();
 
 const { $ffmpeg } = useNuxtApp();
 
@@ -80,7 +82,7 @@ async function initializeWorkers() {
 	if (workersInitialized) return;
 
 	for (let i = 0; i < unifiedAnalyzeWorkers.length; i++) {
-		unifiedAnalyzeWorkers[i] = new Worker('/unified_analyze_worker.js');
+		unifiedAnalyzeWorkers[i] = new Worker(workerUrl('/unified_analyze_worker.js'));
 		unifiedAnalyzeWorkers[i].onerror = (e) => { console.error(e); };
 	}
 

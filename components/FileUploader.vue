@@ -147,6 +147,7 @@
 		<h3>More information, bugs and feature requests?</h3>
 		<p>Read more about Eise.app on the <a href="#" @click.prevent="showAbout">About page</a>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>.</p>
 		<p>Have feedback or running into issues? <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
+		<p class="build-date">Latest release: {{ buildDate }}</p>
 	</div>
 </div>
 </template>
@@ -166,6 +167,18 @@ import { useTracking } from '@/composables/useTracking';
 // Lite mode: auto-enabled when WebGPU unavailable
 // Limitations: max 100 frames, no drizzle, 8-bit, FFmpeg path for all files
 const liteMode = inject('liteMode', ref(false));
+
+// Build date from nuxt.config.ts (set at build time)
+const config = useRuntimeConfig();
+const buildDate = computed(() => {
+	const ts = config.public.buildTimestamp;
+	if (!ts) return '';
+	return new Date(ts).toLocaleDateString(undefined, {
+		year: 'numeric',
+		month: 'short',
+		day: 'numeric'
+	});
+});
 
 const { track } = useTracking();
 
@@ -1059,5 +1072,10 @@ async function processFiles(files) {
 .inline-number:disabled {
 	background: #eee;
 	color: #999;
+}
+.build-date {
+	font-size: 0.85em;
+	color: #888;
+	margin-top: 20px;
 }
 </style>

@@ -2,6 +2,7 @@
 // Handles capturing frames during processing and exporting a 2x2 comparison video
 
 import { ref } from 'vue';
+import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
 // Shared state for captured frames
 const preCropFrames = ref([]);       // Frames before cropping (full frame, shows wobble) - legacy RGBA
@@ -13,6 +14,8 @@ const processedImage = ref(null);    // Final processed image
 const MAX_COMPARISON_FRAMES = 10;
 
 export function useComparisonExport() {
+    const { workerUrl } = useWorkerUrl();
+
     /**
      * Store a pre-crop frame (raw Bayer data for lazy demosaic)
      * Called during stacking with raw frame data
@@ -269,7 +272,7 @@ export function useComparisonExport() {
         const results = [];
 
         // Create a temporary GPU worker for demosaic (the stacking worker may have been terminated)
-        const worker = new Worker('/webgpu_analyze_worker.js');
+        const worker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
 
         try {
             // Wait for worker to initialize

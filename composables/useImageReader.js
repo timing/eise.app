@@ -4,6 +4,7 @@
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
+import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
 // Native image formats that browsers can decode directly
 const NATIVE_FORMATS = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'];
@@ -11,6 +12,7 @@ const NATIVE_FORMATS = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'i
 export function useImageReader() {
     const { addLog, emit } = useEventBus();
     const { stackFramesLocally } = useStacker();
+    const { workerUrl } = useWorkerUrl();
 
     let gpuWorker = null;
     let gpuReady = false;
@@ -18,7 +20,7 @@ export function useImageReader() {
     async function initializeGpuWorker() {
         if (gpuReady) return true;
 
-        gpuWorker = new Worker('/webgpu_analyze_worker.js');
+        gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
 
         try {
             await new Promise((resolve, reject) => {

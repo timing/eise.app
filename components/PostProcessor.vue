@@ -182,6 +182,7 @@ import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useFeedback } from '@/composables/useFeedback';
+import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
 // Lite mode: deconvolution disabled (too slow on CPU)
 const liteMode = inject('liteMode', ref(false));
@@ -189,6 +190,7 @@ const liteMode = inject('liteMode', ref(false));
 const { track } = useTracking();
 const { openFeedbackAfterDownload } = useFeedback();
 const { getOutputFilename } = useProcessingState();
+const { workerUrl } = useWorkerUrl();
 const { captureProcessedImage, canExport, generateComparisonVideo, getExportStatus } = useComparisonExport();
 
 // Comparison video export state
@@ -355,11 +357,11 @@ function initializeWorkers() {
 	console.log('Lazy-loading sharpening workers for post-processing');
 	waveletWorkers = new Array(8);
 	for (let i = 0; i < waveletWorkers.length; i++) {
-		waveletWorkers[i] = new Worker('/wavelet_worker.js');
+		waveletWorkers[i] = new Worker(workerUrl('/wavelet_worker.js'));
 		waveletWorkers[i].onerror = (e) => { console.error(e); };
 	}
 
-	usmWorker = new Worker('/usm_worker.js');
+	usmWorker = new Worker(workerUrl('/usm_worker.js'));
 	usmWorker.onerror = (e) => { console.error('USM worker error:', e); };
 }
 
