@@ -666,7 +666,25 @@ async function processFiles(files) {
 
 		addLog('Storing video in memory');
 		try {
-			$ffmpeg.FS('writeFile', fileToProcess.name, await fetchFile(fileToProcess));
+			// Fetch file content first - Safari can throw InvalidStateError if file changed after selection
+			let fileData;
+			try {
+				fileData = await fetchFile(fileToProcess);
+			} catch (fetchErr) {
+				// Safari-specific: InvalidStateError when file handle becomes invalid
+				const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+				if (fetchErr.name === 'InvalidStateError' || fetchErr.code === 11) {
+					console.error('File fetch error (possible file change):', fetchErr);
+					const msg = isSafari
+						? 'The file could not be read. Safari may have lost access to the file. Please re-select the file and try again.'
+						: 'The file could not be read. It may have been modified or moved. Please re-select the file.';
+					eventBusEmit('upload-error', msg);
+					eventBusEmit('show-error');
+					return;
+				}
+				throw fetchErr; // Re-throw other errors
+			}
+			$ffmpeg.FS('writeFile', fileToProcess.name, fileData);
 		} catch(err) {
 			console.error('FFmpeg writeFile error:', err);
 			reportError(err, {
@@ -837,7 +855,18 @@ async function processFiles(files) {
 
 			await $loadFFmpeg();
 
-			$ffmpeg.FS('writeFile', imageFiles[0].name, await fetchFile(imageFiles[0]));
+			let imageData;
+			try {
+				imageData = await fetchFile(imageFiles[0]);
+			} catch (fetchErr) {
+				if (fetchErr.name === 'InvalidStateError' || fetchErr.code === 11) {
+					eventBusEmit('upload-error', 'The file could not be read. Please re-select the file and try again.');
+					eventBusEmit('show-error');
+					return;
+				}
+				throw fetchErr;
+			}
+			$ffmpeg.FS('writeFile', imageFiles[0].name, imageData);
 
 			await $ffmpeg.run('-i', imageFiles[0].name, imageFiles[0].name + '.png');
 

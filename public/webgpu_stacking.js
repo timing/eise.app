@@ -6,6 +6,26 @@ let stackQueue = null;
 let warpPipeline = null;
 let accumulatePipeline = null;
 let isStackingReady = false;
+let stackDeviceLost = false; // Track if GPU device was lost
+
+// Helper function to safely map GPU buffer with device lost detection
+async function safeStackMapAsync(buffer, mode) {
+    if (stackDeviceLost) {
+        throw new Error('GPU device was lost. Please reload the page to continue.');
+    }
+    try {
+        await buffer.mapAsync(mode);
+    } catch (err) {
+        if (err.message && err.message.includes('Instance reference')) {
+            stackDeviceLost = true;
+            stackDevice = null;
+            stackQueue = null;
+            isStackingReady = false;
+            throw new Error('GPU device was lost during buffer operation. Please reload the page.');
+        }
+        throw err;
+    }
+}
 
 // Cached buffers
 let cachedStackBuffers = null;
@@ -407,10 +427,10 @@ async function readAccumulators(outWidth, outHeight) {
     encoder.copyBufferToBuffer(buffers.accumW, 0, buffers.readbackW, 0, size);
     stackQueue.submit([encoder.finish()]);
 
-    await buffers.readbackR.mapAsync(GPUMapMode.READ);
-    await buffers.readbackG.mapAsync(GPUMapMode.READ);
-    await buffers.readbackB.mapAsync(GPUMapMode.READ);
-    await buffers.readbackW.mapAsync(GPUMapMode.READ);
+    await safeStackMapAsync(buffers.readbackR, GPUMapMode.READ);
+    await safeStackMapAsync(buffers.readbackG, GPUMapMode.READ);
+    await safeStackMapAsync(buffers.readbackB, GPUMapMode.READ);
+    await safeStackMapAsync(buffers.readbackW, GPUMapMode.READ);
 
     const accumR = new Float32Array(buffers.readbackR.getMappedRange().slice(0, size));
     const accumG = new Float32Array(buffers.readbackG.getMappedRange().slice(0, size));

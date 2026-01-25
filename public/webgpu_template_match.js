@@ -7,6 +7,26 @@ let gpuQueue = null;
 let nccPipeline = null;
 let batchPipeline = null;
 let isInitialized = false;
+let matchDeviceLost = false; // Track if GPU device was lost
+
+// Helper function to safely map GPU buffer with device lost detection
+async function safeMatchMapAsync(buffer, mode) {
+    if (matchDeviceLost) {
+        throw new Error('GPU device was lost. Please reload the page to continue.');
+    }
+    try {
+        await buffer.mapAsync(mode);
+    } catch (err) {
+        if (err.message && err.message.includes('Instance reference')) {
+            matchDeviceLost = true;
+            gpuDevice = null;
+            gpuQueue = null;
+            isInitialized = false;
+            throw new Error('GPU device was lost during buffer operation. Please reload the page.');
+        }
+        throw err;
+    }
+}
 
 // Cached buffers for reuse
 let cachedBuffers = null;
@@ -426,7 +446,7 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
     gpuQueue.submit([commandEncoder.finish()]);
 
     // Read results
-    await readbackBuffer.mapAsync(GPUMapMode.READ);
+    await safeMatchMapAsync(readbackBuffer, GPUMapMode.READ);
     const resultsData = new Float32Array(readbackBuffer.getMappedRange().slice(0));
     readbackBuffer.unmap();
 
@@ -600,7 +620,7 @@ async function matchTemplatesGPU(refGrayData, frameGrayData, width, height, alig
     commandEncoder.copyBufferToBuffer(buffers.resultsBuffer, 0, buffers.readbackBuffer, 0, resultsSize);
     gpuQueue.submit([commandEncoder.finish()]);
 
-    await buffers.readbackBuffer.mapAsync(GPUMapMode.READ);
+    await safeMatchMapAsync(buffers.readbackBuffer, GPUMapMode.READ);
     const resultsData = new Float32Array(buffers.readbackBuffer.getMappedRange().slice(0));
     buffers.readbackBuffer.unmap();
 

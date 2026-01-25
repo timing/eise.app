@@ -8,7 +8,7 @@
 			<h4>Color Adjustments</h4>
 			<div>
 				<label>Gain:</label>
-				<input type="range" min="0.5" max="2" step="0.01" v-model="gain" @input="applyProcessing"/>
+				<input type="range" min="0.5" max="3" step="0.01" v-model="gain" @input="applyProcessing"/>
 				<span>{{ gain }}</span>
 			</div>
 			<div>

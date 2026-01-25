@@ -5,6 +5,32 @@ import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 
+// Helper to detect and provide user-friendly messages for memory errors
+function isMemoryError(error) {
+    const msg = error?.message?.toLowerCase() || '';
+    return msg.includes('oom') ||
+           msg.includes('out of memory') ||
+           msg.includes('allocation failed') ||
+           msg.includes('memory limit') ||
+           msg.includes('batch too large');
+}
+
+function getMemoryErrorMessage(error, context = {}) {
+    const { width, height, frameCount } = context;
+    let suggestion = 'Try reducing the number of frames or using a smaller video resolution.';
+
+    if (width && height) {
+        const pixelCount = width * height;
+        if (pixelCount > 8000000) { // > 8MP
+            suggestion = `Your frames are very large (${width}x${height}). Try cropping or scaling down your source video before importing.`;
+        } else if (frameCount && frameCount > 2000) {
+            suggestion = `You have ${frameCount} frames. Try importing fewer frames (under 2000) or trim your video first.`;
+        }
+    }
+
+    return `Memory limit reached: Your browser ran out of memory while processing. ${suggestion}`;
+}
+
 // Map OpenCV Bayer pattern names to GPU shader pattern indices
 // OpenCV uses inverted naming: BG = industry RGGB, RG = industry BGGR
 // GPU shader indices: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
@@ -449,7 +475,7 @@ export function useSerReader() {
         // Dynamic batch size based on frame dimensions to avoid memory issues
         const frameBytes = header.width * header.height * 16; // Float32 RGBA
         const targetMemory = 256 * 1024 * 1024; // 256MB
-        const batchSize = Math.max(2, Math.min(16, Math.floor(targetMemory / frameBytes)));
+        const batchSize = Math.max(1, Math.min(16, Math.floor(targetMemory / frameBytes)));
         let maxSize = 0;
         let canCropCount = 0;
         const detectedCenters = [];
@@ -466,15 +492,11 @@ export function useSerReader() {
                 const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
 
                 // Convert to appropriate typed array based on pixel depth
+                // NOTE: Don't apply scale factor here - bounds detection should work on raw data range
+                // to avoid scaled background exceeding threshold
                 let data;
                 if (header.pixelDepth > 8) {
                     data = new Uint16Array(frameBuffer);
-                    // Scale to full 16-bit range if needed
-                    if (data16bitScaleFactor > 1) {
-                        for (let j = 0; j < data.length; j++) {
-                            data[j] = Math.min(65535, Math.round(data[j] * data16bitScaleFactor));
-                        }
-                    }
                 } else {
                     data = new Uint8Array(frameBuffer);
                 }
@@ -482,8 +504,10 @@ export function useSerReader() {
             }
 
             try {
-                // GPU analyze with threshold ~0.05 (12/255 normalized, matching CPU threshold of 12)
-                const results = await analyzeFrameBatchGpu(frames, header.width, header.height, bayerPattern, 0.05);
+                // GPU analyze for bounds detection
+                // Use lower threshold (0.02) for raw unscaled 16-bit data which may have narrow dynamic range
+                const boundsThreshold = header.pixelDepth > 8 ? 0.02 : 0.05;
+                const results = await analyzeFrameBatchGpu(frames, header.width, header.height, bayerPattern, boundsThreshold);
 
                 for (const result of results) {
                     if (result.bounds) {
@@ -496,8 +520,14 @@ export function useSerReader() {
                     }
                 }
             } catch (err) {
+                if (isMemoryError(err)) {
+                    const msg = getMemoryErrorMessage(err, { width: header.width, height: header.height });
+                    addLog(`Memory error during crop detection: ${msg}`);
+                    // For memory errors, skip crop detection entirely
+                    return null;
+                }
                 console.error('GPU crop detection batch error:', err);
-                // Continue with other batches
+                // Continue with other batches for non-memory errors
             }
 
             emit('update-loading', { progress: (batchEnd / sampleIndices.length) * 100, current: batchEnd, total: sampleIndices.length });
@@ -1119,7 +1149,7 @@ export function useSerReader() {
         // Target ~256MB of Float32 data per batch (width * height * 4 channels * 4 bytes * batchSize)
         const frameBytes = header.width * header.height * 16; // Float32 RGBA = 16 bytes/pixel
         const targetBatchMemory = 256 * 1024 * 1024; // 256MB
-        const maxBatchSize = Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
+        const maxBatchSize = Math.max(1, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
         const INITIAL_BATCH_SIZE = Math.min(8, maxBatchSize);
         const BATCH_SIZE = maxBatchSize;
         addLog(`Using batch size ${BATCH_SIZE} for ${header.width}x${header.height} frames`);
@@ -1191,8 +1221,14 @@ export function useSerReader() {
 
                         try {
                             // Combined GPU: detect bounds + crop + analyze in ONE demosaic pass
+                            // Adjust threshold based on scale factor: scaled background can be much higher
+                            // If scale factor is 16 (12-bit data), background of 500 becomes 8000 = 0.12 normalized
+                            // So we need threshold > 0.12 to avoid detecting background as object
+                            const scaledThreshold = data16bitScaleFactor > 1
+                                ? Math.min(0.25, 0.05 * Math.sqrt(data16bitScaleFactor)) // Scale threshold with sqrt of factor
+                                : 0.05;
                             const combinedResults = await detectCropAnalyzeGpu(
-                                batchFrames, header.width, header.height, cropSize, bayerPattern, 0.05, true
+                                batchFrames, header.width, header.height, cropSize, bayerPattern, scaledThreshold, true
                             );
 
                             // Filter and process results
@@ -1417,8 +1453,12 @@ export function useSerReader() {
 
                         try {
                             // Use metadataOnly=true to avoid creating Float32 buffers during analyze
+                            // Adjust threshold based on scale factor to avoid detecting scaled background
+                            const scaledThreshold = data16bitScaleFactor > 1
+                                ? Math.min(0.25, 0.05 * Math.sqrt(data16bitScaleFactor))
+                                : 0.1;
                             const results = await analyzeFrameBatchGpu(
-                                batchFrames, processWidth, processHeight, gpuBayerPattern, 0.1, true
+                                batchFrames, processWidth, processHeight, gpuBayerPattern, scaledThreshold, true
                             );
 
                             for (let j = 0; j < results.length; j++) {

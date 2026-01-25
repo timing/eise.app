@@ -5,6 +5,67 @@ console.log('webgpu_analyze_worker.js loaded (v1)');
 let device = null;
 let queue = null;
 let isReady = false;
+let deviceLost = false; // Track if GPU device was lost
+
+// Helper function to safely map GPU buffer with device lost detection
+async function safeMapAsync(buffer, mode) {
+    if (deviceLost) {
+        throw new Error('GPU device was lost. Please reload the page to continue.');
+    }
+    try {
+        await buffer.mapAsync(mode);
+    } catch (err) {
+        // Check for "external Instance reference" error - indicates device lost
+        if (err.message && err.message.includes('Instance reference')) {
+            deviceLost = true;
+            device = null;
+            queue = null;
+            isReady = false;
+            throw new Error('GPU device was lost during buffer operation. Please reload the page.');
+        }
+        throw err;
+    }
+}
+
+// Helper function to prepare Bayer data for GPU upload with auto-stretch for 16-bit
+function prepareBayerData(frames, pixelCount, skipStretch = false) {
+    const batchSize = frames.length;
+    const bayerData = new Uint32Array(batchSize * pixelCount);
+    const is16bit = frames[0]?.data instanceof Uint16Array;
+
+    let scale16bit = 1;
+    if (is16bit && !skipStretch) {
+        // Find max across all frames for consistent stretch
+        let maxVal = 0;
+        for (let i = 0; i < batchSize; i++) {
+            const data = frames[i].data;
+            for (let j = 0; j < data.length; j++) {
+                if (data[j] > maxVal) maxVal = data[j];
+            }
+        }
+        // Scale to fill 0-65535 range (like 8-bit * 257)
+        if (maxVal > 0 && maxVal < 60000) {
+            scale16bit = 65535 / maxVal;
+            console.log(`[GPU] Auto-stretch 16-bit: max=${maxVal}, scale=${scale16bit.toFixed(2)}`);
+        }
+    }
+
+    for (let i = 0; i < batchSize; i++) {
+        const frame = frames[i];
+        const offset = i * pixelCount;
+        if (is16bit) {
+            for (let j = 0; j < pixelCount; j++) {
+                bayerData[offset + j] = Math.min(65535, Math.round(frame.data[j] * scale16bit));
+            }
+        } else {
+            // 8-bit data, scale up
+            for (let j = 0; j < pixelCount; j++) {
+                bayerData[offset + j] = frame.data[j] * 257;
+            }
+        }
+    }
+    return bayerData;
+}
 
 // Pipelines
 let demosaicPipeline = null;
@@ -797,8 +858,10 @@ async function init() {
     // Handle GPU device lost (tab suspended, driver crash, etc.)
     device.lost.then((info) => {
         console.error('WebGPU device lost:', info.message);
+        deviceLost = true;
         device = null;
         queue = null;
+        isReady = false;
         self.postMessage({ type: 'error', error: `GPU device lost: ${info.message}. Please reload the page.` });
     });
 
@@ -1057,9 +1120,11 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     // full mode: Float32 RGBA (16 bytes/px) + Uint8 RGBA copy (4 bytes/px) = 20 bytes/px
     const bytesPerPixel = metadataOnly ? 4 : 20;
     const estimatedMemory = batchSize * pixelCount * bytesPerPixel;
-    const maxMemory = 512 * 1024 * 1024; // 512MB limit
+    const maxMemory = 512 * 1024 * 1024; // 512MB hard limit (allow some headroom over 256MB target)
     if (estimatedMemory > maxMemory) {
-        throw new Error(`Batch too large: ${batchSize} frames of ${width}x${height} would need ${Math.round(estimatedMemory / 1024 / 1024)}MB. Reduce batch size.`);
+        const neededMB = Math.round(estimatedMemory / 1024 / 1024);
+        const maxFrames = Math.max(1, Math.floor(maxMemory / (pixelCount * bytesPerPixel)));
+        throw new Error(`Memory limit: ${batchSize} frames of ${width}x${height} needs ${neededMB}MB (limit: 512MB). Try processing fewer frames or use smaller resolution. Max batch: ${maxFrames} frames.`);
     }
 
     // Get cached buffers (creates if needed, reuses if possible)
@@ -1069,22 +1134,8 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     const needsDemosaic = bayerPattern >= 0;
 
     if (needsDemosaic) {
-        // Upload Bayer data to input buffer
-        const bayerData = new Uint32Array(batchSize * pixelCount);
-        for (let i = 0; i < batchSize; i++) {
-            const frame = frames[i];
-            const offset = i * pixelCount;
-            if (frame.data instanceof Uint16Array) {
-                for (let j = 0; j < pixelCount; j++) {
-                    bayerData[offset + j] = frame.data[j];
-                }
-            } else {
-                // 8-bit data, scale up
-                for (let j = 0; j < pixelCount; j++) {
-                    bayerData[offset + j] = frame.data[j] * 257;  // 8-bit to 16-bit
-                }
-            }
-        }
+        // Upload Bayer data to input buffer (NO auto-stretch for bounds detection)
+        const bayerData = prepareBayerData(frames, pixelCount, true);
         queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
 
         // Demosaic params
@@ -1289,10 +1340,10 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     queue.submit([encoder.finish()]);
 
     // Read back results
-    await buffers.reductionReadback.mapAsync(GPUMapMode.READ);
-    await buffers.momentsReadback.mapAsync(GPUMapMode.READ);
-    await buffers.boundsReadback.mapAsync(GPUMapMode.READ);
-    await buffers.rgbaReadback.mapAsync(GPUMapMode.READ);
+    await safeMapAsync(buffers.reductionReadback, GPUMapMode.READ);
+    await safeMapAsync(buffers.momentsReadback, GPUMapMode.READ);
+    await safeMapAsync(buffers.boundsReadback, GPUMapMode.READ);
+    await safeMapAsync(buffers.rgbaReadback, GPUMapMode.READ);
 
     const reductionData = new Float32Array(buffers.reductionReadback.getMappedRange().slice(0, reductionCopySize));
     const momentsData = new Float32Array(buffers.momentsReadback.getMappedRange().slice(0, momentsCopySize));
@@ -1571,22 +1622,8 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const needsDemosaic = bayerPattern >= 0;
 
     if (needsDemosaic) {
-        // Upload Bayer data
-        const bayerData = new Uint32Array(batchSize * srcPixelCount);
-        for (let i = 0; i < batchSize; i++) {
-            const frame = frames[i];
-            const offset = i * srcPixelCount;
-            if (frame.data instanceof Uint16Array) {
-                for (let j = 0; j < srcPixelCount; j++) {
-                    bayerData[offset + j] = frame.data[j];
-                }
-            } else {
-                // 8-bit data, scale up
-                for (let j = 0; j < srcPixelCount; j++) {
-                    bayerData[offset + j] = frame.data[j] * 257;
-                }
-            }
-        }
+        // Upload Bayer data (with auto-stretch for 16-bit stacking)
+        const bayerData = prepareBayerData(frames, srcPixelCount, false);
         queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
 
         // Run demosaic+crop
@@ -1764,15 +1801,15 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     queue.submit([encoder.finish()]);
 
     // Read back results
-    await buffers.readbackBuffer.mapAsync(GPUMapMode.READ);
+    await safeMapAsync(buffers.readbackBuffer, GPUMapMode.READ);
     const reductionData = new Float32Array(buffers.readbackBuffer.getMappedRange().slice(0));
     buffers.readbackBuffer.unmap();
 
-    await buffers.momentsReadbackBuffer.mapAsync(GPUMapMode.READ);
+    await safeMapAsync(buffers.momentsReadbackBuffer, GPUMapMode.READ);
     const momentsData = new Float32Array(buffers.momentsReadbackBuffer.getMappedRange().slice(0));
     buffers.momentsReadbackBuffer.unmap();
 
-    await buffers.croppedReadbackBuffer.mapAsync(GPUMapMode.READ);
+    await safeMapAsync(buffers.croppedReadbackBuffer, GPUMapMode.READ);
     const croppedData = new Uint8Array(buffers.croppedReadbackBuffer.getMappedRange().slice(0));
     buffers.croppedReadbackBuffer.unmap();
 
@@ -1889,20 +1926,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
 
     // ===== STEP 1: Upload raw data and demosaic to full RGBA =====
     if (needsDemosaic) {
-        const bayerData = new Uint32Array(batchSize * srcPixelCount);
-        for (let i = 0; i < batchSize; i++) {
-            const frame = frames[i];
-            const offset = i * srcPixelCount;
-            if (frame.data instanceof Uint16Array) {
-                for (let j = 0; j < srcPixelCount; j++) {
-                    bayerData[offset + j] = frame.data[j];
-                }
-            } else {
-                for (let j = 0; j < srcPixelCount; j++) {
-                    bayerData[offset + j] = frame.data[j] * 257;
-                }
-            }
-        }
+        // Upload Bayer data (NO auto-stretch - bounds detection needs accurate thresholds)
+        const bayerData = prepareBayerData(frames, srcPixelCount, true);
         queue.writeBuffer(analyzeBuffers.inputBuffer, 0, bayerData);
         queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, bayerPattern]));
 
@@ -1997,7 +2022,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     queue.submit([encoder.finish()]);
 
     // ===== STEP 3: Read back bounds and compute centers =====
-    await analyzeBuffers.boundsReadback.mapAsync(GPUMapMode.READ);
+    await safeMapAsync(analyzeBuffers.boundsReadback, GPUMapMode.READ);
     const boundsData = new Uint32Array(analyzeBuffers.boundsReadback.getMappedRange().slice(0));
     analyzeBuffers.boundsReadback.unmap();
 
@@ -2134,8 +2159,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
 
     // ===== STEP 6: Read back results =====
     await Promise.all([
-        cropBuffers.readbackBuffer.mapAsync(GPUMapMode.READ),
-        cropBuffers.croppedReadbackBuffer.mapAsync(GPUMapMode.READ)
+        safeMapAsync(cropBuffers.readbackBuffer, GPUMapMode.READ),
+        safeMapAsync(cropBuffers.croppedReadbackBuffer, GPUMapMode.READ)
     ]);
 
     const reductionData = new Float32Array(cropBuffers.readbackBuffer.getMappedRange().slice(0));
@@ -2288,7 +2313,7 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, pixelCount * 4);
             queue.submit([encoder.finish()]);
 
-            await readbackBuffer.mapAsync(GPUMapMode.READ);
+            await safeMapAsync(readbackBuffer, GPUMapMode.READ);
             fullRgba = new Uint8ClampedArray(readbackBuffer.getMappedRange().slice(0));
             readbackBuffer.unmap();
         }

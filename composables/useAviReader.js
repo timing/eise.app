@@ -1124,6 +1124,29 @@ export function useAviReader() {
             return; // Don't terminate workers yet - they'll be used for stacking
         }
 
+        // Check for no valid frames before attempting to stack
+        if (bestFramesForStacking.length === 0) {
+            const totalSkipped = cutOffFrames + skippedFrames + oversizedFrames;
+            let errorMsg = 'Stacking failed: no valid frames could be processed.';
+
+            if (cutOffFrames === frameCount) {
+                errorMsg = `All ${frameCount} frames were rejected because the object touches the frame edge. Try selecting "Surface" mode for close-up Moon/Sun images, or use a wider field of view.`;
+            } else if (cutOffFrames > frameCount * 0.9) {
+                errorMsg = `${cutOffFrames} of ${frameCount} frames were rejected (object touching edge). Try "Surface" mode or ensure the planet is fully in frame.`;
+            } else if (skippedFrames === frameCount) {
+                errorMsg = `All ${frameCount} frames failed during analysis. The video may be corrupted or contain no recognizable content.`;
+            } else if (totalSkipped > 0) {
+                errorMsg = `No valid frames: ${cutOffFrames} cut-off, ${skippedFrames} crop-failed, ${oversizedFrames} oversized out of ${frameCount} total.`;
+            }
+
+            addLog(errorMsg);
+            emit('upload-error', errorMsg);
+            emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames (AVI)', details: { cutOffFrames, skippedFrames, oversizedFrames, frameCount } });
+            emit('show-error');
+            unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
+            return;
+        }
+
         // Client-side stacking (always on)
         emit('set-caption', 'Stacking frames locally...');
         addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
@@ -1140,9 +1163,10 @@ export function useAviReader() {
                 height: stackResult.height
             });
         } else {
-            addLog('Client-side stacking failed - no valid frames');
-            emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames' });
-            emit('stop-loading');
+            addLog('Client-side stacking failed - frames may have been corrupted during processing');
+            emit('upload-error', 'Stacking failed unexpectedly. Please try again or use a different video file.');
+            emit('stack-failed', { component: 'useAviReader', reason: 'stacking returned null (AVI)' });
+            emit('show-error');
         }
 
         // Terminate workers after all tasks are done (including stacking)
@@ -1388,6 +1412,32 @@ export function useAviReader() {
             return; // Don't terminate workers yet - they'll be used for stacking
         }
 
+        // Check for no valid frames before attempting to stack
+        if (bestFramesForStacking.length === 0) {
+            const totalSkipped = cutOffFrames + skippedFrames + oversizedFrames;
+            let errorMsg = 'Stacking failed: no valid frames could be processed.';
+
+            if (cutOffFrames === frameCount) {
+                // All frames had planet touching edge
+                errorMsg = `All ${frameCount} frames were rejected because the object touches the frame edge. Try selecting "Surface" mode for close-up Moon/Sun images, or use a wider field of view.`;
+            } else if (cutOffFrames > frameCount * 0.9) {
+                // Most frames cut-off
+                errorMsg = `${cutOffFrames} of ${frameCount} frames were rejected (object touching edge). Try "Surface" mode or ensure the planet is fully in frame.`;
+            } else if (skippedFrames === frameCount) {
+                // All frames failed crop/analysis
+                errorMsg = `All ${frameCount} frames failed during analysis. The video may be corrupted or contain no recognizable content.`;
+            } else if (totalSkipped > 0) {
+                errorMsg = `No valid frames: ${cutOffFrames} cut-off, ${skippedFrames} crop-failed, ${oversizedFrames} oversized out of ${frameCount} total.`;
+            }
+
+            addLog(errorMsg);
+            emit('upload-error', errorMsg);
+            emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames (FFmpeg)', details: { cutOffFrames, skippedFrames, oversizedFrames, frameCount } });
+            emit('show-error');
+            unifiedAnalyzeWorkers.forEach(worker => worker.terminate());
+            return;
+        }
+
         // Client-side stacking: use one of the existing workers (before terminating them)
         emit('set-caption', 'Stacking frames locally...');
         addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
@@ -1404,9 +1454,11 @@ export function useAviReader() {
                 height: stackResult.height
             });
         } else {
-            addLog('Client-side stacking failed - no valid frames');
-            emit('stack-failed', { component: 'useAviReader', reason: 'no valid frames (FFmpeg)' });
-            emit('stop-loading');
+            // This should rarely happen now that we check bestFramesForStacking above
+            addLog('Client-side stacking failed - frames may have been corrupted during processing');
+            emit('upload-error', 'Stacking failed unexpectedly. Please try again or use a different video file.');
+            emit('stack-failed', { component: 'useAviReader', reason: 'stacking returned null (FFmpeg)' });
+            emit('show-error');
         }
 
         // Terminate workers after all tasks are done (including stacking)
