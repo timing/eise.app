@@ -17,7 +17,7 @@ async function safeMatchMapAsync(buffer, mode) {
     try {
         await buffer.mapAsync(mode);
     } catch (err) {
-        if (err.message && err.message.includes('Instance reference')) {
+        if (err.message && (err.message.includes('Instance reference') || err.message.includes('Device') && err.message.includes('lost'))) {
             matchDeviceLost = true;
             gpuDevice = null;
             gpuQueue = null;

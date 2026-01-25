@@ -16,7 +16,7 @@ async function safeStackMapAsync(buffer, mode) {
     try {
         await buffer.mapAsync(mode);
     } catch (err) {
-        if (err.message && err.message.includes('Instance reference')) {
+        if (err.message && (err.message.includes('Instance reference') || err.message.includes('Device') && err.message.includes('lost'))) {
             stackDeviceLost = true;
             stackDevice = null;
             stackQueue = null;

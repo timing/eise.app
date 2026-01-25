@@ -15,8 +15,8 @@ async function safeMapAsync(buffer, mode) {
     try {
         await buffer.mapAsync(mode);
     } catch (err) {
-        // Check for "external Instance reference" error - indicates device lost
-        if (err.message && err.message.includes('Instance reference')) {
+        // Check for device lost errors (various error messages from different browsers/drivers)
+        if (err.message && (err.message.includes('Instance reference') || err.message.includes('Device') && err.message.includes('lost'))) {
             deviceLost = true;
             device = null;
             queue = null;
