@@ -445,6 +445,7 @@ export function useSerReader() {
         const gpuReady = await initGpuAnalyzeWorker();
         if (!gpuReady) {
             addLog('GPU not available, falling back to CPU detection');
+            await initializeWorkers(); // Lazy init CPU workers only when needed
             return detectCropRegion(file, header, frameSize, frameCount, bayerChoice, cropMarginPercent);
         }
 
@@ -1687,6 +1688,7 @@ export function useSerReader() {
         const gpuReady = await initGpuAnalyzeWorker();
         if (!gpuReady) {
             addLog('GPU not available, falling back to CPU detection');
+            await initializeWorkers(); // Lazy init CPU workers only when needed
             return detectCropRegionMultiFile(fileInfos, bayerChoice, cropMarginPercent);
         }
 
@@ -1958,17 +1960,11 @@ export function useSerReader() {
 
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
-    async function readSerFiles(files, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
+    async function readSerFiles(files, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
-        await initializeWorkers();
-
-        if (!workersReady) {
-            addLog("Stopping SER processing due to worker initialization failure.");
-            emit('show-error');
-            return;
-        }
+        // CPU workers (with OpenCV) are initialized lazily only if GPU fallback is needed
 
         emit('start-loading', 'Reading file headers...');
         emit('update-loading', 0);
@@ -2051,23 +2047,29 @@ export function useSerReader() {
         if (firstHeader.width >= MIN_SIZE_FOR_CROP && firstHeader.height >= MIN_SIZE_FOR_CROP) {
             emit('set-caption', 'Detecting planet for preview...');
             try {
-                const headerForWorker = {
-                    fileId: firstHeader.fileId,
-                    width: firstHeader.width,
-                    height: firstHeader.height,
-                    pixelDepth: firstHeader.pixelDepth,
-                    colorID: firstHeader.colorID
-                };
-                const bufferCopy = firstFrameBuffer.slice(0);
-                const boundsResult = await processFrameWithWorker(0, {
-                    type: 'detect-bounds',
-                    frameBuffer: bufferCopy,
-                    header: headerForWorker,
-                    bayerChoice: 'MONO',
-                    index: 0
-                }, [bufferCopy]);
+                // Use GPU for preview bounds detection (avoids loading OpenCV)
+                const gpuReady = await initGpuAnalyzeWorker();
+                let boundsResult = null;
 
-                if (boundsResult.bounds && boundsResult.bounds.canCrop) {
+                if (gpuReady) {
+                    const frameData = firstHeader.pixelDepth > 8
+                        ? new Uint16Array(firstFrameBuffer)
+                        : new Uint8Array(firstFrameBuffer);
+                    const frames = [{ data: frameData, index: 0 }];
+                    const results = await analyzeFrameBatchGpu(frames, firstHeader.width, firstHeader.height, -1, 0.05, true);
+                    if (results && results[0] && results[0].bounds) {
+                        boundsResult = {
+                            bounds: {
+                                canCrop: true,
+                                centerX: results[0].bounds.centroidX,
+                                centerY: results[0].bounds.centroidY,
+                                size: Math.max(results[0].bounds.width, results[0].bounds.height)
+                            }
+                        };
+                    }
+                }
+
+                if (boundsResult && boundsResult.bounds && boundsResult.bounds.canCrop) {
                     const { centerX, centerY, size } = boundsResult.bounds;
                     const previewMargin = 1 + (cropMarginPercent / 100);
                     const cropSize = Math.ceil(size * previewMargin / 2) * 2;
@@ -2126,12 +2128,8 @@ export function useSerReader() {
 
         if (allQualifyForCrop) {
             addLog(`All files qualify for auto-crop (min ${MIN_SIZE_FOR_CROP}x${MIN_SIZE_FOR_CROP})`);
-            // Use GPU detection when WebGPU is enabled, falls back to CPU automatically
-            if (useWebGPU) {
-                cropRegion = await detectCropRegionMultiFileGpu(fileInfos, bayerChoice, cropMarginPercent);
-            } else {
-                cropRegion = await detectCropRegionMultiFile(fileInfos, bayerChoice, cropMarginPercent);
-            }
+            // Use GPU detection (falls back to CPU automatically if needed)
+            cropRegion = await detectCropRegionMultiFileGpu(fileInfos, bayerChoice, cropMarginPercent);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
@@ -2143,6 +2141,14 @@ export function useSerReader() {
         emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
 
         // PHASE 5: Analyze all frames from all files
+        // Multi-file processing still uses CPU workers (TODO: convert to GPU)
+        await initializeWorkers();
+        if (!workersReady) {
+            addLog("Stopping SER processing due to worker initialization failure.");
+            emit('show-error');
+            return;
+        }
+
         // Use streaming ranking - only keep best N% in memory to avoid crashes
         const bestFramesCapacity = Math.max(1, Math.floor(totalFramesToProcess * stackPercentage / 100));
         const bestFramesForStacking = [];
@@ -2451,9 +2457,9 @@ export function useSerReader() {
             addLog(`Ready for manual threshold selection with ${allAnalyzedFrames.length} frames`);
             emit('quality-selection-ready', {
                 frames: allAnalyzedFrames,
-                workers: useWebGPU ? [] : unifiedAnalyzeWorkers, // GPU mode creates its own workers
+                workers: [], // GPU mode creates its own workers
                 noiseRobustAlignment,
-                useWebGPU
+                useWebGPU: true
             });
             return;
         } else {
@@ -2461,8 +2467,7 @@ export function useSerReader() {
             emit('set-caption', 'Stacking frames locally...');
             addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
-            const stackingWorker = useWebGPU ? null : unifiedAnalyzeWorkers[0];
-            const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU, null, surfaceMode);
+            const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, null, surfaceMode);
 
             if (stackResult && stackResult.blob) {
                 addLog('Client-side stacking complete');

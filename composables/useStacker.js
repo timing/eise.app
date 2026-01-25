@@ -100,6 +100,112 @@ export function useStacker() {
     }
 
     /**
+     * Create alignment points grid (pure JS, no OpenCV)
+     * PSS defaults: patchSize=20, searchRadius=8 (planets) or 34 (surface)
+     */
+    function createAPGrid(width, height, surfaceMode = false) {
+        const patchSize = 20;
+        const searchRadius = surfaceMode ? 34 : 8;
+
+        // Adaptive spacing based on image size
+        const minDim = Math.min(width, height);
+        let spacing;
+        if (minDim < 300) {
+            spacing = 30;
+        } else if (minDim < 500) {
+            spacing = 25;
+        } else if (minDim < 800) {
+            spacing = 20;
+        } else {
+            spacing = Math.floor(patchSize / 2); // 10px = 50% overlap
+        }
+
+        const alignmentPoints = [];
+        const marginX = Math.floor((width % spacing) / 2) + patchSize / 2;
+        const marginY = Math.floor((height % spacing) / 2) + patchSize / 2;
+
+        for (let y = marginY; y < height - patchSize / 2; y += spacing) {
+            for (let x = marginX; x < width - patchSize / 2; x += spacing) {
+                alignmentPoints.push({ x, y });
+            }
+        }
+
+        return { alignmentPoints, patchSize, searchRadius };
+    }
+
+    /**
+     * Filter alignment points by structure (local contrast) and brightness
+     * PSS defaults: minStructure=0.02, minBrightness=5
+     */
+    function filterAPsByQuality(alignmentPoints, refGray, width, height, patchSize, minStructure = 0.02, minBrightness = 5) {
+        const halfPatch = Math.floor(patchSize / 2);
+        const filtered = [];
+
+        for (const ap of alignmentPoints) {
+            const x0 = ap.x - halfPatch;
+            const y0 = ap.y - halfPatch;
+
+            if (x0 < 0 || y0 < 0 || x0 + patchSize > width || y0 + patchSize > height) {
+                continue;
+            }
+
+            let sum = 0;
+            let sumSq = 0;
+            const n = patchSize * patchSize;
+
+            for (let py = 0; py < patchSize; py++) {
+                for (let px = 0; px < patchSize; px++) {
+                    const val = refGray[(y0 + py) * width + (x0 + px)];
+                    sum += val;
+                    sumSq += val * val;
+                }
+            }
+
+            const mean = sum / n;
+            const variance = (sumSq / n) - (mean * mean);
+            const stdDev = Math.sqrt(Math.max(0, variance));
+            const structure = stdDev / 255;
+
+            if (mean >= minBrightness && structure >= minStructure) {
+                filtered.push(ap);
+            }
+        }
+
+        return filtered;
+    }
+
+    /**
+     * Prepare alignment data (pure JS, no OpenCV needed)
+     * Creates alignment points grid and reference grayscale
+     */
+    function prepareAlignmentData(refFrame, surfaceMode = false) {
+        if (!refFrame || !refFrame.float32Buffer || !refFrame.width || !refFrame.height) {
+            throw new Error('Invalid reference frame');
+        }
+
+        const { width, height } = refFrame;
+
+        // Convert Float32 RGBA to grayscale
+        const refGrayData = rgbaToGrayscale(refFrame.float32Buffer, width, height, true);
+
+        // Create AP grid
+        const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode);
+
+        // Filter APs by quality
+        const filteredAPs = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
+        const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
+
+        return {
+            alignmentPoints: activeAPs,
+            refGrayData,
+            patchSize,
+            searchRadius,
+            width,
+            height
+        };
+    }
+
+    /**
      * Pipelined two-pass GPU stacking
      * Loads frames from file and stacks them concurrently for better performance
      * Instead of: load ALL → then stack ALL
@@ -149,13 +255,12 @@ export function useStacker() {
         addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}`);
         emit('set-caption', 'Initializing GPU workers...');
 
-        // Initialize all workers in parallel
+        // Initialize GPU workers (no OpenCV worker needed - alignment prep is pure JS)
         const gpuAnalyzeWorker = new Worker('/webgpu_analyze_worker.js');
-        const cvWorker = new Worker('/unified_analyze_worker.js');
         const gpuStackWorker = new Worker('/webgpu_worker.js');
 
         try {
-            // Init all workers in parallel
+            // Init GPU workers in parallel
             await Promise.all([
                 new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => reject(new Error('GPU analyze worker timeout')), 30000);
@@ -166,14 +271,6 @@ export function useStacker() {
                     gpuAnalyzeWorker.postMessage({ type: 'init' });
                 }),
                 new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => reject(new Error('CV worker timeout')), 30000);
-                    cvWorker.onmessage = (e) => {
-                        if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
-                        else if (e.data.type === 'error') { clearTimeout(timeout); reject(new Error(e.data.message)); }
-                    };
-                    cvWorker.postMessage({ type: 'init' });
-                }),
-                new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => reject(new Error('GPU stack worker timeout')), 10000);
                     gpuStackWorker.onmessage = (e) => {
                         if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
@@ -182,7 +279,7 @@ export function useStacker() {
                     gpuStackWorker.postMessage({ type: 'init' });
                 })
             ]);
-            addLog('All workers initialized');
+            addLog('GPU workers initialized');
 
             // Helper to load a batch of frames (SER from file, images from memory)
             async function loadRawBatch(batchFrames) {
@@ -278,7 +375,7 @@ export function useStacker() {
             emit('stacking-started', { referenceFrame: refFrame });
             addLog(`Reference frame loaded: index ${refFrame.index}`);
 
-            // Step 2: Prepare alignment points
+            // Step 2: Prepare alignment points (pure JS, no OpenCV)
             emit('set-caption', 'Preparing alignment points...');
             const refFrameData = {
                 float32Buffer: refFrame.float32Buffer.slice(0),
@@ -287,20 +384,7 @@ export function useStacker() {
                 sharpness: refFrame.sharpness
             };
 
-            const alignmentData = await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('Alignment preparation timeout')), 60000);
-                cvWorker.onmessage = (e) => {
-                    if (e.data.type === 'alignment-prepared') {
-                        clearTimeout(timeout);
-                        resolve(e.data);
-                    } else if (e.data.type === 'prepare-error') {
-                        clearTimeout(timeout);
-                        reject(new Error(e.data.error));
-                    }
-                };
-                cvWorker.postMessage({ type: 'prepare-alignment', refFrame: refFrameData, refIndex: 0, surfaceMode });
-            });
-
+            const alignmentData = prepareAlignmentData(refFrameData, surfaceMode);
             const { alignmentPoints, refGrayData, patchSize, searchRadius } = alignmentData;
             addLog(`Alignment prepared: ${alignmentPoints.length} APs`);
 
@@ -492,7 +576,6 @@ export function useStacker() {
             // Cleanup
             gpuStackWorker.postMessage({ type: 'cleanup' });
             gpuAnalyzeWorker.terminate();
-            cvWorker.terminate();
             gpuStackWorker.terminate();
 
             addLog(`Stacking complete: ${result.width}x${result.height}`);
@@ -509,7 +592,6 @@ export function useStacker() {
 
         } catch (error) {
             gpuAnalyzeWorker.terminate();
-            cvWorker.terminate();
             gpuStackWorker.terminate();
             addLog(`Pipelined stacking error: ${error.message}`);
             throw error;
@@ -671,25 +753,13 @@ export function useStacker() {
     async function stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode = false) {
         const { width, height } = frameData[0];
 
-        // Step 1: Initialize OpenCV worker and prepare alignment data
-        addLog('Initializing workers...');
-        emit('set-caption', 'Initializing workers...');
+        // Step 1: Initialize GPU worker
+        addLog('Initializing GPU worker...');
+        emit('set-caption', 'Initializing GPU worker...');
 
-        const cvWorker = new Worker('/unified_analyze_worker.js');
         const gpuWorker = new Worker('/webgpu_worker.js');
 
         try {
-            // Init OpenCV worker
-            await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('OpenCV worker timeout')), 30000);
-                cvWorker.onmessage = (e) => {
-                    if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
-                    else if (e.data.type === 'error') { clearTimeout(timeout); reject(new Error(e.data.message)); }
-                };
-                cvWorker.postMessage({ type: 'init' });
-            });
-            addLog('OpenCV worker ready');
-
             // Init WebGPU worker
             await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error('WebGPU worker timeout')), 10000);
@@ -701,7 +771,7 @@ export function useStacker() {
             });
             addLog('WebGPU worker ready');
 
-            // Step 2: Get alignment points and reference grayscale from OpenCV worker
+            // Step 2: Prepare alignment points (pure JS, no OpenCV needed)
             emit('set-caption', 'Preparing alignment points...');
 
             // Find reference frame (highest sharpness) - only send this one frame
@@ -732,20 +802,8 @@ export function useStacker() {
                 sharpness: refFrame.sharpness
             };
 
-            const alignmentData = await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('Alignment preparation timeout')), 60000);
-                cvWorker.onmessage = (e) => {
-                    if (e.data.type === 'alignment-prepared') {
-                        clearTimeout(timeout);
-                        resolve(e.data);
-                    } else if (e.data.type === 'prepare-error') {
-                        clearTimeout(timeout);
-                        reject(new Error(e.data.error));
-                    }
-                };
-                cvWorker.postMessage({ type: 'prepare-alignment', refFrame: refFrameData, refIndex, surfaceMode });
-            });
-
+            // Prepare alignment data (pure JS, no OpenCV)
+            const alignmentData = prepareAlignmentData(refFrameData, surfaceMode);
             const { alignmentPoints, refGrayData, patchSize, searchRadius } = alignmentData;
             addLog(`Alignment prepared: ${alignmentPoints.length} APs, reference frame ${refIndex}`);
 
@@ -970,7 +1028,6 @@ export function useStacker() {
             // Cleanup and terminate
             gpuWorker.postMessage({ type: 'cleanup' });
             gpuWorker.terminate();
-            cvWorker.terminate();
 
             addLog(`Stacked image: ${result.width}x${result.height}, ${(result.blob.size / 1024).toFixed(1)} KB`);
             emit('set-caption', 'Stacking complete');
@@ -990,7 +1047,6 @@ export function useStacker() {
             };
 
         } catch (error) {
-            cvWorker.terminate();
             gpuWorker.terminate();
             throw error;
         }

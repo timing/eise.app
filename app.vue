@@ -96,7 +96,7 @@
 		<QualitySelector v-show="currentTab === 'FileUploader' && isSelectingQuality" :frames="qualityFrames" @threshold-selected="handleThresholdSelected" />
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="currentTab === 'FileUploader' && isProcessing && !isSelectingColorProfile && !isSelectingQuality"
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
-		<PostProcessor v-show="currentTab === 'PostProcessor'" :file="selectedFile" :float32Data="stackedFloat32Data" :imageDimensions="stackedImageDimensions" :croppedSerData="croppedSerData" :croppedAviData="croppedAviData" />
+		<PostProcessor v-if="currentTab === 'PostProcessor'" :file="selectedFile" :float32Data="stackedFloat32Data" :imageDimensions="stackedImageDimensions" :croppedSerData="croppedSerData" :croppedAviData="croppedAviData" />
 
 		<div class="clearb"></div>
 
@@ -109,12 +109,14 @@
 <script setup>
 import FileUploader from '~/components/FileUploader.vue';
 import VideoFrameProcessor from './components/VideoFrameProcessor.vue';
-import PostProcessor from './components/PostProcessor.vue';
 import Tools from './components/Tools.vue';
 import Logger from './components/Logger.vue';
 import ColorProfileSelector from './components/ColorProfileSelector.vue';
 import QualitySelector from './components/QualitySelector.vue';
-import { ref, watch, computed, provide } from 'vue';
+import { ref, watch, computed, provide, defineAsyncComponent } from 'vue';
+
+// Lazy-load PostProcessor to reduce initial bundle size
+const PostProcessor = defineAsyncComponent(() => import('./components/PostProcessor.vue'));
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
 import { useTracking } from '@/composables/useTracking';

@@ -591,7 +591,7 @@ async function processFiles(files) {
 		emit('processing-started');
 		const { readSerFiles } = useSerReader();
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		await readSerFiles(serFiles, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true, surfaceMode.value);
+		await readSerFiles(serFiles, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value);
 		return;
 	} else if (serFiles.length > 1 && liteMode.value) {
 		alert('Multiple SER files are not supported in Lite Mode. Please select a single file.');
