@@ -48,6 +48,55 @@ if (typeof window !== 'undefined') {
 		});
 		console.log('Use window.debugSaveFrame(index) to download a frame');
 	};
+
+	// Debug utilities for skipped/cut-off frames
+	window.debugSkippedFrames = () => {
+		const cutOff = window.__debugCutOffFrames || [];
+		const noBounds = window.__debugNoBoundsFrames || [];
+		if (cutOff.length === 0 && noBounds.length === 0) {
+			console.log('No skipped frames captured. Process a file first.');
+			return;
+		}
+		if (cutOff.length > 0) {
+			console.log(`Cut-off frames (${cutOff.length} captured):`);
+			cutOff.forEach((f, i) => {
+				console.log(`  [${i}] frame ${f.index}: bounds x=${f.bounds.x.toFixed(0)}, y=${f.bounds.y.toFixed(0)}, ${f.bounds.width.toFixed(0)}x${f.bounds.height.toFixed(0)} (frame: ${f.frameWidth}x${f.frameHeight}, margin: ${f.margin.toFixed(1)})`);
+			});
+		}
+		if (noBounds.length > 0) {
+			console.log(`No-bounds frames (${noBounds.length} captured):`);
+			noBounds.forEach((f, i) => {
+				console.log(`  [${i}] frame ${f.index}: no object detected`);
+			});
+		}
+		console.log('Use window.debugSaveSkippedFrame(index) to download a cut-off frame');
+	};
+
+	window.debugSaveSkippedFrame = async (index = 0) => {
+		const cutOff = window.__debugCutOffFrames || [];
+		if (cutOff.length === 0) {
+			console.log('No cut-off frames captured.');
+			return;
+		}
+		if (index < 0 || index >= cutOff.length) {
+			console.log(`Invalid index. Available: 0 to ${cutOff.length - 1}`);
+			return;
+		}
+		const f = cutOff[index];
+		if (!f.uint8Buffer) {
+			console.log(`Frame ${index} has no image buffer`);
+			return;
+		}
+		const canvas = document.createElement('canvas');
+		canvas.width = canvas.height = f.cropSize;
+		const ctx = canvas.getContext('2d');
+		ctx.putImageData(new ImageData(new Uint8ClampedArray(f.uint8Buffer), f.cropSize, f.cropSize), 0, 0);
+		const a = document.createElement('a');
+		a.href = canvas.toDataURL('image/png');
+		a.download = `cutoff_frame_${f.index}_bounds_${f.bounds.width.toFixed(0)}x${f.bounds.height.toFixed(0)}.png`;
+		a.click();
+		console.log(`Downloaded cut-off frame ${f.index}`);
+	};
 }
 
 // Cleanup all workers on page unload
@@ -92,7 +141,7 @@ export const useEventBus = () => {
 		// Capture frames for debug export
 		if ((event === 'quality-selection-ready' || event === 'debug-frames-available') && payload?.frames) {
 			debugFrames = payload.frames;
-			console.log(`Debug: ${debugFrames.length} frames available. Use window.debugListFrames() or window.debugSaveFrame(index)`);
+			console.log(`Debug: ${debugFrames.length} frames available. Use window.debugListFrames() / window.debugSaveFrame(index) | Skipped: window.debugSkippedFrames() / window.debugSaveSkippedFrame(index)`);
 		}
 		if (eventCallbacks[event]) {
 			eventCallbacks[event].forEach(cb => cb(payload));

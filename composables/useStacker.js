@@ -595,6 +595,16 @@ export function useStacker() {
         } catch (error) {
             gpuAnalyzeWorker.terminate();
             gpuStackWorker.terminate();
+
+            // Check if this is a GPU unavailable error - return null to trigger CPU fallback
+            const gpuUnavailableErrors = ['No WebGPU adapter', 'WebGPU not available', 'Device', 'lost'];
+            const isGpuUnavailable = gpuUnavailableErrors.some(msg => error.message?.includes(msg));
+
+            if (isGpuUnavailable) {
+                addLog(`GPU unavailable: ${error.message} - falling back to CPU`);
+                return null; // Caller should fall back to CPU
+            }
+
             addLog(`Pipelined stacking error: ${error.message}`);
             throw error;
         }
@@ -621,7 +631,12 @@ export function useStacker() {
 
         if (hasTwoPassFrames && useWebGPU) {
             // Use pipelined approach: load batch → align → stack, while loading next batch
-            return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode);
+            const gpuResult = await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode);
+            if (gpuResult) {
+                return gpuResult;
+            }
+            // GPU failed (e.g., no adapter) - fall through to CPU path
+            addLog('GPU stacking unavailable, using CPU fallback');
         }
 
         // Filter frames that have valid buffer (float32Buffer preferred, rgbaBuffer for legacy) and sharpness
@@ -741,7 +756,12 @@ export function useStacker() {
 
         // WebGPU path: orchestrate GPU worker directly from main thread
         if (useWebGPU) {
-            return await stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode);
+            const gpuResult = await stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode);
+            if (gpuResult) {
+                return gpuResult;
+            }
+            // GPU failed - fall through to CPU
+            addLog('GPU stacking unavailable, using CPU fallback');
         }
 
         // CPU path: send everything to unified_analyze_worker
@@ -1050,6 +1070,16 @@ export function useStacker() {
 
         } catch (error) {
             gpuWorker.terminate();
+
+            // Check if this is a GPU unavailable error - return null to trigger CPU fallback
+            const gpuUnavailableErrors = ['No WebGPU adapter', 'WebGPU not available', 'Device', 'lost'];
+            const isGpuUnavailable = gpuUnavailableErrors.some(msg => error.message?.includes(msg));
+
+            if (isGpuUnavailable) {
+                addLog(`GPU unavailable: ${error.message} - falling back to CPU`);
+                return null;
+            }
+
             throw error;
         }
     }

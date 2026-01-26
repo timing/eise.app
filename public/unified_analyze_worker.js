@@ -1278,11 +1278,9 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
         // Note: cv.Size() returns a plain JS object {width, height}, not a WASM object, so no .delete() needed
         _cv.GaussianBlur(grayMat, blurred, new _cv.Size(5, 5), 0);
 
-        // Use a low threshold to catch faint features like Saturn's rings
-        // Otsu often sets threshold too high for faint details
-        // Using ~5% of max (threshold 12-15) catches rings while ignoring noise
+        // 10% threshold (25/255) - high enough to reject noise, low enough to detect dim planets
         binary = new _cv.Mat();
-        _cv.threshold(blurred, binary, 12, 255, _cv.THRESH_BINARY);
+        _cv.threshold(blurred, binary, 25, 255, _cv.THRESH_BINARY);
 
         // Find contours
         contours = new _cv.MatVector();
@@ -1444,9 +1442,9 @@ async function detectObjectBoundsFromPng(pngData) {
         // Note: cv.Size() returns a plain JS object {width, height}, not a WASM object, so no .delete() needed
         _cv.GaussianBlur(grayMat, blurred, new _cv.Size(5, 5), 0);
 
-        // Use low threshold to catch faint features
+        // 10% threshold (25/255) - high enough to reject noise, low enough to detect dim planets
         binary = new _cv.Mat();
-        _cv.threshold(blurred, binary, 12, 255, _cv.THRESH_BINARY);
+        _cv.threshold(blurred, binary, 25, 255, _cv.THRESH_BINARY);
 
         // Find contours
         contours = new _cv.MatVector();

@@ -35,18 +35,28 @@ function prepareBayerData(frames, pixelCount, skipStretch = false) {
 
     let scale16bit = 1;
     if (is16bit && !skipStretch) {
-        // Find max across all frames for consistent stretch
-        let maxVal = 0;
-        for (let i = 0; i < batchSize; i++) {
+        // Sample pixels to find a robust max (ignoring hot pixels)
+        // Use 99th percentile of a sample instead of absolute max
+        const sampleSize = Math.min(10000, frames[0].data.length);
+        const sample = [];
+        for (let i = 0; i < batchSize && sample.length < sampleSize; i++) {
             const data = frames[i].data;
-            for (let j = 0; j < data.length; j++) {
-                if (data[j] > maxVal) maxVal = data[j];
+            const step = Math.max(1, Math.floor(data.length / (sampleSize / batchSize)));
+            for (let j = 0; j < data.length && sample.length < sampleSize; j += step) {
+                sample.push(data[j]);
             }
         }
-        // Scale to fill 0-65535 range (like 8-bit * 257)
-        if (maxVal > 0 && maxVal < 60000) {
-            scale16bit = 65535 / maxVal;
-            console.log(`[GPU] Auto-stretch 16-bit: max=${maxVal}, scale=${scale16bit.toFixed(2)}`);
+        sample.sort((a, b) => a - b);
+        const p99 = sample[Math.floor(sample.length * 0.99)];
+        const actualMax = sample[sample.length - 1];
+
+        // Stretch to bring 99th percentile to ~50% of range, capped at 2x
+        if (p99 > 0 && p99 < 32768) {
+            const idealScale = 32768 / p99;
+            scale16bit = Math.min(idealScale, 2.0);
+            console.log(`[GPU] Auto-stretch 16-bit: p99=${p99}, max=${actualMax}, scale=${scale16bit.toFixed(2)}${idealScale > 2 ? ' (capped)' : ''}`);
+        } else if (p99 > 0) {
+            console.log(`[GPU] 16-bit data bright enough (p99=${p99}, max=${actualMax}) - no stretch needed`);
         }
     }
 
@@ -1134,8 +1144,8 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     const needsDemosaic = bayerPattern >= 0;
 
     if (needsDemosaic) {
-        // Upload Bayer data to input buffer (NO auto-stretch for bounds detection)
-        const bayerData = prepareBayerData(frames, pixelCount, true);
+        // Upload Bayer data to input buffer (auto-stretch for 16-bit to handle dark data)
+        const bayerData = prepareBayerData(frames, pixelCount, false);
         queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
 
         // Demosaic params
@@ -1926,8 +1936,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
 
     // ===== STEP 1: Upload raw data and demosaic to full RGBA =====
     if (needsDemosaic) {
-        // Upload Bayer data (NO auto-stretch - bounds detection needs accurate thresholds)
-        const bayerData = prepareBayerData(frames, srcPixelCount, true);
+        // Upload Bayer data (auto-stretch for 16-bit to handle very dark data)
+        const bayerData = prepareBayerData(frames, srcPixelCount, false);
         queue.writeBuffer(analyzeBuffers.inputBuffer, 0, bayerData);
         queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, bayerPattern]));
 

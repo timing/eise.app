@@ -495,8 +495,6 @@ export function useSerReader() {
                 const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
 
                 // Convert to appropriate typed array based on pixel depth
-                // NOTE: Don't apply scale factor here - bounds detection should work on raw data range
-                // to avoid scaled background exceeding threshold
                 let data;
                 if (header.pixelDepth > 8) {
                     data = new Uint16Array(frameBuffer);
@@ -508,9 +506,9 @@ export function useSerReader() {
 
             try {
                 // GPU analyze for bounds detection
-                // Use lower threshold (0.02) for raw unscaled 16-bit data which may have narrow dynamic range
-                const boundsThreshold = header.pixelDepth > 8 ? 0.02 : 0.05;
-                const results = await analyzeFrameBatchGpu(frames, header.width, header.height, bayerPattern, boundsThreshold);
+                // GPU worker will auto-stretch 16-bit data, use 20% threshold for stretched data
+                // GPU worker will auto-stretch 16-bit data, so use consistent 10% threshold
+                const results = await analyzeFrameBatchGpu(frames, header.width, header.height, bayerPattern, 0.10);
 
                 for (const result of results) {
                     if (result.bounds) {
@@ -1163,6 +1161,16 @@ export function useSerReader() {
                     addLog('Using two-pass GPU crop + analyze path (memory optimized)');
                     const cropSize = cropRegion.size;
 
+                    // Debug: store metadata for a few problematic frames (no heavy buffers)
+                    // Access via: window.__debugCutOffFrames, window.__debugNoBoundsFrames
+                    // Skip in Lite mode to allow aggressive memory cleanup
+                    const isLiteMode = typeof window !== 'undefined' && new URLSearchParams(window.location?.search).has('lite');
+                    if (!isLiteMode) {
+                        window.__debugCutOffFrames = [];
+                        window.__debugNoBoundsFrames = [];
+                    }
+                    const MAX_DEBUG_FRAMES = 5;
+
                     // Map bayer choice to GPU pattern index
                     const bayerPattern = bayerChoiceToGpuPattern(bayerChoice);
 
@@ -1179,12 +1187,7 @@ export function useSerReader() {
                             let data;
                             if (header.pixelDepth > 8) {
                                 data = new Uint16Array(frameBuffer);
-                                // Scale to full 16-bit range if needed
-                                if (data16bitScaleFactor > 1) {
-                                    for (let j = 0; j < data.length; j++) {
-                                        data[j] = Math.min(65535, Math.round(data[j] * data16bitScaleFactor));
-                                    }
-                                }
+                                // Don't scale here - GPU worker handles auto-stretch
                             } else {
                                 data = new Uint8Array(frameBuffer);
                             }
@@ -1197,138 +1200,223 @@ export function useSerReader() {
                     let nextBatchPromise = null;
                     let batchStart = 0;
                     let isFirstBatch = true;
+                    // Track effective max batch size - reduced on memory errors
+                    let effectiveMaxBatchSize = BATCH_SIZE;
 
                     while (batchStart < frameCount && !stopDispatching) {
                         // Use smaller batch for first iteration for quick preview
-                        const currentBatchSize = isFirstBatch ? INITIAL_BATCH_SIZE : BATCH_SIZE;
+                        const currentBatchSize = isFirstBatch ? Math.min(INITIAL_BATCH_SIZE, effectiveMaxBatchSize) : effectiveMaxBatchSize;
                         const batchEnd = Math.min(batchStart + currentBatchSize, frameCount);
 
                         // Get current batch (either pre-loaded or load now)
                         let batchFrames;
                         if (nextBatchPromise) {
                             batchFrames = await nextBatchPromise;
+                            // If we reduced batch size, we may need to trim pre-loaded batch
+                            if (batchFrames.length > effectiveMaxBatchSize) {
+                                batchFrames = batchFrames.slice(0, effectiveMaxBatchSize);
+                            }
                         } else {
                             batchFrames = await loadBatch(batchStart, batchEnd);
                         }
 
                         if (batchFrames.length === 0) break;
 
-                        // Start loading next batch while GPU processes current (use full batch size)
-                        const nextStart = batchEnd;
-                        const nextEnd = Math.min(nextStart + BATCH_SIZE, frameCount);
+                        // Start loading next batch while GPU processes current (use effective batch size)
+                        const nextStart = batchStart + batchFrames.length; // Use actual frames processed
+                        const nextEnd = Math.min(nextStart + effectiveMaxBatchSize, frameCount);
                         if (nextStart < frameCount) {
                             nextBatchPromise = loadBatch(nextStart, nextEnd);
                         } else {
                             nextBatchPromise = null;
                         }
 
-                        try {
-                            // Combined GPU: detect bounds + crop + analyze in ONE demosaic pass
-                            // Adjust threshold based on scale factor: scaled background can be much higher
-                            // If scale factor is 16 (12-bit data), background of 500 becomes 8000 = 0.12 normalized
-                            // So we need threshold > 0.12 to avoid detecting background as object
-                            const scaledThreshold = data16bitScaleFactor > 1
-                                ? Math.min(0.25, 0.05 * Math.sqrt(data16bitScaleFactor)) // Scale threshold with sqrt of factor
-                                : 0.05;
-                            const combinedResults = await detectCropAnalyzeGpu(
-                                batchFrames, header.width, header.height, cropSize, bayerPattern, scaledThreshold, true
-                            );
+                        // Retry loop for memory allocation errors
+                        let combinedResults = null;
+                        let retryBatchFrames = batchFrames;
+                        while (!combinedResults && retryBatchFrames.length > 0) {
+                            try {
+                                // Combined GPU: detect bounds + crop + analyze in ONE demosaic pass
+                                // 10% threshold - high enough to reject noise, low enough to detect dim planets
+                                combinedResults = await detectCropAnalyzeGpu(
+                                    retryBatchFrames, header.width, header.height, cropSize, bayerPattern, 0.10, true
+                                );
+                            } catch (memError) {
+                                // Check for memory allocation errors
+                                const isMemoryError = memError.message?.includes('Array buffer allocation failed') ||
+                                    memError.message?.includes('out of memory') ||
+                                    memError.message?.includes('OOM');
 
-                            // Filter and process results
-                            for (let j = 0; j < combinedResults.length; j++) {
-                                const gpuResult = combinedResults[j];
-                                const frame = batchFrames[j];
+                                if (isMemoryError && retryBatchFrames.length > 1) {
+                                    // Reduce batch size by half and retry
+                                    const newSize = Math.max(1, Math.floor(retryBatchFrames.length / 2));
+                                    addLog(`Memory allocation failed, reducing batch size from ${retryBatchFrames.length} to ${newSize}`);
+                                    retryBatchFrames = retryBatchFrames.slice(0, newSize);
+                                    effectiveMaxBatchSize = newSize;
 
-                                // Check if bounds were detected
-                                if (!gpuResult.bounds) {
-                                    skippedFrames++;
+                                    // Cancel pre-fetched batch as it's now too large
+                                    nextBatchPromise = null;
+                                } else if (isMemoryError) {
+                                    // Even batch size 1 failed - out of memory
+                                    addLog(`GPU memory allocation failed even for single frame - device out of memory`);
+                                    reportError(memError, { component: 'useSerReader', action: 'detectCropAnalyzeGpu', batchStart });
+                                    terminateGpuAnalyzeWorker();
+                                    throw new Error('Not enough memory to process frames. Try closing other tabs or using a device with more memory.');
+                                } else {
+                                    // Non-memory error, propagate
+                                    throw memError;
+                                }
+                            }
+                        }
+
+                        if (!combinedResults) {
+                            break; // No more frames to process
+                        }
+
+                        // Update batchFrames to what was actually processed
+                        batchFrames = retryBatchFrames;
+
+                        // Filter and process results
+                        for (let j = 0; j < combinedResults.length; j++) {
+                            const gpuResult = combinedResults[j];
+                            const frame = batchFrames[j];
+
+                            // Check if bounds were detected
+                            if (!gpuResult.bounds) {
+                                // Debug: capture up to 5 no-bounds frames for inspection
+                                if (window.__debugNoBoundsFrames?.length < MAX_DEBUG_FRAMES) {
+                                    window.__debugNoBoundsFrames.push({
+                                        index: frame.index,
+                                        frameWidth: header.width,
+                                        frameHeight: header.height
+                                    });
+                                    addLog(`Debug: no-bounds frame ${frame.index}`);
+                                }
+                                skippedFrames++;
+                                completedFrames++;
+                                continue;
+                            }
+
+                            // Check for cut-off (object touching edge) - skip for Sun/Moon
+                            if (!surfaceMode) {
+                                const margin = Math.max(header.width, header.height) * 0.01;
+                                const b = gpuResult.bounds;
+                                const hitLeft = b.x < margin;
+                                const hitTop = b.y < margin;
+                                const hitRight = b.x + b.width > header.width - margin;
+                                const hitBottom = b.y + b.height > header.height - margin;
+
+                                if (hitLeft || hitTop || hitRight || hitBottom) {
+                                    // Debug: capture up to 5 cut-off frames for inspection
+                                    if (window.__debugCutOffFrames?.length < MAX_DEBUG_FRAMES) {
+                                        // Sample raw frame data at corners to show actual values
+                                        const raw = frame.data;
+                                        const w = header.width;
+                                        const h = header.height;
+                                        const sampleRaw = (x, y) => {
+                                            if (!raw || x < 0 || y < 0 || x >= w || y >= h) return '?';
+                                            return raw[y * w + x];
+                                        };
+
+                                        // Sample corners of the full frame (raw Bayer values)
+                                        const corners = {
+                                            TL: sampleRaw(5, 5),
+                                            TR: sampleRaw(w - 5, 5),
+                                            BL: sampleRaw(5, h - 5),
+                                            BR: sampleRaw(w - 5, h - 5),
+                                            center: sampleRaw(Math.floor(w/2), Math.floor(h/2))
+                                        };
+
+                                        // Build edge message with position info
+                                        const edges = [];
+                                        if (hitLeft) edges.push(`LEFT: x=${b.x.toFixed(0)}<${margin.toFixed(0)}`);
+                                        if (hitTop) edges.push(`TOP: y=${b.y.toFixed(0)}<${margin.toFixed(0)}`);
+                                        if (hitRight) edges.push(`RIGHT: x+w=${(b.x+b.width).toFixed(0)}>${(header.width-margin).toFixed(0)}`);
+                                        if (hitBottom) edges.push(`BOTTOM: y+h=${(b.y+b.height).toFixed(0)}>${(header.height-margin).toFixed(0)}`);
+
+                                        window.__debugCutOffFrames.push({
+                                            index: frame.index,
+                                            bounds: { ...b },
+                                            frameWidth: header.width,
+                                            frameHeight: header.height,
+                                            margin,
+                                            edges,
+                                            corners,
+                                            cropSize
+                                        });
+                                        addLog(`Debug: cut-off frame ${frame.index} - ${edges.join(' | ')} | raw corners: TL=${corners.TL} TR=${corners.TR} BL=${corners.BL} BR=${corners.BR} center=${corners.center}`);
+                                    }
+                                    cutOffFrames++;
                                     completedFrames++;
                                     continue;
                                 }
+                            }
 
-                                // Check for cut-off (object touching edge) - skip for Sun/Moon
-                                if (!surfaceMode) {
-                                    const margin = Math.max(header.width, header.height) * 0.01;
-                                    if (gpuResult.bounds.x < margin || gpuResult.bounds.y < margin ||
-                                        gpuResult.bounds.x + gpuResult.bounds.width > header.width - margin ||
-                                        gpuResult.bounds.y + gpuResult.bounds.height > header.height - margin) {
-                                        cutOffFrames++;
-                                        completedFrames++;
-                                        continue;
-                                    }
-                                }
-
-                                // Check for oversized
-                                if (cropRegion.medianObjectSize) {
-                                    const size = Math.max(gpuResult.bounds.width, gpuResult.bounds.height);
-                                    const sizeRatio = size / cropRegion.medianObjectSize;
-                                    if (sizeRatio > 1.3) {
-                                        oversizedFrames++;
-                                        completedFrames++;
-                                        continue;
-                                    }
-                                }
-
-                                const center = {
-                                    x: gpuResult.centerX,
-                                    y: gpuResult.centerY
-                                };
-                                // Store center for later re-reading
-                                frameCenters.set(frame.index, center);
-
-                                // Track previous best/ref to detect changes
-                                const prevBest = bestFrameSoFar;
-                                const prevRef = refCandidateSoFar;
-
-                                // TWO-PASS: Store metadata + 8-bit preview buffer (NO float32Buffer)
-                                // Keep uint8Buffer for QualitySelector preview, discard during stacking
-                                const currentFrame = {
-                                    sharpness: gpuResult.sharpness,
-                                    // NO float32Buffer - will be re-read during stacking
-                                    // Keep uint8Buffer for preview in QualitySelector
-                                    uint8Buffer: gpuResult.uint8Buffer,
-                                    width: cropSize,
-                                    height: cropSize,
-                                    index: gpuResult.index,
-                                    centerX: center.x,
-                                    centerY: center.y,
-                                    subPixelOffset: { x: 0, y: 0 },
-                                    circularity: gpuResult.circularity || 0
-                                };
-
-                                rankFrame(currentFrame);
-
-                                // Create blob for immediate preview ONLY if this became new best or ref frame
-                                const isNewBest = bestFrameSoFar === currentFrame && prevBest !== currentFrame;
-                                const isNewRef = refCandidateSoFar === currentFrame && prevRef !== currentFrame;
-                                if ((isNewBest || isNewRef) && gpuResult.uint8Buffer) {
-                                    try {
-                                        const uint8Data = new Uint8ClampedArray(gpuResult.uint8Buffer);
-                                        const imageData = new ImageData(uint8Data, cropSize, cropSize);
-                                        const canvas = new OffscreenCanvas(cropSize, cropSize);
-                                        const ctx = canvas.getContext('2d');
-                                        ctx.putImageData(imageData, 0, 0);
-                                        currentFrame.blob = await canvas.convertToBlob({ type: 'image/png' });
-                                        // Emit immediately so preview shows up fast
-                                        if (isNewBest) emit('best-frame-updated', currentFrame);
-                                        if (isNewRef) emit('ref-candidate-updated', currentFrame);
-                                    } catch (e) {
-                                        console.warn(`Failed to create preview for frame ${currentFrame.index}:`, e);
-                                    }
-                                }
-
-                                successfulFrames++;
-                                completedFrames++;
-
-                                if (successfulFrames === 1) {
-                                    addLog(`First GPU frame: sharpness ${gpuResult.sharpness?.toFixed(2)}, circularity ${gpuResult.circularity?.toFixed(2)}`);
+                            // Check for oversized
+                            if (cropRegion.medianObjectSize) {
+                                const size = Math.max(gpuResult.bounds.width, gpuResult.bounds.height);
+                                const sizeRatio = size / cropRegion.medianObjectSize;
+                                if (sizeRatio > 1.3) {
+                                    oversizedFrames++;
+                                    completedFrames++;
+                                    continue;
                                 }
                             }
-                        } catch (gpuError) {
-                            addLog(`GPU batch error: ${gpuError.message}`);
-                            reportError(gpuError, { component: 'useSerReader', action: 'detectCropAnalyzeGpu', batchStart });
-                            terminateGpuAnalyzeWorker();
-                            throw gpuError;
+
+                            const center = {
+                                x: gpuResult.centerX,
+                                y: gpuResult.centerY
+                            };
+                            // Store center for later re-reading
+                            frameCenters.set(frame.index, center);
+
+                            // Track previous best/ref to detect changes
+                            const prevBest = bestFrameSoFar;
+                            const prevRef = refCandidateSoFar;
+
+                            // TWO-PASS: Store metadata + 8-bit preview buffer (NO float32Buffer)
+                            // Keep uint8Buffer for QualitySelector preview, discard during stacking
+                            const currentFrame = {
+                                sharpness: gpuResult.sharpness,
+                                // NO float32Buffer - will be re-read during stacking
+                                // Keep uint8Buffer for preview in QualitySelector
+                                uint8Buffer: gpuResult.uint8Buffer,
+                                width: cropSize,
+                                height: cropSize,
+                                index: gpuResult.index,
+                                centerX: center.x,
+                                centerY: center.y,
+                                subPixelOffset: { x: 0, y: 0 },
+                                circularity: gpuResult.circularity || 0
+                            };
+
+                            rankFrame(currentFrame);
+
+                            // Create blob for immediate preview ONLY if this became new best or ref frame
+                            const isNewBest = bestFrameSoFar === currentFrame && prevBest !== currentFrame;
+                            const isNewRef = refCandidateSoFar === currentFrame && prevRef !== currentFrame;
+                            if ((isNewBest || isNewRef) && gpuResult.uint8Buffer) {
+                                try {
+                                    const uint8Data = new Uint8ClampedArray(gpuResult.uint8Buffer);
+                                    const imageData = new ImageData(uint8Data, cropSize, cropSize);
+                                    const canvas = new OffscreenCanvas(cropSize, cropSize);
+                                    const ctx = canvas.getContext('2d');
+                                    ctx.putImageData(imageData, 0, 0);
+                                    currentFrame.blob = await canvas.convertToBlob({ type: 'image/png' });
+                                    // Emit immediately so preview shows up fast
+                                    if (isNewBest) emit('best-frame-updated', currentFrame);
+                                    if (isNewRef) emit('ref-candidate-updated', currentFrame);
+                                } catch (e) {
+                                    console.warn(`Failed to create preview for frame ${currentFrame.index}:`, e);
+                                }
+                            }
+
+                            successfulFrames++;
+                            completedFrames++;
+
+                            if (successfulFrames === 1) {
+                                addLog(`First GPU frame: sharpness ${gpuResult.sharpness?.toFixed(2)}, circularity ${gpuResult.circularity?.toFixed(2)}`);
+                            }
                         }
 
                         // Update progress
@@ -1350,8 +1438,8 @@ export function useSerReader() {
                             }
                         }
 
-                        // Move to next batch
-                        batchStart = batchEnd;
+                        // Move to next batch - use actual frames processed (may be reduced)
+                        batchStart += batchFrames.length;
                         isFirstBatch = false;
                     }
 
@@ -1431,14 +1519,20 @@ export function useSerReader() {
                     // Double-buffer: load next batch while GPU processes current
                     let nextBatchPromise = null;
                     let batchStart = 0;
+                    // Track effective max batch size - reduced on memory errors
+                    let effectiveMaxBatchSizeNoCrop = BATCH_SIZE;
 
                     while (batchStart < frameCount && !stopDispatching) {
-                        const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
+                        const batchEnd = Math.min(batchStart + effectiveMaxBatchSizeNoCrop, frameCount);
 
                         // Get current batch
                         let batchFrames;
                         if (nextBatchPromise) {
                             batchFrames = await nextBatchPromise;
+                            // If we reduced batch size, we may need to trim pre-loaded batch
+                            if (batchFrames.length > effectiveMaxBatchSizeNoCrop) {
+                                batchFrames = batchFrames.slice(0, effectiveMaxBatchSizeNoCrop);
+                            }
                         } else {
                             batchFrames = await loadBatchNoCrop(batchStart, batchEnd);
                         }
@@ -1446,77 +1540,97 @@ export function useSerReader() {
                         if (batchFrames.length === 0) break;
 
                         // Start loading next batch while GPU processes
-                        const nextStart = batchEnd;
-                        const nextEnd = Math.min(nextStart + BATCH_SIZE, frameCount);
+                        const nextStart = batchStart + batchFrames.length;
+                        const nextEnd = Math.min(nextStart + effectiveMaxBatchSizeNoCrop, frameCount);
                         if (nextStart < frameCount) {
                             nextBatchPromise = loadBatchNoCrop(nextStart, nextEnd);
                         } else {
                             nextBatchPromise = null;
                         }
 
-                        try {
-                            // Use metadataOnly=true to avoid creating Float32 buffers during analyze
-                            // Adjust threshold based on scale factor to avoid detecting scaled background
-                            const scaledThreshold = data16bitScaleFactor > 1
-                                ? Math.min(0.25, 0.05 * Math.sqrt(data16bitScaleFactor))
-                                : 0.1;
-                            const results = await analyzeFrameBatchGpu(
-                                batchFrames, processWidth, processHeight, gpuBayerPattern, scaledThreshold, true
-                            );
+                        // Retry loop for memory allocation errors
+                        let results = null;
+                        let retryBatchFrames = batchFrames;
+                        while (!results && retryBatchFrames.length > 0) {
+                            try {
+                                // Use metadataOnly=true to avoid creating Float32 buffers during analyze
+                                // 10% threshold - high enough to reject noise, low enough to detect dim planets
+                                results = await analyzeFrameBatchGpu(
+                                    retryBatchFrames, processWidth, processHeight, gpuBayerPattern, 0.10, true
+                                );
+                            } catch (memError) {
+                                // Check for memory allocation errors
+                                const isMemoryError = memError.message?.includes('Array buffer allocation failed') ||
+                                    memError.message?.includes('out of memory') ||
+                                    memError.message?.includes('OOM');
 
-                            for (let j = 0; j < results.length; j++) {
-                                const result = results[j];
-                                const frameIndex = batchFrames[j].index;
-
-                                // Two-pass mode: store only metadata, re-read frames during stacking
-                                // For no-crop mode, center is fixed at frame center
-                                const currentFrame = {
-                                    sharpness: result.sharpness,
-                                    uint8Buffer: result.uint8Buffer, // 8-bit for preview only
-                                    width: processWidth,
-                                    height: processHeight,
-                                    index: frameIndex,
-                                    centerX: processWidth / 2,
-                                    centerY: processHeight / 2,
-                                    subPixelOffset: { x: 0, y: 0 },
-                                    circularity: result.circularity || 0
-                                };
-
-                                rankFrame(currentFrame);
-                                successfulFrames++;
-                                completedFrames++;
-
-                                if (successfulFrames === 1) {
-                                    addLog(`First GPU frame: sharpness ${result.sharpness?.toFixed(2)}, circularity ${result.circularity?.toFixed(2)}`);
+                                if (isMemoryError && retryBatchFrames.length > 1) {
+                                    const newSize = Math.max(1, Math.floor(retryBatchFrames.length / 2));
+                                    addLog(`Memory allocation failed, reducing batch size from ${retryBatchFrames.length} to ${newSize}`);
+                                    retryBatchFrames = retryBatchFrames.slice(0, newSize);
+                                    effectiveMaxBatchSizeNoCrop = newSize;
+                                    nextBatchPromise = null;
+                                } else if (isMemoryError) {
+                                    addLog(`GPU memory allocation failed even for single frame - device out of memory`);
+                                    reportError(memError, { component: 'useSerReader', action: 'analyzeFrameBatchGpu-noCrop', batchStart });
+                                    terminateGpuAnalyzeWorker();
+                                    throw new Error('Not enough memory to process frames. Try closing other tabs or using a device with more memory.');
+                                } else {
+                                    throw memError;
                                 }
                             }
-
-                            emit('update-loading', {
-                                progress: (completedFrames / frameCount) * 100,
-                                current: completedFrames,
-                                total: frameCount
-                            });
-
-                            if (completedFrames % 100 === 0 || completedFrames === frameCount) {
-                                addLog(`GPU analyzed ${completedFrames}/${frameCount} frames`);
-                                if (bestFrameSoFar) {
-                                    await ensureBlob(bestFrameSoFar);
-                                    emit('best-frame-updated', bestFrameSoFar);
-                                }
-                                if (refCandidateSoFar) {
-                                    await ensureBlob(refCandidateSoFar);
-                                    emit('ref-candidate-updated', refCandidateSoFar);
-                                }
-                            }
-                        } catch (gpuError) {
-                            addLog(`GPU batch error: ${gpuError.message}`);
-                            reportError(gpuError, { component: 'useSerReader', action: 'analyzeFrameBatchGpu-noCrop', batchStart });
-                            terminateGpuAnalyzeWorker();
-                            throw gpuError;
                         }
 
-                        // Move to next batch
-                        batchStart = batchEnd;
+                        if (!results) break;
+                        batchFrames = retryBatchFrames;
+
+                        for (let j = 0; j < results.length; j++) {
+                            const result = results[j];
+                            const frameIndex = batchFrames[j].index;
+
+                            // Two-pass mode: store only metadata, re-read frames during stacking
+                            // For no-crop mode, center is fixed at frame center
+                            const currentFrame = {
+                                sharpness: result.sharpness,
+                                uint8Buffer: result.uint8Buffer, // 8-bit for preview only
+                                width: processWidth,
+                                height: processHeight,
+                                index: frameIndex,
+                                centerX: processWidth / 2,
+                                centerY: processHeight / 2,
+                                subPixelOffset: { x: 0, y: 0 },
+                                circularity: result.circularity || 0
+                            };
+
+                            rankFrame(currentFrame);
+                            successfulFrames++;
+                            completedFrames++;
+
+                            if (successfulFrames === 1) {
+                                addLog(`First GPU frame: sharpness ${result.sharpness?.toFixed(2)}, circularity ${result.circularity?.toFixed(2)}`);
+                            }
+                        }
+
+                        emit('update-loading', {
+                            progress: (completedFrames / frameCount) * 100,
+                            current: completedFrames,
+                            total: frameCount
+                        });
+
+                        if (completedFrames % 100 === 0 || completedFrames === frameCount) {
+                            addLog(`GPU analyzed ${completedFrames}/${frameCount} frames`);
+                            if (bestFrameSoFar) {
+                                await ensureBlob(bestFrameSoFar);
+                                emit('best-frame-updated', bestFrameSoFar);
+                            }
+                            if (refCandidateSoFar) {
+                                await ensureBlob(refCandidateSoFar);
+                                emit('ref-candidate-updated', refCandidateSoFar);
+                            }
+                        }
+
+                        // Move to next batch - use actual frames processed (may be reduced)
+                        batchStart += batchFrames.length;
                     }
 
                     // Create frameReReader for two-pass stacking (no cropping needed)
@@ -1787,7 +1901,7 @@ export function useSerReader() {
 
             try {
                 // GPU analyze with threshold ~0.05 (matching CPU threshold)
-                const results = await analyzeFrameBatchGpu(frames, referenceHeader.width, referenceHeader.height, bayerPattern, 0.05);
+                const results = await analyzeFrameBatchGpu(frames, referenceHeader.width, referenceHeader.height, bayerPattern, 0.10);
 
                 for (const result of results) {
                     if (result.bounds) {
@@ -2058,7 +2172,7 @@ export function useSerReader() {
                         ? new Uint16Array(firstFrameBuffer)
                         : new Uint8Array(firstFrameBuffer);
                     const frames = [{ data: frameData, index: 0 }];
-                    const results = await analyzeFrameBatchGpu(frames, firstHeader.width, firstHeader.height, -1, 0.05, true);
+                    const results = await analyzeFrameBatchGpu(frames, firstHeader.width, firstHeader.height, -1, 0.10, true);
                     if (results && results[0] && results[0].bounds) {
                         boundsResult = {
                             bounds: {
