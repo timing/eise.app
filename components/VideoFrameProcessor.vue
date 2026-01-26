@@ -1,5 +1,5 @@
 <template>
-	<div>
+	<div class="page-layout">
 		<div class="card">
 			<LoadingIndicator />
 

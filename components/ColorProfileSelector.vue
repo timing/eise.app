@@ -1,5 +1,5 @@
 <template>
-	<div v-if="visible">
+	<div v-if="visible" class="page-layout">
 		<div class="card">
 			<h3>Select Color Profile</h3>
 			<p>Your SER file contains raw Bayer data that needs to be converted to color.</p>

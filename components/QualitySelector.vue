@@ -1,5 +1,5 @@
 <template>
-<div>
+<div class="page-layout">
 	<div class="card">
 		<h3>Select Quality Threshold</h3>
 		<p>Drag the slider to choose how many frames to include in the stack.</p>
