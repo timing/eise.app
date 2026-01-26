@@ -10,9 +10,11 @@
 			<h1><a href="/">eise.app</a> <span class="subtitle">- Easy (planetary) Image Stacker Engine</span></h1>
 		</header>
 
-		<div v-show="currentTab === 'About'">
-			<div class="card">
-				<img src="/public/EiseApp-NoCopyright-L.webp" width="260" />
+		<div v-show="currentTab === 'About'" class="page-layout">
+			<div class="comparison-images vertical">
+				<img src="/jupiter-stacked.png" alt="Stacked result" />
+				<span class="arrow">&uarr;</span>
+				<img src="/jupiter-singleframe.png" alt="Single frame" />
 			</div>
 			<div class="content">
 			<h2>About eise.app - Image Stacker for Planets, Moon & Sun</h2>
@@ -85,7 +87,7 @@
 			</div>
 		</div>
 	
-		<Tools v-show="currentTab === 'Tools'" />
+		<Tools v-if="currentTab === 'Tools'" />
 
 		<div v-if="liteMode && currentTab === 'FileUploader'" class="lite-mode-banner">
 			<strong>Lite Mode</strong> - <span v-if="forceLiteMode">(forced)</span><span v-else>No WebGPU.</span> Frame limit auto-adjusted to fit in memory.
@@ -109,7 +111,8 @@
 <script setup>
 import FileUploader from '~/components/FileUploader.vue';
 import VideoFrameProcessor from './components/VideoFrameProcessor.vue';
-import Tools from './components/Tools.vue';
+// Lazy-load Tools to reduce initial bundle size
+const Tools = defineAsyncComponent(() => import('./components/Tools.vue'));
 import Logger from './components/Logger.vue';
 import ColorProfileSelector from './components/ColorProfileSelector.vue';
 import QualitySelector from './components/QualitySelector.vue';
@@ -457,21 +460,47 @@ button:hover, a.button:hover {
 	background-color: #8CCF7E; 
 	color: #111;
 }
-.content {
-	max-width: 500px;
-	padding: 5px 5px 5px 50px;
-	line-height: 1.5;
-	clear:both;
+.page-layout {
+	display: flex;
+	flex-direction: column;
+	padding: 20px;
+	gap: 20px;
+	max-width: 900px;
+	margin: 0 auto;
 }
-@media (min-width: 728px) {
-	.content {
-		clear: none;
-		margin-left: 370px;
-		padding-top: 50px;
+.page-layout.page-layout-wide {
+	max-width: none;
+}
+.page-layout .card {
+	width: auto;
+	max-width: 100%;
+}
+.page-layout .content {
+	width: 100%;
+}
+@media (min-width: 640px) {
+	.page-layout {
+		flex-direction: row;
+		align-items: flex-start;
+		flex-wrap: nowrap;
+		gap: 40px;
+	}
+	.page-layout .card {
+		width: 272px;
+	}
+	.page-layout .content {
+		width: auto;
+		min-width: 0;
 	}
 }
+.content {
+	max-width: 500px;
+	padding: 5px;
+	line-height: 1.5;
+	flex: 1;
+}
 canvas {
-	display: block; 
+	display: block;
 	width: auto;
 	height: auto;
 }
@@ -480,11 +509,13 @@ canvas {
 	color: #333;
 	border: 1px solid #ddd;
 	border-radius: 10px;
-	margin: 50px;
 	padding: 10px 20px 20px 20px;
 	width: 272px;
-	min-height: 340px;
-	float: left;
+	margin: 50px;
+	flex-shrink: 0;
+}
+.page-layout .card {
+	margin: 0;
 }
 .separator {
 	border-top: 1px solid #ddd;
@@ -539,5 +570,27 @@ canvas {
 	margin: 10px 50px;
 	border-radius: 5px;
 	font-size: 13px;
+}
+.comparison-images {
+	display: flex;
+	align-items: center;
+	justify-content: flex-start;
+	gap: 20px;
+	margin: 30px 0;
+	flex-wrap: nowrap;
+}
+.comparison-images.vertical {
+	flex-direction: column;
+	flex-shrink: 0;
+	width: 314px; /* Match .card total width: 272px + 40px padding + 2px border */
+}
+.comparison-images img {
+	max-width: 150px;
+	height: auto;
+	border-radius: 8px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.comparison-images .arrow {
+	font-size: 24px;
 }
 </style>

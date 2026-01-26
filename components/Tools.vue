@@ -1,4 +1,5 @@
 <template>
+    <div class="page-layout">
     <div class="card tools-card">
         <h2>Tools</h2>
 
@@ -250,6 +251,11 @@
                 </div>
             </div>
         </div>
+    </div>
+    <div class="content">
+        <h2>Tools</h2>
+        <p>Explore planetary imaging file formats and test how eise.app processes your data. Useful for troubleshooting or seeing what's under the hood.</p>
+    </div>
     </div>
 </template>
 
@@ -839,7 +845,7 @@ async function createTrimmedSerFile() {
 
 <style scoped>
 .tools-card {
-    max-width: 400px;
+    margin: 0;
 }
 
 .tools-card h2 {

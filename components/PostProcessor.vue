@@ -1,5 +1,5 @@
 <template>
-<div>
+<div class="page-layout page-layout-wide">
 	<div class="card">
 		<div class="controls">
 			<div class="processing-indicator" v-if="isProcessing">

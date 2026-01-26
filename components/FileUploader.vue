@@ -1,5 +1,5 @@
 <template>
-<div>
+<div class="page-layout">
 	<div class="card">
 		<!-- LoadingIndicator always mounted so it can receive events -->
 		<LoadingIndicator />
@@ -148,6 +148,11 @@
 		<p>Read more about Eise.app on the <a href="#" @click.prevent="showAbout">About page</a>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>.</p>
 		<p>Have feedback or running into issues? <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
 		<p class="build-date">Latest release: {{ buildDate }}</p>
+		<div class="comparison-images">
+			<img src="/jupiter-singleframe.png" alt="Single frame" />
+			<span class="arrow">&rarr;</span>
+			<img src="/jupiter-stacked.png" alt="Stacked result" />
+		</div>
 	</div>
 </div>
 </template>
