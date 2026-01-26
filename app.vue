@@ -88,7 +88,7 @@
 		<Tools v-show="currentTab === 'Tools'" />
 
 		<div v-if="liteMode && currentTab === 'FileUploader'" class="lite-mode-banner">
-			<strong>Lite Mode</strong> - <span v-if="forceLiteMode">(forced via URL)</span><span v-else>Your device doesn't support WebGPU.</span> Processing limited to 100 frames with basic stacking.
+			<strong>Lite Mode</strong> - <span v-if="forceLiteMode">(forced)</span><span v-else>No WebGPU.</span> Frame limit auto-adjusted to fit in memory.
 		</div>
 
 		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing && !isSelectingQuality" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" @showAbout="currentTab = 'About'" />

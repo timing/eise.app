@@ -6,6 +6,7 @@ import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
+import { useLiteMemoryLimits } from '@/composables/useLiteMemoryLimits';
 
 /**
  * Determines if an AVI FourCC represents an "easy" (uncompressed/raw) format.
@@ -2406,6 +2407,15 @@ export function useAviReader() {
                         cropRegion = await detectCropRegionFromPngData(cropSampleData, frameWidth, frameHeight);
                         if (cropRegion) {
                             addLog(`Auto-crop: ${cropRegion.size}x${cropRegion.size}`);
+
+                            // Calculate dynamic frame limit based on crop size and platform
+                            const { detectPlatform, calculateMaxFrames } = useLiteMemoryLimits();
+                            const platform = detectPlatform();
+                            const dynamicMaxFrames = calculateMaxFrames(cropRegion.size, platform);
+                            if (dynamicMaxFrames < totalFrames) {
+                                addLog(`Limiting to ${dynamicMaxFrames} frames (${platform}, crop: ${cropRegion.size}px)`);
+                                totalFrames = dynamicMaxFrames;
+                            }
                         }
                     }
                 }

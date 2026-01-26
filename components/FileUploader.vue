@@ -163,6 +163,7 @@ import { useProcessingState } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
 import { useFeedback } from '@/composables/useFeedback';
 import { useTracking } from '@/composables/useTracking';
+import { useLiteMemoryLimits } from '@/composables/useLiteMemoryLimits';
 
 // Lite mode: auto-enabled when WebGPU unavailable
 // Limitations: max 100 frames, no drizzle, 8-bit, FFmpeg path for all files
@@ -181,6 +182,7 @@ const buildDate = computed(() => {
 });
 
 const { track } = useTracking();
+const { detectPlatform, checkFileSize } = useLiteMemoryLimits();
 
 const { openFeedback } = useFeedback();
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
@@ -762,6 +764,20 @@ async function processFiles(files) {
 				}
 			}
 		});
+
+		// Lite mode: check file size fits in FFmpeg WASM memory
+		if (liteMode.value) {
+			const fileSizeMB = fileToProcess.size / (1024 * 1024);
+			const platform = detectPlatform();
+			const sizeCheck = checkFileSize(fileSizeMB, platform);
+			if (!sizeCheck.canProcess) {
+				addLog(`File too large for Lite mode: ${Math.round(fileSizeMB)}MB`);
+				eventBusEmit('upload-error', sizeCheck.reason);
+				eventBusEmit('stop-loading');
+				return;
+			}
+			addLog(`File size OK for Lite mode: ${Math.round(fileSizeMB)}MB (${platform})`);
+		}
 
 		// Lite mode: use memory-optimized batched extraction + analysis
 		if (liteMode.value) {
