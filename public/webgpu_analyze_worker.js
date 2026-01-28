@@ -6,10 +6,26 @@ let device = null;
 let queue = null;
 let isReady = false;
 let deviceLost = false; // Track if GPU device was lost
+let reinitializing = false; // Prevent concurrent reinit attempts
+let reinitAttempts = 0;
+const MAX_REINIT_ATTEMPTS = 3;
 
-// Helper function to safely map GPU buffer with device lost detection
+// Forward declaration - will be set after init() is defined
+let reinitializeGpu = null;
+
+// Helper function to safely map GPU buffer with device lost detection and auto-recovery
 async function safeMapAsync(buffer, mode) {
-    if (deviceLost) {
+    if (deviceLost && !reinitializing) {
+        // Try to recover
+        if (reinitializeGpu && reinitAttempts < MAX_REINIT_ATTEMPTS) {
+            console.log('GPU device lost, attempting auto-recovery...');
+            const recovered = await reinitializeGpu();
+            if (!recovered) {
+                throw new Error('GPU device was lost and could not be recovered. Please reload the page.');
+            }
+            // Buffer is now invalid after reinit, caller needs to retry the operation
+            throw new Error('GPU_DEVICE_RECOVERED');
+        }
         throw new Error('GPU device was lost. Please reload the page to continue.');
     }
     try {
@@ -21,6 +37,15 @@ async function safeMapAsync(buffer, mode) {
             device = null;
             queue = null;
             isReady = false;
+
+            // Try to recover
+            if (reinitializeGpu && reinitAttempts < MAX_REINIT_ATTEMPTS) {
+                console.log('GPU device lost during buffer operation, attempting auto-recovery...');
+                const recovered = await reinitializeGpu();
+                if (recovered) {
+                    throw new Error('GPU_DEVICE_RECOVERED');
+                }
+            }
             throw new Error('GPU device was lost during buffer operation. Please reload the page.');
         }
         throw err;
@@ -866,13 +891,36 @@ async function init() {
     queue = device.queue;
 
     // Handle GPU device lost (tab suspended, driver crash, etc.)
-    device.lost.then((info) => {
+    device.lost.then(async (info) => {
         console.error('WebGPU device lost:', info.message);
         deviceLost = true;
         device = null;
         queue = null;
         isReady = false;
-        self.postMessage({ type: 'error', error: `GPU device lost: ${info.message}. Please reload the page.` });
+
+        // Attempt automatic recovery
+        if (reinitAttempts < MAX_REINIT_ATTEMPTS) {
+            console.log(`Attempting GPU recovery (attempt ${reinitAttempts + 1}/${MAX_REINIT_ATTEMPTS})...`);
+            self.postMessage({ type: 'device-lost-recovering', message: info.message });
+
+            // Wait a moment for the GPU to stabilize
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            try {
+                reinitializing = true;
+                reinitAttempts++;
+                await init();
+                console.log('GPU device recovered successfully');
+                self.postMessage({ type: 'device-recovered' });
+            } catch (err) {
+                console.error('GPU recovery failed:', err.message);
+                self.postMessage({ type: 'error', error: `GPU device lost and recovery failed: ${err.message}. Please reload the page.` });
+            } finally {
+                reinitializing = false;
+            }
+        } else {
+            self.postMessage({ type: 'error', error: `GPU device lost: ${info.message}. Max recovery attempts reached. Please reload the page.` });
+        }
     });
 
     // Helper to create shader module with error checking
@@ -952,8 +1000,24 @@ async function init() {
     });
 
     isReady = true;
+    deviceLost = false;
     console.log('WebGPU analyze worker initialized');
 }
+
+// Set up the reinitialize function for auto-recovery
+reinitializeGpu = async function() {
+    if (reinitializing) return false;
+    reinitializing = true;
+    try {
+        await init();
+        return true;
+    } catch (err) {
+        console.error('GPU reinitialization failed:', err);
+        return false;
+    } finally {
+        reinitializing = false;
+    }
+};
 
 // ============================================================
 // ANALYSIS FUNCTIONS

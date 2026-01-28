@@ -2,6 +2,14 @@ import { useEventBus } from '@/composables/eventBus';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
+// Custom error for WebGPU unavailability - callers can catch this to show user choice
+export class WebGPUUnavailableError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'WebGPUUnavailableError';
+    }
+}
+
 export function useStacker() {
     const { addLog, emit } = useEventBus();
     const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
@@ -596,13 +604,13 @@ export function useStacker() {
             gpuAnalyzeWorker.terminate();
             gpuStackWorker.terminate();
 
-            // Check if this is a GPU unavailable error - return null to trigger CPU fallback
+            // Check if this is a GPU unavailable error - throw specific error for user choice
             const gpuUnavailableErrors = ['No WebGPU adapter', 'WebGPU not available', 'Device', 'lost'];
             const isGpuUnavailable = gpuUnavailableErrors.some(msg => error.message?.includes(msg));
 
             if (isGpuUnavailable) {
-                addLog(`GPU unavailable: ${error.message} - falling back to CPU`);
-                return null; // Caller should fall back to CPU
+                addLog(`GPU unavailable: ${error.message}`);
+                throw new WebGPUUnavailableError(error.message);
             }
 
             addLog(`Pipelined stacking error: ${error.message}`);
@@ -631,12 +639,8 @@ export function useStacker() {
 
         if (hasTwoPassFrames && useWebGPU) {
             // Use pipelined approach: load batch → align → stack, while loading next batch
-            const gpuResult = await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode);
-            if (gpuResult) {
-                return gpuResult;
-            }
-            // GPU failed (e.g., no adapter) - fall through to CPU path
-            addLog('GPU stacking unavailable, using CPU fallback');
+            // Will throw WebGPUUnavailableError if GPU not available - caller should handle
+            return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode);
         }
 
         // Filter frames that have valid buffer (float32Buffer preferred, rgbaBuffer for legacy) and sharpness
@@ -755,13 +759,9 @@ export function useStacker() {
         }
 
         // WebGPU path: orchestrate GPU worker directly from main thread
+        // Will throw WebGPUUnavailableError if GPU not available - caller should handle
         if (useWebGPU) {
-            const gpuResult = await stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode);
-            if (gpuResult) {
-                return gpuResult;
-            }
-            // GPU failed - fall through to CPU
-            addLog('GPU stacking unavailable, using CPU fallback');
+            return await stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode);
         }
 
         // CPU path: send everything to unified_analyze_worker
@@ -1071,13 +1071,13 @@ export function useStacker() {
         } catch (error) {
             gpuWorker.terminate();
 
-            // Check if this is a GPU unavailable error - return null to trigger CPU fallback
+            // Check if this is a GPU unavailable error - throw specific error for user choice
             const gpuUnavailableErrors = ['No WebGPU adapter', 'WebGPU not available', 'Device', 'lost'];
             const isGpuUnavailable = gpuUnavailableErrors.some(msg => error.message?.includes(msg));
 
             if (isGpuUnavailable) {
-                addLog(`GPU unavailable: ${error.message} - falling back to CPU`);
-                return null;
+                addLog(`GPU unavailable: ${error.message}`);
+                throw new WebGPUUnavailableError(error.message);
             }
 
             throw error;

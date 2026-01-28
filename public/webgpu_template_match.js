@@ -8,10 +8,25 @@ let nccPipeline = null;
 let batchPipeline = null;
 let isInitialized = false;
 let matchDeviceLost = false; // Track if GPU device was lost
+let matchReinitializing = false;
+let matchReinitAttempts = 0;
+const MATCH_MAX_REINIT_ATTEMPTS = 3;
 
-// Helper function to safely map GPU buffer with device lost detection
+// Forward declaration for auto-recovery
+let reinitializeMatchGpu = null;
+
+// Helper function to safely map GPU buffer with device lost detection and auto-recovery
 async function safeMatchMapAsync(buffer, mode) {
-    if (matchDeviceLost) {
+    if (matchDeviceLost && !matchReinitializing) {
+        // Try to recover
+        if (reinitializeMatchGpu && matchReinitAttempts < MATCH_MAX_REINIT_ATTEMPTS) {
+            console.log('Template match GPU device lost, attempting auto-recovery...');
+            const recovered = await reinitializeMatchGpu();
+            if (!recovered) {
+                throw new Error('GPU device was lost and could not be recovered. Please reload the page.');
+            }
+            throw new Error('GPU_DEVICE_RECOVERED');
+        }
         throw new Error('GPU device was lost. Please reload the page to continue.');
     }
     try {
@@ -22,6 +37,15 @@ async function safeMatchMapAsync(buffer, mode) {
             gpuDevice = null;
             gpuQueue = null;
             isInitialized = false;
+
+            // Try to recover
+            if (reinitializeMatchGpu && matchReinitAttempts < MATCH_MAX_REINIT_ATTEMPTS) {
+                console.log('Template match GPU device lost during buffer operation, attempting auto-recovery...');
+                const recovered = await reinitializeMatchGpu();
+                if (recovered) {
+                    throw new Error('GPU_DEVICE_RECOVERED');
+                }
+            }
             throw new Error('GPU device was lost during buffer operation. Please reload the page.');
         }
         throw err;
@@ -254,6 +278,38 @@ async function initWebGPU() {
         });
         gpuQueue = gpuDevice.queue;
 
+        // Handle device lost - attempt auto-recovery
+        gpuDevice.lost.then(async (info) => {
+            console.warn('Template match GPU device lost:', info.message);
+            matchDeviceLost = true;
+            gpuDevice = null;
+            gpuQueue = null;
+            nccPipeline = null;
+            batchPipeline = null;
+            isInitialized = false;
+            cachedBuffers = null;
+            cachedConfig = null;
+
+            // Attempt automatic recovery
+            if (matchReinitAttempts < MATCH_MAX_REINIT_ATTEMPTS) {
+                console.log(`Template match GPU auto-recovery attempt ${matchReinitAttempts + 1}/${MATCH_MAX_REINIT_ATTEMPTS}...`);
+                await new Promise(resolve => setTimeout(resolve, 500));
+                matchReinitializing = true;
+                matchReinitAttempts++;
+                try {
+                    const success = await initWebGPU();
+                    if (success) {
+                        matchDeviceLost = false;
+                        console.log('Template match GPU device recovered successfully');
+                    }
+                } finally {
+                    matchReinitializing = false;
+                }
+            } else {
+                console.error('Template match GPU device lost - max recovery attempts exceeded');
+            }
+        });
+
         // Create single-frame pipeline
         const shaderModule = gpuDevice.createShaderModule({
             code: nccShaderCode
@@ -273,6 +329,7 @@ async function initWebGPU() {
         });
 
         isInitialized = true;
+        matchDeviceLost = false;
         console.log('WebGPU initialized for template matching (with batching)');
         return true;
     } catch (e) {
@@ -280,6 +337,37 @@ async function initWebGPU() {
         return false;
     }
 }
+
+// Assign the reinitialization function for auto-recovery
+reinitializeMatchGpu = async function() {
+    if (matchReinitializing) return false;
+    matchReinitializing = true;
+    try {
+        // Clean up any remaining cached buffers
+        if (cachedBuffers) {
+            try {
+                cachedBuffers.paramsBuffer.destroy();
+                cachedBuffers.templatesBuffer.destroy();
+                cachedBuffers.searchBuffer.destroy();
+                cachedBuffers.resultsBuffer.destroy();
+                cachedBuffers.readbackBuffer.destroy();
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+            cachedBuffers = null;
+            cachedConfig = null;
+        }
+        isInitialized = false;
+        matchReinitAttempts++;
+        const success = await initWebGPU();
+        if (success) {
+            matchDeviceLost = false;
+        }
+        return success;
+    } finally {
+        matchReinitializing = false;
+    }
+};
 
 /**
  * Match templates for a batch of frames at once

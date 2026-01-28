@@ -7,10 +7,25 @@ let warpPipeline = null;
 let accumulatePipeline = null;
 let isStackingReady = false;
 let stackDeviceLost = false; // Track if GPU device was lost
+let stackReinitializing = false;
+let stackReinitAttempts = 0;
+const STACK_MAX_REINIT_ATTEMPTS = 3;
 
-// Helper function to safely map GPU buffer with device lost detection
+// Forward declaration for auto-recovery
+let reinitializeStackingGpu = null;
+
+// Helper function to safely map GPU buffer with device lost detection and auto-recovery
 async function safeStackMapAsync(buffer, mode) {
-    if (stackDeviceLost) {
+    if (stackDeviceLost && !stackReinitializing) {
+        // Try to recover
+        if (reinitializeStackingGpu && stackReinitAttempts < STACK_MAX_REINIT_ATTEMPTS) {
+            console.log('Stacking GPU device lost, attempting auto-recovery...');
+            const recovered = await reinitializeStackingGpu();
+            if (!recovered) {
+                throw new Error('GPU device was lost and could not be recovered. Please reload the page.');
+            }
+            throw new Error('GPU_DEVICE_RECOVERED');
+        }
         throw new Error('GPU device was lost. Please reload the page to continue.');
     }
     try {
@@ -21,6 +36,15 @@ async function safeStackMapAsync(buffer, mode) {
             stackDevice = null;
             stackQueue = null;
             isStackingReady = false;
+
+            // Try to recover
+            if (reinitializeStackingGpu && stackReinitAttempts < STACK_MAX_REINIT_ATTEMPTS) {
+                console.log('Stacking GPU device lost during buffer operation, attempting auto-recovery...');
+                const recovered = await reinitializeStackingGpu();
+                if (recovered) {
+                    throw new Error('GPU_DEVICE_RECOVERED');
+                }
+            }
             throw new Error('GPU device was lost during buffer operation. Please reload the page.');
         }
         throw err;
@@ -210,6 +234,35 @@ async function initStackingGPU() {
         });
         stackQueue = stackDevice.queue;
 
+        // Handle GPU device lost with auto-recovery
+        stackDevice.lost.then(async (info) => {
+            console.error('Stacking GPU device lost:', info.message);
+            stackDeviceLost = true;
+            stackDevice = null;
+            stackQueue = null;
+            isStackingReady = false;
+            cachedStackBuffers = null;
+            cachedStackConfig = null;
+
+            // Attempt automatic recovery
+            if (stackReinitAttempts < STACK_MAX_REINIT_ATTEMPTS) {
+                console.log(`Attempting stacking GPU recovery (attempt ${stackReinitAttempts + 1}/${STACK_MAX_REINIT_ATTEMPTS})...`);
+                await new Promise(resolve => setTimeout(resolve, 500));
+                try {
+                    stackReinitializing = true;
+                    stackReinitAttempts++;
+                    const success = await initStackingGPU();
+                    if (success) {
+                        console.log('Stacking GPU device recovered successfully');
+                    }
+                } catch (err) {
+                    console.error('Stacking GPU recovery failed:', err.message);
+                } finally {
+                    stackReinitializing = false;
+                }
+            }
+        });
+
         const shaderModule = stackDevice.createShaderModule({
             code: warpAccumulateShader
         });
@@ -220,6 +273,7 @@ async function initStackingGPU() {
         });
 
         isStackingReady = true;
+        stackDeviceLost = false;
         console.log('WebGPU stacking initialized');
         return true;
     } catch (e) {
@@ -227,6 +281,20 @@ async function initStackingGPU() {
         return false;
     }
 }
+
+// Set up the reinitialize function for auto-recovery
+reinitializeStackingGpu = async function() {
+    if (stackReinitializing) return false;
+    stackReinitializing = true;
+    try {
+        return await initStackingGPU();
+    } catch (err) {
+        console.error('Stacking GPU reinitialization failed:', err);
+        return false;
+    } finally {
+        stackReinitializing = false;
+    }
+};
 
 function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
     const inPixels = inWidth * inHeight;

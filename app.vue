@@ -102,6 +102,20 @@
 
 		<div class="clearb"></div>
 
+		<!-- WebGPU Unavailable Choice Dialog -->
+		<div v-if="showWebGPUChoice" class="webgpu-dialog-overlay">
+			<div class="webgpu-dialog">
+				<h3>GPU Acceleration Unavailable</h3>
+				<p>Your browser doesn't support WebGPU, which is needed for fast GPU-accelerated stacking.</p>
+				<p>You can continue with <strong>CPU processing</strong>, which will work but is slower. This may still work fine for smaller files.</p>
+				<p class="browser-tip">For faster processing, try using a recent version of Chrome, Edge, or Safari 18+.</p>
+				<div class="webgpu-dialog-buttons">
+					<button class="continue-button" @click="handleWebGPUContinueCPU">Continue with CPU (slower)</button>
+					<button class="cancel-button" @click="handleWebGPUCancel">Cancel</button>
+				</div>
+			</div>
+		</div>
+
 		<Logger />
 
 		<img v-if="loadPixel" src="https://analytics.tijmentiming.workers.dev/pixel.gif"/>
@@ -121,7 +135,7 @@ import { ref, watch, computed, provide, defineAsyncComponent } from 'vue';
 // Lazy-load PostProcessor to reduce initial bundle size
 const PostProcessor = defineAsyncComponent(() => import('./components/PostProcessor.vue'));
 import { useEventBus } from '@/composables/eventBus';
-import { useStacker } from '@/composables/useStacker';
+import { useStacker, WebGPUUnavailableError } from '@/composables/useStacker';
 import { useTracking } from '@/composables/useTracking';
 import { useFeedback } from '@/composables/useFeedback';
 import { reportError } from '@/composables/useSentryReporting';
@@ -148,6 +162,10 @@ const qualityUseWebGPU = ref(false);
 const qualityFrameReReader = ref(null); // Two-pass mode: re-read frames on demand
 const croppedSerData = ref(null);
 const croppedAviData = ref(null);
+
+// WebGPU unavailable dialog state
+const showWebGPUChoice = ref(false);
+const webGPUChoiceData = ref(null); // Stores data needed to retry stacking
 
 const loadPixel = ref(false)
 const webGPUSupported = ref(null); // null = not yet checked, true/false = result
@@ -300,17 +318,94 @@ async function handleThresholdSelected(data) {
 		}
 
 		const stackingWorker = hasValidWorkers ? qualityWorkers.value[0] : null;
-		const stackResult = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value, qualityUseWebGPU.value, qualityFrameReReader.value);
 
-		// Terminate workers after stacking (CPU mode only)
-		if (hasValidWorkers) {
-			qualityWorkers.value.forEach(worker => worker.terminate());
+		try {
+			const stackResult = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value, qualityUseWebGPU.value, qualityFrameReReader.value);
+
+			// Terminate workers after stacking (CPU mode only)
+			if (hasValidWorkers) {
+				qualityWorkers.value.forEach(worker => worker.terminate());
+			}
+			qualityWorkers.value = null;
+			qualityFrameReReader.value = null; // Clear frameReReader after stacking
+
+			if (stackResult && stackResult.blob) {
+				addLog('Client-side stacking complete');
+				eventBusEmit('stacked-image-ready', {
+					blob: stackResult.blob,
+					float32Data: stackResult.float32Data,
+					width: stackResult.width,
+					height: stackResult.height
+				});
+			} else {
+				addLog('Client-side stacking failed - no valid frames');
+				eventBusEmit('stop-loading');
+				isProcessing.value = false;
+			}
+		} catch (error) {
+			if (error instanceof WebGPUUnavailableError) {
+				// Show choice dialog - user can choose CPU fallback or cancel
+				addLog(`WebGPU not available: ${error.message}`);
+				eventBusEmit('stop-loading');
+				webGPUChoiceData.value = {
+					frames: data.frames,
+					stackingWorker,
+					hasValidWorkers,
+					drizzleScale: 1.5,
+					noiseRobust: qualityNoiseRobust.value,
+					frameReReader: qualityFrameReReader.value
+				};
+				showWebGPUChoice.value = true;
+			} else {
+				// Other errors - log and stop
+				addLog(`Stacking error: ${error.message}`);
+				eventBusEmit('stop-loading');
+				isProcessing.value = false;
+				if (hasValidWorkers) {
+					qualityWorkers.value.forEach(worker => worker.terminate());
+				}
+				qualityWorkers.value = null;
+				qualityFrameReReader.value = null;
+				reportError(error);
+			}
+		}
+	} else {
+		addLog('No frames selected for stacking');
+		isProcessing.value = false;
+	}
+}
+
+// Handle user choice to continue with CPU when WebGPU is unavailable
+async function handleWebGPUContinueCPU() {
+	showWebGPUChoice.value = false;
+	const data = webGPUChoiceData.value;
+	webGPUChoiceData.value = null;
+
+	if (!data) return;
+
+	addLog('Continuing with CPU stacking (slower but compatible)...');
+	eventBusEmit('start-loading', 'Stacking with CPU...');
+
+	try {
+		// Call stackFramesLocally with useWebGPU=false to force CPU path
+		const stackResult = await stackFramesLocally(
+			data.frames,
+			data.stackingWorker,
+			data.drizzleScale,
+			data.noiseRobust,
+			false, // useWebGPU = false
+			data.frameReReader
+		);
+
+		// Cleanup workers
+		if (data.hasValidWorkers) {
+			qualityWorkers.value?.forEach(worker => worker.terminate());
 		}
 		qualityWorkers.value = null;
-		qualityFrameReReader.value = null; // Clear frameReReader after stacking
+		qualityFrameReReader.value = null;
 
 		if (stackResult && stackResult.blob) {
-			addLog('Client-side stacking complete');
+			addLog('CPU stacking complete');
 			eventBusEmit('stacked-image-ready', {
 				blob: stackResult.blob,
 				float32Data: stackResult.float32Data,
@@ -318,14 +413,38 @@ async function handleThresholdSelected(data) {
 				height: stackResult.height
 			});
 		} else {
-			addLog('Client-side stacking failed - no valid frames');
+			addLog('CPU stacking failed - no valid frames');
 			eventBusEmit('stop-loading');
 			isProcessing.value = false;
 		}
-	} else {
-		addLog('No frames selected for stacking');
+	} catch (error) {
+		addLog(`CPU stacking error: ${error.message}`);
+		eventBusEmit('stop-loading');
 		isProcessing.value = false;
+		if (data.hasValidWorkers) {
+			qualityWorkers.value?.forEach(worker => worker.terminate());
+		}
+		qualityWorkers.value = null;
+		qualityFrameReReader.value = null;
+		reportError(error);
 	}
+}
+
+// Handle user choice to cancel when WebGPU is unavailable
+function handleWebGPUCancel() {
+	showWebGPUChoice.value = false;
+	const data = webGPUChoiceData.value;
+	webGPUChoiceData.value = null;
+
+	addLog('Stacking cancelled by user');
+
+	// Cleanup
+	if (data?.hasValidWorkers) {
+		qualityWorkers.value?.forEach(worker => worker.terminate());
+	}
+	qualityWorkers.value = null;
+	qualityFrameReReader.value = null;
+	isProcessing.value = false;
 }
 
 async function handleStackedImageReady(data) {
@@ -592,5 +711,65 @@ canvas {
 }
 .comparison-images .arrow {
 	font-size: 24px;
+}
+/* WebGPU Unavailable Dialog */
+.webgpu-dialog-overlay {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: rgba(0, 0, 0, 0.7);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 1000;
+}
+.webgpu-dialog {
+	background: #fefefe;
+	color: #333;
+	border-radius: 10px;
+	padding: 25px 30px;
+	max-width: 450px;
+	margin: 20px;
+	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+.webgpu-dialog h3 {
+	margin: 0 0 15px 0;
+	color: #d9534f;
+}
+.webgpu-dialog p {
+	margin: 10px 0;
+	line-height: 1.5;
+}
+.webgpu-dialog .browser-tip {
+	font-size: 12px;
+	color: #666;
+	background: #f5f5f5;
+	padding: 10px;
+	border-radius: 5px;
+	margin-top: 15px;
+}
+.webgpu-dialog-buttons {
+	display: flex;
+	gap: 10px;
+	margin-top: 20px;
+	flex-wrap: wrap;
+}
+.webgpu-dialog-buttons .continue-button {
+	background-color: #8CCF7E;
+	color: #111;
+	font-weight: bold;
+	flex: 1;
+}
+.webgpu-dialog-buttons .continue-button:hover {
+	background-color: #7ABF6E;
+}
+.webgpu-dialog-buttons .cancel-button {
+	background-color: #eee;
+	color: #333;
+}
+.webgpu-dialog-buttons .cancel-button:hover {
+	background-color: #ddd;
 }
 </style>
