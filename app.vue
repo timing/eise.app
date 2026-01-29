@@ -89,9 +89,11 @@
 	
 		<Tools v-if="currentTab === 'Tools'" />
 
-		<div v-if="liteMode && currentTab === 'FileUploader'" class="lite-mode-banner">
-			<strong>Lite Mode</strong> - <span v-if="forceLiteMode">(forced)</span><span v-else>No WebGPU.</span> Frame limit auto-adjusted to fit in memory.
-		</div>
+		<ClientOnly>
+			<div v-if="liteMode && currentTab === 'FileUploader'" class="lite-mode-banner">
+				<strong>Lite Mode</strong><span v-if="forceLiteMode"> (forced)</span><span v-else-if="isMobile"> ({{ useGPU ? 'GPU' : 'CPU' }})</span><span v-else> (no WebGPU)</span> · Frame limit auto-adjusted for memory.
+			</div>
+		</ClientOnly>
 
 		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing && !isSelectingQuality" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" @showAbout="currentTab = 'About'" />
 		<ColorProfileSelector v-show="currentTab === 'FileUploader' && isSelectingColorProfile" />
@@ -172,11 +174,23 @@ const webGPUSupported = ref(null); // null = not yet checked, true/false = resul
 const detectedBrowser = ref('Detecting...');
 const forceLiteMode = ref(false); // ?lite=1 URL param for testing
 
-// Lite mode: auto-enabled when WebGPU is explicitly unavailable (not during detection)
-// Can also be forced via ?lite=1 URL parameter for testing
-// Limitations: max 100 frames, no drizzle, 8-bit output, always pre-crop
-const liteMode = computed(() => forceLiteMode.value || webGPUSupported.value === false);
+// Detect mobile devices via user agent
+const isMobile = computed(() => {
+	if (typeof navigator === 'undefined') return false;
+	return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+});
+
+// Lite mode: auto-enabled on mobile OR when WebGPU unavailable OR forced via ?lite=1
+// Limitations: max 100 frames, no drizzle, 8-bit output, limited UI
+const liteMode = computed(() => forceLiteMode.value || isMobile.value || webGPUSupported.value === false);
 provide('liteMode', liteMode);
+
+// GPU mode: use GPU when available (even in lite mode on mobile)
+// Only falls back to CPU when WebGPU is not available
+const useGPU = computed(() => webGPUSupported.value === true);
+provide('useGPU', useGPU);
+provide('isMobile', isMobile);
+provide('webGPUSupported', webGPUSupported);
 
 // Detect browser and version
 function detectBrowser() {

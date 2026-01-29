@@ -4,6 +4,16 @@
 		<!-- LoadingIndicator always mounted so it can receive events -->
 		<LoadingIndicator />
 
+		<!-- Status indicators (mobile only) -->
+		<div v-if="isMobileClient" class="status-indicators">
+			<span class="status-item" :class="{ active: useGPU }">
+				<span class="status-check">{{ useGPU ? '✓' : '✗' }}</span> GPU
+			</span>
+			<span class="status-item" :class="{ active: !useGPU }">
+				<span class="status-check">{{ !useGPU ? '✓' : '✗' }}</span> CPU
+			</span>
+		</div>
+
 		<!-- Cancel button during processing -->
 		<div v-if="isProcessing" class="action-buttons processing-actions">
 			<button class="cancel-button" @click="cancelProcessing">Cancel</button>
@@ -64,7 +74,7 @@
 			<p v-if="showTargetInfo" class="info-text"><strong>Planet:</strong> For full-disk planets or Moon. Rejects frames where the object touches the edge.<br><strong>Surface:</strong> For Moon/Sun closeups. Disables edge detection and uses drift tracking for larger frame-to-frame motion.</p>
 
 			<!-- Frame selection hidden in lite mode (defaults to 30%) -->
-			<template v-if="!liteMode">
+			<template v-if="!liteModeClient">
 				<div class="separator"></div>
 
 				<h4>Frame selection <span class="info-icon" @click="showFrameSelectionInfo = !showFrameSelectionInfo">ⓘ</span></h4>
@@ -83,7 +93,7 @@
 			</template>
 
 			<!-- Advanced options hidden in lite mode -->
-			<template v-if="!liteMode">
+			<template v-if="!liteModeClient">
 				<div class="separator"></div>
 
 				<h4>Stacking mode <span class="info-icon" @click="showStackingModeInfo = !showStackingModeInfo">ⓘ</span></h4>
@@ -170,9 +180,15 @@ import { useFeedback } from '@/composables/useFeedback';
 import { useTracking } from '@/composables/useTracking';
 import { useLiteMemoryLimits } from '@/composables/useLiteMemoryLimits';
 
-// Lite mode: auto-enabled when WebGPU unavailable
-// Limitations: max 100 frames, no drizzle, 8-bit, FFmpeg path for all files
+// Lite mode: auto-enabled on mobile OR when WebGPU unavailable
+// Limitations: max 100 frames, no drizzle, 8-bit, limited UI
 const liteMode = inject('liteMode', ref(false));
+
+/// GPU vs CPU: use GPU when available (even in lite mode on mobile)
+const useGPU = inject('useGPU', ref(false));
+const isMobile = inject('isMobile', ref(false));
+const isMobileClient = ref(false); // Only true after mount to avoid hydration mismatch
+const liteModeClient = ref(false); // Only true after mount to avoid hydration mismatch
 
 // Build date from nuxt.config.ts (set at build time)
 const config = useRuntimeConfig();
@@ -219,7 +235,7 @@ const noiseRobustAlignment = ref(false);
 const targetType = ref('planet');
 const surfaceMode = computed(() => targetType.value === 'sun-moon');
 
-// Lite mode enforced settings
+// Lite mode enforced settings (applies to mobile + no-GPU desktop)
 const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMode.value === '1.5x' ? 1.5 : 1.0));
 const effectiveMaxFrames = computed(() => liteMode.value ? 100 : (enableMaxFrames.value ? selectedMaxFrames.value : -1));
 const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPercent.value);
@@ -274,6 +290,8 @@ watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarg
 
 onMounted(async () => {
 	loadSettings();
+	isMobileClient.value = isMobile.value;
+	liteModeClient.value = liteMode.value;
 });
 
 const selectedFiles = ref([]);
@@ -657,7 +675,7 @@ async function processFiles(files) {
 			if (formatInfo.isSupported) {
 				// Can process directly - readAviFile handles both uncompressed and MJPEG
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, true, null, surfaceMode.value);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -870,7 +888,7 @@ async function processFiles(files) {
 			const { processFFmpegFrames } = useAviReader();
 			const skipAutoCrop = preCropRegion !== null;
 
-			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value, surfaceMode.value);
+			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
 		}
 	
 	} else if (imageFiles.length > 1) {
@@ -879,7 +897,7 @@ async function processFiles(files) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, !liteMode.value, surfaceMode.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing
@@ -924,6 +942,28 @@ async function processFiles(files) {
 </script>
 
 <style>
+.status-indicators {
+	display: flex;
+	gap: 12px;
+	margin-bottom: 15px;
+	flex-wrap: wrap;
+	font-size: 11px;
+}
+.status-item {
+	display: flex;
+	align-items: center;
+	gap: 3px;
+	color: #999;
+}
+.status-item .status-check {
+	font-size: 10px;
+}
+.status-item.active {
+	color: #333;
+}
+.status-item.active .status-check {
+	color: #8CCF7E;
+}
 .error-message {
 	background-color: #ffcccc;
 	color: #D9534F;
