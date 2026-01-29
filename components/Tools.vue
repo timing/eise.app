@@ -388,12 +388,13 @@ function updateRawBytesPreview(buffer) {
 async function renderThumbnails() {
     if (!firstFrameBuffer.value || !serHeader.value) return;
 
+    const header = serHeader.value;
+    if (!header.width || !header.height || header.width <= 0 || header.height <= 0) return;
+
     thumbnailsReady.value = false;
 
     // Wait for next tick to ensure canvases are mounted
     await new Promise(resolve => setTimeout(resolve, 10));
-
-    const header = serHeader.value;
     const buffer = firstFrameBuffer.value;
     const useBitDepth = forcedBitDepth.value;
     const offset = byteOffset.value;
@@ -517,9 +518,11 @@ async function renderCurrentFrame() {
     if (!selectedFile.value || !serHeader.value || !playerCanvas.value) return;
 
     const header = serHeader.value;
+    if (!header.width || !header.height || header.width <= 0 || header.height <= 0) return;
+
     const bpp = forcedBitDepth.value === 16 ? 2 : 1;
     const currentFrameSize = header.width * header.height * bpp;
-    const frameOffset = SER_HEADER_SIZE + (currentFrame.value - 1) * frameSize.value;
+    const frameOffset = SER_HEADER_SIZE + (currentFrame.value - 1) * currentFrameSize;
 
     // Read frame data from file slice (not full buffer)
     const frameSlice = selectedFile.value.slice(frameOffset, frameOffset + currentFrameSize);
