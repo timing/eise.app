@@ -1,118 +1,9 @@
 <template>
     <div class="page-layout">
     <div class="card tools-card">
-        <h2>Tools</h2>
+        <h2>SER Analyzer, Player & Trimmer</h2>
 
         <div class="tool-section">
-            <h3>SER Analyzer</h3>
-            <p class="tool-description">Analyze SER file bit depth and Bayer pattern.</p>
-
-            <div class="file-input-wrapper">
-                <input
-                    type="file"
-                    accept=".ser"
-                    @change="handleAnalyzerFileSelect"
-                    ref="analyzerFileInput"
-                    id="analyzer-ser-input"
-                />
-                <label for="analyzer-ser-input" class="file-label">
-                    {{ analyzerFile ? analyzerFile.name : 'Select SER file...' }}
-                </label>
-            </div>
-
-            <div v-if="analyzerHeader" class="file-info">
-                <div class="info-row">
-                    <span class="label">Dimensions:</span>
-                    <span class="value">{{ analyzerHeader.width }} x {{ analyzerHeader.height }}</span>
-                </div>
-                <div class="info-row">
-                    <span class="label">Header bit depth:</span>
-                    <span class="value">{{ analyzerHeader.pixelDepth }}-bit</span>
-                </div>
-                <div class="info-row">
-                    <span class="label">Frames:</span>
-                    <span class="value">{{ analyzerHeader.frameCount }}</span>
-                </div>
-                <div class="info-row">
-                    <span class="label">File size analysis:</span>
-                    <span class="value">{{ fileSizeAnalysis }}</span>
-                </div>
-                <div class="info-row">
-                    <span class="label">Pixel value range:</span>
-                    <span class="value">{{ pixelValueRange }}</span>
-                </div>
-            </div>
-
-            <div v-if="analyzerHeader" class="analyzer-controls">
-                <div class="control-row">
-                    <label>Bit depth:</label>
-                    <div class="toggle-buttons">
-                        <button
-                            :class="{ active: forcedBitDepth === 8 }"
-                            @click="setForcedBitDepth(8)"
-                        >8-bit</button>
-                        <button
-                            :class="{ active: forcedBitDepth === 16 }"
-                            @click="setForcedBitDepth(16)"
-                        >16-bit</button>
-                    </div>
-                </div>
-
-                <div class="control-row" v-if="forcedBitDepth === 16">
-                    <label>Byte swap:</label>
-                    <div class="toggle-buttons">
-                        <button
-                            :class="{ active: !byteSwap }"
-                            @click="setByteSwap(false)"
-                        >Off</button>
-                        <button
-                            :class="{ active: byteSwap }"
-                            @click="setByteSwap(true)"
-                        >On</button>
-                    </div>
-                </div>
-
-                <div class="control-row">
-                    <label>Byte offset: {{ byteOffset }}</label>
-                    <input
-                        type="range"
-                        v-model.number="byteOffset"
-                        min="0"
-                        max="7"
-                        @input="renderAnalyzerThumbnails"
-                    />
-                </div>
-
-                <div class="raw-bytes-preview">
-                    <label>First 32 raw bytes:</label>
-                    <div class="bytes-display">{{ rawBytesPreview }}</div>
-                </div>
-            </div>
-
-            <div v-if="analyzerHeader" class="bayer-thumbnails">
-                <h4>Bayer Pattern Preview</h4>
-                <div v-if="!thumbnailsReady" class="loading-thumbnails">
-                    <p>Rendering previews...</p>
-                </div>
-                <div class="thumbnails-grid" :class="{ hidden: !thumbnailsReady }">
-                    <div
-                        v-for="profile in bayerProfiles"
-                        :key="profile.id"
-                        class="thumbnail-item"
-                    >
-                        <canvas :ref="el => thumbnailCanvases[profile.id] = el" class="thumbnail-canvas"></canvas>
-                        <div class="thumbnail-label">{{ profile.label }}</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="separator"></div>
-
-        <div class="tool-section">
-            <h3>Trim SER File</h3>
-            <p class="tool-description">Extract a range of frames from a SER file without re-encoding.</p>
-
             <div class="file-input-wrapper">
                 <input
                     type="file"
@@ -132,12 +23,20 @@
                     <span class="value">{{ serHeader.width }} x {{ serHeader.height }}</span>
                 </div>
                 <div class="info-row">
-                    <span class="label">Bit depth:</span>
+                    <span class="label">Header bit depth:</span>
                     <span class="value">{{ serHeader.pixelDepth }}-bit</span>
                 </div>
                 <div class="info-row">
-                    <span class="label">Total frames:</span>
+                    <span class="label">Frames:</span>
                     <span class="value">{{ serHeader.frameCount }}</span>
+                </div>
+                <div class="info-row">
+                    <span class="label">File size analysis:</span>
+                    <span class="value">{{ fileSizeAnalysis }}</span>
+                </div>
+                <div class="info-row">
+                    <span class="label">Pixel value range:</span>
+                    <span class="value">{{ pixelValueRange }}</span>
                 </div>
                 <div class="info-row" v-if="serHeader.observer && !isDefaultObserver">
                     <span class="label">Observer:</span>
@@ -145,69 +44,201 @@
                 </div>
             </div>
 
-            <div v-if="serHeader" class="trim-controls">
+            <!-- Analyzer Section -->
+            <template v-if="serHeader">
                 <div class="separator"></div>
+                <h3>Analyzer</h3>
 
-                <div class="input-group">
-                    <label for="start-frame">Start frame:</label>
-                    <input
-                        type="number"
-                        id="start-frame"
-                        v-model.number="startFrame"
-                        :min="1"
-                        :max="serHeader.frameCount"
-                    />
+                <div class="analyzer-controls">
+                    <div class="control-row">
+                        <label>Bit depth:</label>
+                        <div class="toggle-buttons">
+                            <button
+                                :class="{ active: forcedBitDepth === 8 }"
+                                @click="setForcedBitDepth(8)"
+                            >8-bit</button>
+                            <button
+                                :class="{ active: forcedBitDepth === 16 }"
+                                @click="setForcedBitDepth(16)"
+                            >16-bit</button>
+                        </div>
+                    </div>
+
+                    <div class="control-row" v-if="forcedBitDepth === 16">
+                        <label>Byte swap:</label>
+                        <div class="toggle-buttons">
+                            <button
+                                :class="{ active: !byteSwap }"
+                                @click="setByteSwap(false)"
+                            >Off</button>
+                            <button
+                                :class="{ active: byteSwap }"
+                                @click="setByteSwap(true)"
+                            >On</button>
+                        </div>
+                    </div>
+
+                    <div class="control-row">
+                        <label>Byte offset: {{ byteOffset }}</label>
+                        <input
+                            type="range"
+                            v-model.number="byteOffset"
+                            min="0"
+                            max="7"
+                            @input="renderThumbnails"
+                        />
+                    </div>
+
+                    <div class="raw-bytes-preview">
+                        <label>First 32 raw bytes:</label>
+                        <div class="bytes-display">{{ rawBytesPreview }}</div>
+                    </div>
                 </div>
 
-                <div class="input-group">
-                    <label for="end-frame">End frame:</label>
-                    <input
-                        type="number"
-                        id="end-frame"
-                        v-model.number="endFrame"
-                        :min="startFrame"
-                        :max="serHeader.frameCount"
-                    />
+                <div class="bayer-thumbnails">
+                    <h4>Bayer Pattern Preview</h4>
+                    <div v-if="!thumbnailsReady" class="loading-thumbnails">
+                        <p>Rendering previews...</p>
+                    </div>
+                    <div class="thumbnails-grid" :class="{ hidden: !thumbnailsReady }">
+                        <div
+                            v-for="profile in bayerProfiles"
+                            :key="profile.id"
+                            class="thumbnail-item"
+                            :class="{ selected: selectedBayerProfile === profile.id }"
+                            @click="selectBayerProfile(profile.id)"
+                        >
+                            <canvas :ref="el => thumbnailCanvases[profile.id] = el" class="thumbnail-canvas"></canvas>
+                            <div class="thumbnail-label">{{ profile.label }}</div>
+                        </div>
+                    </div>
                 </div>
+            </template>
 
-                <div class="output-info">
-                    <span class="label">Output frames:</span>
-                    <span class="value">{{ outputFrameCount }}</span>
-                    <span class="percentage">({{ outputPercentage }}%)</span>
-                </div>
-
+            <!-- Trimmer Section -->
+            <template v-if="serHeader">
                 <div class="separator"></div>
+                <h3>Trimmer</h3>
 
-                <button
-                    @click="trimAndDownload"
-                    :disabled="isProcessing || outputFrameCount <= 0"
-                    class="download-button"
-                >
-                    {{ isProcessing ? 'Processing...' : 'Download Trimmed SER' }}
-                </button>
+                <div class="trim-controls">
+                    <div class="input-group">
+                        <label for="start-frame">Start frame:</label>
+                        <input
+                            type="number"
+                            id="start-frame"
+                            v-model.number="startFrame"
+                            :min="1"
+                            :max="serHeader.frameCount"
+                        />
+                    </div>
 
-                <div v-if="isProcessing" class="progress-bar">
-                    <div class="progress-fill" :style="{ width: progress + '%' }"></div>
+                    <div class="input-group">
+                        <label for="end-frame">End frame:</label>
+                        <input
+                            type="number"
+                            id="end-frame"
+                            v-model.number="endFrame"
+                            :min="startFrame"
+                            :max="serHeader.frameCount"
+                        />
+                    </div>
+
+                    <div class="trim-buttons">
+                        <button @click="setStartFromCurrent" class="set-frame-button">
+                            Set start to current ({{ currentFrame }})
+                        </button>
+                        <button @click="setEndFromCurrent" class="set-frame-button">
+                            Set end to current ({{ currentFrame }})
+                        </button>
+                    </div>
+
+                    <div class="output-info">
+                        <span class="label">Output frames:</span>
+                        <span class="value">{{ outputFrameCount }}</span>
+                        <span class="percentage">({{ outputPercentage }}%)</span>
+                    </div>
+
+                    <button
+                        @click="trimAndDownload"
+                        :disabled="isProcessing || outputFrameCount <= 0"
+                        class="download-button"
+                    >
+                        {{ isProcessing ? 'Processing...' : 'Download Trimmed SER' }}
+                    </button>
+
+                    <div v-if="isProcessing" class="progress-bar">
+                        <div class="progress-fill" :style="{ width: progress + '%' }"></div>
+                    </div>
                 </div>
-            </div>
+            </template>
         </div>
     </div>
     <div class="content">
-        <h2>Tools</h2>
-        <p>Explore planetary imaging file formats and test how eise.app processes your data. Useful for troubleshooting or seeing what's under the hood.</p>
+        <h2>SER Tools</h2>
+        <p>Analyze SER file bit depth and Bayer pattern, play back frames with the selected color profile, or trim to extract a range of frames.</p>
+
+        <!-- Player Section -->
+        <template v-if="serHeader">
+            <div class="separator"></div>
+            <h3>Player</h3>
+
+            <div class="player-section">
+                <div class="player-canvas-container">
+                    <canvas ref="playerCanvas" class="player-canvas"></canvas>
+                </div>
+
+                <div class="player-controls">
+                    <div class="frame-slider">
+                        <input
+                            type="range"
+                            v-model.number="currentFrame"
+                            :min="1"
+                            :max="serHeader.frameCount"
+                            @input="renderCurrentFrame"
+                        />
+                        <span class="frame-number">{{ currentFrame }} / {{ serHeader.frameCount }}</span>
+                    </div>
+
+                    <div class="playback-controls">
+                        <button @click="previousFrame" :disabled="currentFrame <= 1">
+                            &lt;
+                        </button>
+                        <button @click="togglePlayback" class="play-button">
+                            {{ isPlaying ? '⏸' : '▶' }}
+                        </button>
+                        <button @click="nextFrame" :disabled="currentFrame >= serHeader.frameCount">
+                            &gt;
+                        </button>
+                        <div class="speed-control">
+                            <label>FPS:</label>
+                            <input
+                                type="number"
+                                v-model.number="playbackFps"
+                                min="1"
+                                max="60"
+                                class="fps-input"
+                            />
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </template>
     </div>
     </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick } from 'vue';
+import { ref, computed, onUnmounted } from 'vue';
 import { parseSerHeader } from '@/composables/useSerReader';
 
-// SER Analyzer state
-const analyzerFileInput = ref(null);
-const analyzerFile = ref(null);
-const analyzerBuffer = ref(null);
-const analyzerHeader = ref(null);
+// Shared state
+const fileInput = ref(null);
+const selectedFile = ref(null);
+const serHeader = ref(null);
+const firstFrameBuffer = ref(null);
+const frameSize = ref(0); // Calculated frame size in bytes
+
+// Analyzer state
 const forcedBitDepth = ref(16);
 const byteSwap = ref(false);
 const byteOffset = ref(0);
@@ -216,6 +247,7 @@ const thumbnailsReady = ref(false);
 const pixelValueRange = ref('');
 const fileSizeAnalysis = ref('');
 const rawBytesPreview = ref('');
+const selectedBayerProfile = ref('RGGB');
 
 const bayerProfiles = [
     { id: 'RGGB', label: 'RGGB' },
@@ -225,22 +257,56 @@ const bayerProfiles = [
     { id: 'MONO', label: 'Mono' }
 ];
 
-async function handleAnalyzerFileSelect(event) {
+// Player state
+const playerCanvas = ref(null);
+const currentFrame = ref(1);
+const isPlaying = ref(false);
+const playbackFps = ref(15);
+let playbackInterval = null;
+
+// Trimmer state
+const startFrame = ref(1);
+const endFrame = ref(1);
+const isProcessing = ref(false);
+const progress = ref(0);
+
+const SER_HEADER_SIZE = 178;
+
+const outputFrameCount = computed(() => {
+    if (!serHeader.value) return 0;
+    return Math.max(0, endFrame.value - startFrame.value + 1);
+});
+
+const outputPercentage = computed(() => {
+    if (!serHeader.value || serHeader.value.frameCount === 0) return 0;
+    return Math.round((outputFrameCount.value / serHeader.value.frameCount) * 100);
+});
+
+const isDefaultObserver = computed(() => {
+    if (!serHeader.value?.observer) return true;
+    const obs = serHeader.value.observer.toLowerCase();
+    return obs === 'observer name' || obs === 'observer' || obs === 'unknown';
+});
+
+async function handleFileSelect(event) {
     const file = event.target.files[0];
     if (!file) return;
 
-    analyzerFile.value = file;
+    // Stop any playback
+    stopPlayback();
+
+    selectedFile.value = file;
     thumbnailsReady.value = false;
 
     // Read header
-    const headerBuf = await file.slice(0, 178).arrayBuffer();
+    const headerBuf = await file.slice(0, SER_HEADER_SIZE).arrayBuffer();
     const header = parseSerHeader(headerBuf);
-    analyzerHeader.value = header;
+    serHeader.value = header;
 
     // Analyze file size
     const frameSize16 = header.width * header.height * 2;
     const frameSize8 = header.width * header.height * 1;
-    const dataSize = file.size - 178;
+    const dataSize = file.size - SER_HEADER_SIZE;
     const frameCount16 = Math.floor(dataSize / frameSize16);
     const frameCount8 = Math.floor(dataSize / frameSize8);
     fileSizeAnalysis.value = `as 16-bit: ${frameCount16} frames, as 8-bit: ${frameCount8} frames`;
@@ -248,15 +314,25 @@ async function handleAnalyzerFileSelect(event) {
     // Set initial bit depth based on header
     forcedBitDepth.value = header.pixelDepth > 8 ? 16 : 8;
 
-    // Read first frame and analyze pixel values
+    // Calculate and store frame size
     const bpp = header.pixelDepth > 8 ? 2 : 1;
-    const frameSize = header.width * header.height * bpp;
-    const frameBuffer = await file.slice(178, 178 + frameSize).arrayBuffer();
-    analyzerBuffer.value = frameBuffer;
+    frameSize.value = header.width * header.height * bpp;
 
-    analyzePixelValues(frameBuffer, header.pixelDepth);
-    updateRawBytesPreview(frameBuffer);
-    await renderAnalyzerThumbnails();
+    // Read first frame for analyzer (slice, not full file)
+    const firstFrameSlice = file.slice(SER_HEADER_SIZE, SER_HEADER_SIZE + frameSize.value);
+    firstFrameBuffer.value = await firstFrameSlice.arrayBuffer();
+
+    analyzePixelValues(firstFrameBuffer.value, header.pixelDepth);
+    updateRawBytesPreview(firstFrameBuffer.value);
+    await renderThumbnails();
+
+    // Set trimmer defaults
+    startFrame.value = 1;
+    endFrame.value = header.frameCount;
+    currentFrame.value = 1;
+
+    // Render first frame in player
+    await renderCurrentFrame();
 }
 
 function analyzePixelValues(buffer, headerBitDepth) {
@@ -285,12 +361,19 @@ function analyzePixelValues(buffer, headerBitDepth) {
 
 function setForcedBitDepth(depth) {
     forcedBitDepth.value = depth;
-    renderAnalyzerThumbnails();
+    renderThumbnails();
+    renderCurrentFrame();
 }
 
 function setByteSwap(swap) {
     byteSwap.value = swap;
-    renderAnalyzerThumbnails();
+    renderThumbnails();
+    renderCurrentFrame();
+}
+
+function selectBayerProfile(profileId) {
+    selectedBayerProfile.value = profileId;
+    renderCurrentFrame();
 }
 
 function updateRawBytesPreview(buffer) {
@@ -302,14 +385,16 @@ function updateRawBytesPreview(buffer) {
     rawBytesPreview.value = preview.join(' ');
 }
 
-async function renderAnalyzerThumbnails() {
-    if (!analyzerBuffer.value || !analyzerHeader.value) return;
+async function renderThumbnails() {
+    if (!firstFrameBuffer.value || !serHeader.value) return;
 
     thumbnailsReady.value = false;
-    await nextTick();
 
-    const header = analyzerHeader.value;
-    const buffer = analyzerBuffer.value;
+    // Wait for next tick to ensure canvases are mounted
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    const header = serHeader.value;
+    const buffer = firstFrameBuffer.value;
     const useBitDepth = forcedBitDepth.value;
     const offset = byteOffset.value;
     const swap = byteSwap.value;
@@ -324,14 +409,11 @@ async function renderAnalyzerThumbnails() {
     const offsetBytes = rawBytes.slice(offset);
 
     if (useBitDepth === 16) {
-        // Create Uint16Array from offset bytes
         const u16 = new Uint16Array(Math.floor(offsetBytes.length / 2));
         for (let i = 0; i < u16.length; i++) {
             if (swap) {
-                // Big-endian: high byte first
                 u16[i] = (offsetBytes[i * 2] << 8) | offsetBytes[i * 2 + 1];
             } else {
-                // Little-endian: low byte first (default)
                 u16[i] = offsetBytes[i * 2] | (offsetBytes[i * 2 + 1] << 8);
             }
         }
@@ -341,7 +423,6 @@ async function renderAnalyzerThumbnails() {
     }
 
     const srcScale = useBitDepth === 16 ? 1/256 : 1;
-    const pixelCount = src.length;
     const actualWidth = useBitDepth === 8 && header.pixelDepth > 8 ? width : width;
     const actualHeight = useBitDepth === 8 && header.pixelDepth > 8 ? height * 2 : height;
 
@@ -431,55 +512,176 @@ async function renderAnalyzerThumbnails() {
     thumbnailsReady.value = true;
 }
 
-// SER trimmer state
-const fileInput = ref(null);
-const selectedFile = ref(null);
-const fileBuffer = ref(null);
-const serHeader = ref(null);
-const startFrame = ref(1);
-const endFrame = ref(1);
-const isProcessing = ref(false);
-const progress = ref(0);
+// Player functions
+async function renderCurrentFrame() {
+    if (!selectedFile.value || !serHeader.value || !playerCanvas.value) return;
 
-const SER_HEADER_SIZE = 178;
+    const header = serHeader.value;
+    const bpp = forcedBitDepth.value === 16 ? 2 : 1;
+    const currentFrameSize = header.width * header.height * bpp;
+    const frameOffset = SER_HEADER_SIZE + (currentFrame.value - 1) * frameSize.value;
 
-const outputFrameCount = computed(() => {
-    if (!serHeader.value) return 0;
-    return Math.max(0, endFrame.value - startFrame.value + 1);
-});
+    // Read frame data from file slice (not full buffer)
+    const frameSlice = selectedFile.value.slice(frameOffset, frameOffset + currentFrameSize);
+    const frameBuffer = await frameSlice.arrayBuffer();
 
-const outputPercentage = computed(() => {
-    if (!serHeader.value || serHeader.value.frameCount === 0) return 0;
-    return Math.round((outputFrameCount.value / serHeader.value.frameCount) * 100);
-});
+    // Apply byte offset
+    const rawBytes = new Uint8Array(frameBuffer);
+    const offsetBytes = rawBytes.slice(byteOffset.value);
 
-const isDefaultObserver = computed(() => {
-    if (!serHeader.value?.observer) return true;
-    const obs = serHeader.value.observer.toLowerCase();
-    return obs === 'observer name' || obs === 'observer' || obs === 'unknown';
-});
+    let src;
+    if (forcedBitDepth.value === 16) {
+        const u16 = new Uint16Array(Math.floor(offsetBytes.length / 2));
+        for (let i = 0; i < u16.length; i++) {
+            if (byteSwap.value) {
+                u16[i] = (offsetBytes[i * 2] << 8) | offsetBytes[i * 2 + 1];
+            } else {
+                u16[i] = offsetBytes[i * 2] | (offsetBytes[i * 2 + 1] << 8);
+            }
+        }
+        src = u16;
+    } else {
+        src = offsetBytes;
+    }
 
-async function handleFileSelect(event) {
-    const file = event.target.files[0];
-    if (!file) return;
+    const srcScale = forcedBitDepth.value === 16 ? 1/256 : 1;
+    const width = header.width;
+    const height = header.height;
 
-    selectedFile.value = file;
+    // Set canvas size
+    const canvas = playerCanvas.value;
+    const maxWidth = 400;
+    const scale = Math.min(1, maxWidth / width);
+    canvas.width = Math.floor(width * scale);
+    canvas.height = Math.floor(height * scale);
 
-    // Read the file
-    const buffer = await file.arrayBuffer();
-    fileBuffer.value = buffer;
+    const ctx = canvas.getContext('2d');
+    const imageData = ctx.createImageData(canvas.width, canvas.height);
+    const data = imageData.data;
 
-    // Parse header
-    const header = parseSerHeader(buffer);
-    serHeader.value = header;
+    const xRatio = width / canvas.width;
+    const yRatio = height / canvas.height;
 
-    // Set default range to full file
-    startFrame.value = 1;
-    endFrame.value = header.frameCount;
+    // Get Bayer config
+    const patternConfigs = {
+        'RGGB': { rX: 0, rY: 0, bX: 1, bY: 1 },
+        'BGGR': { rX: 1, rY: 1, bX: 0, bY: 0 },
+        'GBRG': { rX: 0, rY: 1, bX: 1, bY: 0 },
+        'GRBG': { rX: 1, rY: 0, bX: 0, bY: 1 },
+        'MONO': { mono: true }
+    };
+    const config = patternConfigs[selectedBayerProfile.value] || patternConfigs['RGGB'];
+
+    let minVal = 255, maxVal = 0;
+    const tempRgb = new Float32Array(canvas.width * canvas.height * 3);
+
+    // First pass: demosaic and find min/max
+    for (let ty = 0; ty < canvas.height; ty++) {
+        for (let tx = 0; tx < canvas.width; tx++) {
+            const sx = Math.floor(tx * xRatio);
+            const sy = Math.floor(ty * yRatio);
+            const tidx = (ty * canvas.width + tx) * 3;
+
+            if (config.mono) {
+                const idx = sy * width + sx;
+                const v = (idx < src.length ? src[idx] : 0) * srcScale;
+                tempRgb[tidx] = tempRgb[tidx + 1] = tempRgb[tidx + 2] = v;
+            } else {
+                const bx = sx & ~1;
+                const by = sy & ~1;
+                const getVal = (x, y) => {
+                    const idx = Math.min(y, height-1) * width + Math.min(x, width-1);
+                    return (idx < src.length ? src[idx] : 0) * srcScale;
+                };
+
+                const rPos = { x: bx + config.rX, y: by + config.rY };
+                const bPos = { x: bx + config.bX, y: by + config.bY };
+                const g1 = { x: bx + (1 - config.rX), y: by + config.rY };
+                const g2 = { x: bx + config.rX, y: by + (1 - config.rY) };
+
+                tempRgb[tidx] = getVal(rPos.x, rPos.y);
+                tempRgb[tidx + 1] = (getVal(g1.x, g1.y) + getVal(g2.x, g2.y)) / 2;
+                tempRgb[tidx + 2] = getVal(bPos.x, bPos.y);
+            }
+
+            const lum = (tempRgb[tidx] + tempRgb[tidx + 1] + tempRgb[tidx + 2]) / 3;
+            minVal = Math.min(minVal, lum);
+            maxVal = Math.max(maxVal, lum);
+        }
+    }
+
+    // Second pass: auto-stretch
+    const range = maxVal - minVal || 1;
+    const stretchScale = 255 / range;
+
+    for (let i = 0; i < canvas.width * canvas.height; i++) {
+        const tidx = i * 3;
+        const didx = i * 4;
+        data[didx] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx] - minVal) * stretchScale)));
+        data[didx + 1] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 1] - minVal) * stretchScale)));
+        data[didx + 2] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 2] - minVal) * stretchScale)));
+        data[didx + 3] = 255;
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+}
+
+function previousFrame() {
+    if (currentFrame.value > 1) {
+        currentFrame.value--;
+        renderCurrentFrame();
+    }
+}
+
+function nextFrame() {
+    if (serHeader.value && currentFrame.value < serHeader.value.frameCount) {
+        currentFrame.value++;
+        renderCurrentFrame();
+    }
+}
+
+function togglePlayback() {
+    if (isPlaying.value) {
+        stopPlayback();
+    } else {
+        startPlayback();
+    }
+}
+
+function startPlayback() {
+    isPlaying.value = true;
+    const interval = 1000 / playbackFps.value;
+    playbackInterval = setInterval(() => {
+        if (serHeader.value && currentFrame.value < serHeader.value.frameCount) {
+            currentFrame.value++;
+            renderCurrentFrame();
+        } else {
+            // Loop back to start
+            currentFrame.value = 1;
+            renderCurrentFrame();
+        }
+    }, interval);
+}
+
+function stopPlayback() {
+    isPlaying.value = false;
+    if (playbackInterval) {
+        clearInterval(playbackInterval);
+        playbackInterval = null;
+    }
+}
+
+// Trimmer functions
+function setStartFromCurrent() {
+    startFrame.value = currentFrame.value;
+}
+
+function setEndFromCurrent() {
+    endFrame.value = currentFrame.value;
 }
 
 async function trimAndDownload() {
-    if (!fileBuffer.value || !serHeader.value) return;
+    if (!selectedFile.value || !serHeader.value) return;
 
     isProcessing.value = true;
     progress.value = 0;
@@ -512,57 +714,41 @@ async function trimAndDownload() {
 
 async function createTrimmedSerFile() {
     const header = serHeader.value;
+    const file = selectedFile.value;
     const bytesPerPixel = header.pixelDepth > 8 ? 2 : 1;
-    const frameSize = header.width * header.height * bytesPerPixel;
+    const singleFrameSize = header.width * header.height * bytesPerPixel;
 
     // Calculate frame indices (0-based internally)
     const startIdx = startFrame.value - 1;
     const endIdx = endFrame.value - 1;
     const newFrameCount = endIdx - startIdx + 1;
 
-    // Create new header
+    // Read and modify header
+    const originalHeader = await file.slice(0, SER_HEADER_SIZE).arrayBuffer();
     const newHeader = new ArrayBuffer(SER_HEADER_SIZE);
+    new Uint8Array(newHeader).set(new Uint8Array(originalHeader));
     const headerView = new DataView(newHeader);
-    const originalHeaderView = new DataView(fileBuffer.value);
-
-    // Copy original header
-    new Uint8Array(newHeader).set(new Uint8Array(fileBuffer.value.slice(0, SER_HEADER_SIZE)));
-
-    // Update frame count
     headerView.setInt32(38, newFrameCount, true);
 
-    // Calculate total size for trimmed file
-    const trimmedDataSize = newFrameCount * frameSize;
-    const trimmedFile = new ArrayBuffer(SER_HEADER_SIZE + trimmedDataSize);
+    // Calculate source range and read all needed frames at once
+    const sourceStart = SER_HEADER_SIZE + startIdx * singleFrameSize;
+    const sourceEnd = SER_HEADER_SIZE + (endIdx + 1) * singleFrameSize;
 
-    // Copy header
-    new Uint8Array(trimmedFile).set(new Uint8Array(newHeader));
+    progress.value = 10; // Show some progress while reading
+    const framesSlice = file.slice(sourceStart, sourceEnd);
+    const framesData = await framesSlice.arrayBuffer();
+    progress.value = 90;
 
-    // Copy frames
-    const trimmedData = new Uint8Array(trimmedFile);
-    const sourceData = new Uint8Array(fileBuffer.value);
+    // Combine header and frames
+    const result = new Blob([newHeader, framesData], { type: 'application/octet-stream' });
+    progress.value = 100;
 
-    for (let i = 0; i < newFrameCount; i++) {
-        const sourceOffset = SER_HEADER_SIZE + (startIdx + i) * frameSize;
-        const destOffset = SER_HEADER_SIZE + i * frameSize;
-
-        // Copy frame data
-        trimmedData.set(
-            sourceData.slice(sourceOffset, sourceOffset + frameSize),
-            destOffset
-        );
-
-        // Update progress
-        progress.value = Math.round(((i + 1) / newFrameCount) * 100);
-
-        // Yield to UI every 100 frames
-        if (i % 100 === 0) {
-            await new Promise(resolve => setTimeout(resolve, 0));
-        }
-    }
-
-    return new Blob([trimmedFile], { type: 'application/octet-stream' });
+    return result;
 }
+
+onUnmounted(() => {
+    stopPlayback();
+});
 </script>
 
 <style scoped>
@@ -578,7 +764,7 @@ async function createTrimmedSerFile() {
 
 .tool-section h3 {
     margin-top: 0;
-    margin-bottom: 5px;
+    margin-bottom: 10px;
     font-size: 14px;
     color: #333;
 }
@@ -667,6 +853,27 @@ async function createTrimmedSerFile() {
     text-align: right;
 }
 
+.trim-buttons {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.set-frame-button {
+    flex: 1;
+    padding: 8px;
+    background: #f5f5f5;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.set-frame-button:hover {
+    background: #e8f5e9;
+    border-color: #8CCF7E;
+}
+
 .output-info {
     display: flex;
     align-items: center;
@@ -731,9 +938,9 @@ async function createTrimmedSerFile() {
     margin: 15px -20px;
 }
 
-/* SER Analyzer styles */
+/* Analyzer styles */
 .analyzer-controls {
-    margin: 15px 0;
+    margin: 10px 0;
 }
 
 .control-row {
@@ -816,6 +1023,19 @@ async function createTrimmedSerFile() {
 
 .thumbnail-item {
     text-align: center;
+    cursor: pointer;
+    padding: 5px;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.thumbnail-item:hover {
+    background: #f0f0f0;
+}
+
+.thumbnail-item.selected {
+    background: #e8f5e9;
+    outline: 2px solid #8CCF7E;
 }
 
 .thumbnail-canvas {
@@ -823,6 +1043,10 @@ async function createTrimmedSerFile() {
     border-radius: 4px;
     background: #000;
     max-width: 100%;
+}
+
+.thumbnail-item.selected .thumbnail-canvas {
+    border-color: #8CCF7E;
 }
 
 .thumbnail-label {
@@ -836,5 +1060,96 @@ async function createTrimmedSerFile() {
     text-align: center;
     padding: 20px;
     color: #666;
+}
+
+/* Player styles */
+.player-section {
+    margin-top: 10px;
+}
+
+.player-canvas-container {
+    background: #000;
+    border-radius: 4px;
+    padding: 10px;
+    display: flex;
+    justify-content: center;
+    margin-bottom: 10px;
+}
+
+.player-canvas {
+    max-width: 100%;
+    border-radius: 2px;
+}
+
+.player-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.frame-slider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.frame-slider input[type="range"] {
+    flex: 1;
+}
+
+.frame-number {
+    min-width: 80px;
+    text-align: right;
+    font-size: 12px;
+    color: #666;
+}
+
+.playback-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.playback-controls button {
+    padding: 8px 16px;
+    border: 1px solid #ccc;
+    background: #f5f5f5;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.playback-controls button:hover:not(:disabled) {
+    background: #e8f5e9;
+    border-color: #8CCF7E;
+}
+
+.playback-controls button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.play-button {
+    min-width: 50px;
+}
+
+.speed-control {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: auto;
+}
+
+.speed-control label {
+    font-size: 12px;
+    color: #666;
+}
+
+.fps-input {
+    width: 50px;
+    padding: 4px 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    text-align: center;
 }
 </style>

@@ -89,11 +89,9 @@
 	
 		<Tools v-if="currentTab === 'Tools'" />
 
-		<ClientOnly>
-			<div v-if="liteMode && currentTab === 'FileUploader'" class="lite-mode-banner">
-				<strong>Lite Mode</strong><span v-if="forceLiteMode"> (forced)</span><span v-else-if="isMobile"> ({{ useGPU ? 'GPU' : 'CPU' }})</span><span v-else> (no WebGPU)</span> · Frame limit auto-adjusted for memory.
-			</div>
-		</ClientOnly>
+		<div v-if="isMounted && liteMode && currentTab === 'FileUploader'" class="lite-mode-banner">
+			<strong>Lite Mode</strong><span v-if="forceLiteMode"> (forced)</span><span v-else-if="isMobile"> ({{ useGPU ? 'GPU' : 'CPU' }})</span><span v-else> (no WebGPU)</span> · Frame limit auto-adjusted for memory.
+		</div>
 
 		<FileUploader v-show="currentTab === 'FileUploader' && !isProcessing && !isSelectingQuality" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" @showAbout="currentTab = 'About'" />
 		<ColorProfileSelector v-show="currentTab === 'FileUploader' && isSelectingColorProfile" />
@@ -173,6 +171,7 @@ const loadPixel = ref(false)
 const webGPUSupported = ref(null); // null = not yet checked, true/false = result
 const detectedBrowser = ref('Detecting...');
 const forceLiteMode = ref(false); // ?lite=1 URL param for testing
+const isMounted = ref(false); // Track mount state to avoid hydration mismatch
 
 // Detect mobile devices via user agent
 const isMobile = computed(() => {
@@ -240,6 +239,7 @@ function detectBrowser() {
 }
 
 onMounted(async () => {
+	isMounted.value = true;
 	loadPixel.value = true;
 	track('page_view');
 	trackHumanInteraction();
