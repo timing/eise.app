@@ -1,26 +1,56 @@
-# About eise.app - Planetary Image Cloud Stacker
-https://eise.app is the first web-based online planetary image stacking tool available in the solar system. The name is an ode to Eise Eisinga, a Frisian amateur astronomer who built a planetarium in his house. The main reason for developing yet another application for stacking is because of recent frustrations I had getting software running on my ARM based macbook. AutoStakkert4! didn't work in Wine, Planetary System Stacker by Rolf Hempel had python dependency issues, Lynkeos was slow with a very wonky UI and crashed continuously.
+# eise.app - Browser-Based Planetary Image Stacker
 
-As a web developer, I saw an opportunity to make something simpler that works directly in your browser, regardless of your operating system. Initially, I thought about doing all the processing on a server, but that would be expensive and not scalable. Instead, eise.app does a chunk of the work in your browser using WebAssembly and WebWorkers, which turns out to be quite fast, and it just works (hopefully!) by navigating to this website!
+https://eise.app is the first fully browser-based planetary image stacking tool. Everything runs locally on your machine using WebAssembly and Web Workers - your data never leaves your computer.
 
-# Currently eise.app works as follows:
+The name is an ode to [Eise Eisinga](https://en.wikipedia.org/wiki/Eise_Eisinga), a Frisian amateur astronomer who built a planetarium in his living room. The project started from frustrations getting existing software running on ARM-based Macs - AutoStakkert4! didn't work in Wine, PSS had dependency issues, Lynkeos crashed continuously.
 
-- The astrophotographer selects a video file from their machine.
-- FFmpeg.js is used to extract frames from the video file.
-- eise.app starts ranking (up to 5k) frames of the video based on sharpness.
-- The best 30% of frames are uploaded to a VPS powered by Digital Ocean.
-- On the server a slightly modified Planetary System Stacker (by Rolf Hempel) is stacking all frames it receives.
-- The server returns the stacked image to the browser.
-- A very basic post processor is opened, providing Wavelets sharpening, some noise reduction and color alignment. Code is from OpenCV and a GIMP plugin compiled to WebAssembly using emscripten.
-- In essence, eise.app is a blend of PSS's stacking capabilities combined with browser-based frame ranking and (post) processing.
+## How it works
 
-I hope this web-app will improve your astrophotography workflow, or helps beginners not giving up when trying to set-up their software.
+1. **Load your capture** - Select a SER file (recommended), AVI, or any video format
+2. **Frame ranking** - Sharpness analysis scores each frame using Laplacian variance
+3. **Quality selection** - Choose which percentage of frames to stack with an interactive quality graph
+4. **Auto-crop** - Detects and centers the target in each frame, rejects cut-off frames
+5. **Local alignment** - Alignment Points (APs) track motion across the frame using template matching
+6. **De-warping** - Displacement maps correct atmospheric wobble using inverse distance weighted interpolation
+7. **Stacking** - Quality-weighted averaging with optional 1.5x drizzle
+8. **Post-processing** - Wavelet sharpening, deconvolution, RGB alignment, rotation, crop
+
+All processing happens client-side using WebGPU (GPU-accelerated) or falls back to CPU via OpenCV WebAssembly.
+
+## Features
+
+- **100% browser-based** - No uploads, no installs, works on any OS
+- **File support** - SER (recommended), AVI (uncompressed), or any video via FFmpeg.js
+- **Surface mode** - For Moon/Sun closeups with drift tracking
+- **Drizzle** - 1.5x output resolution using sub-pixel frame offsets
+- **WebGPU acceleration** - Fast GPU-based template matching and stacking
+
+## Acknowledgments
+
+This project draws inspiration from [Planetary System Stacker](https://github.com/Rolf-Hempel/PlanetarySystemStacker) by Rolf Hempel. The alignment point approach, local de-warping, and quality-weighted stacking concepts are based on PSS's implementation.
+
+## Running locally
+
+```bash
+git clone https://github.com/tijmen/eise.app
+cd eise.app
+npm install
+npm run dev
+```
+
+## Browser requirements
+
+eise.app uses WebGPU for fast GPU-accelerated processing:
+- Chrome 113+ (Android: 121+)
+- Edge 113+
+- Safari 18+ (macOS Sequoia / iOS 18)
+- Firefox 141+ (Windows only for now)
+
+Falls back to CPU processing on older browsers.
+
+---
 
 Happy Stacking,
 Tijmen
-
-
-# Running Eise.app locally
-Clone this repo, `npm install`, `npm run dev` etc.
 
 
