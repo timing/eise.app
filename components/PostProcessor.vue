@@ -141,27 +141,56 @@
 					</span>
 				</template>
 				<template #toolbar>
-					<!-- Export dropdown -->
-					<div class="export-dropdown-container">
-						<div v-if="exportDropdownOpen" class="dropdown-backdrop" @click="exportDropdownOpen = false"></div>
-						<button class="export-dropdown-btn" @click="exportDropdownOpen = !exportDropdownOpen">
-							⬇ Export ▾
-						</button>
-						<div class="export-dropdown-menu" v-if="exportDropdownOpen" @click="exportDropdownOpen = false">
-							<button @click="downloadCanvasAsPNG">Processed PNG (8-bit)</button>
-							<button v-if="use16bit && sharpenedImage16" @click="download16BitProcessedPNG">Processed PNG (16-bit)</button>
-							<button @click="downloadUnprocessedPNG">Unprocessed PNG</button>
-							<button v-if="props.croppedSerData" @click="downloadCroppedSer">Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})</button>
-							<button v-if="props.croppedAviData" @click="downloadCroppedAvi">Cropped AVI ({{ props.croppedAviData.frameCount }} frames)</button>
-							<div class="dropdown-divider"></div>
-							<button @click="downloadComparisonVideo" :disabled="!canExport() || isExportingVideo" :title="!canExport() ? 'Only available after running the full stack pipeline (not for single image post-processing)' : ''">
-								{{ isExportingVideo ? exportProgress : 'Comparison Video' }}
-							</button>
-						</div>
-					</div>
+					<button class="export-btn" @click="openExportPopup">
+						⬇ Export
+					</button>
 				</template>
 			</ZoomableCanvas>
 		</template>
+	</div>
+
+	<!-- Export Popup -->
+	<div v-if="showExportPopup" class="export-popup-overlay" @click.self="showExportPopup = false">
+		<div class="export-popup">
+			<h3>Export</h3>
+
+			<div class="export-filename">
+				<label>Filename:</label>
+				<input type="text" v-model="exportFilename" @keydown.enter="downloadCanvasAsPNG" />
+			</div>
+
+			<div class="export-buttons">
+				<button class="export-option" @click="downloadCanvasAsPNG">
+					⬇ Processed PNG (8-bit)
+				</button>
+				<button v-if="use16bit && sharpenedImage16" class="export-option" @click="download16BitProcessedPNG">
+					⬇ Processed PNG (16-bit)
+				</button>
+				<button class="export-option" @click="downloadUnprocessedPNG">
+					⬇ Unprocessed PNG
+				</button>
+				<button v-if="props.croppedSerData" class="export-option secondary" @click="downloadCroppedSer">
+					⬇ Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})
+				</button>
+				<button v-if="props.croppedAviData" class="export-option secondary" @click="downloadCroppedAvi">
+					⬇ Cropped AVI ({{ props.croppedAviData.frameCount }} frames)
+				</button>
+				<button
+					class="export-option video"
+					@click="downloadComparisonVideo"
+					:disabled="!canExport() || isExportingVideo"
+					:title="!canExport() ? 'Only available after running the full stack pipeline' : ''">
+					{{ isExportingVideo ? exportProgress : '⬇ Comparison Video (mp4)' }}
+				</button>
+			</div>
+
+			<div class="export-popup-footer">
+				<a href="https://github.com/timing/eise.app/issues" target="_blank" class="feedback-cta" @click="handleFeedbackClick">
+					💬 How was your result? Send feedback!
+				</a>
+				<button class="close-btn" @click="showExportPopup = false">Close</button>
+			</div>
+		</div>
 	</div>
 
 </div>
@@ -188,15 +217,34 @@ import { useWorkerUrl } from '@/composables/useWorkerUrl';
 const liteMode = inject('liteMode', ref(false));
 
 const { track } = useTracking();
-const { openFeedbackAfterDownload } = useFeedback();
-const { getOutputFilename } = useProcessingState();
+const { openFeedback, openFeedbackAfterDownload } = useFeedback();
+const { inputFilename, getOutputFilename } = useProcessingState();
 const { workerUrl } = useWorkerUrl();
 const { captureProcessedImage, canExport, generateComparisonVideo, getExportStatus } = useComparisonExport();
 
 // Comparison video export state
 const isExportingVideo = ref(false);
 const exportProgress = ref('');
-const exportDropdownOpen = ref(false);
+
+// Export popup state
+const showExportPopup = ref(false);
+const exportFilename = ref('');
+const sentryAvailable = ref(false);
+
+function openExportPopup() {
+	// Prefill filename with base name (without extension)
+	exportFilename.value = inputFilename.value || 'eise_app';
+	showExportPopup.value = true;
+}
+
+function handleFeedbackClick(event) {
+	if (sentryAvailable.value) {
+		event.preventDefault();
+		openFeedback();
+	}
+	// Otherwise, let the <a href> work normally (opens GitHub)
+}
+
 
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
@@ -223,11 +271,13 @@ const downloadCanvasAsPNG = () => {
 	track('download_processed');
 	const dataURL = canvas.value.toDataURL('image/png');
 	const link = document.createElement('a');
-	link.download = getOutputFilename('stacked_processed', 'png');
+	const filename = exportFilename.value || inputFilename.value || 'eise_app';
+	link.download = `${filename}_processed.png`;
 	link.href = dataURL;
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
 	document.body.removeChild(link);
+	showExportPopup.value = false;
 	openFeedbackAfterDownload();
 };
 
@@ -244,11 +294,13 @@ const downloadUnprocessedPNG = () => {
 
 	const dataURL = tempCanvas.toDataURL('image/png');
 	const link = document.createElement('a');
-	link.download = getOutputFilename('stacked_unprocessed', 'png');
+	const filename = exportFilename.value || inputFilename.value || 'eise_app';
+	link.download = `${filename}_unprocessed.png`;
 	link.href = dataURL;
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
 	document.body.removeChild(link);
+	showExportPopup.value = false;
 	openFeedbackAfterDownload();
 };
 
@@ -276,12 +328,14 @@ const downloadComparisonVideo = async () => {
 		// Download the video
 		const url = URL.createObjectURL(videoBlob);
 		const link = document.createElement('a');
-		link.download = getOutputFilename('comparison', 'mp4');
+		const filename = exportFilename.value || inputFilename.value || 'eise_app';
+		link.download = `${filename}_comparison.mp4`;
 		link.href = url;
 		document.body.appendChild(link);
 		link.click();
 		document.body.removeChild(link);
 		URL.revokeObjectURL(url);
+		showExportPopup.value = false;
 		openFeedbackAfterDownload();
 
 	} catch (error) {
@@ -300,11 +354,13 @@ const downloadCroppedSer = () => {
 	const url = URL.createObjectURL(props.croppedSerData.blob);
 	const a = document.createElement('a');
 	a.href = url;
-	a.download = getOutputFilename('cropped', 'ser');
+	const filename = exportFilename.value || inputFilename.value || 'eise_app';
+	a.download = `${filename}_cropped.ser`;
 	document.body.appendChild(a);
 	a.click();
 	document.body.removeChild(a);
 	URL.revokeObjectURL(url);
+	showExportPopup.value = false;
 	openFeedbackAfterDownload();
 };
 
@@ -317,11 +373,13 @@ const downloadCroppedAvi = () => {
 		const url = URL.createObjectURL(aviBlob);
 		const a = document.createElement('a');
 		a.href = url;
-		a.download = getOutputFilename('cropped_debayered', 'avi');
+		const filename = exportFilename.value || inputFilename.value || 'eise_app';
+		a.download = `${filename}_cropped.avi`;
 		document.body.appendChild(a);
 		a.click();
 		document.body.removeChild(a);
 		URL.revokeObjectURL(url);
+		showExportPopup.value = false;
 		openFeedbackAfterDownload();
 	} catch (e) {
 		console.error('AVI encoding error:', e);
@@ -333,12 +391,14 @@ const download16BitProcessedPNG = async () => {
 
 	track('download_processed_16bit');
 	try {
+		const filename = exportFilename.value || inputFilename.value || 'eise_app';
 		await download16BitPNG(
 			sharpenedImage16.data,
 			sharpenedImage16.width,
 			sharpenedImage16.height,
-			getOutputFilename('stacked_processed_16bit', 'png')
+			`${filename}_processed_16bit.png`
 		);
+		showExportPopup.value = false;
 		openFeedbackAfterDownload();
 	} catch (e) {
 		console.error('16-bit PNG export error:', e);
@@ -434,6 +494,13 @@ onMounted(() => {
 	if (props.file) {
 		loadImage(props.file);
 	}
+
+	// Check Sentry feedback availability (getFeedback() returns null if not configured)
+	import('@sentry/vue').then((Sentry) => {
+		sentryAvailable.value = !!(Sentry.getFeedback && Sentry.getFeedback());
+	}).catch(() => {
+		sentryAvailable.value = false;
+	});
 });
 
 onUnmounted(() => {
@@ -1804,67 +1871,6 @@ button.download {
 button.download:hover {
 	background-color: #7ABF6E;
 }
-.export-dropdown-container {
-	position: relative;
-}
-.dropdown-backdrop {
-	position: fixed;
-	top: 0;
-	left: 0;
-	right: 0;
-	bottom: 0;
-	z-index: 99;
-}
-.export-dropdown-btn {
-	background-color: #8CCF7E;
-	color: #111;
-	padding: 8px 16px;
-	border: none;
-	border-radius: 5px;
-	cursor: pointer;
-	font-weight: bold;
-	font-size: 14px;
-	position: relative;
-	z-index: 100;
-}
-.export-dropdown-btn:hover {
-	background-color: #7ABF6E;
-}
-.export-dropdown-menu {
-	position: absolute;
-	top: 100%;
-	right: 0;
-	margin-top: 5px;
-	background: white;
-	border-radius: 5px;
-	box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-	min-width: 220px;
-	overflow: hidden;
-	z-index: 100;
-}
-.export-dropdown-menu button {
-	display: block;
-	width: 100%;
-	padding: 10px 15px;
-	border: none;
-	background: none;
-	text-align: left;
-	cursor: pointer;
-	font-size: 13px;
-	color: #333;
-}
-.export-dropdown-menu button:hover:not(:disabled) {
-	background-color: #f0f8ff;
-}
-.export-dropdown-menu button:disabled {
-	color: #aaa;
-	cursor: not-allowed;
-}
-.dropdown-divider {
-	height: 1px;
-	background: #eee;
-	margin: 5px 0;
-}
 .loading-inline {
 	position: absolute;
 	top: 10px;
@@ -1889,6 +1895,139 @@ button.download:hover {
 .comparison-btn:disabled {
 	opacity: 0.6;
 	cursor: not-allowed;
+}
+.export-btn {
+	background-color: #8CCF7E;
+	color: #111;
+	padding: 8px 16px;
+	border: none;
+	border-radius: 5px;
+	cursor: pointer;
+	font-weight: bold;
+	font-size: 14px;
+}
+.export-btn:hover {
+	background-color: #7ABF6E;
+}
+.export-popup-overlay {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: rgba(0, 0, 0, 0.6);
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	z-index: 1000;
+}
+.export-popup {
+	background: #fefefe;
+	color: #333;
+	border-radius: 10px;
+	padding: 25px 30px;
+	max-width: 400px;
+	width: 90%;
+	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+.export-popup h3 {
+	margin: 0 0 20px 0;
+	color: #333;
+	font-size: 18px;
+}
+.export-filename {
+	margin-bottom: 20px;
+}
+.export-filename label {
+	display: block;
+	margin-bottom: 5px;
+	font-weight: bold;
+	font-size: 13px;
+}
+.export-filename input {
+	width: 100%;
+	padding: 10px;
+	border: 1px solid #ccc;
+	border-radius: 5px;
+	font-size: 14px;
+	box-sizing: border-box;
+}
+.export-filename input:focus {
+	outline: none;
+	border-color: #8CCF7E;
+}
+.export-buttons {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 20px;
+}
+.export-option {
+	padding: 12px 16px;
+	border: none;
+	border-radius: 5px;
+	cursor: pointer;
+	font-size: 14px;
+	text-align: left;
+	transition: background-color 0.2s;
+	background-color: #8CCF7E;
+	color: #111;
+	font-weight: bold;
+}
+.export-option:hover:not(:disabled) {
+	background-color: #7ABF6E;
+}
+.export-option.secondary {
+	background-color: #e8e8e8;
+	color: #333;
+	font-weight: normal;
+}
+.export-option.secondary:hover:not(:disabled) {
+	background-color: #d8d8d8;
+}
+.export-option.video {
+	background-color: #5bc0de;
+	color: #fff;
+}
+.export-option.video:hover:not(:disabled) {
+	background-color: #4ab0ce;
+}
+.export-option:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+.export-popup-footer {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 10px;
+	padding-top: 15px;
+	border-top: 1px solid #eee;
+}
+.feedback-cta {
+	background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+	border: none;
+	color: white;
+	cursor: pointer;
+	font-size: 13px;
+	padding: 10px 16px;
+	border-radius: 5px;
+	font-weight: bold;
+	flex: 1;
+}
+.feedback-cta:hover {
+	opacity: 0.9;
+}
+.close-btn {
+	padding: 8px 20px;
+	background-color: #eee;
+	border: none;
+	border-radius: 5px;
+	cursor: pointer;
+	font-size: 14px;
+}
+.close-btn:hover {
+	background-color: #ddd;
 }
 </style>
 

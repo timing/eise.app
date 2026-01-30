@@ -495,6 +495,10 @@ canvas {
 #sentry-feedback {
 	--inset: auto 0 80px auto;
 }
+/* Ensure Sentry feedback dialog appears above export popup */
+[data-sentry-feedback] {
+	z-index: 10000 !important;
+}
 .compat-table {
 	border-collapse: collapse;
 	margin: 10px 0;
