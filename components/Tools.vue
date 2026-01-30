@@ -177,6 +177,13 @@
         <h2>SER Tools</h2>
         <p>Analyze SER file bit depth and Bayer pattern, play back frames with the selected color profile, or trim to extract a range of frames.</p>
 
+        <div class="feedback-box">
+            <p>Ideas for this page? Something not working?</p>
+            <a href="https://github.com/timing/eise.app/issues" target="_blank" class="feedback-cta" @click="handleFeedbackClick">
+                💬 Send feedback!
+            </a>
+        </div>
+
         <!-- Player Section -->
         <template v-if="serHeader">
             <div class="separator"></div>
@@ -228,8 +235,20 @@
 </template>
 
 <script setup>
-import { ref, computed, onUnmounted } from 'vue';
+import { ref, computed, onUnmounted, onMounted } from 'vue';
 import { parseSerHeader } from '@/composables/useSerReader';
+import { useFeedback } from '@/composables/useFeedback';
+
+const { openFeedback } = useFeedback();
+const sentryAvailable = ref(false);
+
+function handleFeedbackClick(event) {
+    if (sentryAvailable.value) {
+        event.preventDefault();
+        openFeedback();
+    }
+    // Otherwise, let the <a href> work normally (opens GitHub)
+}
 
 // Shared state
 const fileInput = ref(null);
@@ -749,6 +768,15 @@ async function createTrimmedSerFile() {
     return result;
 }
 
+onMounted(() => {
+    // Check Sentry feedback availability
+    import('@sentry/vue').then((Sentry) => {
+        sentryAvailable.value = !!(Sentry.getFeedback && Sentry.getFeedback());
+    }).catch(() => {
+        sentryAvailable.value = false;
+    });
+});
+
 onUnmounted(() => {
     stopPlayback();
 });
@@ -1154,5 +1182,32 @@ onUnmounted(() => {
     border: 1px solid #ccc;
     border-radius: 4px;
     text-align: center;
+}
+
+/* Feedback box */
+.feedback-box {
+    margin-top: 30px;
+    text-align: center;
+}
+
+.feedback-box p {
+    margin: 0 0 15px 0;
+}
+
+.feedback-cta {
+    display: inline-block;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    color: white;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 12px 24px;
+    border-radius: 5px;
+    font-weight: bold;
+    text-decoration: none;
+}
+
+.feedback-cta:hover {
+    opacity: 0.9;
 }
 </style>
