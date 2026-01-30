@@ -2,15 +2,9 @@
 // also trying to fix this: https://github.com/nuxt/nuxt/issues/22141
 export default defineNuxtConfig({
 	devtools: { enabled: true },
-	app: {
-		head: {
-			script: [
-				{
-					src: 'https://scripts.simpleanalyticscdn.com/latest.js',
-					async: true,
-					'data-collect-dnt': 'true'
-				}
-			]
+	router: {
+		options: {
+			trailingSlash: false
 		}
 	},
 	runtimeConfig: {
