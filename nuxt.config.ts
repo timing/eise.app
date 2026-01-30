@@ -2,6 +2,17 @@
 // also trying to fix this: https://github.com/nuxt/nuxt/issues/22141
 export default defineNuxtConfig({
 	devtools: { enabled: true },
+	app: {
+		head: {
+			script: [
+				{
+					src: 'https://scripts.simpleanalyticscdn.com/latest.js',
+					async: true,
+					'data-collect-dnt': 'true'
+				}
+			]
+		}
+	},
 	runtimeConfig: {
 		public: {
 			buildTimestamp: Date.now() // Unix timestamp in ms, set at build time
