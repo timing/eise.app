@@ -1701,6 +1701,7 @@ export function useSerReader() {
                 workers: [], // GPU mode creates its own workers
                 noiseRobustAlignment,
                 useWebGPU: true,
+                drizzleScale,
                 frameReReader // Two-pass: include frameReReader for on-demand frame loading
             });
             return;
@@ -2575,7 +2576,8 @@ export function useSerReader() {
                 frames: allAnalyzedFrames,
                 workers: [], // GPU mode creates its own workers
                 noiseRobustAlignment,
-                useWebGPU: true
+                useWebGPU: true,
+                drizzleScale
             });
             return;
         } else {

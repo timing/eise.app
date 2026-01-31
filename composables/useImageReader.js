@@ -578,6 +578,7 @@ export function useImageReader() {
                 workers: null, // Not using CPU workers
                 noiseRobustAlignment,
                 useWebGPU: true,
+                drizzleScale,
                 frameReReader
             });
             return;

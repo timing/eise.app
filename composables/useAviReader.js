@@ -1122,6 +1122,7 @@ export function useAviReader() {
                 workers: unifiedAnalyzeWorkers,
                 noiseRobustAlignment,
                 useWebGPU,
+                drizzleScale,
                 frameReReader: null // AVI frames already have float32Buffer loaded
             });
             return; // Don't terminate workers yet - they'll be used for stacking
@@ -1410,6 +1411,7 @@ export function useAviReader() {
                 workers: unifiedAnalyzeWorkers,
                 noiseRobustAlignment,
                 useWebGPU,
+                drizzleScale,
                 frameReReader: null // AVI frames already have float32Buffer loaded
             });
             return; // Don't terminate workers yet - they'll be used for stacking
@@ -2093,6 +2095,7 @@ export function useAviReader() {
                 workers: null,
                 noiseRobustAlignment,
                 useWebGPU: true,
+                drizzleScale,
                 frameReReader
             });
             return;
@@ -2447,6 +2450,7 @@ export function useAviReader() {
                 workers: liteWorkers,
                 noiseRobustAlignment,
                 useWebGPU: false,
+                drizzleScale,
                 frameReReader: null
             });
             return;

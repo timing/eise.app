@@ -30,6 +30,7 @@ const qualityWorkers = ref(null);
 const qualityNoiseRobust = ref(false);
 const qualityUseWebGPU = ref(false);
 const qualityFrameReReader = ref(null);
+const qualityDrizzleScale = ref(1.5);
 const croppedSerData = ref(null);
 const croppedAviData = ref(null);
 
@@ -180,6 +181,7 @@ function handleQualitySelectionReady(data) {
 	qualityNoiseRobust.value = data.noiseRobustAlignment || false;
 	qualityUseWebGPU.value = data.useWebGPU || false;
 	qualityFrameReReader.value = data.frameReReader || null;
+	qualityDrizzleScale.value = data.drizzleScale || 1.0;
 	isSelectingQuality.value = true;
 	eventBusEmit('stop-loading');
 }
@@ -203,7 +205,7 @@ async function handleThresholdSelected(data) {
 		const stackingWorker = hasValidWorkers ? qualityWorkers.value[0] : null;
 
 		try {
-			const stackResult = await stackFramesLocally(data.frames, stackingWorker, 1.5, qualityNoiseRobust.value, qualityUseWebGPU.value, qualityFrameReReader.value);
+			const stackResult = await stackFramesLocally(data.frames, stackingWorker, qualityDrizzleScale.value, qualityNoiseRobust.value, qualityUseWebGPU.value, qualityFrameReReader.value);
 
 			if (hasValidWorkers) {
 				qualityWorkers.value.forEach(worker => worker.terminate());
@@ -232,7 +234,7 @@ async function handleThresholdSelected(data) {
 					frames: data.frames,
 					stackingWorker,
 					hasValidWorkers,
-					drizzleScale: 1.5,
+					drizzleScale: qualityDrizzleScale.value,
 					noiseRobust: qualityNoiseRobust.value,
 					frameReReader: qualityFrameReReader.value
 				};
