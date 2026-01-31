@@ -452,6 +452,9 @@ async function renderThumbnails() {
     const thumbWidth = Math.floor(actualWidth * scale);
     const thumbHeight = Math.floor(actualHeight * scale);
 
+    // Guard against zero dimensions (can happen with corrupt headers)
+    if (thumbWidth < 1 || thumbHeight < 1) return;
+
     // Bayer pattern configs
     const patternConfigs = [
         { id: 'RGGB', rX: 0, rY: 0, bX: 1, bY: 1 },
@@ -576,6 +579,9 @@ async function renderCurrentFrame() {
     const scale = Math.min(1, maxWidth / width);
     canvas.width = Math.floor(width * scale);
     canvas.height = Math.floor(height * scale);
+
+    // Guard against zero dimensions (can happen with corrupt headers)
+    if (canvas.width < 1 || canvas.height < 1) return;
 
     const ctx = canvas.getContext('2d');
     const imageData = ctx.createImageData(canvas.width, canvas.height);

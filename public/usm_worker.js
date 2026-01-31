@@ -22,13 +22,13 @@ self.addEventListener('message', (e) => {
 });
 
 function unsharpMask(data, width, height, radius, amount, threshold) {
-	// If radius is 0 or amount is 0, return original
-	if (radius < 0.5 || amount === 0) {
+	// If radius is invalid or amount is 0, return original
+	if (!Number.isFinite(radius) || radius < 0.5 || amount === 0) {
 		return new Uint8ClampedArray(data);
 	}
 
 	// Create Gaussian kernel
-	const kernelRadius = Math.ceil(radius * 2.5); // 2.5 sigma covers 99% of Gaussian
+	const kernelRadius = Math.max(1, Math.ceil(radius * 2.5)); // 2.5 sigma covers 99% of Gaussian
 	const kernel = createGaussianKernel(radius, kernelRadius);
 
 	// Separate channels for processing (skip alpha)
@@ -82,6 +82,10 @@ function unsharpMask(data, width, height, radius, amount, threshold) {
 }
 
 function createGaussianKernel(sigma, radius) {
+	// Guard against invalid radius (negative or NaN)
+	if (radius < 0 || !Number.isFinite(radius)) {
+		return new Float32Array([1.0]); // Return identity kernel
+	}
 	const kernel = new Float32Array(radius * 2 + 1);
 	const sigma2 = sigma * sigma * 2;
 	let sum = 0;
@@ -147,8 +151,8 @@ function clamp(value) {
  * @returns {Float32Array} Processed RGBA data
  */
 function unsharpMask16(data, width, height, radius, amount, threshold) {
-	// If radius is 0 or amount is 0, return original
-	if (radius < 0.5 || amount === 0) {
+	// If radius is invalid or amount is 0, return original
+	if (!Number.isFinite(radius) || radius < 0.5 || amount === 0) {
 		return new Float32Array(data);
 	}
 
@@ -156,7 +160,7 @@ function unsharpMask16(data, width, height, radius, amount, threshold) {
 	const thresholdNormalized = threshold / 255;
 
 	// Create Gaussian kernel
-	const kernelRadius = Math.ceil(radius * 2.5);
+	const kernelRadius = Math.max(1, Math.ceil(radius * 2.5));
 	const kernel = createGaussianKernel(radius, kernelRadius);
 
 	// Separate channels for processing (skip alpha)
