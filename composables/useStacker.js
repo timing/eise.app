@@ -128,11 +128,11 @@ export function useStacker() {
         const minDim = Math.min(width, height);
         let spacing;
         if (minDim < 300) {
-            spacing = 30;
+            spacing = 20;  // Was 30 - more APs on small crops for better alignment
         } else if (minDim < 500) {
-            spacing = 25;
-        } else if (minDim < 800) {
             spacing = 20;
+        } else if (minDim < 800) {
+            spacing = 15;
         } else {
             spacing = Math.floor(patchSize / 2); // 10px = 50% overlap
         }
