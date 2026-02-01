@@ -205,7 +205,7 @@ import { initWebGL, processWithWebGL, isWebGLAvailable, disposeWebGL } from '@/u
 import { deconvolveWebGL, deconvolveWebGL16, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
 import { Image16 } from '@/utils/Image16.js'
 import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2, blurWithWebGL2 } from '@/utils/webgl2Processor.js'
-import { download16BitPNG } from '@/utils/png16Encoder.js'
+import { download16BitPNG, decodePNG } from '@/utils/png16Encoder.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
@@ -551,6 +551,27 @@ async function loadImage(file) {
 	const hasFloat32Data = props.float32Data && props.imageDimensions &&
 		props.imageDimensions.width && props.imageDimensions.height;
 
+	// Try to decode 16-bit PNG directly (before browser clamps to 8-bit)
+	let decoded16Bit = null;
+	if (!hasFloat32Data) {
+		const isPNG = file.type === 'image/png' || file.name?.toLowerCase().endsWith('.png');
+		if (isPNG) {
+			try {
+				const buffer = await file.arrayBuffer();
+				const decoded = await decodePNG(buffer);
+				if (decoded.depth === 16 && decoded.float32Data) {
+					decoded16Bit = {
+						data: decoded.float32Data,
+						width: decoded.width,
+						height: decoded.height
+					};
+				}
+			} catch (err) {
+				console.warn('Failed to decode PNG:', err);
+			}
+		}
+	}
+
 	const img = new Image();
 	img.onload = function() {
 		canvas.value.width = img.width;
@@ -568,20 +589,16 @@ async function loadImage(file) {
 		// Initialize 16-bit image container
 		if (hasFloat32Data) {
 			// Use Float32Array directly from stacking (full precision preserved)
-			console.log('float32Data type:', props.float32Data?.constructor?.name);
-			console.log('float32Data length:', props.float32Data?.length);
-			console.log('float32Data expected:', props.imageDimensions.width * props.imageDimensions.height * 4);
-			// Sample from CENTER of image (not black corners)
-			const centerY = Math.floor(props.imageDimensions.height / 2);
-			const centerX = Math.floor(props.imageDimensions.width / 2);
-			const centerIdx = (centerY * props.imageDimensions.width + centerX) * 4;
-			console.log(`float32Data CENTER (${centerX},${centerY}) RGBA:`, Array.from(props.float32Data?.slice(centerIdx, centerIdx + 4) || []));
 			image16 = Image16.fromFloat32Array(props.float32Data, props.imageDimensions.width, props.imageDimensions.height);
-			console.log('16-bit image initialized from stacking data (full precision):', props.imageDimensions.width, 'x', props.imageDimensions.height);
+			console.log('16-bit image initialized from stacking data:', props.imageDimensions.width, 'x', props.imageDimensions.height);
+		} else if (decoded16Bit) {
+			// Use decoded 16-bit PNG data (full precision preserved)
+			image16 = Image16.fromFloat32Array(decoded16Bit.data, decoded16Bit.width, decoded16Bit.height);
+			console.log('16-bit image initialized from PNG file:', decoded16Bit.width, 'x', decoded16Bit.height);
 		} else {
 			// Upscale from 8-bit (fallback for direct file uploads)
 			image16 = Image16.fromImageData(initCanvasImageData);
-			console.log('16-bit image container initialized (upscaled from 8-bit):', img.width, 'x', img.height);
+			console.log('8-bit image loaded:', img.width, 'x', img.height);
 		}
 		sharpenedImage16 = null;
 
