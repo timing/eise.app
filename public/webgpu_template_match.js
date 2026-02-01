@@ -1,6 +1,15 @@
 // WebGPU Template Matching for Alignment Points
 // Uses normalized cross-correlation (NCC) computed on GPU
 // Optimized with buffer reuse and multi-frame batching
+//
+// MEMORY OPTIMIZATION: Frame grayscale data uses packed u8 format (4 pixels per u32)
+// instead of f32, providing 4x memory savings. This is safe because:
+// - NCC normalizes by mean/variance, so relative patterns matter, not absolute precision
+// - 256 intensity levels capture planetary features well (high contrast against dark sky)
+// - 20x20 patches (400 pixels) provide statistical robustness for reliable correlation
+// - Industry standard: AutoStakkert, PIPP, Registax all use 8-bit for alignment
+// - The NCC computation itself still uses f32 internally for accumulation precision
+// Reference templates remain f32 (small and reused across all frames, negligible savings)
 
 let gpuDevice = null;
 let gpuQueue = null;
@@ -52,9 +61,13 @@ async function safeMatchMapAsync(buffer, mode) {
     }
 }
 
-// Cached buffers for reuse
+// Cached buffers for reuse (single-frame matching)
 let cachedBuffers = null;
 let cachedConfig = null;
+
+// Cached buffers for batch matching
+let cachedBatchBuffers = null;
+let cachedBatchConfig = null;
 
 // WGSL shader for normalized cross-correlation (single frame)
 const nccShaderCode = `
@@ -146,7 +159,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-// Batch shader - processes multiple frames at once
+// Batch shader with GPU-side max reduction - outputs only (dx, dy, quality) per (frame, AP)
+// Uses workgroup shared memory for parallel reduction
+//
+// PRECISION NOTE: Frame grayscale data is stored as packed u8 (4 pixels per u32) for memory efficiency.
+// This is sufficient for alignment because:
+// 1. NCC normalizes by mean/variance - relative patterns matter, not absolute precision
+// 2. 256 intensity levels capture planetary features well (good contrast against dark sky)
+// 3. The 20x20 patch size (400 pixels) provides statistical robustness
+// 4. Professional stacking software (AutoStakkert, PIPP, Registax) all use 8-bit for alignment
+// 5. The NCC math still uses f32 internally for accumulation precision
+// Reference templates remain f32 for simplicity since they're small and reused across all frames.
 const batchShaderCode = `
 struct Params {
     templateWidth: u32,
@@ -160,17 +183,27 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> refTemplates: array<f32>;     // Reference templates for all APs
-@group(0) @binding(2) var<storage, read> frameGrays: array<f32>;       // All frames' grayscale data
+@group(0) @binding(1) var<storage, read> refTemplates: array<f32>;     // Reference templates for all APs (f32 - small, reused)
+@group(0) @binding(2) var<storage, read> frameGraysPacked: array<u32>; // Packed u8 grayscale (4 pixels per u32, 4x memory savings)
 @group(0) @binding(3) var<storage, read> apPositions: array<u32>;      // AP x,y positions (packed)
 @group(0) @binding(4) var<storage, read_write> results: array<f32>;    // Results: numFrames * numAPs * 3 (dx, dy, score)
 
+// Shared memory for workgroup reduction (256 threads max)
+var<workgroup> sharedScores: array<f32, 256>;
+var<workgroup> sharedOffsets: array<u32, 256>;  // Packed (dx << 16) | dy
+
+// Sample a pixel from packed u8 grayscale data, returns 0.0-255.0
 fn sampleFrame(frameIdx: u32, x: i32, y: i32) -> f32 {
     if (x < 0 || y < 0 || u32(x) >= params.frameWidth || u32(y) >= params.frameHeight) {
         return 0.0;
     }
     let frameSize = params.frameWidth * params.frameHeight;
-    return frameGrays[frameIdx * frameSize + u32(y) * params.frameWidth + u32(x)];
+    let pixelIdx = frameIdx * frameSize + u32(y) * params.frameWidth + u32(x);
+    // Unpack: 4 u8 values stored in each u32
+    let packedIdx = pixelIdx >> 2u;           // Divide by 4
+    let byteOffset = (pixelIdx & 3u) << 3u;   // (pixelIdx % 4) * 8
+    let packed = frameGraysPacked[packedIdx];
+    return f32((packed >> byteOffset) & 0xFFu);
 }
 
 fn computeBatchNCC(frameIdx: u32, apIdx: u32, offsetX: i32, offsetY: i32) -> f32 {
@@ -224,11 +257,15 @@ fn computeBatchNCC(frameIdx: u32, apIdx: u32, offsetX: i32, offsetY: i32) -> f32
     return numerator / denominator;
 }
 
-// Each workgroup handles one (frame, AP) pair, threads search different offsets
-@compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wid: vec3<u32>) {
-    let frameIdx = wid.z / params.numAPs;
-    let apIdx = wid.z % params.numAPs;
+// One workgroup per (frame, AP) pair - 256 threads handle all search positions and reduce
+@compute @workgroup_size(256, 1, 1)
+fn main(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>
+) {
+    let frameIdx = wid.x / params.numAPs;
+    let apIdx = wid.x % params.numAPs;
+    let threadIdx = lid.x;
 
     if (frameIdx >= params.numFrames || apIdx >= params.numAPs) {
         return;
@@ -236,20 +273,60 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(workgroup_id) wi
 
     let searchRadius = i32((params.searchWidth - params.templateWidth) / 2u);
     let gridSize = u32(2 * searchRadius + 1);
+    let totalPositions = gridSize * gridSize;
 
-    let offsetX = i32(gid.x) - searchRadius;
-    let offsetY = i32(gid.y) - searchRadius;
+    // Each thread may handle multiple search positions
+    var bestScore: f32 = -1.0;
+    var bestDx: i32 = 0;
+    var bestDy: i32 = 0;
 
-    if (gid.x >= gridSize || gid.y >= gridSize) {
-        return;
+    // Loop over positions assigned to this thread
+    var pos = threadIdx;
+    while (pos < totalPositions) {
+        let dy = i32(pos / gridSize);
+        let dx = i32(pos % gridSize);
+        let offsetX = dx - searchRadius;
+        let offsetY = dy - searchRadius;
+
+        let score = computeBatchNCC(frameIdx, apIdx, offsetX, offsetY);
+        if (score > bestScore) {
+            bestScore = score;
+            bestDx = offsetX;
+            bestDy = offsetY;
+        }
+        pos += 256u;
     }
 
-    let score = computeBatchNCC(frameIdx, apIdx, offsetX, offsetY);
+    // Store local best in shared memory (offset by searchRadius to make positive for packing)
+    sharedScores[threadIdx] = bestScore;
+    let packedOffset = u32(bestDx + searchRadius) | (u32(bestDy + searchRadius) << 16u);
+    sharedOffsets[threadIdx] = packedOffset;
+    workgroupBarrier();
 
-    // Store in results array: each AP gets gridSize*gridSize scores, find best on CPU
-    let resultsPerAP = gridSize * gridSize;
-    let resultIdx = (frameIdx * params.numAPs + apIdx) * resultsPerAP + gid.y * gridSize + gid.x;
-    results[resultIdx] = score;
+    // Parallel reduction to find global best in workgroup
+    for (var stride: u32 = 128u; stride > 0u; stride = stride >> 1u) {
+        if (threadIdx < stride) {
+            let other = threadIdx + stride;
+            if (sharedScores[other] > sharedScores[threadIdx]) {
+                sharedScores[threadIdx] = sharedScores[other];
+                sharedOffsets[threadIdx] = sharedOffsets[other];
+            }
+        }
+        workgroupBarrier();
+    }
+
+    // Thread 0 writes final result: (dx, dy, score) for this (frame, AP)
+    if (threadIdx == 0u) {
+        let finalOffset = sharedOffsets[0];
+        let finalDx = i32(finalOffset & 0xFFFFu) - searchRadius;
+        let finalDy = i32(finalOffset >> 16u) - searchRadius;
+        let finalScore = sharedScores[0];
+
+        let resultIdx = (frameIdx * params.numAPs + apIdx) * 3u;
+        results[resultIdx] = f32(finalDx);
+        results[resultIdx + 1u] = f32(finalDy);
+        results[resultIdx + 2u] = finalScore;
+    }
 }
 `;
 
@@ -289,6 +366,8 @@ async function initWebGPU() {
             isInitialized = false;
             cachedBuffers = null;
             cachedConfig = null;
+            cachedBatchBuffers = null;
+            cachedBatchConfig = null;
 
             // Attempt automatic recovery
             if (matchReinitAttempts < MATCH_MAX_REINIT_ATTEMPTS) {
@@ -343,19 +422,29 @@ reinitializeMatchGpu = async function() {
     if (matchReinitializing) return false;
     matchReinitializing = true;
     try {
-        // Clean up any remaining cached buffers
+        // Clean up any remaining cached buffers (single-frame)
         if (cachedBuffers) {
             try {
-                cachedBuffers.paramsBuffer.destroy();
-                cachedBuffers.templatesBuffer.destroy();
-                cachedBuffers.searchBuffer.destroy();
-                cachedBuffers.resultsBuffer.destroy();
-                cachedBuffers.readbackBuffer.destroy();
+                Object.values(cachedBuffers).forEach(buf => {
+                    if (buf && buf.destroy) buf.destroy();
+                });
             } catch (e) {
                 // Ignore cleanup errors
             }
             cachedBuffers = null;
             cachedConfig = null;
+        }
+        // Clean up batch buffers
+        if (cachedBatchBuffers) {
+            try {
+                Object.values(cachedBatchBuffers).forEach(buf => {
+                    if (buf && buf.destroy) buf.destroy();
+                });
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+            cachedBatchBuffers = null;
+            cachedBatchConfig = null;
         }
         isInitialized = false;
         matchReinitAttempts++;
@@ -383,17 +472,14 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
 
     const numFrames = frameGrayDatas.length;
     const numAPs = alignmentPoints.length;
-    const templateSize = patchSize * patchSize;
-    const gridSize = 2 * searchRadius + 1;
-    const resultsPerAP = gridSize * gridSize;
-    const frameSize = width * height;
 
     // WebGPU limit: max workgroups per dimension is 65535
-    const MAX_WORKGROUPS_Z = 65535;
-    const maxFramesPerBatch = Math.floor(MAX_WORKGROUPS_Z / numAPs);
+    // We dispatch (numFrames * numAPs) workgroups in X dimension
+    const MAX_WORKGROUPS_X = 65535;
+    const maxFramesPerBatch = Math.floor(MAX_WORKGROUPS_X / numAPs);
 
     // If we can fit all frames in one batch, use the simple path
-    if (numFrames * numAPs <= MAX_WORKGROUPS_Z) {
+    if (numFrames * numAPs <= MAX_WORKGROUPS_X) {
         return await matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset);
     }
 
@@ -417,15 +503,88 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
 }
 
 /**
+ * Get or create cached buffers for batch matching
+ * Note: framesBuffer uses packed u8 format (4 pixels per u32) for 4x memory savings
+ */
+function getBatchBuffers(numFrames, numAPs, templateSize, frameSize) {
+    const align4 = (size) => Math.ceil(size / 4) * 4;
+
+    // Packed u8: 4 pixels per u32, so size = ceil(pixels/4) * 4 bytes
+    const packedFrameBytes = Math.ceil(numFrames * frameSize / 4) * 4;
+
+    const requiredSizes = {
+        templatesSize: align4(numAPs * templateSize * 4),  // f32 templates (small, reused)
+        framesSize: align4(packedFrameBytes),               // packed u8 grayscale (4x savings)
+        apPosSize: align4(numAPs * 4),
+        resultsSize: align4(numFrames * numAPs * 3 * 4)
+    };
+
+    // Check if cached buffers are large enough
+    if (cachedBatchBuffers && cachedBatchConfig &&
+        cachedBatchConfig.templatesSize >= requiredSizes.templatesSize &&
+        cachedBatchConfig.framesSize >= requiredSizes.framesSize &&
+        cachedBatchConfig.apPosSize >= requiredSizes.apPosSize &&
+        cachedBatchConfig.resultsSize >= requiredSizes.resultsSize) {
+        return cachedBatchBuffers;
+    }
+
+    // Destroy old buffers
+    if (cachedBatchBuffers) {
+        Object.values(cachedBatchBuffers).forEach(buf => {
+            if (buf && buf.destroy) buf.destroy();
+        });
+    }
+
+    // Create new buffers with headroom
+    const headroom = 1.2;
+    const templatesSize = align4(Math.ceil(requiredSizes.templatesSize * headroom));
+    const framesSize = align4(Math.ceil(requiredSizes.framesSize * headroom));
+    const apPosSize = align4(Math.ceil(requiredSizes.apPosSize * headroom));
+    const resultsSize = align4(Math.ceil(requiredSizes.resultsSize * headroom));
+
+    cachedBatchBuffers = {
+        paramsBuffer: gpuDevice.createBuffer({
+            size: 8 * 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        }),
+        templatesBuffer: gpuDevice.createBuffer({
+            size: templatesSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        }),
+        framesBuffer: gpuDevice.createBuffer({
+            size: framesSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        }),
+        apPosBuffer: gpuDevice.createBuffer({
+            size: apPosSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        }),
+        resultsBuffer: gpuDevice.createBuffer({
+            size: resultsSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+        }),
+        readbackBuffer: gpuDevice.createBuffer({
+            size: resultsSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        })
+    };
+
+    cachedBatchConfig = { templatesSize, framesSize, apPosSize, resultsSize };
+    return cachedBatchBuffers;
+}
+
+/**
  * Simple implementation that processes all frames at once (must fit within workgroup limits)
+ * Uses GPU-side max reduction - only reads back (dx, dy, quality) per (frame, AP)
  */
 async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset = null) {
     const numFrames = frameGrayDatas.length;
     const numAPs = alignmentPoints.length;
     const templateSize = patchSize * patchSize;
-    const gridSize = 2 * searchRadius + 1;
-    const resultsPerAP = gridSize * gridSize;
     const frameSize = width * height;
+
+    // Get cached buffers (creates if needed, reuses if large enough)
+    const buffers = getBatchBuffers(numFrames, numAPs, templateSize, frameSize);
 
     // Extract reference templates (once for all frames) - always from original AP positions
     const refTemplates = new Float32Array(numAPs * templateSize);
@@ -457,122 +616,79 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
         }
     }
 
-    // Pack all frame grayscale data
-    const allFrameGrays = new Float32Array(numFrames * frameSize);
+    // Pack all frame grayscale data as u8 into u32 (4 pixels per u32)
+    // This gives 4x memory savings compared to f32 - see shader comment for why 8-bit is sufficient
+    const packedSize = Math.ceil(numFrames * frameSize / 4);
+    const allFrameGraysPacked = new Uint32Array(packedSize);
     for (let f = 0; f < numFrames; f++) {
         const gray = frameGrayDatas[f];
-        for (let i = 0; i < frameSize; i++) {
-            allFrameGrays[f * frameSize + i] = gray[i];
+        const frameOffset = f * frameSize;
+        for (let i = 0; i < frameSize; i += 4) {
+            const packedIdx = (frameOffset + i) >> 2;
+            // Pack 4 u8 values into one u32 (handle boundary case)
+            const v0 = gray[i] || 0;
+            const v1 = (i + 1 < frameSize) ? (gray[i + 1] || 0) : 0;
+            const v2 = (i + 2 < frameSize) ? (gray[i + 2] || 0) : 0;
+            const v3 = (i + 3 < frameSize) ? (gray[i + 3] || 0) : 0;
+            allFrameGraysPacked[packedIdx] = v0 | (v1 << 8) | (v2 << 16) | (v3 << 24);
         }
     }
 
-    // Create buffers
-    const paramsBuffer = gpuDevice.createBuffer({
-        size: 8 * 4,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-
-    const templatesBuffer = gpuDevice.createBuffer({
-        size: refTemplates.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    });
-
-    const framesBuffer = gpuDevice.createBuffer({
-        size: allFrameGrays.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    });
-
-    const apPosBuffer = gpuDevice.createBuffer({
-        size: apPositions.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    });
-
-    const resultsSize = numFrames * numAPs * resultsPerAP * 4;
-    const resultsBuffer = gpuDevice.createBuffer({
-        size: resultsSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-    });
-
-    const readbackBuffer = gpuDevice.createBuffer({
-        size: resultsSize,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
+    // Results size for this batch
+    const resultsSize = numFrames * numAPs * 3 * 4;
 
     // Upload data
     const searchSize = patchSize + 2 * searchRadius;
     const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, numFrames, width, height]);
-    gpuQueue.writeBuffer(paramsBuffer, 0, paramsData);
-    gpuQueue.writeBuffer(templatesBuffer, 0, refTemplates);
-    gpuQueue.writeBuffer(framesBuffer, 0, allFrameGrays);
-    gpuQueue.writeBuffer(apPosBuffer, 0, apPositions);
+    gpuQueue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
+    gpuQueue.writeBuffer(buffers.templatesBuffer, 0, refTemplates);
+    gpuQueue.writeBuffer(buffers.framesBuffer, 0, allFrameGraysPacked);
+    gpuQueue.writeBuffer(buffers.apPosBuffer, 0, apPositions);
 
     // Create bind group
     const bindGroup = gpuDevice.createBindGroup({
         layout: batchPipeline.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: { buffer: paramsBuffer } },
-            { binding: 1, resource: { buffer: templatesBuffer } },
-            { binding: 2, resource: { buffer: framesBuffer } },
-            { binding: 3, resource: { buffer: apPosBuffer } },
-            { binding: 4, resource: { buffer: resultsBuffer } }
+            { binding: 0, resource: { buffer: buffers.paramsBuffer } },
+            { binding: 1, resource: { buffer: buffers.templatesBuffer } },
+            { binding: 2, resource: { buffer: buffers.framesBuffer } },
+            { binding: 3, resource: { buffer: buffers.apPosBuffer } },
+            { binding: 4, resource: { buffer: buffers.resultsBuffer } }
         ]
     });
 
-    // Dispatch - one workgroup per (frame, AP) pair
+    // Dispatch - one workgroup (256 threads) per (frame, AP) pair
     const commandEncoder = gpuDevice.createCommandEncoder();
     const passEncoder = commandEncoder.beginComputePass();
     passEncoder.setPipeline(batchPipeline);
     passEncoder.setBindGroup(0, bindGroup);
-
-    const workgroupsX = Math.ceil(gridSize / 8);
-    const workgroupsY = Math.ceil(gridSize / 8);
-    const workgroupsZ = numFrames * numAPs;
-    passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY, workgroupsZ);
+    passEncoder.dispatchWorkgroups(numFrames * numAPs, 1, 1);
     passEncoder.end();
 
-    commandEncoder.copyBufferToBuffer(resultsBuffer, 0, readbackBuffer, 0, resultsSize);
+    commandEncoder.copyBufferToBuffer(buffers.resultsBuffer, 0, buffers.readbackBuffer, 0, resultsSize);
     gpuQueue.submit([commandEncoder.finish()]);
 
-    // Read results
-    await safeMatchMapAsync(readbackBuffer, GPUMapMode.READ);
-    const resultsData = new Float32Array(readbackBuffer.getMappedRange().slice(0));
-    readbackBuffer.unmap();
+    // Read results - already reduced on GPU, just (dx, dy, score) per (frame, AP)
+    await safeMatchMapAsync(buffers.readbackBuffer, GPUMapMode.READ);
+    const resultsData = new Float32Array(buffers.readbackBuffer.getMappedRange().slice(0));
+    buffers.readbackBuffer.unmap();
 
-    // Find best match for each (frame, AP)
-    // If search was offset, add that offset to shifts so they're relative to original AP position
+    // Unpack results - GPU already found the best match
     const allShifts = [];
     for (let f = 0; f < numFrames; f++) {
         const frameShifts = [];
         for (let ap = 0; ap < numAPs; ap++) {
-            let bestScore = -1;
-            let bestDx = 0;
-            let bestDy = 0;
-
-            const baseIdx = (f * numAPs + ap) * resultsPerAP;
-            for (let dy = 0; dy < gridSize; dy++) {
-                for (let dx = 0; dx < gridSize; dx++) {
-                    const score = resultsData[baseIdx + dy * gridSize + dx];
-                    if (score > bestScore) {
-                        bestScore = score;
-                        bestDx = dx - searchRadius;
-                        bestDy = dy - searchRadius;
-                    }
-                }
-            }
+            const baseIdx = (f * numAPs + ap) * 3;
+            const dx = resultsData[baseIdx];
+            const dy = resultsData[baseIdx + 1];
+            const quality = resultsData[baseIdx + 2];
             // Add search offset to get shift relative to original AP position
-            frameShifts.push({ dx: bestDx + offsetX, dy: bestDy + offsetY, quality: bestScore });
+            frameShifts.push({ dx: dx + offsetX, dy: dy + offsetY, quality });
         }
         allShifts.push(frameShifts);
     }
 
-    // Cleanup
-    paramsBuffer.destroy();
-    templatesBuffer.destroy();
-    framesBuffer.destroy();
-    apPosBuffer.destroy();
-    resultsBuffer.destroy();
-    readbackBuffer.destroy();
-
+    // Buffers are cached and reused - no cleanup here
     return allShifts;
 }
 

@@ -1,6 +1,7 @@
 import { useEventBus } from '@/composables/eventBus';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
+import { useLiteMode } from '@/composables/useLiteMode';
 
 // Custom error for WebGPU unavailability - callers can catch this to show user choice
 export class WebGPUUnavailableError extends Error {
@@ -44,7 +45,13 @@ export function useStacker() {
     }
 
     /**
-     * Convert RGBA buffer to grayscale (supports both Float32 and Uint8 input)
+     * Convert RGBA buffer to grayscale for alignment (supports both Float32 and Uint8 input)
+     * Returns Uint8Array (8-bit grayscale) because:
+     * - NCC alignment normalizes by mean/variance, so relative patterns matter, not precision
+     * - 256 intensity levels capture planetary features well (high contrast against dark sky)
+     * - 20x20 patches provide statistical robustness for reliable template matching
+     * - Industry standard: AutoStakkert, PIPP, Registax all use 8-bit for alignment
+     * The GPU template matcher packs this u8 data (4 pixels per u32) for 4x memory savings
      */
     function rgbaToGrayscale(buffer, width, height, isFloat32 = false) {
         const gray = new Uint8Array(width * height);
@@ -186,7 +193,11 @@ export function useStacker() {
 
     /**
      * Prepare alignment data (pure JS, no OpenCV needed)
-     * Creates alignment points grid and reference grayscale
+     * Creates alignment points grid and reference grayscale for template matching.
+     *
+     * Note: The grayscale data here is 8-bit and used ONLY for alignment (finding dx/dy shifts).
+     * The actual frame data used for stacking accumulation remains float32 (16-bit precision).
+     * See rgbaToGrayscale() for why 8-bit is sufficient for alignment.
      */
     function prepareAlignmentData(refFrame, surfaceMode = false) {
         if (!refFrame || !refFrame.float32Buffer || !refFrame.width || !refFrame.height) {
@@ -427,12 +438,20 @@ export function useStacker() {
 
             // Step 4: Process frames in pipelined batches
             emit('set-caption', 'Stacking...');
-            // Dynamic batch size based on crop size to avoid memory issues
+            // Dynamic batch size - start aggressive, OOM handling will scale back
+            // Lite mode stays conservative for mobile/low-memory devices
             const frameBytes = cropSize * cropSize * 16; // Float32 RGBA = 16 bytes/pixel
-            const targetBatchMemory = 256 * 1024 * 1024; // 256MB
-            const BATCH_SIZE = Math.max(4, Math.min(32, Math.floor(targetBatchMemory / frameBytes)));
+            const { isLiteMode: checkLiteMode } = useLiteMode();
+            const inLiteMode = checkLiteMode();
+            const targetBatchMemory = inLiteMode ? (256 * 1024 * 1024) : (512 * 1024 * 1024);
+            let effectiveBatchSize = Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
             const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
             let processedCount = 0;
+
+            // Helper to check for OOM errors
+            const isOOMError = (err) => err.message?.includes('Array buffer allocation failed') ||
+                err.message?.includes('out of memory') || err.message?.includes('OOM') ||
+                err.message?.includes('allocation failed');
 
             // For surface mode, sort frames by original index for temporal drift tracking
             let framesToProcess = [...frameMetadata];
@@ -449,29 +468,57 @@ export function useStacker() {
             let nextBatchPromise = null;
 
             while (batchStart < frameCount) {
-                const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
-                const batchFrames = framesToProcess.slice(batchStart, batchEnd);
+                const batchEnd = Math.min(batchStart + effectiveBatchSize, frameCount);
+                let batchFrames = framesToProcess.slice(batchStart, batchEnd);
 
                 // Get current batch (pre-loaded or load now)
                 let rawBatch;
                 if (nextBatchPromise) {
                     rawBatch = await nextBatchPromise;
+                    // Trim if batch size was reduced
+                    if (rawBatch.frames.length > effectiveBatchSize) {
+                        rawBatch.frames = rawBatch.frames.slice(0, effectiveBatchSize);
+                        rawBatch.centers = rawBatch.centers.slice(0, effectiveBatchSize);
+                        batchFrames = batchFrames.slice(0, effectiveBatchSize);
+                    }
                 } else {
                     rawBatch = await loadRawBatch(batchFrames);
                 }
 
                 // Start loading next batch while processing current
-                const nextStart = batchEnd;
+                const nextStart = batchStart + rawBatch.frames.length;
                 if (nextStart < frameCount) {
-                    const nextEnd = Math.min(nextStart + BATCH_SIZE, frameCount);
+                    const nextEnd = Math.min(nextStart + effectiveBatchSize, frameCount);
                     const nextFrames = framesToProcess.slice(nextStart, nextEnd);
                     nextBatchPromise = loadRawBatch(nextFrames);
                 } else {
                     nextBatchPromise = null;
                 }
 
-                // Process current batch via GPU (demosaic + crop)
-                const gpuResults = await processGpuBatch(rawBatch.frames, rawBatch.centers);
+                // Process current batch via GPU (demosaic + crop) with OOM handling
+                let gpuResults = null;
+                let retryFrames = rawBatch.frames;
+                let retryCenters = rawBatch.centers;
+                while (!gpuResults && retryFrames.length > 0) {
+                    try {
+                        gpuResults = await processGpuBatch(retryFrames, retryCenters);
+                    } catch (err) {
+                        if (isOOMError(err) && retryFrames.length > 1) {
+                            const newSize = Math.max(1, Math.floor(retryFrames.length / 2));
+                            addLog(`GPU memory error, reducing batch from ${retryFrames.length} to ${newSize}`);
+                            retryFrames = retryFrames.slice(0, newSize);
+                            retryCenters = retryCenters.slice(0, newSize);
+                            batchFrames = batchFrames.slice(0, newSize);
+                            effectiveBatchSize = newSize;
+                            nextBatchPromise = null; // Cancel pre-fetch
+                        } else {
+                            throw err;
+                        }
+                    }
+                }
+                if (!gpuResults) break;
+                rawBatch.frames = retryFrames;
+                rawBatch.centers = retryCenters;
 
                 // Capture frames for comparison video (both raw pre-crop and processed post-crop)
                 for (let i = 0; i < gpuResults.length; i++) {
@@ -836,10 +883,13 @@ export function useStacker() {
 
             // Calculate batch size based on frame size and memory limits
             // Each frame needs width*height*4 bytes for grayscale float data
+            // Start aggressive, OOM handling will scale back if needed
             const frameBytes = width * height * 4;
-            const maxBatchMemory = 256 * 1024 * 1024; // 256MB for frame data
-            const batchSize = Math.min(64, Math.max(8, Math.floor(maxBatchMemory / frameBytes)));
-            addLog(`Using batch size ${batchSize} for GPU template matching`);
+            const { isLiteMode: checkLiteModeStack } = useLiteMode();
+            const inLiteModeStack = checkLiteModeStack();
+            const maxBatchMemory = inLiteModeStack ? (256 * 1024 * 1024) : (512 * 1024 * 1024);
+            let batchSize = Math.min(128, Math.max(8, Math.floor(maxBatchMemory / frameBytes)));
+            addLog(`Using batch size ${batchSize} for GPU template matching${inLiteModeStack ? ' (Lite mode)' : ''}`);
 
             // Pre-fill reference frame with zero shifts
             frameShifts[refIndex] = alignmentPoints.map(() => ({ dx: 0, dy: 0, quality: 1 }));

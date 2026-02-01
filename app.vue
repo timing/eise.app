@@ -5,11 +5,12 @@
 </template>
 
 <script setup>
-import { ref, computed, provide, defineAsyncComponent } from 'vue';
+import { ref, computed, provide, defineAsyncComponent, watch } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker, WebGPUUnavailableError } from '@/composables/useStacker';
 import { useTracking } from '@/composables/useTracking';
 import { reportError } from '@/composables/useSentryReporting';
+import { useLiteMode } from '@/composables/useLiteMode';
 
 const { on, emit: eventBusEmit, addLog } = useEventBus();
 const { stackFramesLocally } = useStacker();
@@ -50,6 +51,12 @@ const isMobile = computed(() => {
 
 const liteMode = computed(() => forceLiteMode.value || isMobile.value || webGPUSupported.value === false);
 const useGPU = computed(() => webGPUSupported.value === true);
+
+// Sync liteMode to shared state so composables can access it
+const { setLiteMode } = useLiteMode();
+watch(liteMode, (newValue) => {
+	setLiteMode(newValue);
+}, { immediate: true });
 
 // Provide state to pages
 provide('frames', frames);

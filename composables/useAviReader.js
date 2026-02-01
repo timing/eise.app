@@ -1876,10 +1876,15 @@ export function useAviReader() {
         let cutOffFrames = 0;
         let oversizedFrames = 0;
 
-        // Dynamic batch size based on frame dimensions to avoid memory issues
+        // Dynamic batch size - start aggressive, OOM handling will scale back
         const frameBytes = width * height * 16; // Float32 RGBA = 16 bytes/pixel
-        const targetBatchMemory = 256 * 1024 * 1024; // 256MB
-        const BATCH_SIZE = Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
+        const targetBatchMemory = 512 * 1024 * 1024; // 512MB (OOM handling will reduce if needed)
+        let effectiveBatchSize = Math.max(4, Math.min(128, Math.floor(targetBatchMemory / frameBytes)));
+
+        // Helper to check for OOM errors
+        const isOOMError = (err) => err.message?.includes('Array buffer allocation failed') ||
+            err.message?.includes('out of memory') || err.message?.includes('OOM') ||
+            err.message?.includes('allocation failed');
 
         // Helper to decode a batch of frames
         async function decodeBatch(start, end) {
@@ -1901,19 +1906,26 @@ export function useAviReader() {
         }
 
         // Pipeline: start decoding next batch while GPU processes current batch
-        let nextDecodePromise = decodeBatch(0, Math.min(BATCH_SIZE, frameCount));
+        let nextDecodePromise = decodeBatch(0, Math.min(effectiveBatchSize, frameCount));
+        let batchStart = 0;
 
-        for (let batchStart = 0; batchStart < frameCount; batchStart += BATCH_SIZE) {
-            const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
+        while (batchStart < frameCount) {
+            const batchEnd = Math.min(batchStart + effectiveBatchSize, frameCount);
 
             // Wait for this batch's decode (started in previous iteration or before loop)
-            const decodeResults = await nextDecodePromise;
+            let decodeResults = await nextDecodePromise;
+            // Trim if batch size was reduced due to OOM
+            if (decodeResults.length > effectiveBatchSize) {
+                decodeResults = decodeResults.slice(0, effectiveBatchSize);
+            }
 
             // Immediately start decoding NEXT batch while we process this one on GPU
-            const nextBatchStart = batchStart + BATCH_SIZE;
+            const nextBatchStart = batchStart + decodeResults.length;
             if (nextBatchStart < frameCount) {
-                const nextBatchEnd = Math.min(nextBatchStart + BATCH_SIZE, frameCount);
+                const nextBatchEnd = Math.min(nextBatchStart + effectiveBatchSize, frameCount);
                 nextDecodePromise = decodeBatch(nextBatchStart, nextBatchEnd);
+            } else {
+                nextDecodePromise = null;
             }
 
             // Process decoded frames
@@ -2029,6 +2041,14 @@ export function useAviReader() {
                     }
                 }
             } catch (error) {
+                // Check for OOM and retry with smaller batch
+                if (isOOMError(error) && batchFrames.length > 1) {
+                    const newSize = Math.max(1, Math.floor(batchFrames.length / 2));
+                    addLog(`GPU memory error, reducing batch from ${batchFrames.length} to ${newSize}`);
+                    effectiveBatchSize = newSize;
+                    nextDecodePromise = null; // Cancel pre-fetch
+                    continue; // Retry same batch position with smaller size
+                }
                 addLog(`GPU batch error: ${error.message}`);
                 completedFrames += batchFrames.length;
             }
@@ -2042,6 +2062,9 @@ export function useAviReader() {
             if (bestFrameSoFar && completedFrames % 100 === 0) {
                 emit('best-frame-updated', bestFrameSoFar);
             }
+
+            // Move to next batch
+            batchStart += decodeResults.length;
         }
 
         const skipMsgs = [];

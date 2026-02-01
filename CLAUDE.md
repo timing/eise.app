@@ -16,6 +16,8 @@ npm run build        # Production build
 npm run generate     # Generate static files (for Cloudflare deployment)
 ```
 
+**IMPORTANT: Do NOT run `npm run build` to verify changes.** The dev server (`npm run dev`) is always running in another terminal and will show compilation errors immediately via hot-reload. Running build is slow and unnecessary.
+
 ## Architecture
 
 ```

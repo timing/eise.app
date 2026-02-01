@@ -178,13 +178,6 @@ self.addEventListener('message', async (e) => {
             for (let i = 0; i < frames.length; i++) {
                 const frame = frames[i];
 
-                // DEBUG: Check input frame values - CENTER pixel, not corners
-                if (i === 0) {
-                    const sample = new Uint8Array(frame.rgbaBuffer);
-                    const centerIdx = (Math.floor(ctx.height / 2) * ctx.width + Math.floor(ctx.width / 2)) * 4;
-                    console.log(`GPU frame 0 - CENTER pixel (${Math.floor(ctx.width/2)},${Math.floor(ctx.height/2)}) RGBA:`, Array.from(sample.slice(centerIdx, centerIdx + 4)));
-                }
-
                 // Calculate brightness normalization
                 const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, ctx.width, ctx.height);
                 const brightnessScale = ctx.refBrightness / frameBrightness;

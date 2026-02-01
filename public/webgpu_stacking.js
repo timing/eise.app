@@ -371,13 +371,31 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
         readbackW: stackDevice.createBuffer({
             size: accumSizeAligned,
             usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        // Alternate readback buffers for double-buffering
+        readbackRAlt: stackDevice.createBuffer({
+            size: accumSizeAligned,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        readbackGAlt: stackDevice.createBuffer({
+            size: accumSizeAligned,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        readbackBAlt: stackDevice.createBuffer({
+            size: accumSizeAligned,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        readbackWAlt: stackDevice.createBuffer({
+            size: accumSizeAligned,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
         })
     };
 
     cachedStackConfig = {
         frameSize: frameSizeAligned,
         apSize: apSizeAligned,
-        accumSize: accumSizeAligned
+        accumSize: accumSizeAligned,
+        bufferGen: 0
     };
 
     return cachedStackBuffers;
@@ -488,27 +506,42 @@ async function readAccumulators(outWidth, outHeight) {
     const pixelCount = outWidth * outHeight;
     const size = Math.ceil(pixelCount * 4 / 4) * 4;  // Align to 4 bytes
 
+    // Select readback buffers based on generation (double-buffering)
+    const useAlt = (cachedStackConfig?.bufferGen || 0) % 2 === 1;
+    const readbackR = useAlt ? buffers.readbackRAlt : buffers.readbackR;
+    const readbackG = useAlt ? buffers.readbackGAlt : buffers.readbackG;
+    const readbackB = useAlt ? buffers.readbackBAlt : buffers.readbackB;
+    const readbackW = useAlt ? buffers.readbackWAlt : buffers.readbackW;
+
     const encoder = stackDevice.createCommandEncoder();
-    encoder.copyBufferToBuffer(buffers.accumR, 0, buffers.readbackR, 0, size);
-    encoder.copyBufferToBuffer(buffers.accumG, 0, buffers.readbackG, 0, size);
-    encoder.copyBufferToBuffer(buffers.accumB, 0, buffers.readbackB, 0, size);
-    encoder.copyBufferToBuffer(buffers.accumW, 0, buffers.readbackW, 0, size);
+    encoder.copyBufferToBuffer(buffers.accumR, 0, readbackR, 0, size);
+    encoder.copyBufferToBuffer(buffers.accumG, 0, readbackG, 0, size);
+    encoder.copyBufferToBuffer(buffers.accumB, 0, readbackB, 0, size);
+    encoder.copyBufferToBuffer(buffers.accumW, 0, readbackW, 0, size);
     stackQueue.submit([encoder.finish()]);
 
-    await safeStackMapAsync(buffers.readbackR, GPUMapMode.READ);
-    await safeStackMapAsync(buffers.readbackG, GPUMapMode.READ);
-    await safeStackMapAsync(buffers.readbackB, GPUMapMode.READ);
-    await safeStackMapAsync(buffers.readbackW, GPUMapMode.READ);
+    // Rotate buffer generation for next call
+    if (cachedStackConfig) {
+        cachedStackConfig.bufferGen = (cachedStackConfig.bufferGen || 0) + 1;
+    }
 
-    const accumR = new Float32Array(buffers.readbackR.getMappedRange().slice(0, size));
-    const accumG = new Float32Array(buffers.readbackG.getMappedRange().slice(0, size));
-    const accumB = new Float32Array(buffers.readbackB.getMappedRange().slice(0, size));
-    const accumW = new Float32Array(buffers.readbackW.getMappedRange().slice(0, size));
+    // Map all readback buffers in parallel for better throughput
+    await Promise.all([
+        safeStackMapAsync(readbackR, GPUMapMode.READ),
+        safeStackMapAsync(readbackG, GPUMapMode.READ),
+        safeStackMapAsync(readbackB, GPUMapMode.READ),
+        safeStackMapAsync(readbackW, GPUMapMode.READ)
+    ]);
 
-    buffers.readbackR.unmap();
-    buffers.readbackG.unmap();
-    buffers.readbackB.unmap();
-    buffers.readbackW.unmap();
+    const accumR = new Float32Array(readbackR.getMappedRange().slice(0, size));
+    const accumG = new Float32Array(readbackG.getMappedRange().slice(0, size));
+    const accumB = new Float32Array(readbackB.getMappedRange().slice(0, size));
+    const accumW = new Float32Array(readbackW.getMappedRange().slice(0, size));
+
+    readbackR.unmap();
+    readbackG.unmap();
+    readbackB.unmap();
+    readbackW.unmap();
 
     return { accumR, accumG, accumB, accumW };
 }

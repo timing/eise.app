@@ -5,6 +5,7 @@ import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
+import { useLiteMode } from '@/composables/useLiteMode';
 
 // Helper to detect and provide user-friendly messages for memory errors
 function isMemoryError(error) {
@@ -1146,14 +1147,17 @@ export function useSerReader() {
             throw new Error('WebGPU initialization failed - GPU is required for processing');
         }
 
-        // Batch size for GPU: dynamic based on frame size to avoid memory issues
-        // Target ~256MB of Float32 data per batch (width * height * 4 channels * 4 bytes * batchSize)
+        // Batch size for GPU: dynamic based on frame size
+        // Start aggressive (512MB), OOM handling will scale back if needed
+        // Lite mode stays conservative (256MB) for mobile/low-memory devices
         const frameBytes = header.width * header.height * 16; // Float32 RGBA = 16 bytes/pixel
-        const targetBatchMemory = 256 * 1024 * 1024; // 256MB
-        const maxBatchSize = Math.max(1, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
+        const { isLiteMode: checkLiteMode } = useLiteMode();
+        const inLiteMode = checkLiteMode();
+        const targetBatchMemory = inLiteMode ? (256 * 1024 * 1024) : (512 * 1024 * 1024);
+        const maxBatchSize = Math.max(1, Math.min(128, Math.floor(targetBatchMemory / frameBytes)));
         const INITIAL_BATCH_SIZE = Math.min(8, maxBatchSize);
         const BATCH_SIZE = maxBatchSize;
-        addLog(`Using batch size ${BATCH_SIZE} for ${header.width}x${header.height} frames`);
+        addLog(`Using batch size ${BATCH_SIZE} for ${header.width}x${header.height} frames${inLiteMode ? ' (Lite mode)' : ''}`);
 
         if (cropRegion) {
                     // TWO-PASS GPU PATH: GPU detects centers + analyzes, stores only metadata
@@ -1164,8 +1168,7 @@ export function useSerReader() {
                     // Debug: store metadata for a few problematic frames (no heavy buffers)
                     // Access via: window.__debugCutOffFrames, window.__debugNoBoundsFrames
                     // Skip in Lite mode to allow aggressive memory cleanup
-                    const isLiteMode = typeof window !== 'undefined' && new URLSearchParams(window.location?.search).has('lite');
-                    if (!isLiteMode) {
+                    if (!inLiteMode) {
                         window.__debugCutOffFrames = [];
                         window.__debugNoBoundsFrames = [];
                     }
