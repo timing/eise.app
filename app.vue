@@ -330,7 +330,7 @@ async function handleStackedImageReady(data) {
 	stackedImageDimensions.value = (data.width && data.height) ? { width: data.width, height: data.height } : null;
 	isProcessing.value = false;
 	track('post_process');
-	navigateTo('/post-processor');
+	navigateTo('/post-processor/');
 }
 
 async function handleFrames(data) {
@@ -345,7 +345,7 @@ function handleProcessingStarted() {
 async function handlePostProcessing(data) {
 	selectedFile.value = data;
 	isProcessing.value = false;
-	navigateTo('/post-processor');
+	navigateTo('/post-processor/');
 }
 </script>
 

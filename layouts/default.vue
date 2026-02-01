@@ -2,8 +2,8 @@
 	<div>
 		<nav class="tabs">
 			<NuxtLink to="/" :class="{ active: route.path === '/' }">✨ &nbsp; Stack & Process</NuxtLink>
-			<NuxtLink to="/tools" :class="{ active: route.path === '/tools' }">🛠️ &nbsp; Tools</NuxtLink>
-			<NuxtLink to="/about" style="float:right;" :class="{ active: route.path === '/about' }">ℹ️  &nbsp; About</NuxtLink>
+			<NuxtLink to="/tools/" :class="{ active: route.path.startsWith('/tools') }">🛠️ &nbsp; Tools</NuxtLink>
+			<NuxtLink to="/about/" style="float:right;" :class="{ active: route.path.startsWith('/about') }">ℹ️  &nbsp; About</NuxtLink>
 		</nav>
 
 		<header>
