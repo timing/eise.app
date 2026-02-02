@@ -586,6 +586,10 @@ function showAbout() {
 	emit('showAbout');
 }
 
+// Unsupported RAW camera formats
+const RAW_EXTENSIONS = ['.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2', '.raf'];
+const isRawFile = (file) => RAW_EXTENSIONS.some(ext => file.name.toLowerCase().endsWith(ext));
+
 async function processFiles(files) {
 	const { setInputFilename } = useProcessingState();
 
@@ -893,6 +897,13 @@ async function processFiles(files) {
 	
 	} else if (imageFiles.length > 1) {
 		// Multiple images selected - analyze and stack them
+		const rawFile = imageFiles.find(isRawFile);
+		if (rawFile) {
+			eventBusEmit('upload-error', `RAW camera files (${rawFile.name.split('.').pop().toUpperCase()}) are not supported. For planetary imaging, please use SER or AVI format from your capture software.`);
+			eventBusEmit('stop-loading');
+			return;
+		}
+
 		emit('processing-started');
 		addLog(`${imageFiles.length} images selected for stacking`);
 
@@ -901,6 +912,12 @@ async function processFiles(files) {
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing
+		if (isRawFile(imageFiles[0])) {
+			eventBusEmit('upload-error', `RAW camera files (${imageFiles[0].name.split('.').pop().toUpperCase()}) are not supported. For planetary imaging, please use SER or AVI format from your capture software.`);
+			eventBusEmit('stop-loading');
+			return;
+		}
+
 		if (['image/png', 'image/jpg', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'].indexOf(imageFiles[0].type) == -1) {
 
 			addLog('One image selected that is not natively supported by browsers, converting..');
