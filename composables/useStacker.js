@@ -234,8 +234,9 @@ export function useStacker() {
      *
      * Supports both SER files (raw Bayer) and image files (RGBA)
      * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
+     * @param noiseRobustAlignment - If true, use two-phase alignment (coarse on blurred, fine on original)
      */
-    async function stackWithGpuPipelined(frameMetadata, frameReReader, drizzleScale, addLog, emit, surfaceMode = false) {
+    async function stackWithGpuPipelined(frameMetadata, frameReReader, drizzleScale, addLog, emit, surfaceMode = false, noiseRobustAlignment = false) {
         const frameCount = frameMetadata.length;
 
         // Detect frameReReader type and extract parameters
@@ -273,7 +274,7 @@ export function useStacker() {
             throw new Error('Unknown frameReReader type');
         }
 
-        addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}`);
+        addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}${noiseRobustAlignment ? ' (two-phase)' : ''}`);
         emit('set-caption', 'Initializing GPU workers...');
 
         // Initialize GPU workers (no OpenCV worker needed - alignment prep is pure JS)
@@ -560,7 +561,8 @@ export function useStacker() {
                         alignmentPoints,
                         patchSize,
                         searchRadius,
-                        searchOffset
+                        searchOffset,
+                        noiseRobustAlignment
                     });
                 });
 
@@ -687,7 +689,7 @@ export function useStacker() {
         if (hasTwoPassFrames && useWebGPU) {
             // Use pipelined approach: load batch → align → stack, while loading next batch
             // Will throw WebGPUUnavailableError if GPU not available - caller should handle
-            return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode);
+            return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode, noiseRobustAlignment);
         }
 
         // Filter frames that have valid buffer (float32Buffer preferred, rgbaBuffer for legacy) and sharpness
@@ -808,7 +810,7 @@ export function useStacker() {
         // WebGPU path: orchestrate GPU worker directly from main thread
         // Will throw WebGPUUnavailableError if GPU not available - caller should handle
         if (useWebGPU) {
-            return await stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode);
+            return await stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode, noiseRobustAlignment);
         }
 
         // CPU path: send everything to unified_analyze_worker
@@ -818,8 +820,9 @@ export function useStacker() {
     /**
      * Stack using WebGPU for template matching (main thread orchestrates)
      * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
+     * @param noiseRobustAlignment - If true, use two-phase alignment (coarse on blurred, fine on original)
      */
-    async function stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode = false) {
+    async function stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode = false, noiseRobustAlignment = false) {
         const { width, height } = frameData[0];
 
         // Step 1: Initialize GPU worker
@@ -889,7 +892,7 @@ export function useStacker() {
             const inLiteModeStack = checkLiteModeStack();
             const maxBatchMemory = inLiteModeStack ? (256 * 1024 * 1024) : (512 * 1024 * 1024);
             let batchSize = Math.min(128, Math.max(8, Math.floor(maxBatchMemory / frameBytes)));
-            addLog(`Using batch size ${batchSize} for GPU template matching${inLiteModeStack ? ' (Lite mode)' : ''}`);
+            addLog(`Using batch size ${batchSize} for GPU template matching${inLiteModeStack ? ' (Lite mode)' : ''}${noiseRobustAlignment ? ' (two-phase)' : ''}`);
 
             // Pre-fill reference frame with zero shifts
             frameShifts[refIndex] = alignmentPoints.map(() => ({ dx: 0, dy: 0, quality: 1 }));
@@ -955,7 +958,8 @@ export function useStacker() {
                         alignmentPoints,
                         patchSize,
                         searchRadius,
-                        searchOffset
+                        searchOffset,
+                        noiseRobustAlignment
                     });
                 });
 

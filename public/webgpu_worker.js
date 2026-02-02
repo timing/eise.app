@@ -93,7 +93,7 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { requestId, refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset } = e.data;
+        const { requestId, refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset, noiseRobustAlignment } = e.data;
 
         try {
             const allShifts = await matchTemplatesBatchGPU(
@@ -104,7 +104,8 @@ self.addEventListener('message', async (e) => {
                 alignmentPoints,
                 patchSize,
                 searchRadius,
-                searchOffset
+                searchOffset,
+                noiseRobustAlignment
             );
 
             if (allShifts) {

@@ -107,14 +107,12 @@
 						Normal (1x)
 					</label>
 				</div>
-				<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.</p>
 
-				<label class="checkbox-option">
-					<input type="checkbox" v-model="noiseRobustAlignment" />
+				<label class="checkbox-option" :class="{ disabled: useGPU }" :title="useGPU ? 'Not optimized for GPU mode yet' : ''">
+					<input type="checkbox" v-model="noiseRobustAlignmentVisible" :disabled="useGPU" />
 					Pre-blur alignment
 				</label>
-				<span class="info-icon" @click="showAlignmentInfo = !showAlignmentInfo">ⓘ</span>
-				<p v-if="showAlignmentInfo" class="info-text">Aligns on blurred frames first, then refines on original. Better for turbulent seeing conditions, but slower.</p>
+				<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Pre-blur alignment:</strong> Aligns on blurred frames first, then refines on original. Better for turbulent seeing conditions. CPU only.</p>
 
 				<template v-if="targetType !== 'sun-moon'">
 					<div class="separator"></div>
@@ -220,7 +218,6 @@ const showPreCropInfo = ref(false);
 const showTargetInfo = ref(false);
 const showFrameSelectionInfo = ref(false);
 const showStackingModeInfo = ref(false);
-const showAlignmentInfo = ref(false);
 
 // Crop margin setting (percentage of detected object size to add as margin)
 const cropMarginPercent = ref(10);
@@ -230,6 +227,11 @@ const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 const noiseRobustAlignment = ref(false);
+// Computed for checkbox binding - shows unchecked when GPU is on
+const noiseRobustAlignmentVisible = computed({
+	get: () => useGPU.value ? false : noiseRobustAlignment.value,
+	set: (val) => { noiseRobustAlignment.value = val; }
+});
 
 // Target type: 'planet' or 'sun-moon' - affects cut-off frame detection
 const targetType = ref('planet');
@@ -239,7 +241,7 @@ const surfaceMode = computed(() => targetType.value === 'sun-moon');
 const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMode.value === '1.5x' ? 1.5 : 1.0));
 const effectiveMaxFrames = computed(() => liteMode.value ? 100 : (enableMaxFrames.value ? selectedMaxFrames.value : -1));
 const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPercent.value);
-const effectiveNoiseRobust = computed(() => liteMode.value ? false : noiseRobustAlignment.value);
+const effectiveNoiseRobust = computed(() => (liteMode.value || useGPU.value) ? false : noiseRobustAlignment.value);
 const effectiveQualityMode = computed(() => liteMode.value ? 'percentage' : qualityMode.value);
 const effectiveStackPercentage = computed(() => liteMode.value ? 30 : stackPercentage.value);
 
@@ -1100,6 +1102,10 @@ async function processFiles(files) {
 	gap: 8px;
 	cursor: pointer;
 	margin: 10px 0;
+}
+.checkbox-option.disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
 }
 .checkbox-option input[type="checkbox"] {
 	margin: 0;
