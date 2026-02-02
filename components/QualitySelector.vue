@@ -225,7 +225,7 @@ async function drawPreview() {
 			url = URL.createObjectURL(frame.blob);
 			await new Promise((resolve, reject) => {
 				img.onload = resolve;
-				img.onerror = reject;
+				img.onerror = () => reject(new Error('Failed to load frame preview'));
 				img.src = url;
 			});
 		} else if (frame.uint8Buffer && frame.width && frame.height) {

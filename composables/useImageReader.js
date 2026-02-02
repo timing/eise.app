@@ -56,7 +56,7 @@ export function useImageReader() {
 
         await new Promise((resolve, reject) => {
             img.onload = resolve;
-            img.onerror = reject;
+            img.onerror = () => reject(new Error('Image failed to decode - file may be corrupted or unsupported'));
             img.src = url;
         });
         URL.revokeObjectURL(url);
@@ -162,7 +162,7 @@ export function useImageReader() {
 
         await new Promise((resolve, reject) => {
             img.onload = resolve;
-            img.onerror = reject;
+            img.onerror = () => reject(new Error('Image failed to load - file may be corrupted or unsupported'));
             img.src = url;
         });
         URL.revokeObjectURL(url);

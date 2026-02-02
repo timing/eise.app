@@ -240,7 +240,7 @@ export function useComparisonExport() {
 
         await new Promise((resolve, reject) => {
             img.onload = resolve;
-            img.onerror = reject;
+            img.onerror = () => reject(new Error('Failed to load image for comparison export'));
             img.src = url;
         });
 
