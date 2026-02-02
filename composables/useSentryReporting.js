@@ -33,7 +33,7 @@ export function reportError(error, context = {}) {
             scope.setTag('action', context.action);
         }
         if (filename) {
-            scope.setTag('filename', filename);
+            scope.setTag('input_file', filename);
             // Extract file extension for easier filtering
             const ext = filename.split('.').pop()?.toLowerCase();
             if (ext) {

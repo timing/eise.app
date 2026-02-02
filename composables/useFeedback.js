@@ -26,7 +26,7 @@ export function useFeedback() {
         const { getInputFilename } = useProcessingState();
         const filename = getInputFilename();
         if (filename) {
-            Sentry.setTag('filename', filename);
+            Sentry.setTag('input_file', filename);
         }
         if (logs.value && logs.value.length > 0) {
             Sentry.setContext('session_logs', {
