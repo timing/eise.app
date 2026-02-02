@@ -49,7 +49,9 @@ const isMobile = computed(() => {
 	return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 });
 
-const liteMode = computed(() => forceLiteMode.value || isMobile.value || webGPUSupported.value === false);
+// Lite mode: only for mobile devices (memory constrained) or manual override
+// Desktop without WebGPU uses CPU mode with full features
+const liteMode = computed(() => forceLiteMode.value || isMobile.value);
 const useGPU = computed(() => webGPUSupported.value === true);
 
 // Sync liteMode to shared state so composables can access it
