@@ -28,6 +28,7 @@
 				<li><strong>Stacking:</strong> Quality-weighted averaging with brightness normalization</li>
 				<li><strong>Post-processing:</strong> Wavelet sharpening, deconvolution, RGB alignment (auto-detect + sub-pixel), rotation, crop</li>
 			</ul>
+			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image - just open a PNG or TIFF for wavelet sharpening, RGB alignment, and other adjustments without stacking.</p>
 
 			<h3>Acknowledgments</h3>
 			<p>

@@ -130,8 +130,8 @@
 	</div>
 	<div class="content">
 		<div v-if="!props.file" class="empty-state">
-			<h2>Nothing loaded yet</h2>
-			<p>Please upload a video (or bunch of files) for analyzing and stacking frames. Upload one image file for direct post processing.</p>
+			<h2>Post-processor</h2>
+			<p>Load any image (PNG, TIFF, JPEG) to apply sharpening, color adjustments, and other processing.</p>
 			<div class="empty-state-buttons">
 				<input
 					type="file"
@@ -140,8 +140,20 @@
 					style="display: none"
 					@change="handleDirectFileSelect"
 				/>
-				<button class="primary-btn" @click="triggerDirectFileSelect">Select image for post processing</button>
-				<button class="secondary-btn" @click="goBackToStart">Go back and start a new stack</button>
+				<button class="primary-btn" @click="triggerDirectFileSelect">Select image</button>
+				<NuxtLink to="/" class="secondary-btn">Go to stacking</NuxtLink>
+			</div>
+			<div class="feature-list">
+				<h4>Features</h4>
+				<ul>
+					<li><strong>Wavelet sharpening</strong> - multi-scale sharpening with denoise option</li>
+					<li><strong>Unsharp mask</strong> - radius, amount, and threshold controls</li>
+					<li><strong>Deconvolution</strong> - Richardson-Lucy iterative deconvolution</li>
+					<li><strong>Color adjustments</strong> - gain, contrast, gamma, saturation, vibrance</li>
+					<li><strong>RGB alignment</strong> - fix chromatic aberration with auto-detect or manual sub-pixel shifts</li>
+					<li><strong>Rotation and crop</strong> - straighten and trim your image</li>
+					<li><strong>16-bit support</strong> - maintains precision when loading 16-bit PNGs</li>
+				</ul>
 			</div>
 		</div>
 		<template v-else>
@@ -2112,6 +2124,7 @@ button.download:hover {
 }
 
 .empty-state-buttons .secondary-btn {
+	display: inline-block;
 	background-color: transparent;
 	color: #c6fffd;
 	padding: 10px 20px;
@@ -2119,10 +2132,32 @@ button.download:hover {
 	border-radius: 5px;
 	cursor: pointer;
 	font-size: 14px;
+	text-decoration: none;
 }
 
 .empty-state-buttons .secondary-btn:hover {
 	background-color: rgba(198, 255, 253, 0.1);
+}
+
+.feature-list {
+	margin-top: 32px;
+	text-align: left;
+	max-width: 500px;
+}
+
+.feature-list h4 {
+	margin-bottom: 12px;
+}
+
+.feature-list ul {
+	list-style: none;
+	padding: 0;
+	margin: 0;
+}
+
+.feature-list li {
+	padding: 6px 0;
+	font-size: 14px;
 }
 </style>
 

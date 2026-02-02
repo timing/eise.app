@@ -3,5 +3,14 @@
 	<url>
 		<loc>https://eise.app/</loc>
 	</url>
+	<url>
+		<loc>https://eise.app/post-processor/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/tools/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/about/</loc>
+	</url>
 </urlset>
 
