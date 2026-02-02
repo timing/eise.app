@@ -207,6 +207,8 @@
 				</button>
 			</div>
 
+			<p class="share-note">If you share this image, a mention of eise.app is appreciated!</p>
+
 			<div class="export-popup-footer">
 				<a href="https://github.com/timing/eise.app/issues" target="_blank" class="feedback-cta" @click="handleFeedbackClick">
 					💬 How was your result? Send feedback!
@@ -2061,13 +2063,20 @@ button.download:hover {
 	opacity: 0.5;
 	cursor: not-allowed;
 }
+.share-note {
+	font-size: 13px;
+	color: #666;
+	text-align: center;
+	margin: 15px 0 0 0;
+	padding-top: 15px;
+	border-top: 1px solid #eee;
+}
 .export-popup-footer {
 	display: flex;
 	justify-content: space-between;
 	align-items: center;
 	gap: 10px;
 	padding-top: 15px;
-	border-top: 1px solid #eee;
 }
 .feedback-cta {
 	background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
