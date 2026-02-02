@@ -600,6 +600,7 @@ async function processFiles(files) {
 	const primaryFile = videoFiles[0] || imageFiles[0];
 	if (primaryFile) {
 		setInputFilename(primaryFile.name);
+		addLog(`File: ${primaryFile.name}`);
 	}
 
 	// Multiple SER files are allowed - they'll be combined for stacking

@@ -1,4 +1,6 @@
 import * as Sentry from '@sentry/vue';
+import { logs } from './eventBus';
+import { useProcessingState } from './useProcessingState';
 
 // Track if feedback has been shown this session (per page view)
 let feedbackShownThisSession = false;
@@ -18,6 +20,19 @@ export function useFeedback() {
         if (!feedback) {
             console.warn('Sentry feedback not available');
             return;
+        }
+
+        // Attach session logs and filename as context before opening feedback
+        const { getInputFilename } = useProcessingState();
+        const filename = getInputFilename();
+        if (filename) {
+            Sentry.setTag('filename', filename);
+        }
+        if (logs.value && logs.value.length > 0) {
+            Sentry.setContext('session_logs', {
+                logs: logs.value.slice(-50),
+                total_log_count: logs.value.length
+            });
         }
 
         try {
