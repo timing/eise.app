@@ -9,8 +9,10 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
+import { useLiteMode } from '@/composables/useLiteMode';
 
 const { logs, onLogAdded, off } = useEventBus();
+const { isLiteMode } = useLiteMode();
 const logContent = ref(null);
 const isExpanded = ref(false);
 const memoryDisplay = ref('');
@@ -48,7 +50,10 @@ const handleLogAdded = (log) => {
 };
 
 onMounted(() => {
-	logContent.value.innerHTML += (new Date()).toLocaleString() + ': Welcome to eise.app!\n';
+	const hasGPU = !!navigator.gpu;
+	const lite = isLiteMode();
+	const mode = (hasGPU ? 'GPU' : 'CPU') + (lite ? ', Lite' : '');
+	logContent.value.innerHTML += (new Date()).toLocaleString() + `: Welcome to eise.app! (${mode})\n`;
 
 	onLogAdded(handleLogAdded);
 

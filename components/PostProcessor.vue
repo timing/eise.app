@@ -129,9 +129,20 @@
 		</div>
 	</div>
 	<div class="content">
-		<div v-if="!props.file">
+		<div v-if="!props.file" class="empty-state">
 			<h2>Nothing loaded yet</h2>
 			<p>Please upload a video (or bunch of files) for analyzing and stacking frames. Upload one image file for direct post processing.</p>
+			<div class="empty-state-buttons">
+				<input
+					type="file"
+					ref="directFileInput"
+					accept="image/*"
+					style="display: none"
+					@change="handleDirectFileSelect"
+				/>
+				<button class="primary-btn" @click="triggerDirectFileSelect">Select image for post processing</button>
+				<button class="secondary-btn" @click="goBackToStart">Go back and start a new stack</button>
+			</div>
 		</div>
 		<template v-else>
 			<ZoomableCanvas ref="zoomableCanvasRef" id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" :previewRotation="previewRotationAngle">
@@ -216,6 +227,10 @@ import { useWorkerUrl } from '@/composables/useWorkerUrl';
 // Lite mode: deconvolution disabled (too slow on CPU)
 const liteMode = inject('liteMode', ref(false));
 
+// For direct image loading when arriving on this page without a file
+const selectedFile = inject('selectedFile', ref(null));
+const directFileInput = ref(null);
+
 const { track } = useTracking();
 const { openFeedback, openFeedbackAfterDownload } = useFeedback();
 const { inputFilename, getOutputFilename } = useProcessingState();
@@ -230,6 +245,27 @@ const exportProgress = ref('');
 const showExportPopup = ref(false);
 const exportFilename = ref('');
 const sentryAvailable = ref(false);
+
+// Direct file loading for when user arrives on this page without a file
+function triggerDirectFileSelect() {
+	directFileInput.value?.click();
+}
+
+async function handleDirectFileSelect(event) {
+	const file = event.target.files?.[0];
+	if (!file) return;
+
+	// Set the filename for output naming
+	const { setInputFilename } = useProcessingState();
+	setInputFilename(file.name);
+
+	// Load the image as a blob and set it as selectedFile
+	selectedFile.value = file;
+}
+
+function goBackToStart() {
+	navigateTo('/');
+}
 
 function openExportPopup() {
 	// Prefill filename with base name (without extension)
@@ -2045,6 +2081,48 @@ button.download:hover {
 }
 .close-btn:hover {
 	background-color: #ddd;
+}
+
+.empty-state {
+	text-align: center;
+	padding: 40px 20px;
+}
+
+.empty-state-buttons {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	margin-top: 24px;
+	align-items: center;
+}
+
+.empty-state-buttons .primary-btn {
+	background-color: #8CCF7E;
+	color: #111;
+	padding: 12px 24px;
+	border: none;
+	border-radius: 5px;
+	cursor: pointer;
+	font-size: 14px;
+	font-weight: bold;
+}
+
+.empty-state-buttons .primary-btn:hover {
+	background-color: #7ABF6E;
+}
+
+.empty-state-buttons .secondary-btn {
+	background-color: transparent;
+	color: #c6fffd;
+	padding: 10px 20px;
+	border: 1px solid #c6fffd;
+	border-radius: 5px;
+	cursor: pointer;
+	font-size: 14px;
+}
+
+.empty-state-buttons .secondary-btn:hover {
+	background-color: rgba(198, 255, 253, 0.1);
 }
 </style>
 
