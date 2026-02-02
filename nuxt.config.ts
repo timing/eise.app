@@ -35,7 +35,10 @@ export default defineNuxtConfig({
 				'Cross-Origin-Embedder-Policy': 'require-corp',
 				'Cross-Origin-Opener-Policy': 'same-origin'
 			}
-		} 
+		},
+		build: {
+			sourcemap: true // Enable source maps for better Sentry stack traces
+		}
 	}/*,
 	serverMiddleware: [
 		'~/server/middleware/headers.ts',
