@@ -10,6 +10,11 @@ export function useTracking() {
 
         const img = new Image();
         img.src = `${PIXEL_URL}?e=${encodeURIComponent(event)}`;
+
+        // Also send to Simple Analytics (if loaded)
+        if (typeof window.sa_event === 'function') {
+            window.sa_event(event);
+        }
     }
 
     function trackHumanInteraction() {

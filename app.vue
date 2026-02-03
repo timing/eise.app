@@ -338,7 +338,7 @@ async function handleStackedImageReady(data) {
 	stackedFloat32Data.value = data.float32Data || null;
 	stackedImageDimensions.value = (data.width && data.height) ? { width: data.width, height: data.height } : null;
 	isProcessing.value = false;
-	track('post_process');
+	track('stack_finished');
 	navigateTo('/post-processor/');
 }
 
