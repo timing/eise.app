@@ -72,7 +72,7 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 - AVI: Direct parsing with FourCC detection
 - Images: PNG, JPG, WebP, AVIF (direct), others (FFmpeg converted)
 
-**AVI Export**: `utils/aviEncoder.js` can export cropped/debayered frames as uncompressed AVI (DIB format). Used for debugging moiré issues - allows re-importing processed frames to compare stacking results.
+**AVI Export**: `utils/aviEncoder.js` can export cropped/debayered frames as uncompressed AVI (DIB format). Useful for exporting processed frames for use in other stacking software.
 
 **Event Bus Pattern**: Cross-component communication via `composables/eventBus.js`. Key events: `set-caption`, `update-loading`, `stop-loading`, `upload-error`, `postProcessing`, `stacking-started`, `stacked-image-ready`.
 
@@ -83,33 +83,7 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 - Max file size: 2GB (larger files can be trimmed)
 - Max frames: 5000 configurable
 
-## Known Issues & Investigation Notes
-
-**Moiré Pattern in SER Stacking (UNSOLVED)**:
-SER files produce moiré artifacts when stacked, but exporting debayered frames to AVI and re-importing produces less moiré (though still some). Both paths stack the same 1500 frames with the same reference frame selected.
-
-**Ruled out as causes:**
-- Per-frame crop centering - AVI frames ARE the per-frame centered frames
-- subPixelOffset / globalOffset correction - disabling didn't help
-- Padding (BORDER_REPLICATE) - AVI frames have same padding baked in
-- cv.remap() interpolation - moiré happens even with simple averaging (no de-warping)
-- VNG vs bilinear demosaic - both produce moiré
-- Color channel handling (BGR/RGB conversions) - fixed but moiré remains
-- AP grid parameters - PSS-like parameters (20px, 8px search) didn't fix it
-- Original frame dimensions affecting cropped frames - verified dimensions are correct
-
-**Key observations:**
-- Frames are pixel-identical when compared in GIMP (verified by color picking)
-- Same reference frame selected in both paths
-- Same number of frames (1500) stacked
-- AVI has LESS moiré but still SOME - suggesting base moiré from demosaic, extra from SER path
-- When AVI is re-imported at <300px, no auto-crop runs - frames go straight to stacking
-
-**Remaining suspects:**
-- Something in fresh demosaic vs pre-demosaiced AVI data
-- Subtle floating-point differences in accumulation
-- Buffer handling differences (Uint8ClampedArray vs Uint8Array)
-- The RGBA→BGR→RGBA round-trip in AVI somehow reduces artifacts
+## Technical Reference
 
 **OpenCV Bayer Naming Convention (INVERTED from industry standard)**:
 OpenCV uses the 2x2 sub-matrix starting at row 2, column 2 of the CFA, while the rest of the industry (camera manufacturers, MATLAB, etc.) uses the top-left 2x2 sub-matrix. See [OpenCV issue #19629](https://github.com/opencv/opencv/issues/19629).
