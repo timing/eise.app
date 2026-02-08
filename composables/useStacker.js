@@ -309,15 +309,30 @@ export function useStacker() {
                 const centers = [];
 
                 if (isSerFile) {
-                    const { file, frameSize, header } = frameReReader;
-                    for (const frame of batchFrames) {
-                        const offset = 178 + (frame.index * frameSize);
-                        const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
-                        const data = header.pixelDepth > 8
-                            ? new Uint16Array(frameBuffer)
-                            : new Uint8Array(frameBuffer);
-                        frames.push({ data, index: frame.index });
-                        centers.push({ x: frame.centerX, y: frame.centerY });
+                    // Handle multi-file SER (uses getFrame method)
+                    if (frameReReader.fileType === 'ser-multi') {
+                        for (const frame of batchFrames) {
+                            const result = await frameReReader.getFrame(frame.index);
+                            if (result) {
+                                const data = frameReReader.header.pixelDepth > 8
+                                    ? new Uint16Array(result.frameBuffer)
+                                    : new Uint8Array(result.frameBuffer);
+                                frames.push({ data, index: frame.index });
+                                centers.push({ x: result.centerX, y: result.centerY });
+                            }
+                        }
+                    } else {
+                        // Single-file SER
+                        const { file, frameSize, header } = frameReReader;
+                        for (const frame of batchFrames) {
+                            const offset = 178 + (frame.index * frameSize);
+                            const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+                            const data = header.pixelDepth > 8
+                                ? new Uint16Array(frameBuffer)
+                                : new Uint8Array(frameBuffer);
+                            frames.push({ data, index: frame.index });
+                            centers.push({ x: frame.centerX, y: frame.centerY });
+                        }
                     }
                 } else if (isImageFile) {
                     for (const frame of batchFrames) {
