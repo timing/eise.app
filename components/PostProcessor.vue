@@ -39,13 +39,20 @@
 			</div>
 
 			<fieldset class="sharpening-frame">
-				<legend>Sharpening</legend>
+				<legend>Sharpening <span class="info-icon" @click="showSharpeningInfo = !showSharpeningInfo">ⓘ</span></legend>
+				<div v-if="showSharpeningInfo" class="info-text">
+					Luminance-only sharpening reduces color noise but may slightly desaturate the image. Increase saturation/vibrance to compensate.
+				</div>
 				<div class="sharpening-tabs">
 					<button :class="{ active: sharpeningMethod === 'wavelets' }" @click="setSharpeningMethod('wavelets')">Wavelets</button>
 					<button :class="{ active: sharpeningMethod === 'usm' }" @click="setSharpeningMethod('usm')">Unsharp Mask</button>
-					<button v-if="!liteMode" :class="{ active: sharpeningMethod === 'deconv' }" @click="setSharpeningMethod('deconv')">Deconvolution</button>
 					<button :class="{ active: sharpeningMethod === 'none' }" @click="setSharpeningMethod('none')" title="None">⊘</button>
 				</div>
+
+				<label v-if="sharpeningMethod === 'wavelets' || sharpeningMethod === 'usm'" class="checkbox-label luminance-only-option">
+					<input type="checkbox" v-model="sharpenLuminanceOnly" @change="applyProcessing" />
+					Luminance only (reduces color noise)
+				</label>
 
 				<div class="sharpening-content" v-if="sharpeningMethod === 'usm'">
 					<div>
@@ -83,18 +90,6 @@
 					</div>
 				</div>
 
-				<div class="sharpening-content" v-if="sharpeningMethod === 'deconv'">
-					<div>
-						<label>PSF Radius:</label>
-						<input type="range" min="0" max="10" step="0.1" v-model="deconvRadius" @input="applyProcessing"/>
-						<span>{{ deconvRadius }}</span>
-					</div>
-					<div>
-						<label>Iterations:</label>
-						<input type="range" min="0" max="200" step="1" v-model="deconvIterations" @input="applyProcessing"/>
-						<span>{{ deconvIterations }}</span>
-					</div>
-				</div>
 			</fieldset>
 
 			<h4>Color Adjustments</h4>
@@ -206,7 +201,7 @@
 					⬇ Processed PNG (16-bit)
 				</button>
 				<button class="export-option" @click="downloadUnprocessedPNG">
-					⬇ Unprocessed PNG
+					⬇ Unprocessed PNG (16-bit)
 				</button>
 				<button v-if="props.croppedSerData" class="export-option secondary" @click="downloadCroppedSer">
 					⬇ Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})
@@ -347,27 +342,23 @@ const downloadCanvasAsPNG = () => {
 	openFeedbackAfterDownload();
 };
 
-const downloadUnprocessedPNG = () => {
-	if (!initCanvasImageData) return;
+const downloadUnprocessedPNG = async () => {
+	if (!image16) return;
 
 	track('download_unprocessed');
-	// Create a temporary canvas to convert ImageData to PNG
-	const tempCanvas = document.createElement('canvas');
-	tempCanvas.width = initCanvasImageData.width;
-	tempCanvas.height = initCanvasImageData.height;
-	const tempCtx = tempCanvas.getContext('2d');
-	tempCtx.putImageData(initCanvasImageData, 0, 0);
-
-	const dataURL = tempCanvas.toDataURL('image/png');
-	const link = document.createElement('a');
-	const filename = exportFilename.value || inputFilename.value || 'eise_app';
-	link.download = `${filename}_unprocessed.png`;
-	link.href = dataURL;
-	document.body.appendChild(link); // Required for Firefox
-	link.click();
-	document.body.removeChild(link);
-	showExportPopup.value = false;
-	openFeedbackAfterDownload();
+	try {
+		const filename = exportFilename.value || inputFilename.value || 'eise_app';
+		await download16BitPNG(
+			image16.data,
+			image16.width,
+			image16.height,
+			`${filename}_unprocessed.png`
+		);
+		showExportPopup.value = false;
+		openFeedbackAfterDownload();
+	} catch (e) {
+		console.error('16-bit unprocessed PNG export error:', e);
+	}
 };
 
 const downloadComparisonVideo = async () => {
@@ -520,7 +511,8 @@ const postNoiseReduction = ref(0);
 const blueDown = ref(0);
 const isProcessing = ref(false);
 const isLoadingImage = ref(false);
-const sharpeningMethod = ref('wavelets'); // 'usm', 'wavelets', 'deconv', or 'none'
+const sharpeningMethod = ref('wavelets'); // 'usm', 'wavelets', or 'none'
+const sharpenLuminanceOnly = ref(false); // Sharpen only luminance channel to reduce color noise
 const rotation = ref(0); // degrees (slider value)
 const previewRotationAngle = ref(0); // CSS preview rotation while dragging
 const hasAppliedRotation = ref(false);
@@ -529,6 +521,7 @@ let appliedRotation = 0; // Track what rotation has been applied to pixels
 const isAutoAligning = ref(false);
 const rgbAlignmentIsAuto = ref(false); // Track if alignment was set via Auto (to re-run after crop/rotation)
 const showManualRgbControls = ref(false); // Toggle visibility of manual RGB adjustment buttons
+const showSharpeningInfo = ref(false); // Toggle visibility of sharpening info
 
 // Check if any RGB alignment offset has been applied
 const hasAlignmentOffset = computed(() => {
@@ -888,7 +881,7 @@ const applyProcessingInternal = async() => {
 
 		// STEP 1: Sharpening (based on selected method)
 		if (sharpeningMethod.value === 'usm' && usmAmount.value > 0) {
-			console.log(`USM 16-bit (radius=${usmRadius.value}, amount=${usmAmount.value}%, threshold=${usmThreshold.value})`);
+			console.log(`USM 16-bit (radius=${usmRadius.value}, amount=${usmAmount.value}%, threshold=${usmThreshold.value}, lumOnly=${sharpenLuminanceOnly.value})`);
 			try {
 				workingData = await usmSharpenInWorker16(
 					workingData,
@@ -896,37 +889,24 @@ const applyProcessingInternal = async() => {
 					height,
 					parseFloat(usmRadius.value),
 					parseFloat(usmAmount.value),
-					parseFloat(usmThreshold.value)
+					parseFloat(usmThreshold.value),
+					sharpenLuminanceOnly.value
 				);
 			} catch (e) {
 				console.log('USM rejected (newer task running)');
 				isProcessing.value = false;
 				return;
 			}
-		} else if (sharpeningMethod.value === 'deconv' && deconvRadius.value > 0 && deconvIterations.value > 0) {
-			console.log(`deconvolution 16-bit (PSF=${deconvRadius.value}, iterations=${deconvIterations.value})`);
-			try {
-				workingData = await deconvolveInWorker16(
-					workingData,
-					width,
-					height,
-					parseFloat(deconvRadius.value),
-					parseInt(deconvIterations.value)
-				);
-			} catch (e) {
-				console.log('Deconvolution rejected (newer task running)');
-				isProcessing.value = false;
-				return;
-			}
 		} else if (sharpeningMethod.value === 'wavelets' && waveletsAmount.value > 0) {
-			console.log('wavelets 16-bit');
+			console.log(`wavelets 16-bit (lumOnly=${sharpenLuminanceOnly.value})`);
 			try {
 				workingData = await waveletSharpenInWorker16(
 					workingData,
 					width,
 					height,
 					parseFloat(waveletsAmount.value),
-					parseFloat(waveletsRadius.value)
+					parseFloat(waveletsRadius.value),
+					sharpenLuminanceOnly.value
 				);
 			} catch (e) {
 				console.log('Recent sharpening rejected because newer task is doing work');
@@ -997,35 +977,28 @@ const applyProcessingInternal = async() => {
 
 		// STEP 1: Sharpening (based on selected method)
 		if (sharpeningMethod.value === 'usm' && usmAmount.value > 0) {
-			console.log(`USM (radius=${usmRadius.value}, amount=${usmAmount.value}%, threshold=${usmThreshold.value})`);
+			console.log(`USM (radius=${usmRadius.value}, amount=${usmAmount.value}%, threshold=${usmThreshold.value}, lumOnly=${sharpenLuminanceOnly.value})`);
 			try {
 				workingImage = await usmSharpenInWorker(
 					workingImage,
 					parseFloat(usmRadius.value),
 					parseFloat(usmAmount.value),
-					parseFloat(usmThreshold.value)
+					parseFloat(usmThreshold.value),
+					sharpenLuminanceOnly.value
 				);
 			} catch (e) {
 				console.log('USM rejected (newer task running)');
 				isProcessing.value = false;
 				return;
 			}
-		} else if (sharpeningMethod.value === 'deconv' && deconvRadius.value > 0 && deconvIterations.value > 0) {
-			console.log(`deconvolution (PSF=${deconvRadius.value}, iterations=${deconvIterations.value})`);
-			try {
-				workingImage = await deconvolveInWorker(workingImage, parseFloat(deconvRadius.value), parseInt(deconvIterations.value));
-			} catch (e) {
-				console.log('Deconvolution rejected (newer task running)');
-				isProcessing.value = false;
-				return;
-			}
 		} else if (sharpeningMethod.value === 'wavelets' && waveletsAmount.value > 0) {
-			console.log('wavelets');
+			console.log(`wavelets (lumOnly=${sharpenLuminanceOnly.value})`);
 			try {
 				workingImage = await waveletSharpenInWorker(
 					workingImage,
 					parseFloat(waveletsAmount.value),
-					parseFloat(waveletsRadius.value)
+					parseFloat(waveletsRadius.value),
+					sharpenLuminanceOnly.value
 				);
 			} catch (e) {
 				console.log('Recent sharpening rejected because newer task is doing work');
@@ -1132,7 +1105,7 @@ function applyConditionalGain(imageData, gain, threshold, reducedGainFactor) {
 
 let currentTaskId = 0;
 let lastReturnedTaskId = 0;
-function waveletSharpenInWorker(imageData, amount, radius){
+function waveletSharpenInWorker(imageData, amount, radius, luminanceOnly = false){
 	const width = imageData.width
 	const height = imageData.height;
 	currentTaskId++;
@@ -1159,7 +1132,7 @@ function waveletSharpenInWorker(imageData, amount, radius){
 		// Create a copy for transfer (original imageData needs to stay intact)
 		const dataCopy = new Uint8ClampedArray(imageData.data);
 		waveletWorkers[workerId].postMessage(
-			{ imageData: dataCopy, width, height, amount, radius, taskId: currentTaskId },
+			{ imageData: dataCopy, width, height, amount, radius, taskId: currentTaskId, luminanceOnly },
 			[dataCopy.buffer] // Transfer the buffer for zero-copy
 		);
 	});
@@ -1167,7 +1140,7 @@ function waveletSharpenInWorker(imageData, amount, radius){
 
 let usmTaskId = 0;
 let lastUsmTaskId = 0;
-function usmSharpenInWorker(imageData, radius, amount, threshold) {
+function usmSharpenInWorker(imageData, radius, amount, threshold, luminanceOnly = false) {
 	const width = imageData.width;
 	const height = imageData.height;
 	usmTaskId++;
@@ -1191,7 +1164,7 @@ function usmSharpenInWorker(imageData, radius, amount, threshold) {
 		// Create a copy for transfer
 		const dataCopy = new Uint8ClampedArray(imageData.data);
 		usmWorker.postMessage(
-			{ imageData: dataCopy, width, height, radius, amount, threshold, taskId: currentTask },
+			{ imageData: dataCopy, width, height, radius, amount, threshold, taskId: currentTask, luminanceOnly },
 			[dataCopy.buffer]
 		);
 	});
@@ -1200,7 +1173,7 @@ function usmSharpenInWorker(imageData, radius, amount, threshold) {
 // 16-bit wavelet sharpening worker wrapper
 let currentTaskId16 = 0;
 let lastReturnedTaskId16 = 0;
-function waveletSharpenInWorker16(data, width, height, amount, radius) {
+function waveletSharpenInWorker16(data, width, height, amount, radius, luminanceOnly = false) {
 	currentTaskId16++;
 	const workerId = currentTaskId16 % waveletWorkers.length;
 	const currentTask = currentTaskId16;
@@ -1226,7 +1199,7 @@ function waveletSharpenInWorker16(data, width, height, amount, radius) {
 		// Send copy to worker (no transfer to avoid data corruption issues)
 		const dataCopy = new Float32Array(data);
 		waveletWorkers[workerId].postMessage(
-			{ imageData: dataCopy, width, height, amount, radius, taskId: currentTask, is16bit: true }
+			{ imageData: dataCopy, width, height, amount, radius, taskId: currentTask, is16bit: true, luminanceOnly }
 		);
 	});
 }
@@ -1234,7 +1207,7 @@ function waveletSharpenInWorker16(data, width, height, amount, radius) {
 // 16-bit USM sharpening worker wrapper
 let usmTaskId16 = 0;
 let lastUsmTaskId16 = 0;
-function usmSharpenInWorker16(data, width, height, radius, amount, threshold) {
+function usmSharpenInWorker16(data, width, height, radius, amount, threshold, luminanceOnly = false) {
 	usmTaskId16++;
 	const currentTask = usmTaskId16;
 
@@ -1257,12 +1230,18 @@ function usmSharpenInWorker16(data, width, height, radius, amount, threshold) {
 		// Send copy to worker (no transfer to avoid data corruption issues)
 		const dataCopy = new Float32Array(data);
 		usmWorker.postMessage(
-			{ imageData: dataCopy, width, height, radius, amount, threshold, taskId: currentTask, is16bit: true }
+			{ imageData: dataCopy, width, height, radius, amount, threshold, taskId: currentTask, is16bit: true, luminanceOnly }
 		);
 	});
 }
 
 let fixedAberration = reactive({});
+
+// Helper to clear fixedAberration without reassigning (preserves Vue reactivity)
+function clearFixedAberration() {
+	fixedAberration.red = undefined;
+	fixedAberration.blue = undefined;
+}
 
 // ==================== CHROMATIC ABERRATION CORRECTION ====================
 // These functions work on image data directly (not canvas) for proper pipeline integration
@@ -1272,6 +1251,8 @@ function applyChromaticAberrationCorrection16(data, width, height, redOffset, bl
 	const hasRedOffset = redOffset && (redOffset.x || redOffset.y);
 	const hasBlueOffset = blueOffset && (blueOffset.x || blueOffset.y);
 
+	console.log('CA correction 16-bit:', { hasRedOffset, hasBlueOffset, redOffset, blueOffset, width, height });
+
 	if (!hasRedOffset && !hasBlueOffset) return data;
 
 	const result = new Float32Array(data.length);
@@ -1280,12 +1261,18 @@ function applyChromaticAberrationCorrection16(data, width, height, redOffset, bl
 
 	// Apply red channel shift
 	if (hasRedOffset) {
-		shiftChannel16(data, result, width, height, 0, -(redOffset.x || 0), -(redOffset.y || 0));
+		const shiftX = -(redOffset.x || 0);
+		const shiftY = -(redOffset.y || 0);
+		console.log('Shifting red by:', shiftX, shiftY);
+		shiftChannel16(data, result, width, height, 0, shiftX, shiftY);
 	}
 
 	// Apply blue channel shift
 	if (hasBlueOffset) {
-		shiftChannel16(data, result, width, height, 2, -(blueOffset.x || 0), -(blueOffset.y || 0));
+		const shiftX = -(blueOffset.x || 0);
+		const shiftY = -(blueOffset.y || 0);
+		console.log('Shifting blue by:', shiftX, shiftY);
+		shiftChannel16(data, result, width, height, 2, shiftX, shiftY);
 	}
 
 	return result;
@@ -1688,7 +1675,7 @@ function applyCrop() {
 
 	// Remember if we need to re-run auto alignment
 	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
-	fixedAberration = reactive({});
+	clearFixedAberration();
 
 	// Reinitialize WebGL/WebGL2 for new dimensions
 	useWebGL2 = initWebGL2(sel.width, sel.height);
@@ -1748,7 +1735,7 @@ function undoCrop() {
 
 	// Remember if we need to re-run auto alignment
 	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
-	fixedAberration = reactive({});
+	clearFixedAberration();
 
 	preCropImageData = null;
 	preCropImage16 = null;
@@ -1815,7 +1802,7 @@ function applyRotation() {
 
 	// Remember if we need to re-run auto alignment
 	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
-	fixedAberration = reactive({});
+	clearFixedAberration();
 
 	// Reinitialize WebGL/WebGL2 for new dimensions
 	useWebGL2 = initWebGL2(rotatedData.width, rotatedData.height);
@@ -1866,7 +1853,7 @@ function resetRotation() {
 
 	// Remember if we need to re-run auto alignment
 	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
-	fixedAberration = reactive({});
+	clearFixedAberration();
 
 	// Clear backup and reset values
 	preRotationImage16 = null;
@@ -1893,7 +1880,7 @@ function processChromaticAberration(channel, axis, magnitude){
 
 	// Update the offset state (CA correction is now applied at the start of the pipeline)
 	if( fixedAberration[channel] == undefined ){
-		fixedAberration[channel] = reactive({});
+		fixedAberration[channel] = {};
 	}
 
 	if( fixedAberration[channel][axis] == undefined ){
@@ -1970,18 +1957,16 @@ async function autoAlignRGB() {
 		const redOffset = findChannelOffset(green, red, width, height);
 		const blueOffset = findChannelOffset(green, blue, width, height);
 
-		console.log('Auto-detected offsets:', { red: redOffset, blue: blueOffset });
-
 		// Reset existing alignment
 		fixedAberration.red = undefined;
 		fixedAberration.blue = undefined;
 
 		// Apply detected offsets (negated - correlation finds where channel IS, we need to shift it BACK)
 		if (redOffset.x !== 0 || redOffset.y !== 0) {
-			fixedAberration.red = reactive({ x: -redOffset.x, y: -redOffset.y });
+			fixedAberration.red = { x: -redOffset.x, y: -redOffset.y };
 		}
 		if (blueOffset.x !== 0 || blueOffset.y !== 0) {
-			fixedAberration.blue = reactive({ x: -blueOffset.x, y: -blueOffset.y });
+			fixedAberration.blue = { x: -blueOffset.x, y: -blueOffset.y };
 		}
 
 		// Mark as auto-aligned (so we re-run after crop/rotation)
@@ -2129,6 +2114,28 @@ canvas {
 	height: 16px;
 	cursor: pointer;
 }
+.luminance-only-option {
+	margin: 2px 0 6px 0;
+	font-size: 11px;
+	color: #888;
+}
+.info-icon {
+	cursor: pointer;
+	color: #666;
+	font-size: 0.85em;
+	user-select: none;
+}
+.info-icon:hover {
+	color: #333;
+}
+.info-text {
+	font-size: 0.85em;
+	color: #555;
+	margin-bottom: 8px;
+	padding: 6px 8px;
+	background: #f5f5f5;
+	border-radius: 4px;
+}
 .crop-controls {
 	display: flex;
 	gap: 10px;
@@ -2172,25 +2179,28 @@ canvas {
 	margin-bottom: 8px;
 }
 .sharpening-tabs {
-	display: flex;
-	gap: 0;
+	display: inline-flex;
 	margin-bottom: 10px;
-	border-radius: 4px;
-	overflow: hidden;
-	border: 1px solid #ccc;
 }
 .sharpening-tabs button {
-	flex: 1;
-	padding: 6px 10px;
-	border: none;
+	padding: 6px 12px;
+	border: 1px solid #ccc;
+	border-radius: 0;
+	margin-left: -1px;
 	background-color: #e8e8e8;
 	color: #555;
 	cursor: pointer;
 	font-size: 12px;
+	white-space: nowrap;
 	transition: background-color 0.2s;
 }
-.sharpening-tabs button:not(:last-child) {
-	border-right: 1px solid #ccc;
+.sharpening-tabs button:first-child {
+	margin-left: 0;
+	border-radius: 4px 0 0 4px;
+}
+.sharpening-tabs button:last-child {
+	border-radius: 0 4px 4px 0;
+	padding: 6px 8px;
 }
 .sharpening-tabs button:hover {
 	background-color: #d0d0d0;
