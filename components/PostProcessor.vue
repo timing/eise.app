@@ -556,7 +556,9 @@ function setSharpeningMethod(method) {
 const cropMode = ref(false);
 const cropSelection = ref(null); // { x, y, width, height }
 let cropStart = null;
-let preCropImageData = null; // Store image before crop for undo
+let preCropImageData = null; // Store 8-bit image before crop for undo
+let preCropImage16 = null; // Store 16-bit image before crop for undo
+let preCropRotationState = null; // Store rotation state before crop for undo
 const canUndoCrop = ref(false);
 
 onMounted(() => {
@@ -1630,25 +1632,34 @@ function applyCrop() {
 
 	const sel = cropSelection.value;
 
-	// Save current state for undo
+	// Save current state for undo (both 8-bit and 16-bit)
 	preCropImageData = new ImageData(
 		new Uint8ClampedArray(initCanvasImageData.data),
 		initCanvasImageData.width,
 		initCanvasImageData.height
 	);
+	preCropImage16 = image16.clone();
+	preCropRotationState = {
+		preRotationImage16: preRotationImage16 ? preRotationImage16.clone() : null,
+		hasAppliedRotation: hasAppliedRotation.value,
+		appliedRotation,
+		rotation: rotation.value
+	};
 	canUndoCrop.value = true;
 
-	// Extract cropped region from original image data
-	const croppedData = new Uint8ClampedArray(sel.width * sel.height * 4);
+	// Crop from 16-bit image16 directly to preserve precision
+	const srcWidth = image16.width;
+	const srcData = image16.data;
+	const croppedFloatData = new Float32Array(sel.width * sel.height * 4);
 
 	for (let y = 0; y < sel.height; y++) {
 		for (let x = 0; x < sel.width; x++) {
-			const srcIdx = ((sel.y + y) * initCanvasImageData.width + (sel.x + x)) * 4;
+			const srcIdx = ((sel.y + y) * srcWidth + (sel.x + x)) * 4;
 			const dstIdx = (y * sel.width + x) * 4;
-			croppedData[dstIdx] = initCanvasImageData.data[srcIdx];
-			croppedData[dstIdx + 1] = initCanvasImageData.data[srcIdx + 1];
-			croppedData[dstIdx + 2] = initCanvasImageData.data[srcIdx + 2];
-			croppedData[dstIdx + 3] = initCanvasImageData.data[srcIdx + 3];
+			croppedFloatData[dstIdx] = srcData[srcIdx];
+			croppedFloatData[dstIdx + 1] = srcData[srcIdx + 1];
+			croppedFloatData[dstIdx + 2] = srcData[srcIdx + 2];
+			croppedFloatData[dstIdx + 3] = srcData[srcIdx + 3];
 		}
 	}
 
@@ -1656,15 +1667,21 @@ function applyCrop() {
 	canvas.value.width = sel.width;
 	canvas.value.height = sel.height;
 
-	// Update all image data references
-	initCanvasImageData = new ImageData(croppedData, sel.width, sel.height);
+	// Update 16-bit image container from cropped float data
+	image16 = Image16.fromFloat32Array(croppedFloatData, sel.width, sel.height);
+	sharpenedImage16 = null;
+
+	// Clear rotation backup (no longer valid for cropped dimensions)
+	preRotationImage16 = null;
+	hasAppliedRotation.value = false;
+	appliedRotation = 0;
+	rotation.value = 0;
+
+	// Derive 8-bit initCanvasImageData from 16-bit for compatibility
+	initCanvasImageData = image16.toImageData();
 	gainedImageData = new ImageData(sel.width, sel.height);
 	preNoiseReducedImageData = new ImageData(sel.width, sel.height);
 	sharpenedImageData = new ImageData(sel.width, sel.height);
-
-	// Update 16-bit image container
-	image16 = Image16.fromImageData(initCanvasImageData);
-	sharpenedImage16 = null;
 
 	// Clear caches
 	prevValues = {};
@@ -1705,15 +1722,26 @@ function undoCrop() {
 	canvas.value.width = preCropImageData.width;
 	canvas.value.height = preCropImageData.height;
 
-	// Restore image data
-	initCanvasImageData = preCropImageData;
+	// Restore 16-bit image from backup (or fall back to 8-bit conversion)
+	if (preCropImage16) {
+		image16 = preCropImage16;
+		initCanvasImageData = image16.toImageData();
+	} else {
+		initCanvasImageData = preCropImageData;
+		image16 = Image16.fromImageData(initCanvasImageData);
+	}
 	gainedImageData = new ImageData(preCropImageData.width, preCropImageData.height);
 	preNoiseReducedImageData = new ImageData(preCropImageData.width, preCropImageData.height);
 	sharpenedImageData = new ImageData(preCropImageData.width, preCropImageData.height);
-
-	// Restore 16-bit image container
-	image16 = Image16.fromImageData(initCanvasImageData);
 	sharpenedImage16 = null;
+
+	// Restore rotation state
+	if (preCropRotationState) {
+		preRotationImage16 = preCropRotationState.preRotationImage16;
+		hasAppliedRotation.value = preCropRotationState.hasAppliedRotation;
+		appliedRotation = preCropRotationState.appliedRotation;
+		rotation.value = preCropRotationState.rotation;
+	}
 
 	// Force reprocess by clearing cached values
 	prevValues = {};
@@ -1723,6 +1751,8 @@ function undoCrop() {
 	fixedAberration = reactive({});
 
 	preCropImageData = null;
+	preCropImage16 = null;
+	preCropRotationState = null;
 	canUndoCrop.value = false;
 
 	// Reinitialize WebGL/WebGL2 for restored dimensions
