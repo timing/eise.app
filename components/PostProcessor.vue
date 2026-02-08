@@ -5,31 +5,37 @@
 			<div class="processing-indicator" v-if="isProcessing">
 				<div class="spinner"></div>
 			</div>
-			<h4>Color Adjustments</h4>
-			<div>
-				<label>Gain:</label>
-				<input type="range" min="0.5" max="3" step="0.01" v-model="gain" @input="applyProcessing"/>
-				<span>{{ gain }}</span>
+
+			<!-- Pipeline order: RGB Alignment → Color Balance → Sharpening → Color Adjustments → Crop → Rotation -->
+
+			<div class="color-alignment">
+				<h4>RGB Alignment <a href="#" class="manual-link" @click.prevent="showManualRgbControls = !showManualRgbControls">{{ showManualRgbControls ? 'hide manual' : 'manual' }}</a></h4>
+				<label class="checkbox-label">
+					<input type="checkbox" v-model="rgbAlignmentIsAuto" @change="onAutoAlignCheckboxChange" :disabled="isAutoAligning" />
+					{{ isAutoAligning ? 'Detecting...' : 'Auto' }}
+				</label>
+
+				<div v-if="showManualRgbControls" class="manual-rgb-controls">
+					<h5 style="color:blue;">Blue</h5>
+					<button @click="processChromaticAberration('blue', 'y', -0.5)">↑ {{ fixedAberration.blue?.y < 0 ? Math.abs(fixedAberration.blue.y) : '' }}</button>
+					<button @click="processChromaticAberration('blue', 'y', 0.5)">↓ {{ fixedAberration.blue?.y > 0 ? fixedAberration.blue.y : '' }}</button>
+					<button @click="processChromaticAberration('blue', 'x', -0.5)">← {{ fixedAberration.blue?.x < 0 ? Math.abs(fixedAberration.blue.x) : '' }}</button>
+					<button @click="processChromaticAberration('blue', 'x', 0.5)">→ {{ fixedAberration.blue?.x > 0 ? fixedAberration.blue.x : '' }}</button>
+
+					<h5 style="color:red;">Red</h5>
+					<button @click="processChromaticAberration('red', 'y', -0.5)">↑ {{ fixedAberration.red?.y < 0 ? Math.abs(fixedAberration.red.y) : '' }}</button>
+					<button @click="processChromaticAberration('red', 'y', 0.5)">↓ {{ fixedAberration.red?.y > 0 ? fixedAberration.red.y : '' }}</button>
+					<button @click="processChromaticAberration('red', 'x', -0.5)">← {{ fixedAberration.red?.x < 0 ? Math.abs(fixedAberration.red.x) : '' }}</button>
+					<button @click="processChromaticAberration('red', 'x', 0.5)">→ {{ fixedAberration.red?.x > 0 ? fixedAberration.red.x : '' }}</button>
+				</div>
 			</div>
-			<div>
-				<label>Contrast:</label>
-				<input type="range" min="0.5" max="2" step="0.01" v-model="contrast" @input="applyProcessing"/>
-				<span>{{ contrast }}</span>
-			</div>
-			<div>
-				<label>Gamma:</label>
-				<input type="range" min="0.3" max="3" step="0.01" v-model="gamma" @input="applyProcessing"/>
-				<span>{{ gamma }}</span>
-			</div>
-			<div>
-				<label>Saturation:</label>
-				<input type="range" min="0" max="2" step="0.01" v-model="saturation" @input="applyProcessing"/>
-				<span>{{ saturation }}</span>
-			</div>
-			<div>
-				<label>Vibrance:</label>
-				<input type="range" min="-1" max="2" step="0.01" v-model="vibrance" @input="applyProcessing"/>
-				<span>{{ vibrance }}</span>
+
+			<div class="color-balance-section">
+				<h4>Color Balance</h4>
+				<label class="checkbox-label">
+					<input type="checkbox" v-model="autoColorBalance" @change="applyProcessing" />
+					Auto (gray world)
+				</label>
 			</div>
 
 			<fieldset class="sharpening-frame">
@@ -91,21 +97,31 @@
 				</div>
 			</fieldset>
 
-			<div class="color-alignment">
-				<h4>RGB Alignment <button class="auto-align-btn" @click="autoAlignRGB" :disabled="isAutoAligning">{{ isAutoAligning ? 'Detecting...' : 'Auto' }}</button></h4>
-
-				<h5 style="color:blue;">Blue</h5>
-				<button @click="processChromaticAberration('blue', 'y', -0.5)">↑ {{ fixedAberration.blue?.y < 0 ? Math.abs(fixedAberration.blue.y) : '' }}</button>
-				<button @click="processChromaticAberration('blue', 'y', 0.5)">↓ {{ fixedAberration.blue?.y > 0 ? fixedAberration.blue.y : '' }}</button>
-				<button @click="processChromaticAberration('blue', 'x', -0.5)">← {{ fixedAberration.blue?.x < 0 ? Math.abs(fixedAberration.blue.x) : '' }}</button>
-				<button @click="processChromaticAberration('blue', 'x', 0.5)">→ {{ fixedAberration.blue?.x > 0 ? fixedAberration.blue.x : '' }}</button>
-
-				<h5 style="color:red;">Red</h5>
-				<button @click="processChromaticAberration('red', 'y', -0.5)">↑ {{ fixedAberration.red?.y < 0 ? Math.abs(fixedAberration.red.y) : '' }}</button>
-				<button @click="processChromaticAberration('red', 'y', 0.5)">↓ {{ fixedAberration.red?.y > 0 ? fixedAberration.red.y : '' }}</button>
-				<button @click="processChromaticAberration('red', 'x', -0.5)">← {{ fixedAberration.red?.x < 0 ? Math.abs(fixedAberration.red.x) : '' }}</button>
-				<button @click="processChromaticAberration('red', 'x', 0.5)">→ {{ fixedAberration.red?.x > 0 ? fixedAberration.red.x : '' }}</button>
-
+			<h4>Color Adjustments</h4>
+			<div>
+				<label>Gain:</label>
+				<input type="range" min="0.5" max="3" step="0.01" v-model="gain" @input="applyProcessing"/>
+				<span>{{ gain }}</span>
+			</div>
+			<div>
+				<label>Contrast:</label>
+				<input type="range" min="0.5" max="2" step="0.01" v-model="contrast" @input="applyProcessing"/>
+				<span>{{ contrast }}</span>
+			</div>
+			<div>
+				<label>Gamma:</label>
+				<input type="range" min="0.3" max="3" step="0.01" v-model="gamma" @input="applyProcessing"/>
+				<span>{{ gamma }}</span>
+			</div>
+			<div>
+				<label>Saturation:</label>
+				<input type="range" min="0" max="2" step="0.01" v-model="saturation" @input="applyProcessing"/>
+				<span>{{ saturation }}</span>
+			</div>
+			<div>
+				<label>Vibrance:</label>
+				<input type="range" min="-1" max="2" step="0.01" v-model="vibrance" @input="applyProcessing"/>
+				<span>{{ vibrance }}</span>
 			</div>
 
 			<h4>Crop</h4>
@@ -489,6 +505,7 @@ const contrast = ref(1);
 const gamma = ref(1);
 const saturation = ref(1);
 const vibrance = ref(0);
+const autoColorBalance = ref(false);
 const preNoiseReduction = ref(0);
 const waveletsRadius = ref(0);
 const waveletsAmount = ref(0);
@@ -510,6 +527,8 @@ const hasAppliedRotation = ref(false);
 let preRotationImage16 = null; // Backup of original 16-bit image before rotation
 let appliedRotation = 0; // Track what rotation has been applied to pixels
 const isAutoAligning = ref(false);
+const rgbAlignmentIsAuto = ref(false); // Track if alignment was set via Auto (to re-run after crop/rotation)
+const showManualRgbControls = ref(false); // Toggle visibility of manual RGB adjustment buttons
 
 // Check if any RGB alignment offset has been applied
 const hasAlignmentOffset = computed(() => {
@@ -849,6 +868,22 @@ const applyProcessingInternal = async() => {
 		// ==================== 16-BIT PROCESSING PATH ====================
 		let workingData = new Float32Array(image16.data); // Copy for processing
 
+		// STEP 0: Chromatic aberration correction (FIRST - before any other processing)
+		// This fixes spatial misalignment of color channels before sharpening amplifies artifacts
+		workingData = applyChromaticAberrationCorrection16(
+			workingData,
+			width,
+			height,
+			fixedAberration.red,
+			fixedAberration.blue
+		);
+
+		// STEP 0.5: Auto color balance (gray world)
+		// Corrects color cast before sharpening amplifies color differences
+		if (autoColorBalance.value) {
+			workingData = applyAutoColorBalance16(workingData, width, height);
+		}
+
 		// STEP 1: Sharpening (based on selected method)
 		if (sharpeningMethod.value === 'usm' && usmAmount.value > 0) {
 			console.log(`USM 16-bit (radius=${usmRadius.value}, amount=${usmAmount.value}%, threshold=${usmThreshold.value})`);
@@ -946,6 +981,18 @@ const applyProcessingInternal = async() => {
 		// ==================== 8-BIT PROCESSING PATH (LEGACY) ====================
 		let workingImage = initCanvasImageData;
 
+		// STEP 0: Chromatic aberration correction (FIRST - before any other processing)
+		workingImage = applyChromaticAberrationCorrection8(
+			workingImage,
+			fixedAberration.red,
+			fixedAberration.blue
+		);
+
+		// STEP 0.5: Auto color balance (gray world)
+		if (autoColorBalance.value) {
+			workingImage = applyAutoColorBalance8(workingImage);
+		}
+
 		// STEP 1: Sharpening (based on selected method)
 		if (sharpeningMethod.value === 'usm' && usmAmount.value > 0) {
 			console.log(`USM (radius=${usmRadius.value}, amount=${usmAmount.value}%, threshold=${usmThreshold.value})`);
@@ -1016,9 +1063,6 @@ const applyProcessingInternal = async() => {
 		sharpenedImage16 = null; // No 16-bit data in 8-bit mode
 		ctx.putImageData(sharpenedImageData, 0, 0);
 	}
-
-	// Reapply chromatic aberration corrections
-	redoChromaticAberration();
 
 	isProcessing.value = false;
 };
@@ -1218,6 +1262,255 @@ function usmSharpenInWorker16(data, width, height, radius, amount, threshold) {
 
 let fixedAberration = reactive({});
 
+// ==================== CHROMATIC ABERRATION CORRECTION ====================
+// These functions work on image data directly (not canvas) for proper pipeline integration
+
+// Apply chromatic aberration correction to 16-bit Float32Array data
+function applyChromaticAberrationCorrection16(data, width, height, redOffset, blueOffset) {
+	const hasRedOffset = redOffset && (redOffset.x || redOffset.y);
+	const hasBlueOffset = blueOffset && (blueOffset.x || blueOffset.y);
+
+	if (!hasRedOffset && !hasBlueOffset) return data;
+
+	const result = new Float32Array(data.length);
+	// Copy all data first (we'll overwrite shifted channels)
+	result.set(data);
+
+	// Apply red channel shift
+	if (hasRedOffset) {
+		shiftChannel16(data, result, width, height, 0, -(redOffset.x || 0), -(redOffset.y || 0));
+	}
+
+	// Apply blue channel shift
+	if (hasBlueOffset) {
+		shiftChannel16(data, result, width, height, 2, -(blueOffset.x || 0), -(blueOffset.y || 0));
+	}
+
+	return result;
+}
+
+// Shift a single channel using bilinear interpolation (16-bit)
+function shiftChannel16(srcData, dstData, width, height, channelIndex, offsetX, offsetY) {
+	const needsInterpolation = (offsetX % 1 !== 0) || (offsetY % 1 !== 0);
+
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			const dstIdx = (y * width + x) * 4 + channelIndex;
+
+			const srcX = x + offsetX;
+			const srcY = y + offsetY;
+
+			if (needsInterpolation) {
+				// Bilinear interpolation for sub-pixel precision
+				const x0 = Math.floor(srcX);
+				const y0 = Math.floor(srcY);
+				const x1 = x0 + 1;
+				const y1 = y0 + 1;
+				const fx = srcX - x0;
+				const fy = srcY - y0;
+
+				if (x0 >= 0 && x1 < width && y0 >= 0 && y1 < height) {
+					const v00 = srcData[(y0 * width + x0) * 4 + channelIndex];
+					const v01 = srcData[(y0 * width + x1) * 4 + channelIndex];
+					const v10 = srcData[(y1 * width + x0) * 4 + channelIndex];
+					const v11 = srcData[(y1 * width + x1) * 4 + channelIndex];
+
+					dstData[dstIdx] = v00 * (1 - fx) * (1 - fy) +
+					                  v01 * fx * (1 - fy) +
+					                  v10 * (1 - fx) * fy +
+					                  v11 * fx * fy;
+				} else {
+					// Edge case: clamp to nearest valid pixel
+					const clampedX = Math.max(0, Math.min(width - 1, Math.round(srcX)));
+					const clampedY = Math.max(0, Math.min(height - 1, Math.round(srcY)));
+					dstData[dstIdx] = srcData[(clampedY * width + clampedX) * 4 + channelIndex];
+				}
+			} else {
+				// Integer offset - direct lookup
+				const srcXi = Math.round(srcX);
+				const srcYi = Math.round(srcY);
+
+				if (srcXi >= 0 && srcXi < width && srcYi >= 0 && srcYi < height) {
+					dstData[dstIdx] = srcData[(srcYi * width + srcXi) * 4 + channelIndex];
+				} else {
+					// Edge case: clamp to nearest valid pixel
+					const clampedX = Math.max(0, Math.min(width - 1, srcXi));
+					const clampedY = Math.max(0, Math.min(height - 1, srcYi));
+					dstData[dstIdx] = srcData[(clampedY * width + clampedX) * 4 + channelIndex];
+				}
+			}
+		}
+	}
+}
+
+// Apply chromatic aberration correction to 8-bit ImageData
+function applyChromaticAberrationCorrection8(imageData, redOffset, blueOffset) {
+	const hasRedOffset = redOffset && (redOffset.x || redOffset.y);
+	const hasBlueOffset = blueOffset && (blueOffset.x || blueOffset.y);
+
+	if (!hasRedOffset && !hasBlueOffset) return imageData;
+
+	const width = imageData.width;
+	const height = imageData.height;
+	const srcData = imageData.data;
+	const dstData = new Uint8ClampedArray(srcData.length);
+	// Copy all data first
+	dstData.set(srcData);
+
+	// Apply red channel shift
+	if (hasRedOffset) {
+		shiftChannel8(srcData, dstData, width, height, 0, -(redOffset.x || 0), -(redOffset.y || 0));
+	}
+
+	// Apply blue channel shift
+	if (hasBlueOffset) {
+		shiftChannel8(srcData, dstData, width, height, 2, -(blueOffset.x || 0), -(blueOffset.y || 0));
+	}
+
+	return new ImageData(dstData, width, height);
+}
+
+// Shift a single channel using bilinear interpolation (8-bit)
+function shiftChannel8(srcData, dstData, width, height, channelIndex, offsetX, offsetY) {
+	const needsInterpolation = (offsetX % 1 !== 0) || (offsetY % 1 !== 0);
+
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			const dstIdx = (y * width + x) * 4 + channelIndex;
+
+			const srcX = x + offsetX;
+			const srcY = y + offsetY;
+
+			if (needsInterpolation) {
+				const x0 = Math.floor(srcX);
+				const y0 = Math.floor(srcY);
+				const x1 = x0 + 1;
+				const y1 = y0 + 1;
+				const fx = srcX - x0;
+				const fy = srcY - y0;
+
+				if (x0 >= 0 && x1 < width && y0 >= 0 && y1 < height) {
+					const v00 = srcData[(y0 * width + x0) * 4 + channelIndex];
+					const v01 = srcData[(y0 * width + x1) * 4 + channelIndex];
+					const v10 = srcData[(y1 * width + x0) * 4 + channelIndex];
+					const v11 = srcData[(y1 * width + x1) * 4 + channelIndex];
+
+					dstData[dstIdx] = Math.round(
+						v00 * (1 - fx) * (1 - fy) +
+						v01 * fx * (1 - fy) +
+						v10 * (1 - fx) * fy +
+						v11 * fx * fy
+					);
+				} else {
+					const clampedX = Math.max(0, Math.min(width - 1, Math.round(srcX)));
+					const clampedY = Math.max(0, Math.min(height - 1, Math.round(srcY)));
+					dstData[dstIdx] = srcData[(clampedY * width + clampedX) * 4 + channelIndex];
+				}
+			} else {
+				const srcXi = Math.round(srcX);
+				const srcYi = Math.round(srcY);
+
+				if (srcXi >= 0 && srcXi < width && srcYi >= 0 && srcYi < height) {
+					dstData[dstIdx] = srcData[(srcYi * width + srcXi) * 4 + channelIndex];
+				} else {
+					const clampedX = Math.max(0, Math.min(width - 1, srcXi));
+					const clampedY = Math.max(0, Math.min(height - 1, srcYi));
+					dstData[dstIdx] = srcData[(clampedY * width + clampedX) * 4 + channelIndex];
+				}
+			}
+		}
+	}
+}
+
+// ==================== AUTO COLOR BALANCE ====================
+// Gray World assumption: adjusts R/G/B so their averages match (using green as reference)
+
+// Apply auto color balance to 16-bit Float32Array data
+function applyAutoColorBalance16(data, width, height) {
+	const pixelCount = width * height;
+
+	// Calculate average for each channel
+	let sumR = 0, sumG = 0, sumB = 0;
+	for (let i = 0; i < pixelCount; i++) {
+		const idx = i * 4;
+		sumR += data[idx];
+		sumG += data[idx + 1];
+		sumB += data[idx + 2];
+	}
+
+	const avgR = sumR / pixelCount;
+	const avgG = sumG / pixelCount;
+	const avgB = sumB / pixelCount;
+
+	// Use green as reference (typically most accurate in camera sensors)
+	// Calculate scale factors to match green's average
+	const scaleR = avgG / avgR;
+	const scaleB = avgG / avgB;
+
+	// Skip if already balanced (within 0.1% tolerance)
+	if (Math.abs(scaleR - 1) < 0.001 && Math.abs(scaleB - 1) < 0.001) {
+		return data;
+	}
+
+	console.log(`Auto color balance: R×${scaleR.toFixed(3)}, B×${scaleB.toFixed(3)}`);
+
+	// Apply scaling
+	const result = new Float32Array(data.length);
+	for (let i = 0; i < pixelCount; i++) {
+		const idx = i * 4;
+		result[idx] = Math.min(1, data[idx] * scaleR);
+		result[idx + 1] = data[idx + 1]; // Green unchanged
+		result[idx + 2] = Math.min(1, data[idx + 2] * scaleB);
+		result[idx + 3] = data[idx + 3]; // Alpha unchanged
+	}
+
+	return result;
+}
+
+// Apply auto color balance to 8-bit ImageData
+function applyAutoColorBalance8(imageData) {
+	const width = imageData.width;
+	const height = imageData.height;
+	const data = imageData.data;
+	const pixelCount = width * height;
+
+	// Calculate average for each channel
+	let sumR = 0, sumG = 0, sumB = 0;
+	for (let i = 0; i < pixelCount; i++) {
+		const idx = i * 4;
+		sumR += data[idx];
+		sumG += data[idx + 1];
+		sumB += data[idx + 2];
+	}
+
+	const avgR = sumR / pixelCount;
+	const avgG = sumG / pixelCount;
+	const avgB = sumB / pixelCount;
+
+	// Use green as reference
+	const scaleR = avgG / avgR;
+	const scaleB = avgG / avgB;
+
+	// Skip if already balanced
+	if (Math.abs(scaleR - 1) < 0.001 && Math.abs(scaleB - 1) < 0.001) {
+		return imageData;
+	}
+
+	console.log(`Auto color balance: R×${scaleR.toFixed(3)}, B×${scaleB.toFixed(3)}`);
+
+	// Apply scaling
+	const result = new Uint8ClampedArray(data.length);
+	for (let i = 0; i < pixelCount; i++) {
+		const idx = i * 4;
+		result[idx] = Math.min(255, Math.round(data[idx] * scaleR));
+		result[idx + 1] = data[idx + 1]; // Green unchanged
+		result[idx + 2] = Math.min(255, Math.round(data[idx + 2] * scaleB));
+		result[idx + 3] = data[idx + 3]; // Alpha unchanged
+	}
+
+	return new ImageData(result, width, height);
+}
+
 // Crop functions
 function startCropMode() {
 	cropMode.value = true;
@@ -1375,6 +1668,9 @@ function applyCrop() {
 
 	// Clear caches
 	prevValues = {};
+
+	// Remember if we need to re-run auto alignment
+	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
 	fixedAberration = reactive({});
 
 	// Reinitialize WebGL/WebGL2 for new dimensions
@@ -1393,8 +1689,13 @@ function applyCrop() {
 	canvasEl.removeEventListener('mouseup', onCropMouseUp);
 	document.removeEventListener('keydown', onCropKeyDown);
 
-	// Reprocess with new dimensions
-	applyProcessing();
+	// Re-run auto alignment on cropped image if it was auto-aligned before
+	if (shouldRerunAutoAlign) {
+		autoAlignRGB();
+	} else {
+		// Reprocess with new dimensions
+		applyProcessing();
+	}
 }
 
 function undoCrop() {
@@ -1414,18 +1715,12 @@ function undoCrop() {
 	image16 = Image16.fromImageData(initCanvasImageData);
 	sharpenedImage16 = null;
 
-	// Clear only the sharpening cache (not settings)
+	// Force reprocess by clearing cached values
+	prevValues = {};
 
-	// Force reprocess by clearing only dimension-related cached values
-	delete prevValues.gain;
-	delete prevValues.contrast;
-	delete prevValues.gamma;
-	delete prevValues.saturation;
-	delete prevValues.waveletsAmount;
-	delete prevValues.waveletsRadius;
-	delete prevValues.usmRadius;
-	delete prevValues.usmAmount;
-	delete prevValues.usmThreshold;
+	// Remember if we need to re-run auto alignment
+	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
+	fixedAberration = reactive({});
 
 	preCropImageData = null;
 	canUndoCrop.value = false;
@@ -1434,8 +1729,13 @@ function undoCrop() {
 	useWebGL2 = initWebGL2(canvas.value.width, canvas.value.height);
 	useWebGL = initWebGL(canvas.value.width, canvas.value.height);
 
-	// Reprocess with current settings
-	applyProcessing();
+	// Re-run auto alignment if it was auto-aligned before
+	if (shouldRerunAutoAlign) {
+		autoAlignRGB();
+	} else {
+		// Reprocess with current settings
+		applyProcessing();
+	}
 }
 
 // Rotation functions
@@ -1482,6 +1782,9 @@ function applyRotation() {
 
 	// Clear caches
 	prevValues = {};
+
+	// Remember if we need to re-run auto alignment
+	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
 	fixedAberration = reactive({});
 
 	// Reinitialize WebGL/WebGL2 for new dimensions
@@ -1491,11 +1794,16 @@ function applyRotation() {
 	hasAppliedRotation.value = true;
 	appliedRotation = rotation.value;
 
-	// Reprocess with current settings
-	applyProcessing();
-
 	// Clear CSS preview after pixels are rotated
 	previewRotationAngle.value = 0;
+
+	// Re-run auto alignment on rotated image if it was auto-aligned before
+	if (shouldRerunAutoAlign) {
+		autoAlignRGB();
+	} else {
+		// Reprocess with current settings
+		applyProcessing();
+	}
 }
 
 function resetRotation() {
@@ -1525,6 +1833,9 @@ function resetRotation() {
 
 	// Clear caches
 	prevValues = {};
+
+	// Remember if we need to re-run auto alignment
+	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
 	fixedAberration = reactive({});
 
 	// Clear backup and reset values
@@ -1537,13 +1848,20 @@ function resetRotation() {
 	useWebGL2 = initWebGL2(canvas.value.width, canvas.value.height);
 	useWebGL = initWebGL(canvas.value.width, canvas.value.height);
 
-	// Reprocess with current settings
-	applyProcessing();
+	// Re-run auto alignment if it was auto-aligned before
+	if (shouldRerunAutoAlign) {
+		autoAlignRGB();
+	} else {
+		// Reprocess with current settings
+		applyProcessing();
+	}
 }
 
 function processChromaticAberration(channel, axis, magnitude){
-	fixChromaticAberration(canvas.value, channel, axis, magnitude);
+	// Manual adjustment - no longer auto-aligned
+	rgbAlignmentIsAuto.value = false;
 
+	// Update the offset state (CA correction is now applied at the start of the pipeline)
 	if( fixedAberration[channel] == undefined ){
 		fixedAberration[channel] = reactive({});
 	}
@@ -1553,25 +1871,35 @@ function processChromaticAberration(channel, axis, magnitude){
 	}
 
 	fixedAberration[channel][axis] += magnitude;
-}
 
-function redoChromaticAberration(){
-	for( const channel in fixedAberration ){
-		for( const axis in fixedAberration[channel] ){
-			fixChromaticAberration(canvas.value, channel, axis, fixedAberration[channel][axis])
-		}
-	}
+	// Trigger full reprocessing with updated CA correction
+	applyProcessing();
 }
 
 function resetRGBAlignment() {
+	rgbAlignmentIsAuto.value = false;
 	fixedAberration.red = undefined;
 	fixedAberration.blue = undefined;
 	applyProcessing();
 }
 
+// Handle Auto checkbox change
+function onAutoAlignCheckboxChange() {
+	if (rgbAlignmentIsAuto.value) {
+		// Checkbox was just checked - run auto alignment
+		autoAlignRGB();
+	} else {
+		// Checkbox was unchecked - revert alignment
+		fixedAberration.red = undefined;
+		fixedAberration.blue = undefined;
+		applyProcessing();
+	}
+}
+
 // Auto-detect RGB alignment using cross-correlation
 async function autoAlignRGB() {
-	if (!sharpenedImageData) return;
+	// Work on original image data to detect true offsets (before any CA correction is applied)
+	if (!image16 && !initCanvasImageData) return;
 
 	isAutoAligning.value = true;
 
@@ -1579,19 +1907,33 @@ async function autoAlignRGB() {
 	await new Promise(resolve => setTimeout(resolve, 10));
 
 	try {
-		const width = sharpenedImageData.width;
-		const height = sharpenedImageData.height;
-		const data = sharpenedImageData.data;
+		let width, height;
+		const red = use16bit.value && image16
+			? new Float32Array(image16.width * image16.height)
+			: new Float32Array(initCanvasImageData.width * initCanvasImageData.height);
+		const green = new Float32Array(red.length);
+		const blue = new Float32Array(red.length);
 
-		// Extract channels
-		const red = new Float32Array(width * height);
-		const green = new Float32Array(width * height);
-		const blue = new Float32Array(width * height);
-
-		for (let i = 0; i < width * height; i++) {
-			red[i] = data[i * 4];
-			green[i] = data[i * 4 + 1];
-			blue[i] = data[i * 4 + 2];
+		if (use16bit.value && image16) {
+			// Use original 16-bit data (0.0-1.0 range, scale to 0-255 for correlation)
+			width = image16.width;
+			height = image16.height;
+			const data = image16.data;
+			for (let i = 0; i < width * height; i++) {
+				red[i] = data[i * 4] * 255;
+				green[i] = data[i * 4 + 1] * 255;
+				blue[i] = data[i * 4 + 2] * 255;
+			}
+		} else {
+			// Use original 8-bit data
+			width = initCanvasImageData.width;
+			height = initCanvasImageData.height;
+			const data = initCanvasImageData.data;
+			for (let i = 0; i < width * height; i++) {
+				red[i] = data[i * 4];
+				green[i] = data[i * 4 + 1];
+				blue[i] = data[i * 4 + 2];
+			}
 		}
 
 		// Find offset using cross-correlation (green is reference)
@@ -1611,6 +1953,9 @@ async function autoAlignRGB() {
 		if (blueOffset.x !== 0 || blueOffset.y !== 0) {
 			fixedAberration.blue = reactive({ x: -blueOffset.x, y: -blueOffset.y });
 		}
+
+		// Mark as auto-aligned (so we re-run after crop/rotation)
+		rgbAlignmentIsAuto.value = true;
 
 		// Reapply processing with new alignment
 		applyProcessing();
@@ -1697,72 +2042,6 @@ function correlationScore(ref, target, width, height, dx, dy) {
 	return count > 0 ? sum / count : 0;
 }
 
-// Sub-pixel chromatic aberration fix using bilinear interpolation
-function fixChromaticAberration(canvas, channel, axis, magnitude) {
-	const ctx = canvas.getContext('2d');
-	const width = canvas.width;
-	const height = canvas.height;
-
-	const imageData = ctx.getImageData(0, 0, width, height);
-	const data = imageData.data;
-	const originalData = new Uint8ClampedArray(data);
-
-	const channelIndexes = { 'red': 0, 'green': 1, 'blue': 2 };
-	const channelIndex = channelIndexes[channel];
-	if (channelIndex === undefined) return;
-
-	// Calculate offset
-	const offsetX = axis === 'x' ? -magnitude : 0;
-	const offsetY = axis === 'y' ? -magnitude : 0;
-
-	// Check if we need sub-pixel interpolation
-	const needsInterpolation = (offsetX % 1 !== 0) || (offsetY % 1 !== 0);
-
-	for (let y = 0; y < height; y++) {
-		for (let x = 0; x < width; x++) {
-			const dstIdx = (y * width + x) * 4 + channelIndex;
-
-			const srcX = x + offsetX;
-			const srcY = y + offsetY;
-
-			if (needsInterpolation) {
-				// Bilinear interpolation for sub-pixel precision
-				const x0 = Math.floor(srcX);
-				const y0 = Math.floor(srcY);
-				const x1 = x0 + 1;
-				const y1 = y0 + 1;
-				const fx = srcX - x0;
-				const fy = srcY - y0;
-
-				// Bounds check
-				if (x0 >= 0 && x1 < width && y0 >= 0 && y1 < height) {
-					const v00 = originalData[(y0 * width + x0) * 4 + channelIndex];
-					const v01 = originalData[(y0 * width + x1) * 4 + channelIndex];
-					const v10 = originalData[(y1 * width + x0) * 4 + channelIndex];
-					const v11 = originalData[(y1 * width + x1) * 4 + channelIndex];
-
-					const val = v00 * (1 - fx) * (1 - fy) +
-					            v01 * fx * (1 - fy) +
-					            v10 * (1 - fx) * fy +
-					            v11 * fx * fy;
-
-					data[dstIdx] = Math.round(val);
-				}
-			} else {
-				// Integer offset - direct lookup
-				const srcXi = Math.round(srcX);
-				const srcYi = Math.round(srcY);
-
-				if (srcXi >= 0 && srcXi < width && srcYi >= 0 && srcYi < height) {
-					data[dstIdx] = originalData[(srcYi * width + srcXi) * 4 + channelIndex];
-				}
-			}
-		}
-	}
-
-	ctx.putImageData(imageData, 0, 0);
-}
-
 
 
 </script>
@@ -1787,18 +2066,38 @@ canvas {
 	min-width: 50px;
 	padding: 4px 8px;
 }
-.auto-align-btn {
-	font-size: 11px;
-	padding: 2px 8px;
-	min-width: auto !important;
-	background-color: #8CCF7E;
-	border: none;
-	border-radius: 3px;
-	cursor: pointer;
+.manual-link {
+	margin-left: 10px;
+	font-size: 12px;
+	font-weight: normal;
+	color: #7ab;
 }
-.auto-align-btn:disabled {
-	background-color: #ccc;
-	cursor: wait;
+.manual-link:hover {
+	color: #9cd;
+}
+.manual-rgb-controls {
+	margin-top: 8px;
+	padding: 8px;
+	background: rgba(255,255,255,0.05);
+	border-radius: 4px;
+}
+.color-balance-section {
+	margin: 15px 0;
+}
+.color-balance-section h4 {
+	margin-bottom: 8px;
+}
+.checkbox-label {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	cursor: pointer;
+	font-size: 14px;
+}
+.checkbox-label input[type="checkbox"] {
+	width: 16px;
+	height: 16px;
+	cursor: pointer;
 }
 .crop-controls {
 	display: flex;
@@ -1833,15 +2132,14 @@ canvas {
 	color: #666;
 }
 .sharpening-frame {
-	border: 2px groove #ccc;
-	border-radius: 4px;
-	padding: 10px;
-	margin: 10px 0;
+	border: none;
+	padding: 0;
+	margin: 0;
 }
 .sharpening-frame legend {
 	font-weight: bold;
-	color: #333;
-	padding: 0 6px;
+	padding: 0;
+	margin-bottom: 8px;
 }
 .sharpening-tabs {
 	display: flex;
