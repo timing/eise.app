@@ -507,7 +507,7 @@ const sharpeningMethod = ref('wavelets'); // 'usm', 'wavelets', 'deconv', or 'no
 const rotation = ref(0); // degrees (slider value)
 const previewRotationAngle = ref(0); // CSS preview rotation while dragging
 const hasAppliedRotation = ref(false);
-let preRotationImageData = null; // Backup of original image before rotation
+let preRotationImage16 = null; // Backup of original 16-bit image before rotation
 let appliedRotation = 0; // Track what rotation has been applied to pixels
 const isAutoAligning = ref(false);
 
@@ -1439,37 +1439,6 @@ function undoCrop() {
 }
 
 // Rotation functions
-function rotateImageData(imageData, angleDegrees) {
-	const angleRad = angleDegrees * Math.PI / 180;
-
-	const width = imageData.width;
-	const height = imageData.height;
-
-	// Create temp canvas with old image
-	const srcCanvas = document.createElement('canvas');
-	srcCanvas.width = width;
-	srcCanvas.height = height;
-	const srcCtx = srcCanvas.getContext('2d');
-	srcCtx.putImageData(imageData, 0, 0);
-
-	// Create rotated canvas (same size - corners will be clipped)
-	const rotatedCanvas = document.createElement('canvas');
-	rotatedCanvas.width = width;
-	rotatedCanvas.height = height;
-	const rotatedCtx = rotatedCanvas.getContext('2d');
-
-	// Fill with black background
-	rotatedCtx.fillStyle = '#000000';
-	rotatedCtx.fillRect(0, 0, width, height);
-
-	// Rotate around center
-	rotatedCtx.translate(width / 2, height / 2);
-	rotatedCtx.rotate(angleRad);
-	rotatedCtx.drawImage(srcCanvas, -width / 2, -height / 2);
-
-	return rotatedCtx.getImageData(0, 0, width, height);
-}
-
 function previewRotation() {
 	// Show CSS rotation preview (difference from applied rotation)
 	previewRotationAngle.value = rotation.value - appliedRotation;
@@ -1489,16 +1458,17 @@ function applyRotation() {
 	}
 
 	// Save backup before first rotation
-	if (!preRotationImageData) {
-		preRotationImageData = new ImageData(
-			new Uint8ClampedArray(initCanvasImageData.data),
-			initCanvasImageData.width,
-			initCanvasImageData.height
-		);
+	if (!preRotationImage16) {
+		preRotationImage16 = image16.clone();
 	}
 
 	// Rotate from the original backup (not current state - avoids accumulated interpolation)
-	const rotatedData = rotateImageData(preRotationImageData, rotation.value);
+	// Use Image16.rotate() to preserve 16-bit precision
+	image16 = preRotationImage16.rotate(rotation.value);
+	sharpenedImage16 = null;
+
+	// Convert rotated Image16 to ImageData for display
+	const rotatedData = image16.toImageData();
 
 	// Update canvas size
 	canvas.value.width = rotatedData.width;
@@ -1509,10 +1479,6 @@ function applyRotation() {
 	gainedImageData = new ImageData(rotatedData.width, rotatedData.height);
 	preNoiseReducedImageData = new ImageData(rotatedData.width, rotatedData.height);
 	sharpenedImageData = new ImageData(rotatedData.width, rotatedData.height);
-
-	// Update 16-bit image container
-	image16 = Image16.fromImageData(initCanvasImageData);
-	sharpenedImage16 = null;
 
 	// Clear caches
 	prevValues = {};
@@ -1536,35 +1502,33 @@ function resetRotation() {
 	// Clear CSS preview
 	previewRotationAngle.value = 0;
 
-	if (!preRotationImageData) {
+	if (!preRotationImage16) {
 		rotation.value = 0;
 		appliedRotation = 0;
 		return;
 	}
 
-	// Restore from backup
-	canvas.value.width = preRotationImageData.width;
-	canvas.value.height = preRotationImageData.height;
-
-	initCanvasImageData = new ImageData(
-		new Uint8ClampedArray(preRotationImageData.data),
-		preRotationImageData.width,
-		preRotationImageData.height
-	);
-	gainedImageData = new ImageData(preRotationImageData.width, preRotationImageData.height);
-	preNoiseReducedImageData = new ImageData(preRotationImageData.width, preRotationImageData.height);
-	sharpenedImageData = new ImageData(preRotationImageData.width, preRotationImageData.height);
-
-	// Restore 16-bit image container
-	image16 = Image16.fromImageData(initCanvasImageData);
+	// Restore from 16-bit backup
+	image16 = preRotationImage16.clone();
 	sharpenedImage16 = null;
+
+	// Convert to ImageData for display
+	initCanvasImageData = image16.toImageData();
+
+	// Restore canvas size
+	canvas.value.width = initCanvasImageData.width;
+	canvas.value.height = initCanvasImageData.height;
+
+	gainedImageData = new ImageData(initCanvasImageData.width, initCanvasImageData.height);
+	preNoiseReducedImageData = new ImageData(initCanvasImageData.width, initCanvasImageData.height);
+	sharpenedImageData = new ImageData(initCanvasImageData.width, initCanvasImageData.height);
 
 	// Clear caches
 	prevValues = {};
 	fixedAberration = reactive({});
 
 	// Clear backup and reset values
-	preRotationImageData = null;
+	preRotationImage16 = null;
 	rotation.value = 0;
 	appliedRotation = 0;
 	hasAppliedRotation.value = false;

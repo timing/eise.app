@@ -147,4 +147,79 @@ export class Image16 {
 		this.data[idx + 2] = b;
 		this.data[idx + 3] = a;
 	}
+
+	/**
+	 * Rotate the image by the given angle (in degrees) around the center
+	 * Uses bilinear interpolation to preserve quality
+	 * @param {number} angleDegrees - Rotation angle in degrees (positive = counterclockwise)
+	 * @returns {Image16} New rotated Image16 instance
+	 */
+	rotate(angleDegrees) {
+		if (angleDegrees === 0) {
+			return this.clone();
+		}
+
+		const angleRad = -angleDegrees * Math.PI / 180; // Negative for correct direction
+		const cos = Math.cos(angleRad);
+		const sin = Math.sin(angleRad);
+
+		const { width, height, data: srcData } = this;
+		const cx = width / 2;
+		const cy = height / 2;
+
+		// Output same size (corners will be clipped)
+		const rotated = new Image16(width, height);
+		const dstData = rotated.data;
+
+		// For each output pixel, find the source position (inverse rotation)
+		for (let y = 0; y < height; y++) {
+			for (let x = 0; x < width; x++) {
+				// Translate to center, rotate, translate back
+				const dx = x - cx;
+				const dy = y - cy;
+				const srcX = cos * dx - sin * dy + cx;
+				const srcY = sin * dx + cos * dy + cy;
+
+				const dstIdx = (y * width + x) * 4;
+
+				// Check bounds
+				if (srcX < 0 || srcX >= width - 1 || srcY < 0 || srcY >= height - 1) {
+					// Out of bounds - fill with black
+					dstData[dstIdx] = 0;
+					dstData[dstIdx + 1] = 0;
+					dstData[dstIdx + 2] = 0;
+					dstData[dstIdx + 3] = 1; // Opaque black
+					continue;
+				}
+
+				// Bilinear interpolation
+				const x0 = Math.floor(srcX);
+				const y0 = Math.floor(srcY);
+				const x1 = x0 + 1;
+				const y1 = y0 + 1;
+				const fx = srcX - x0;
+				const fy = srcY - y0;
+
+				const idx00 = (y0 * width + x0) * 4;
+				const idx10 = (y0 * width + x1) * 4;
+				const idx01 = (y1 * width + x0) * 4;
+				const idx11 = (y1 * width + x1) * 4;
+
+				// Interpolate each channel
+				for (let c = 0; c < 4; c++) {
+					const v00 = srcData[idx00 + c];
+					const v10 = srcData[idx10 + c];
+					const v01 = srcData[idx01 + c];
+					const v11 = srcData[idx11 + c];
+
+					// Bilinear: lerp in x, then lerp in y
+					const v0 = v00 + (v10 - v00) * fx;
+					const v1 = v01 + (v11 - v01) * fx;
+					dstData[dstIdx + c] = v0 + (v1 - v0) * fy;
+				}
+			}
+		}
+
+		return rotated;
+	}
 }
