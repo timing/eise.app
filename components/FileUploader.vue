@@ -112,7 +112,12 @@
 					<input type="checkbox" v-model="noiseRobustAlignmentVisible" :disabled="useGPU" />
 					Pre-blur alignment
 				</label>
-				<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Pre-blur alignment:</strong> Aligns on blurred frames first, then refines on original. Better for turbulent seeing conditions. CPU only.</p>
+
+				<label class="checkbox-option">
+					<input type="checkbox" v-model="useVngDemosaic" />
+					VNG demosaicing
+				</label>
+				<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Pre-blur alignment:</strong> Aligns on blurred frames first, then refines on original. Better for turbulent seeing conditions. CPU only.<br><strong>VNG demosaicing:</strong> Variable Number of Gradients - higher quality color interpolation for raw Bayer data. When disabled, uses faster bilinear interpolation.</p>
 
 				<template v-if="targetType !== 'sun-moon'">
 					<div class="separator"></div>
@@ -227,6 +232,7 @@ const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 const noiseRobustAlignment = ref(false);
+const useVngDemosaic = ref(true); // VNG demosaic (default) vs bilinear
 // Computed for checkbox binding - shows unchecked when GPU is on
 const noiseRobustAlignmentVisible = computed({
 	get: () => useGPU.value ? false : noiseRobustAlignment.value,
@@ -262,6 +268,7 @@ function loadSettings() {
 			if (settings.enableMaxFrames !== undefined) enableMaxFrames.value = settings.enableMaxFrames;
 			if (settings.selectedMaxFrames) selectedMaxFrames.value = settings.selectedMaxFrames;
 			if (settings.targetType) targetType.value = settings.targetType;
+			if (settings.useVngDemosaic !== undefined) useVngDemosaic.value = settings.useVngDemosaic;
 		}
 	} catch (e) {
 		console.warn('Failed to load settings:', e);
@@ -279,7 +286,8 @@ function saveSettings() {
 			cropMarginPercent: cropMarginPercent.value,
 			enableMaxFrames: enableMaxFrames.value,
 			selectedMaxFrames: selectedMaxFrames.value,
-			targetType: targetType.value
+			targetType: targetType.value,
+			useVngDemosaic: useVngDemosaic.value
 		};
 		localStorage.setItem('eise-settings', JSON.stringify(settings));
 	} catch (e) {
@@ -288,7 +296,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, useVngDemosaic], saveSettings);
 
 onMounted(async () => {
 	loadSettings();
@@ -636,7 +644,7 @@ async function processFiles(files) {
 		emit('processing-started');
 		const { readSerFiles } = useSerReader();
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		await readSerFiles(serFiles, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value);
+		await readSerFiles(serFiles, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value, useVngDemosaic.value);
 		return;
 	} else if (serFiles.length > 1 && liteMode.value) {
 		alert('Multiple SER files are not supported in Lite Mode. Please select a single file.');
@@ -661,7 +669,7 @@ async function processFiles(files) {
 		if (fileToProcess.name.endsWith('.ser') && !liteMode.value) {
 			emit('processing-started');
 			const { readSerFile } = useSerReader();
-			await readSerFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value);
+			await readSerFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value, useVngDemosaic.value);
 			return;
 		}
 
@@ -682,7 +690,7 @@ async function processFiles(files) {
 			if (formatInfo.isSupported) {
 				// Can process directly - readAviFile handles both uncompressed and MJPEG
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, useVngDemosaic.value);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);

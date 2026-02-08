@@ -120,13 +120,17 @@ let cachedAnalyzeConfig = null;
 // WGSL SHADERS
 // ============================================================
 
-// Demosaic shader - converts Bayer pattern to RGB
+// Demosaic shader - converts Bayer pattern to RGB (supports bilinear and VNG)
 const demosaicShader = `
 struct Params {
     width: u32,
     height: u32,
     batchSize: u32,
     bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
+    useVng: u32,        // 0=bilinear, 1=VNG
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -142,6 +146,307 @@ fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
     let cx = clamp(x, 0, i32(params.width) - 1);
     let cy = clamp(y, 0, i32(params.height) - 1);
     return getBayerValue(frameIdx, u32(cx), u32(cy));
+}
+
+// VNG gradient computation - computes gradient in a given direction
+fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
+    // Gradient = sum of absolute differences along the direction
+    var grad: f32 = 0.0;
+    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
+    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
+    return grad;
+}
+
+// VNG interpolation for missing colors
+// Returns (r, g, b) using gradient-weighted interpolation
+fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
+    // Compute gradients in 8 directions: N, S, E, W, NE, NW, SE, SW
+    let gN = computeGradient(frameIdx, x, y, 0, -1);
+    let gS = computeGradient(frameIdx, x, y, 0, 1);
+    let gE = computeGradient(frameIdx, x, y, 1, 0);
+    let gW = computeGradient(frameIdx, x, y, -1, 0);
+    let gNE = computeGradient(frameIdx, x, y, 1, -1);
+    let gNW = computeGradient(frameIdx, x, y, -1, -1);
+    let gSE = computeGradient(frameIdx, x, y, 1, 1);
+    let gSW = computeGradient(frameIdx, x, y, -1, 1);
+
+    // Find minimum gradient and set threshold
+    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
+    let threshold = minGrad * 1.5 + 0.001;  // Small epsilon to avoid division issues
+
+    // Current pixel value
+    let center = sampleBayer(frameIdx, x, y);
+
+    var r: f32 = 0.0;
+    var g: f32 = 0.0;
+    var b: f32 = 0.0;
+
+    // Determine what color the current pixel is and interpolate missing colors
+    // using gradient-weighted averaging
+
+    // Sample neighbors for interpolation
+    let n = sampleBayer(frameIdx, x, y - 1);
+    let s = sampleBayer(frameIdx, x, y + 1);
+    let e = sampleBayer(frameIdx, x + 1, y);
+    let w = sampleBayer(frameIdx, x - 1, y);
+    let ne = sampleBayer(frameIdx, x + 1, y - 1);
+    let nw = sampleBayer(frameIdx, x - 1, y - 1);
+    let se = sampleBayer(frameIdx, x + 1, y + 1);
+    let sw = sampleBayer(frameIdx, x - 1, y + 1);
+
+    // Gradient weights (inverse, so low gradient = high weight)
+    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
+    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
+    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
+    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
+    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
+    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
+    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
+    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
+
+    // Use pattern-specific VNG interpolation
+    // For each pixel type, we interpolate missing colors using gradient-weighted neighbors
+
+    if (pattern == 0u) { // RGGB
+        if (bx == 0u && by == 0u) { // R pixel
+            r = center;
+            // Green: use weighted average of NSEW green neighbors
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            // Blue: use weighted average of diagonal blue neighbors
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 1u) { // B pixel
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 1u && by == 0u) { // G pixel (R row)
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        } else { // G pixel (B row)
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        }
+    } else if (pattern == 1u) { // BGGR
+        if (bx == 0u && by == 0u) { // B pixel
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 1u && by == 1u) { // R pixel
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 0u) { // G pixel (B row)
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        } else { // G pixel (R row)
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        }
+    } else if (pattern == 2u) { // GRBG
+        if (bx == 1u && by == 0u) { // R pixel
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 0u && by == 1u) { // B pixel
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 0u && by == 0u) { // G pixel (R row)
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        } else { // G pixel (B row)
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        }
+    } else { // GBRG (pattern == 3)
+        if (bx == 0u && by == 1u) { // R pixel
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 0u) { // B pixel
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 0u && by == 0u) { // G pixel (B row)
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        } else { // G pixel (R row)
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        }
+    }
+
+    return vec3<f32>(r, g, b);
+}
+
+// Bilinear interpolation (original simple demosaic)
+fn bilinearInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
+    var r: f32 = 0.0;
+    var g: f32 = 0.0;
+    var b: f32 = 0.0;
+
+    if (pattern == 0u) { // RGGB
+        if (bx == 0u && by == 0u) { // R pixel
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 1u) { // B pixel
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 0u) { // G pixel (R row)
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else { // G pixel (B row)
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    } else if (pattern == 1u) { // BGGR
+        if (bx == 0u && by == 0u) { // B pixel
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 1u) { // R pixel
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 0u) { // G pixel (B row)
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else { // G pixel (R row)
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    } else if (pattern == 2u) { // GRBG
+        if (bx == 1u && by == 0u) { // R pixel
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 0u && by == 1u) { // B pixel
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 0u && by == 0u) { // G pixel (R row)
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else { // G pixel (B row)
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    } else { // GBRG (pattern == 3)
+        if (bx == 0u && by == 1u) { // R pixel
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 0u) { // B pixel
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 0u && by == 0u) { // G pixel (B row)
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else { // G pixel (R row)
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    }
+
+    return vec3<f32>(r, g, b);
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -160,109 +465,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ix = i32(x);
     let iy = i32(y);
 
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    // RGGB pattern (most common)
-    // R  G
-    // G  B
     let pattern = params.bayerPattern;
 
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) { // R pixel
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) { // B pixel
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) { // G pixel (R row)
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else { // G pixel (B row)
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) { // B pixel
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) { // R pixel
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) { // G pixel (B row)
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else { // G pixel (R row)
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) { // R pixel
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 0u && by == 1u) { // B pixel
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) { // G pixel (R row)
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else { // G pixel (B row)
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
-    } else { // GBRG (pattern == 3)
-        if (bx == 0u && by == 1u) { // R pixel
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) { // B pixel
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) { // G pixel (B row)
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else { // G pixel (R row)
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
+    // Use VNG or bilinear interpolation based on params
+    var rgb: vec3<f32>;
+    if (params.useVng == 1u) {
+        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
+    } else {
+        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
     }
 
     // Pack as RGBA (8-bit per channel for output)
-    let ri = u32(clamp(r * 255.0, 0.0, 255.0));
-    let gi = u32(clamp(g * 255.0, 0.0, 255.0));
-    let bi = u32(clamp(b * 255.0, 0.0, 255.0));
+    let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
+    let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
+    let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
     let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
 
     let outIdx = frameIdx * params.width * params.height + y * params.width + x;
@@ -270,7 +486,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-// Demosaic + Crop shader - crops around per-frame centers during demosaic
+// Demosaic + Crop shader - crops around per-frame centers during demosaic (supports bilinear and VNG)
 const demosaicCropShader = `
 struct Params {
     srcWidth: u32,      // Source frame width
@@ -278,9 +494,9 @@ struct Params {
     cropSize: u32,      // Output crop size (square)
     bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
     batchSize: u32,
+    useVng: u32,        // 0=bilinear, 1=VNG
     _pad1: u32,
     _pad2: u32,
-    _pad3: u32,
 }
 
 struct CropCenter {
@@ -304,20 +520,300 @@ fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
     return getBayerValue(frameIdx, u32(cx), u32(cy));
 }
 
+// VNG gradient computation
+fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
+    var grad: f32 = 0.0;
+    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
+    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
+    return grad;
+}
+
+// VNG interpolation
+fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
+    let gN = computeGradient(frameIdx, x, y, 0, -1);
+    let gS = computeGradient(frameIdx, x, y, 0, 1);
+    let gE = computeGradient(frameIdx, x, y, 1, 0);
+    let gW = computeGradient(frameIdx, x, y, -1, 0);
+    let gNE = computeGradient(frameIdx, x, y, 1, -1);
+    let gNW = computeGradient(frameIdx, x, y, -1, -1);
+    let gSE = computeGradient(frameIdx, x, y, 1, 1);
+    let gSW = computeGradient(frameIdx, x, y, -1, 1);
+
+    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
+    let threshold = minGrad * 1.5 + 0.001;
+
+    let center = sampleBayer(frameIdx, x, y);
+    var r: f32 = 0.0;
+    var g: f32 = 0.0;
+    var b: f32 = 0.0;
+
+    let n = sampleBayer(frameIdx, x, y - 1);
+    let s = sampleBayer(frameIdx, x, y + 1);
+    let e = sampleBayer(frameIdx, x + 1, y);
+    let w = sampleBayer(frameIdx, x - 1, y);
+    let ne = sampleBayer(frameIdx, x + 1, y - 1);
+    let nw = sampleBayer(frameIdx, x - 1, y - 1);
+    let se = sampleBayer(frameIdx, x + 1, y + 1);
+    let sw = sampleBayer(frameIdx, x - 1, y + 1);
+
+    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
+    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
+    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
+    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
+    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
+    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
+    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
+    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
+
+    if (pattern == 0u) { // RGGB
+        if (bx == 0u && by == 0u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 1u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 1u && by == 0u) {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        } else {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        }
+    } else if (pattern == 1u) { // BGGR
+        if (bx == 0u && by == 0u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 1u && by == 1u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 0u) {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        } else {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        }
+    } else if (pattern == 2u) { // GRBG
+        if (bx == 1u && by == 0u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 0u && by == 1u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 0u && by == 0u) {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        } else {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        }
+    } else { // GBRG
+        if (bx == 0u && by == 1u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 0u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 0u && by == 0u) {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        } else {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        }
+    }
+    return vec3<f32>(r, g, b);
+}
+
+// Bilinear interpolation
+fn bilinearInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
+    var r: f32 = 0.0;
+    var g: f32 = 0.0;
+    var b: f32 = 0.0;
+
+    if (pattern == 0u) { // RGGB
+        if (bx == 0u && by == 0u) {
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 1u) {
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 0u) {
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else {
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    } else if (pattern == 1u) { // BGGR
+        if (bx == 0u && by == 0u) {
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 1u) {
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 0u) {
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else {
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    } else if (pattern == 2u) { // GRBG
+        if (bx == 1u && by == 0u) {
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 0u && by == 1u) {
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 0u && by == 0u) {
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else {
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    } else { // GBRG
+        if (bx == 0u && by == 1u) {
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 0u) {
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 0u && by == 0u) {
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else {
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    }
+    return vec3<f32>(r, g, b);
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let outX = gid.x;  // Output pixel x (0 to cropSize-1)
-    let outY = gid.y;  // Output pixel y (0 to cropSize-1)
+    let outX = gid.x;
+    let outY = gid.y;
     let frameIdx = gid.z;
 
     if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
         return;
     }
 
-    // Get crop center for this frame
     let center = centers[frameIdx];
-
-    // Calculate source coordinates (ensure even alignment for Bayer pattern)
     let halfSize = f32(params.cropSize) / 2.0;
     let cropStartX = i32(floor(center.x - halfSize)) & ~1;
     let cropStartY = i32(floor(center.y - halfSize)) & ~1;
@@ -325,119 +821,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let srcX = cropStartX + i32(outX);
     let srcY = cropStartY + i32(outY);
 
-    // Clamp to source bounds
     let x = u32(clamp(srcX, 0, i32(params.srcWidth) - 1));
     let y = u32(clamp(srcY, 0, i32(params.srcHeight) - 1));
     let ix = i32(x);
     let iy = i32(y);
 
-    // Bayer position in the pattern
     let bx = x % 2u;
     let by = y % 2u;
-
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
     let pattern = params.bayerPattern;
 
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) {
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) {
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) {
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 0u && by == 1u) {
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
-    } else { // GBRG (pattern == 3)
-        if (bx == 0u && by == 1u) {
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
+    // Use VNG or bilinear interpolation based on params
+    var rgb: vec3<f32>;
+    if (params.useVng == 1u) {
+        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
+    } else {
+        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
     }
 
-    // Pack as RGBA
-    let ri = u32(clamp(r * 255.0, 0.0, 255.0));
-    let gi = u32(clamp(g * 255.0, 0.0, 255.0));
-    let bi = u32(clamp(b * 255.0, 0.0, 255.0));
+    let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
+    let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
+    let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
     let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
 
-    // Output to cropped buffer
     let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
     output[outIdx] = rgba;
 }
@@ -527,13 +932,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-// Fused demosaic + grayscale shader - outputs both RGBA and grayscale in one pass
+// Fused demosaic + grayscale shader - outputs both RGBA and grayscale in one pass (supports bilinear and VNG)
 const demosaicGrayShader = `
 struct Params {
     width: u32,
     height: u32,
     batchSize: u32,
     bayerPattern: u32,
+    useVng: u32,        // 0=bilinear, 1=VNG
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -552,6 +961,285 @@ fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
     return getBayerValue(frameIdx, u32(cx), u32(cy));
 }
 
+fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
+    var grad: f32 = 0.0;
+    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
+    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
+    return grad;
+}
+
+fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
+    let gN = computeGradient(frameIdx, x, y, 0, -1);
+    let gS = computeGradient(frameIdx, x, y, 0, 1);
+    let gE = computeGradient(frameIdx, x, y, 1, 0);
+    let gW = computeGradient(frameIdx, x, y, -1, 0);
+    let gNE = computeGradient(frameIdx, x, y, 1, -1);
+    let gNW = computeGradient(frameIdx, x, y, -1, -1);
+    let gSE = computeGradient(frameIdx, x, y, 1, 1);
+    let gSW = computeGradient(frameIdx, x, y, -1, 1);
+
+    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
+    let threshold = minGrad * 1.5 + 0.001;
+    let center = sampleBayer(frameIdx, x, y);
+    var r: f32 = 0.0;
+    var g: f32 = 0.0;
+    var b: f32 = 0.0;
+
+    let n = sampleBayer(frameIdx, x, y - 1);
+    let s = sampleBayer(frameIdx, x, y + 1);
+    let e = sampleBayer(frameIdx, x + 1, y);
+    let w = sampleBayer(frameIdx, x - 1, y);
+    let ne = sampleBayer(frameIdx, x + 1, y - 1);
+    let nw = sampleBayer(frameIdx, x - 1, y - 1);
+    let se = sampleBayer(frameIdx, x + 1, y + 1);
+    let sw = sampleBayer(frameIdx, x - 1, y + 1);
+
+    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
+    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
+    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
+    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
+    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
+    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
+    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
+    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
+
+    if (pattern == 0u) {
+        if (bx == 0u && by == 0u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 1u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 1u && by == 0u) {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        } else {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        }
+    } else if (pattern == 1u) {
+        if (bx == 0u && by == 0u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 1u && by == 1u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 0u) {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        } else {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        }
+    } else if (pattern == 2u) {
+        if (bx == 1u && by == 0u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 0u && by == 1u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 0u && by == 0u) {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        } else {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        }
+    } else {
+        if (bx == 0u && by == 1u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 0u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 0u && by == 0u) {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        } else {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        }
+    }
+    return vec3<f32>(r, g, b);
+}
+
+fn bilinearInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
+    var r: f32 = 0.0;
+    var g: f32 = 0.0;
+    var b: f32 = 0.0;
+
+    if (pattern == 0u) {
+        if (bx == 0u && by == 0u) {
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 1u) {
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 0u) {
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else {
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    } else if (pattern == 1u) {
+        if (bx == 0u && by == 0u) {
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 1u) {
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 0u) {
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else {
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    } else if (pattern == 2u) {
+        if (bx == 1u && by == 0u) {
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 0u && by == 1u) {
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 0u && by == 0u) {
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else {
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    } else {
+        if (bx == 0u && by == 1u) {
+            r = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 1u && by == 0u) {
+            b = sampleBayer(frameIdx, x, y);
+            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
+                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
+            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
+                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
+        } else if (bx == 0u && by == 0u) {
+            g = sampleBayer(frameIdx, x, y);
+            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        } else {
+            g = sampleBayer(frameIdx, x, y);
+            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
+            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
+        }
+    }
+    return vec3<f32>(r, g, b);
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
@@ -566,102 +1254,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let by = y % 2u;
     let ix = i32(x);
     let iy = i32(y);
-
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
     let pattern = params.bayerPattern;
 
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) {
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) {
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) {
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 0u && by == 1u) {
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
-    } else { // GBRG
-        if (bx == 0u && by == 1u) {
-            r = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            b = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            b = sampleBayer(frameIdx, ix, iy);
-            g = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy) +
-                 sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.25;
-            r = (sampleBayer(frameIdx, ix-1, iy-1) + sampleBayer(frameIdx, ix+1, iy-1) +
-                 sampleBayer(frameIdx, ix-1, iy+1) + sampleBayer(frameIdx, ix+1, iy+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, ix, iy);
-            b = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            r = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, ix, iy);
-            r = (sampleBayer(frameIdx, ix-1, iy) + sampleBayer(frameIdx, ix+1, iy)) * 0.5;
-            b = (sampleBayer(frameIdx, ix, iy-1) + sampleBayer(frameIdx, ix, iy+1)) * 0.5;
-        }
+    var rgb: vec3<f32>;
+    if (params.useVng == 1u) {
+        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
+    } else {
+        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
     }
+
+    let r = rgb.x;
+    let g = rgb.y;
+    let b = rgb.z;
 
     // Output RGBA (8-bit packed)
     let ri = u32(clamp(r * 255.0, 0.0, 255.0));
@@ -1235,7 +1839,7 @@ function getAnalyzeBuffers(batchSize, width, height) {
 
     cachedAnalyzeBuffers = {
         paramsBuffer: device.createBuffer({
-            size: 16,
+            size: 32,  // 8 u32 values for demosaic params including useVng
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         }),
         inputBuffer: device.createBuffer({
@@ -1336,7 +1940,7 @@ function cleanupAnalyzeBuffers() {
     }
 }
 
-async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false) {
+async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false, useVng = true) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -1369,7 +1973,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
 
         // Demosaic params
-        queue.writeBuffer(buffers.paramsBuffer, 0, new Uint32Array([width, height, batchSize, bayerPattern]));
+        queue.writeBuffer(buffers.paramsBuffer, 0, new Uint32Array([width, height, batchSize, bayerPattern, useVng ? 1 : 0, 0, 0, 0]));
 
         // Run fused demosaic + grayscale (outputs both RGBA and grayscale in one pass)
         const demosaicGrayBindGroup = device.createBindGroup({
@@ -1849,8 +2453,10 @@ function rotateCropBuffers() {
  * @param {Array} centers - Array of {x, y} per-frame centers
  * @param {number} bayerPattern - Bayer pattern (0-3, or -1 for mono)
  * @param {number} threshold - Threshold for moments (default 0.1)
+ * @param {boolean} metadataOnly - If true, skip float32 buffer readback
+ * @param {boolean} useVng - If true, use VNG demosaic; otherwise bilinear
  */
-async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1, metadataOnly = false) {
+async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1, metadataOnly = false, useVng = true) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -1869,8 +2475,8 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     }
     queue.writeBuffer(buffers.centersBuffer, 0, centersData);
 
-    // Set crop params
-    const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, 0, 0, 0]);
+    // Set crop params (including useVng for demosaic)
+    const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, useVng ? 1 : 0, 0, 0]);
     queue.writeBuffer(buffers.paramsBuffer, 0, cropParams);
 
     const needsDemosaic = bayerPattern >= 0;
@@ -2159,8 +2765,9 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
  * 3. Read bounds to get centers
  * 4. Crop from already-demosaiced RGBA
  * 5. Calculate sharpness on cropped
+ * @param {boolean} useVng - If true, use VNG demosaic; otherwise bilinear
  */
-async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false) {
+async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false, useVng = true) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -2183,7 +2790,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         // Upload Bayer data (auto-stretch for 16-bit to handle very dark data)
         const bayerData = prepareBayerData(frames, srcPixelCount, false);
         queue.writeBuffer(analyzeBuffers.inputBuffer, 0, bayerData);
-        queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, bayerPattern]));
+        queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, bayerPattern, useVng ? 1 : 0, 0, 0, 0]));
 
         const demosaicBindGroup = device.createBindGroup({
             layout: demosaicPipeline.getBindGroupLayout(0),
@@ -2532,7 +3139,7 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
     });
 
     const paramsBuffer = device.createBuffer({
-        size: 16,
+        size: 32,  // 8 u32 values for demosaic params
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
@@ -2554,8 +3161,8 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
                 fullRgba[i * 4 + 3] = 255;
             }
         } else {
-            // Demosaic with GPU
-            queue.writeBuffer(paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, 1, pattern]));
+            // Demosaic with GPU (use bilinear for thumbnails for speed)
+            queue.writeBuffer(paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, 1, pattern, 0, 0, 0, 0]));
 
             const bindGroup = device.createBindGroup({
                 layout: demosaicPipeline.getBindGroupLayout(0),
@@ -2681,10 +3288,10 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly } = e.data;
+        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, useVng = false } = e.data;
 
         try {
-            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly);
+            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, useVng);
             // Transfer uint8Buffer or float32Buffer depending on mode
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'analyze-result', requestId, results }, transferables);
@@ -2701,10 +3308,10 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId, metadataOnly } = e.data;
+        const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId, metadataOnly, useVng = false } = e.data;
 
         try {
-            const results = await cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly);
+            const results = await cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly, useVng);
             // Transfer uint8Buffer or float32Buffer depending on mode
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'crop-analyze-result', requestId, results }, transferables);
@@ -2721,10 +3328,10 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly } = e.data;
+        const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly, useVng = false } = e.data;
 
         try {
-            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly);
+            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly, useVng);
             // Transfer uint8Buffer or float32Buffer depending on mode
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'detect-crop-analyze-result', requestId, results }, transferables);

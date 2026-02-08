@@ -290,6 +290,7 @@ export function useStacker() {
         const isImageFile = frameReReader.fileType === 'image' || frameReReader.rgbaFrames;
 
         let cropSize, srcWidth, srcHeight, bayerPattern;
+        const useVng = frameReReader.useVngDemosaic ?? false;  // VNG demosaic for stacking
 
         if (isSerFile) {
             const { header, bayerChoice, cropRegion } = frameReReader;
@@ -423,7 +424,8 @@ export function useStacker() {
                         bayerPattern,
                         threshold: 0.1,
                         requestId,
-                        metadataOnly: false // Get float32 data for stacking
+                        metadataOnly: false, // Get float32 data for stacking
+                        useVng  // VNG demosaic for better quality during stacking
                     });
                 });
             }

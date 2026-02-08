@@ -575,9 +575,11 @@ export function useSerReader() {
     // GPU batch analysis helper
     let gpuAnalyzeWorker = null;
     let gpuWorkerReady = false;
+    let gpuInitFailed = false; // Track if GPU init already failed to avoid repeated attempts
 
     async function initGpuAnalyzeWorker() {
         if (gpuAnalyzeWorker && gpuWorkerReady) return true;
+        if (gpuInitFailed) return false; // Don't retry if GPU already known to be unavailable
 
         gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
 
@@ -586,6 +588,7 @@ export function useSerReader() {
                 addLog('WebGPU analyze worker timeout');
                 gpuAnalyzeWorker.terminate();
                 gpuAnalyzeWorker = null;
+                gpuInitFailed = true; // Mark GPU as permanently unavailable
                 resolve(false);
             }, 10000);
 
@@ -604,6 +607,7 @@ export function useSerReader() {
                     addLog(`WebGPU analyze worker error: ${e.data.error}`);
                     gpuAnalyzeWorker.terminate();
                     gpuAnalyzeWorker = null;
+                    gpuInitFailed = true; // Mark GPU as permanently unavailable
                     resolve(false);
                 }
             };
@@ -614,6 +618,7 @@ export function useSerReader() {
                 addLog(`WebGPU analyze worker crashed: ${err.message}`);
                 gpuAnalyzeWorker.terminate();
                 gpuAnalyzeWorker = null;
+                gpuInitFailed = true; // Mark GPU as permanently unavailable
                 resolve(false);
             };
             gpuAnalyzeWorker.postMessage({ type: 'init' });
@@ -793,7 +798,7 @@ export function useSerReader() {
         return cropped;
     }
 
-    async function readSerFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false) {
+    async function readSerFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false, useVngDemosaic = true) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -1212,10 +1217,9 @@ export function useSerReader() {
         };
 
         const gpuReady = await initGpuAnalyzeWorker();
-        if (!gpuReady) {
-            throw new Error('WebGPU initialization failed - GPU is required for processing');
-        }
 
+        if (gpuReady) {
+        // ========== GPU PATH ==========
         // Batch size for GPU: dynamic based on frame size
         // Start aggressive (512MB), OOM handling will scale back if needed
         // Lite mode stays conservative (256MB) for mobile/low-memory devices
@@ -1546,6 +1550,7 @@ export function useSerReader() {
                             frameCenters, // Map of index -> {x, y}
                             frameSize,
                             analysisStartTime: analysisStats.startTime, // For total pipeline time
+                            useVngDemosaic, // VNG demosaic for stacking phase
 
                             // Re-read a single frame and return float32Buffer
                             async getFrame(frameIndex, centerOverride = null) {
@@ -1755,6 +1760,7 @@ export function useSerReader() {
                         height: processHeight,
                         noCrop: true, // Flag to indicate no cropping needed
                         analysisStartTime: analysisStats.startTime, // For total pipeline time
+                        useVngDemosaic, // VNG demosaic for stacking phase
 
                         // Re-read a single frame by index
                         async getFrame(frameIndex) {
@@ -1781,6 +1787,133 @@ export function useSerReader() {
                 }
 
         terminateGpuAnalyzeWorker();
+        } else {
+            // ========== CPU FALLBACK PATH ==========
+            addLog('GPU not available, falling back to CPU workers');
+            await initializeWorkers();
+            if (!workersReady) {
+                addLog("Stopping SER processing due to worker initialization failure.");
+                emit('show-error');
+                return;
+            }
+
+            const workerPromises = [];
+
+            for (let i = 0; i < frameCount && !stopDispatching; i++) {
+                const offset = 178 + (i * frameSize);
+                if (offset + frameSize > file.size) {
+                    addLog(`Stopping at frame ${i} due to reaching end of file.`);
+                    break;
+                }
+
+                await acquireSlot();
+
+                const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+
+                // Pick a worker that's not currently recycling
+                let workerIndex = i % numWorkers;
+                let attempts = 0;
+                while (recyclingWorkers.has(workerIndex) && attempts < numWorkers) {
+                    workerIndex = (workerIndex + 1) % numWorkers;
+                    attempts++;
+                }
+                if (attempts >= numWorkers) {
+                    await new Promise(r => setTimeout(r, 100));
+                }
+
+                const preCropSampleInterval = Math.max(1, Math.floor(frameCount / 10));
+                const shouldCapturePreCrop = cropRegion && (i % preCropSampleInterval === 0);
+
+                const dataToWorker = {
+                    type: cropRegion ? 'analyze-cropped' : 'ser',
+                    frameBuffer: frameBuffer,
+                    header: headerForWorker,
+                    bayerChoice: bayerChoice,
+                    cropRegion: cropRegion,
+                    capturePreCrop: shouldCapturePreCrop,
+                    index: i,
+                    surfaceMode: surfaceMode
+                };
+
+                const promise = processFrameWithWorker(workerIndex, dataToWorker, [frameBuffer])
+                    .then(result => {
+                        if (result.skipped) {
+                            if (result.reason === 'cut-off') {
+                                cutOffFrames++;
+                            } else if (result.reason === 'oversized') {
+                                oversizedFrames++;
+                            } else {
+                                skippedFrames++;
+                            }
+                            completedFrames++;
+                            return;
+                        }
+
+                        if (result.preCropRgbaBuffer && result.preCropWidth && result.preCropHeight) {
+                            capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, frameCount);
+                        }
+
+                        const currentFrame = {
+                            sharpness: result.sharpness,
+                            blob: result.pngBlob,
+                            croppedBuffer: result.croppedBuffer,
+                            float32Buffer: result.float32Buffer,
+                            width: result.width,
+                            height: result.height,
+                            index: result.index,
+                            subPixelOffset: result.subPixelOffset || { x: 0, y: 0 },
+                            circularity: result.circularity || 0
+                        };
+
+                        if (currentFrame.blob && currentFrame.blob instanceof Blob && currentFrame.blob.size > 0) {
+                            rankFrame(currentFrame);
+                            successfulFrames++;
+                        }
+
+                        completedFrames++;
+
+                        if (completedFrames % 50 === 0 || completedFrames === frameCount) {
+                            emit('update-loading', {
+                                progress: (completedFrames / frameCount) * 100,
+                                current: completedFrames,
+                                total: frameCount
+                            });
+                            addLog(`Analyzed frame ${completedFrames}/${frameCount} (CPU)`);
+
+                            if (bestFrameSoFar) {
+                                emit('best-frame-updated', bestFrameSoFar);
+                            }
+                            if (refCandidateSoFar) {
+                                emit('ref-candidate-updated', refCandidateSoFar);
+                            }
+                        }
+                    })
+                    .catch(error => {
+                        totalErrors++;
+                        completedFrames++;
+                        if (isHeapCorruptionError(error)) {
+                            forceWorkerRecycle(workerIndex);
+                        }
+                        if (totalErrors <= 3) {
+                            addLog(`Error processing frame ${i}: ${error}`);
+                        } else if (totalErrors === 4) {
+                            addLog(`Further frame errors suppressed...`);
+                        }
+                        if (totalErrors >= maxErrorsBeforeStopDispatching && !stopDispatching) {
+                            stopDispatching = true;
+                            addLog(`Too many errors (${totalErrors}), stopped dispatching new frames.`);
+                        }
+                    })
+                    .finally(() => {
+                        releaseSlot();
+                    });
+
+                workerPromises.push(promise);
+            }
+
+            // Wait for all worker tasks to complete
+            await Promise.all(workerPromises);
+        }
 
         const skipMsgs = [];
         if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
@@ -2180,7 +2313,7 @@ export function useSerReader() {
 
     // Process multiple SER files and combine their frames for stacking
     // NOTE: Future consideration - similar multi-file support could be added to useAviReader.js
-    async function readSerFiles(files, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false) {
+    async function readSerFiles(files, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false, useVngDemosaic = true) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
@@ -2864,6 +2997,7 @@ export function useSerReader() {
                     cropRegion,
                     frameCenters, // Map: globalIndex -> {x, y, fileInfo, localIndex}
                     analysisStartTime: analysisStats.startTime, // For total time calculation
+                    useVngDemosaic, // VNG demosaic for stacking phase
 
                     async getFrame(globalIndex, centerOverride = null) {
                         const centerInfo = centerOverride || this.frameCenters.get(globalIndex);
