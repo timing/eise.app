@@ -1237,12 +1237,6 @@ function usmSharpenInWorker16(data, width, height, radius, amount, threshold, lu
 
 let fixedAberration = reactive({});
 
-// Helper to clear fixedAberration without reassigning (preserves Vue reactivity)
-function clearFixedAberration() {
-	fixedAberration.red = undefined;
-	fixedAberration.blue = undefined;
-}
-
 // ==================== CHROMATIC ABERRATION CORRECTION ====================
 // These functions work on image data directly (not canvas) for proper pipeline integration
 
@@ -1250,8 +1244,6 @@ function clearFixedAberration() {
 function applyChromaticAberrationCorrection16(data, width, height, redOffset, blueOffset) {
 	const hasRedOffset = redOffset && (redOffset.x || redOffset.y);
 	const hasBlueOffset = blueOffset && (blueOffset.x || blueOffset.y);
-
-	console.log('CA correction 16-bit:', { hasRedOffset, hasBlueOffset, redOffset, blueOffset, width, height });
 
 	if (!hasRedOffset && !hasBlueOffset) return data;
 
@@ -1261,18 +1253,12 @@ function applyChromaticAberrationCorrection16(data, width, height, redOffset, bl
 
 	// Apply red channel shift
 	if (hasRedOffset) {
-		const shiftX = -(redOffset.x || 0);
-		const shiftY = -(redOffset.y || 0);
-		console.log('Shifting red by:', shiftX, shiftY);
-		shiftChannel16(data, result, width, height, 0, shiftX, shiftY);
+		shiftChannel16(data, result, width, height, 0, -(redOffset.x || 0), -(redOffset.y || 0));
 	}
 
 	// Apply blue channel shift
 	if (hasBlueOffset) {
-		const shiftX = -(blueOffset.x || 0);
-		const shiftY = -(blueOffset.y || 0);
-		console.log('Shifting blue by:', shiftX, shiftY);
-		shiftChannel16(data, result, width, height, 2, shiftX, shiftY);
+		shiftChannel16(data, result, width, height, 2, -(blueOffset.x || 0), -(blueOffset.y || 0));
 	}
 
 	return result;
@@ -1673,9 +1659,8 @@ function applyCrop() {
 	// Clear caches
 	prevValues = {};
 
-	// Remember if we need to re-run auto alignment
-	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
-	clearFixedAberration();
+	// Keep existing RGB alignment - CA is a global optical property, same offset applies to cropped region
+	// (Don't re-run auto-alignment on crop - correlation often fails on smaller/different regions)
 
 	// Reinitialize WebGL/WebGL2 for new dimensions
 	useWebGL2 = initWebGL2(sel.width, sel.height);
@@ -1693,13 +1678,8 @@ function applyCrop() {
 	canvasEl.removeEventListener('mouseup', onCropMouseUp);
 	document.removeEventListener('keydown', onCropKeyDown);
 
-	// Re-run auto alignment on cropped image if it was auto-aligned before
-	if (shouldRerunAutoAlign) {
-		autoAlignRGB();
-	} else {
-		// Reprocess with new dimensions
-		applyProcessing();
-	}
+	// Reprocess with existing alignment settings
+	applyProcessing();
 }
 
 function undoCrop() {
@@ -1733,9 +1713,7 @@ function undoCrop() {
 	// Force reprocess by clearing cached values
 	prevValues = {};
 
-	// Remember if we need to re-run auto alignment
-	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
-	clearFixedAberration();
+	// Keep existing RGB alignment - CA is a global optical property
 
 	preCropImageData = null;
 	preCropImage16 = null;
@@ -1746,13 +1724,8 @@ function undoCrop() {
 	useWebGL2 = initWebGL2(canvas.value.width, canvas.value.height);
 	useWebGL = initWebGL(canvas.value.width, canvas.value.height);
 
-	// Re-run auto alignment if it was auto-aligned before
-	if (shouldRerunAutoAlign) {
-		autoAlignRGB();
-	} else {
-		// Reprocess with current settings
-		applyProcessing();
-	}
+	// Reprocess with existing alignment settings
+	applyProcessing();
 }
 
 // Rotation functions
@@ -1800,9 +1773,7 @@ function applyRotation() {
 	// Clear caches
 	prevValues = {};
 
-	// Remember if we need to re-run auto alignment
-	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
-	clearFixedAberration();
+	// Keep existing RGB alignment - CA is a global optical property
 
 	// Reinitialize WebGL/WebGL2 for new dimensions
 	useWebGL2 = initWebGL2(rotatedData.width, rotatedData.height);
@@ -1814,13 +1785,8 @@ function applyRotation() {
 	// Clear CSS preview after pixels are rotated
 	previewRotationAngle.value = 0;
 
-	// Re-run auto alignment on rotated image if it was auto-aligned before
-	if (shouldRerunAutoAlign) {
-		autoAlignRGB();
-	} else {
-		// Reprocess with current settings
-		applyProcessing();
-	}
+	// Reprocess with existing alignment settings
+	applyProcessing();
 }
 
 function resetRotation() {
@@ -1851,9 +1817,7 @@ function resetRotation() {
 	// Clear caches
 	prevValues = {};
 
-	// Remember if we need to re-run auto alignment
-	const shouldRerunAutoAlign = rgbAlignmentIsAuto.value;
-	clearFixedAberration();
+	// Keep existing RGB alignment - CA is a global optical property
 
 	// Clear backup and reset values
 	preRotationImage16 = null;
@@ -1865,13 +1829,8 @@ function resetRotation() {
 	useWebGL2 = initWebGL2(canvas.value.width, canvas.value.height);
 	useWebGL = initWebGL(canvas.value.width, canvas.value.height);
 
-	// Re-run auto alignment if it was auto-aligned before
-	if (shouldRerunAutoAlign) {
-		autoAlignRGB();
-	} else {
-		// Reprocess with current settings
-		applyProcessing();
-	}
+	// Reprocess with existing alignment settings
+	applyProcessing();
 }
 
 function processChromaticAberration(channel, axis, magnitude){
@@ -1924,18 +1883,23 @@ async function autoAlignRGB() {
 	await new Promise(resolve => setTimeout(resolve, 10));
 
 	try {
+		// Use pre-crop image if available (larger image = more reliable correlation)
+		// CA is a global optical property, so detecting on full image works for cropped regions too
+		const sourceImage = preCropImage16 || image16;
+		const sourceImageData = preCropImageData || initCanvasImageData;
+
 		let width, height;
-		const red = use16bit.value && image16
-			? new Float32Array(image16.width * image16.height)
-			: new Float32Array(initCanvasImageData.width * initCanvasImageData.height);
+		const red = use16bit.value && sourceImage
+			? new Float32Array(sourceImage.width * sourceImage.height)
+			: new Float32Array(sourceImageData.width * sourceImageData.height);
 		const green = new Float32Array(red.length);
 		const blue = new Float32Array(red.length);
 
-		if (use16bit.value && image16) {
+		if (use16bit.value && sourceImage) {
 			// Use original 16-bit data (0.0-1.0 range, scale to 0-255 for correlation)
-			width = image16.width;
-			height = image16.height;
-			const data = image16.data;
+			width = sourceImage.width;
+			height = sourceImage.height;
+			const data = sourceImage.data;
 			for (let i = 0; i < width * height; i++) {
 				red[i] = data[i * 4] * 255;
 				green[i] = data[i * 4 + 1] * 255;
@@ -1943,9 +1907,9 @@ async function autoAlignRGB() {
 			}
 		} else {
 			// Use original 8-bit data
-			width = initCanvasImageData.width;
-			height = initCanvasImageData.height;
-			const data = initCanvasImageData.data;
+			width = sourceImageData.width;
+			height = sourceImageData.height;
+			const data = sourceImageData.data;
 			for (let i = 0; i < width * height; i++) {
 				red[i] = data[i * 4];
 				green[i] = data[i * 4 + 1];
@@ -2000,8 +1964,14 @@ function findChannelOffset(ref, target, width, height) {
 	}
 
 	// Fine search around best (0.5px steps)
-	for (let dy = bestY - 1; dy <= bestY + 1; dy += 0.5) {
-		for (let dx = bestX - 1; dx <= bestX + 1; dx += 0.5) {
+	// Store boundaries before loop to prevent drift
+	const fineMinX = bestX - 1;
+	const fineMaxX = bestX + 1;
+	const fineMinY = bestY - 1;
+	const fineMaxY = bestY + 1;
+
+	for (let dy = fineMinY; dy <= fineMaxY; dy += 0.5) {
+		for (let dx = fineMinX; dx <= fineMaxX; dx += 0.5) {
 			const score = correlationScore(ref, target, width, height, dx, dy);
 			if (score > bestScore) {
 				bestScore = score;
@@ -2011,10 +1981,10 @@ function findChannelOffset(ref, target, width, height) {
 		}
 	}
 
-	// Round to 0.5px
+	// Round to 0.5px and clamp to search range
 	return {
-		x: Math.round(bestX * 2) / 2,
-		y: Math.round(bestY * 2) / 2
+		x: Math.max(-maxSearch - 1, Math.min(maxSearch + 1, Math.round(bestX * 2) / 2)),
+		y: Math.max(-maxSearch - 1, Math.min(maxSearch + 1, Math.round(bestY * 2) / 2))
 	};
 }
 
