@@ -16,6 +16,42 @@ export function useStacker() {
     const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
 
+    // Timing stats collector for performance analysis
+    let stackingStats = null;
+    function resetStackingStats() {
+        stackingStats = {
+            frameLoadMs: [],      // Time to read frames from disk
+            gpuDemosaicMs: [],    // Time for GPU demosaic+crop
+            grayscaleMs: [],      // Time for grayscale conversion
+            templateMatchMs: [],  // Time for GPU template matching
+            accumulateMs: [],     // Time for GPU accumulation
+            totalFrames: 0,
+            startTime: performance.now()
+        };
+    }
+    function logStackingStats() {
+        if (!stackingStats) return;
+        const elapsed = performance.now() - stackingStats.startTime;
+        const avg = arr => arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1) : '0';
+        const sum = arr => arr.reduce((a, b) => a + b, 0);
+        const pct = (ms) => elapsed > 0 ? ((ms / elapsed) * 100).toFixed(0) : '0';
+
+        const loadTotal = sum(stackingStats.frameLoadMs);
+        const demosaicTotal = sum(stackingStats.gpuDemosaicMs);
+        const grayTotal = sum(stackingStats.grayscaleMs);
+        const matchTotal = sum(stackingStats.templateMatchMs);
+        const accumTotal = sum(stackingStats.accumulateMs);
+
+        addLog(`─── Stacking Performance Summary ───`);
+        addLog(`Total time: ${(elapsed / 1000).toFixed(1)}s for ${stackingStats.totalFrames} frames`);
+        addLog(`Frame loading (disk): ${avg(stackingStats.frameLoadMs)}ms avg, ${(loadTotal / 1000).toFixed(1)}s total (${pct(loadTotal)}%)`);
+        addLog(`GPU demosaic+crop: ${avg(stackingStats.gpuDemosaicMs)}ms avg, ${(demosaicTotal / 1000).toFixed(1)}s total (${pct(demosaicTotal)}%)`);
+        addLog(`Grayscale: ${avg(stackingStats.grayscaleMs)}ms avg, ${(grayTotal / 1000).toFixed(1)}s total (${pct(grayTotal)}%)`);
+        addLog(`Template match: ${avg(stackingStats.templateMatchMs)}ms avg, ${(matchTotal / 1000).toFixed(1)}s total (${pct(matchTotal)}%)`);
+        addLog(`Accumulate: ${avg(stackingStats.accumulateMs)}ms avg, ${(accumTotal / 1000).toFixed(1)}s total (${pct(accumTotal)}%)`);
+        addLog(`────────────────────────────────────`);
+    }
+
     /**
      * Convert Float32 buffer to Uint8 buffer (for GPU workers that expect Uint8)
      */
@@ -238,6 +274,7 @@ export function useStacker() {
      */
     async function stackWithGpuPipelined(frameMetadata, frameReReader, drizzleScale, addLog, emit, surfaceMode = false, noiseRobustAlignment = false) {
         const frameCount = frameMetadata.length;
+        resetStackingStats();
 
         // Detect frameReReader type and extract parameters
         const isSerFile = frameReReader.fileType === 'ser' || frameReReader.header;
@@ -489,6 +526,7 @@ export function useStacker() {
 
                 // Get current batch (pre-loaded or load now)
                 let rawBatch;
+                const t0Load = performance.now();
                 if (nextBatchPromise) {
                     rawBatch = await nextBatchPromise;
                     // Trim if batch size was reduced
@@ -500,6 +538,7 @@ export function useStacker() {
                 } else {
                     rawBatch = await loadRawBatch(batchFrames);
                 }
+                stackingStats.frameLoadMs.push(performance.now() - t0Load);
 
                 // Start loading next batch while processing current
                 const nextStart = batchStart + rawBatch.frames.length;
@@ -512,6 +551,7 @@ export function useStacker() {
                 }
 
                 // Process current batch via GPU (demosaic + crop) with OOM handling
+                const t0Demosaic = performance.now();
                 let gpuResults = null;
                 let retryFrames = rawBatch.frames;
                 let retryCenters = rawBatch.centers;
@@ -532,6 +572,7 @@ export function useStacker() {
                         }
                     }
                 }
+                stackingStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
                 if (!gpuResults) break;
                 rawBatch.frames = retryFrames;
                 rawBatch.centers = retryCenters;
@@ -548,15 +589,18 @@ export function useStacker() {
                 }
 
                 // Calculate shifts for batch via GPU template matching
+                const t0Gray = performance.now();
                 const frameGrayDatas = gpuResults.map(r =>
                     rgbaToGrayscale(r.float32Buffer, cropSize, cropSize, true)
                 );
+                stackingStats.grayscaleMs.push(performance.now() - t0Gray);
 
                 // For surface mode, pass searchOffset to shift search region without affecting template extraction
                 const searchOffset = surfaceMode && (cumulativeDrift.dx !== 0 || cumulativeDrift.dy !== 0)
                     ? { dx: cumulativeDrift.dx, dy: cumulativeDrift.dy }
                     : null;
 
+                const t0Match = performance.now();
                 const batchShifts = await new Promise((resolve, reject) => {
                     const requestId = batchStart;
                     const handler = (e) => {
@@ -580,6 +624,7 @@ export function useStacker() {
                         noiseRobustAlignment
                     });
                 });
+                stackingStats.templateMatchMs.push(performance.now() - t0Match);
 
                 // Update cumulative drift from last frame's shifts (surface mode)
                 if (surfaceMode && batchShifts.length > 0) {
@@ -604,6 +649,7 @@ export function useStacker() {
                 }));
                 const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
 
+                const t0Accum = performance.now();
                 await new Promise((resolve, reject) => {
                     const handler = (e) => {
                         if (e.data.type === 'stack-batch-done') {
@@ -622,6 +668,7 @@ export function useStacker() {
                         frameWeights: batchWeights
                     });
                 });
+                stackingStats.accumulateMs.push(performance.now() - t0Accum);
 
                 processedCount += batchFrames.length;
                 const progress = (processedCount / frameCount) * 90;
@@ -651,6 +698,10 @@ export function useStacker() {
             gpuStackWorker.postMessage({ type: 'cleanup' });
             gpuAnalyzeWorker.terminate();
             gpuStackWorker.terminate();
+
+            // Log performance summary
+            stackingStats.totalFrames = frameCount;
+            logStackingStats();
 
             addLog(`Stacking complete: ${result.width}x${result.height}`);
             emit('set-caption', 'Stacking complete');
@@ -839,6 +890,7 @@ export function useStacker() {
      */
     async function stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode = false, noiseRobustAlignment = false) {
         const { width, height } = frameData[0];
+        resetStackingStats();
 
         // Step 1: Initialize GPU worker
         addLog('Initializing GPU worker...');
@@ -941,11 +993,13 @@ export function useStacker() {
                 const batchIndices = framesToProcess.slice(batchStart, batchEnd);
 
                 // Convert batch frames to grayscale (handle both Float32 and Uint8)
+                const t0Gray = performance.now();
                 const frameGrayDatas = batchIndices.map(f => {
                     const frame = frameData[f];
                     const buffer = frame.isFloat32 ? frame.float32Buffer : frame.rgbaBuffer;
                     return rgbaToGrayscale(buffer, width, height, frame.isFloat32);
                 });
+                stackingStats.grayscaleMs.push(performance.now() - t0Gray);
 
                 // Send batch to GPU with searchOffset for drift tracking
                 // searchOffset tells GPU to search around expected drifted position while
@@ -954,6 +1008,7 @@ export function useStacker() {
                     ? { dx: cumulativeDrift.dx, dy: cumulativeDrift.dy }
                     : null;
 
+                const t0Match = performance.now();
                 const batchShifts = await new Promise((resolve, reject) => {
                     const requestId = batchStart;
                     const handler = (e) => {
@@ -977,6 +1032,7 @@ export function useStacker() {
                         noiseRobustAlignment
                     });
                 });
+                stackingStats.templateMatchMs.push(performance.now() - t0Match);
 
                 // Store results at correct indices
                 for (let i = 0; i < batchIndices.length; i++) {
@@ -1074,6 +1130,7 @@ export function useStacker() {
                     batchWeights.push(frame.sharpness / totalSharpness * frameCount);
                 }
 
+                const t0Accum = performance.now();
                 await new Promise((resolve, reject) => {
                     const handler = (e) => {
                         if (e.data.type === 'stack-batch-done') {
@@ -1092,6 +1149,7 @@ export function useStacker() {
                         frameWeights: batchWeights
                     });
                 });
+                stackingStats.accumulateMs.push(performance.now() - t0Accum);
 
                 stackedCount = batchEnd;
                 const progress = 50 + (stackedCount / frameCount) * 40;
@@ -1119,6 +1177,10 @@ export function useStacker() {
             // Cleanup and terminate
             gpuWorker.postMessage({ type: 'cleanup' });
             gpuWorker.terminate();
+
+            // Log performance summary
+            stackingStats.totalFrames = frameCount;
+            logStackingStats();
 
             addLog(`Stacked image: ${result.width}x${result.height}, ${(result.blob.size / 1024).toFixed(1)} KB`);
             emit('set-caption', 'Stacking complete');
