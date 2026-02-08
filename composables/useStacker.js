@@ -26,7 +26,8 @@ export function useStacker() {
             templateMatchMs: [],  // Time for GPU template matching
             accumulateMs: [],     // Time for GPU accumulation
             totalFrames: 0,
-            startTime: performance.now()
+            startTime: performance.now(),
+            analysisStartTime: null // Set separately for total pipeline time
         };
     }
     function logStackingStats() {
@@ -43,13 +44,20 @@ export function useStacker() {
         const accumTotal = sum(stackingStats.accumulateMs);
 
         addLog(`─── Stacking Performance Summary ───`);
-        addLog(`Total time: ${(elapsed / 1000).toFixed(1)}s for ${stackingStats.totalFrames} frames`);
+        addLog(`Stacking time: ${(elapsed / 1000).toFixed(1)}s for ${stackingStats.totalFrames} frames`);
         addLog(`Frame loading (disk): ${avg(stackingStats.frameLoadMs)}ms avg, ${(loadTotal / 1000).toFixed(1)}s total (${pct(loadTotal)}%)`);
         addLog(`GPU demosaic+crop: ${avg(stackingStats.gpuDemosaicMs)}ms avg, ${(demosaicTotal / 1000).toFixed(1)}s total (${pct(demosaicTotal)}%)`);
         addLog(`Grayscale: ${avg(stackingStats.grayscaleMs)}ms avg, ${(grayTotal / 1000).toFixed(1)}s total (${pct(grayTotal)}%)`);
         addLog(`Template match: ${avg(stackingStats.templateMatchMs)}ms avg, ${(matchTotal / 1000).toFixed(1)}s total (${pct(matchTotal)}%)`);
         addLog(`Accumulate: ${avg(stackingStats.accumulateMs)}ms avg, ${(accumTotal / 1000).toFixed(1)}s total (${pct(accumTotal)}%)`);
-        addLog(`────────────────────────────────────`);
+
+        // Total pipeline time (analysis + stacking)
+        if (stackingStats.analysisStartTime) {
+            const totalPipeline = performance.now() - stackingStats.analysisStartTime;
+            addLog(`─── Total pipeline: ${(totalPipeline / 1000).toFixed(1)}s ───`);
+        } else {
+            addLog(`────────────────────────────────────`);
+        }
     }
 
     /**
@@ -275,6 +283,7 @@ export function useStacker() {
     async function stackWithGpuPipelined(frameMetadata, frameReReader, drizzleScale, addLog, emit, surfaceMode = false, noiseRobustAlignment = false) {
         const frameCount = frameMetadata.length;
         resetStackingStats();
+        stackingStats.analysisStartTime = frameReReader.analysisStartTime;
 
         // Detect frameReReader type and extract parameters
         const isSerFile = frameReReader.fileType === 'ser' || frameReReader.header;

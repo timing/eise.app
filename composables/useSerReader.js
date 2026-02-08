@@ -907,6 +907,68 @@ export function useSerReader() {
             scale16bitData(previewBuffer, data16bitScaleFactor);
         }
         let previewHeader = header;
+        let previewDetectedSize = null; // Store for use in crop region detection
+
+        // Try to crop the preview for better display in color selector (same as multi-file path)
+        if (header.width >= MIN_SIZE_FOR_CROP && header.height >= MIN_SIZE_FOR_CROP) {
+            emit('set-caption', 'Detecting planet for preview...');
+            try {
+                const gpuReady = await initGpuAnalyzeWorker();
+                let boundsResult = null;
+
+                if (gpuReady) {
+                    const frameData = header.pixelDepth > 8
+                        ? new Uint16Array(previewBuffer)
+                        : new Uint8Array(previewBuffer);
+                    const frames = [{ data: frameData, index: 0 }];
+                    const previewBayerPattern = bayerChoiceToGpuPattern(autoDetectedProfile);
+                    const results = await analyzeFrameBatchGpu(frames, header.width, header.height, previewBayerPattern, 0.10, true);
+                    if (results && results[0] && results[0].bounds) {
+                        previewDetectedSize = Math.max(results[0].bounds.width, results[0].bounds.height);
+                        boundsResult = {
+                            bounds: {
+                                canCrop: true,
+                                centerX: results[0].bounds.centroidX,
+                                centerY: results[0].bounds.centroidY,
+                                size: previewDetectedSize
+                            }
+                        };
+                    }
+                }
+
+                if (boundsResult && boundsResult.bounds && boundsResult.bounds.canCrop) {
+                    const { centerX, centerY, size } = boundsResult.bounds;
+                    const previewMargin = 1 + (cropMarginPercent / 100);
+                    const cropSize = Math.ceil(size * previewMargin / 2) * 2;
+                    const maxCropSize = Math.min(header.width, header.height);
+
+                    if (cropSize < maxCropSize) {
+                        const bpp = header.pixelDepth > 8 ? 2 : 1;
+                        const halfSize = Math.floor(cropSize / 2);
+                        let startX = Math.max(0, Math.min(header.width - cropSize, Math.round(centerX) - halfSize));
+                        let startY = Math.max(0, Math.min(header.height - cropSize, Math.round(centerY) - halfSize));
+                        startX = Math.floor(startX / 2) * 2;
+                        startY = Math.floor(startY / 2) * 2;
+
+                        const croppedBuffer = new ArrayBuffer(cropSize * cropSize * bpp);
+                        const srcView = header.pixelDepth > 8 ? new Uint16Array(previewBuffer) : new Uint8Array(previewBuffer);
+                        const dstView = header.pixelDepth > 8 ? new Uint16Array(croppedBuffer) : new Uint8Array(croppedBuffer);
+
+                        for (let y = 0; y < cropSize; y++) {
+                            const srcOffset = (startY + y) * header.width + startX;
+                            const dstOffset = y * cropSize;
+                            dstView.set(srcView.subarray(srcOffset, srcOffset + cropSize), dstOffset);
+                        }
+
+                        previewBuffer = croppedBuffer;
+                        previewHeader = { ...header, width: cropSize, height: cropSize };
+                        addLog(`Cropped preview to ${cropSize}x${cropSize} for color selector`);
+                    }
+                }
+            } catch (error) {
+                addLog(`Could not crop preview: ${error.message}`);
+            }
+        }
 
         emit('set-caption', 'Select color profile');
 
@@ -1142,6 +1204,13 @@ export function useSerReader() {
         // Pass 2: During stacking, re-read selected frames on-demand via frameReReader
         let frameReReader = null; // Will be set if two-pass mode is used
 
+        // Timing stats for analysis phase
+        const analysisStats = {
+            frameLoadMs: [],
+            gpuDemosaicMs: [],
+            startTime: performance.now()
+        };
+
         const gpuReady = await initGpuAnalyzeWorker();
         if (!gpuReady) {
             throw new Error('WebGPU initialization failed - GPU is required for processing');
@@ -1213,6 +1282,7 @@ export function useSerReader() {
 
                         // Get current batch (either pre-loaded or load now)
                         let batchFrames;
+                        const t0Load = performance.now();
                         if (nextBatchPromise) {
                             batchFrames = await nextBatchPromise;
                             // If we reduced batch size, we may need to trim pre-loaded batch
@@ -1222,6 +1292,7 @@ export function useSerReader() {
                         } else {
                             batchFrames = await loadBatch(batchStart, batchEnd);
                         }
+                        analysisStats.frameLoadMs.push(performance.now() - t0Load);
 
                         if (batchFrames.length === 0) break;
 
@@ -1235,6 +1306,7 @@ export function useSerReader() {
                         }
 
                         // Retry loop for memory allocation errors
+                        const t0Demosaic = performance.now();
                         let combinedResults = null;
                         let retryBatchFrames = batchFrames;
                         while (!combinedResults && retryBatchFrames.length > 0) {
@@ -1271,6 +1343,7 @@ export function useSerReader() {
                                 }
                             }
                         }
+                        analysisStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
 
                         if (!combinedResults) {
                             break; // No more frames to process
@@ -1446,6 +1519,21 @@ export function useSerReader() {
                         isFirstBatch = false;
                     }
 
+                    // Log analysis phase performance summary
+                    const analysisElapsed = performance.now() - analysisStats.startTime;
+                    const avgLoad = analysisStats.frameLoadMs.length ? (analysisStats.frameLoadMs.reduce((a, b) => a + b, 0) / analysisStats.frameLoadMs.length).toFixed(1) : '0';
+                    const avgDemosaic = analysisStats.gpuDemosaicMs.length ? (analysisStats.gpuDemosaicMs.reduce((a, b) => a + b, 0) / analysisStats.gpuDemosaicMs.length).toFixed(1) : '0';
+                    const totalLoad = analysisStats.frameLoadMs.reduce((a, b) => a + b, 0);
+                    const totalDemosaic = analysisStats.gpuDemosaicMs.reduce((a, b) => a + b, 0);
+                    const pctLoad = analysisElapsed > 0 ? ((totalLoad / analysisElapsed) * 100).toFixed(0) : '0';
+                    const pctDemosaic = analysisElapsed > 0 ? ((totalDemosaic / analysisElapsed) * 100).toFixed(0) : '0';
+
+                    addLog(`─── Analysis Performance Summary ───`);
+                    addLog(`Total time: ${(analysisElapsed / 1000).toFixed(1)}s for ${completedFrames} frames`);
+                    addLog(`Frame loading (disk): ${avgLoad}ms avg, ${(totalLoad / 1000).toFixed(1)}s total (${pctLoad}%)`);
+                    addLog(`GPU demosaic (8-bit): ${avgDemosaic}ms avg, ${(totalDemosaic / 1000).toFixed(1)}s total (${pctDemosaic}%)`);
+                    addLog(`────────────────────────────────────`);
+
                     // Create frameReReader for two-pass stacking
                     // This allows the stacker to re-read frames on-demand instead of storing all float32 buffers
                     if (frameCenters.size > 0) {
@@ -1457,6 +1545,7 @@ export function useSerReader() {
                             cropRegion,
                             frameCenters, // Map of index -> {x, y}
                             frameSize,
+                            analysisStartTime: analysisStats.startTime, // For total pipeline time
 
                             // Re-read a single frame and return float32Buffer
                             async getFrame(frameIndex, centerOverride = null) {
@@ -1530,6 +1619,7 @@ export function useSerReader() {
 
                         // Get current batch
                         let batchFrames;
+                        const t0Load = performance.now();
                         if (nextBatchPromise) {
                             batchFrames = await nextBatchPromise;
                             // If we reduced batch size, we may need to trim pre-loaded batch
@@ -1539,6 +1629,7 @@ export function useSerReader() {
                         } else {
                             batchFrames = await loadBatchNoCrop(batchStart, batchEnd);
                         }
+                        analysisStats.frameLoadMs.push(performance.now() - t0Load);
 
                         if (batchFrames.length === 0) break;
 
@@ -1552,6 +1643,7 @@ export function useSerReader() {
                         }
 
                         // Retry loop for memory allocation errors
+                        const t0Demosaic = performance.now();
                         let results = null;
                         let retryBatchFrames = batchFrames;
                         while (!results && retryBatchFrames.length > 0) {
@@ -1583,6 +1675,7 @@ export function useSerReader() {
                                 }
                             }
                         }
+                        analysisStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
 
                         if (!results) break;
                         batchFrames = retryBatchFrames;
@@ -1636,6 +1729,21 @@ export function useSerReader() {
                         batchStart += batchFrames.length;
                     }
 
+                    // Log analysis phase performance summary
+                    const analysisElapsed = performance.now() - analysisStats.startTime;
+                    const avgLoad = analysisStats.frameLoadMs.length ? (analysisStats.frameLoadMs.reduce((a, b) => a + b, 0) / analysisStats.frameLoadMs.length).toFixed(1) : '0';
+                    const avgDemosaic = analysisStats.gpuDemosaicMs.length ? (analysisStats.gpuDemosaicMs.reduce((a, b) => a + b, 0) / analysisStats.gpuDemosaicMs.length).toFixed(1) : '0';
+                    const totalLoad = analysisStats.frameLoadMs.reduce((a, b) => a + b, 0);
+                    const totalDemosaic = analysisStats.gpuDemosaicMs.reduce((a, b) => a + b, 0);
+                    const pctLoad = analysisElapsed > 0 ? ((totalLoad / analysisElapsed) * 100).toFixed(0) : '0';
+                    const pctDemosaic = analysisElapsed > 0 ? ((totalDemosaic / analysisElapsed) * 100).toFixed(0) : '0';
+
+                    addLog(`─── Analysis Performance Summary ───`);
+                    addLog(`Total time: ${(analysisElapsed / 1000).toFixed(1)}s for ${completedFrames} frames`);
+                    addLog(`Frame loading (disk): ${avgLoad}ms avg, ${(totalLoad / 1000).toFixed(1)}s total (${pctLoad}%)`);
+                    addLog(`GPU demosaic (8-bit): ${avgDemosaic}ms avg, ${(totalDemosaic / 1000).toFixed(1)}s total (${pctDemosaic}%)`);
+                    addLog(`────────────────────────────────────`);
+
                     // Create frameReReader for two-pass stacking (no cropping needed)
                     frameReReader = {
                         header,
@@ -1646,6 +1754,7 @@ export function useSerReader() {
                         width: processWidth,
                         height: processHeight,
                         noCrop: true, // Flag to indicate no cropping needed
+                        analysisStartTime: analysisStats.startTime, // For total pipeline time
 
                         // Re-read a single frame by index
                         async getFrame(frameIndex) {
@@ -1880,23 +1989,10 @@ export function useSerReader() {
                 const frameBuffer = await item.file.slice(item.offset, item.offset + item.frameSize).arrayBuffer();
 
                 // Convert to appropriate typed array based on pixel depth
+                // Don't scale here - GPU worker will auto-stretch 16-bit data (same as single-file path)
                 let data;
                 if (item.header.pixelDepth > 8) {
                     data = new Uint16Array(frameBuffer);
-                    // Detect effective bit depth and scale to full 16-bit range
-                    const sampleMax = Math.max(...data.slice(0, Math.min(1000, data.length)));
-                    if (sampleMax > 0 && sampleMax < 32768) {
-                        let scaleFactor = 1;
-                        if (sampleMax <= 255) scaleFactor = 257;        // 8-bit
-                        else if (sampleMax <= 1023) scaleFactor = 64;   // 10-bit
-                        else if (sampleMax <= 4095) scaleFactor = 16;   // 12-bit
-                        else if (sampleMax <= 16383) scaleFactor = 4;   // 14-bit
-                        if (scaleFactor > 1) {
-                            for (let j = 0; j < data.length; j++) {
-                                data[j] = Math.min(65535, data[j] * scaleFactor);
-                            }
-                        }
-                    }
                 } else {
                     data = new Uint8Array(frameBuffer);
                 }
@@ -1911,9 +2007,8 @@ export function useSerReader() {
                 for (const result of results) {
                     if (result.bounds) {
                         canCropCount++;
-                        // Add 20% margin on each side (1.4x) to match CPU's detectObjectBounds
-                        const rawSize = Math.max(result.bounds.width, result.bounds.height);
-                        const size = rawSize * 1.4;
+                        // Use raw detected size - user's cropMarginPercent will be applied later
+                        const size = Math.max(result.bounds.width, result.bounds.height);
                         maxSize = Math.max(maxSize, size);
                         detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
                         detectedSizes.push(size);
@@ -1938,13 +2033,17 @@ export function useSerReader() {
             return null;
         }
 
-        // Calculate median size (more robust than max which can be skewed by moons/noise)
+        // Use 25th percentile for tighter crop (median can be skewed by atmospheric expansion)
         const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const percentile25 = sortedSizes[Math.floor(sortedSizes.length * 0.25)];
         const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
+        const baseSize = percentile25; // Use 25th percentile for tighter crop
 
-        // Use median size with margin, capped at smallest frame dimensions
+        addLog(`Size distribution: min=${sortedSizes[0]?.toFixed(0)}, 25th=${percentile25?.toFixed(0)}, median=${medianSize?.toFixed(0)}, max=${sortedSizes[sortedSizes.length-1]?.toFixed(0)}`);
+
+        // Use 25th percentile size with margin, capped at smallest frame dimensions
         const marginMultiplier = 1 + (cropMarginPercent / 100);
-        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
+        const desiredSize = Math.ceil(baseSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(...fileInfos.map(info => Math.min(info.header.width, info.header.height)));
         let finalSize = Math.min(desiredSize, maxAllowedSize);
 
@@ -1953,8 +2052,8 @@ export function useSerReader() {
         }
 
         if (detectedCenters.length === 0) {
-            addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize} (${canCropCount}/${sampleFrames.length} frames croppable)`);
-            return { size: finalSize, medianObjectSize: medianSize };
+            addLog(`GPU detected crop size: ${finalSize}x${finalSize}, base object size: ${baseSize?.toFixed(0)} (${canCropCount}/${sampleFrames.length} frames croppable)`);
+            return { size: finalSize, medianObjectSize: baseSize };
         }
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -1962,9 +2061,9 @@ export function useSerReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        addLog(`GPU detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, max detected: ${maxSize} (${canCropCount}/${sampleFrames.length} frames croppable across ${fileInfos.length} files)`);
+        addLog(`GPU detected crop size: ${finalSize}x${finalSize}, base object size: ${baseSize?.toFixed(0)} (${canCropCount}/${sampleFrames.length} frames croppable across ${fileInfos.length} files)`);
 
-        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: baseSize };
     }
 
     // Detect crop region across multiple files
@@ -2163,6 +2262,7 @@ export function useSerReader() {
         // Try to crop the first frame for better preview in color selector
         let previewBuffer = firstFrameBuffer;
         let previewHeader = firstHeader;
+        let previewDetectedSize = null; // Store for use in crop region detection
         const MIN_SIZE_FOR_CROP = 300;
 
         if (firstHeader.width >= MIN_SIZE_FOR_CROP && firstHeader.height >= MIN_SIZE_FOR_CROP) {
@@ -2181,12 +2281,13 @@ export function useSerReader() {
                     const previewBayerPattern = bayerChoiceToGpuPattern(autoDetectedProfile);
                     const results = await analyzeFrameBatchGpu(frames, firstHeader.width, firstHeader.height, previewBayerPattern, 0.10, true);
                     if (results && results[0] && results[0].bounds) {
+                        previewDetectedSize = Math.max(results[0].bounds.width, results[0].bounds.height);
                         boundsResult = {
                             bounds: {
                                 canCrop: true,
                                 centerX: results[0].bounds.centroidX,
                                 centerY: results[0].bounds.centroidY,
-                                size: Math.max(results[0].bounds.width, results[0].bounds.height)
+                                size: previewDetectedSize
                             }
                         };
                     }
@@ -2403,6 +2504,13 @@ export function useSerReader() {
             // GPU PATH: Use same batch processing pattern as single-file
             addLog('Using GPU for multi-file frame analysis');
 
+            // Timing stats for analysis phase
+            const analysisStats = {
+                frameLoadMs: [],
+                gpuDemosaicMs: [],
+                startTime: performance.now()
+            };
+
             // Build unified frame reference list across all files
             const allFrameRefs = [];
             for (const fileInfo of fileInfos) {
@@ -2508,6 +2616,7 @@ export function useSerReader() {
 
                 // Get current batch
                 let batchFrames;
+                const t0Load = performance.now();
                 if (nextBatchPromise) {
                     batchFrames = await nextBatchPromise;
                     if (batchFrames.length > effectiveMaxBatchSize) {
@@ -2516,6 +2625,7 @@ export function useSerReader() {
                 } else {
                     batchFrames = await loadBatchMultiFile(batchStart, batchEnd);
                 }
+                analysisStats.frameLoadMs.push(performance.now() - t0Load);
 
                 if (batchFrames.length === 0) break;
 
@@ -2532,6 +2642,7 @@ export function useSerReader() {
                 let combinedResults = null;
                 let retryBatchFrames = batchFrames;
 
+                const t0Demosaic = performance.now();
                 while (!combinedResults && retryBatchFrames.length > 0) {
                     try {
                         if (batchStart === 0) {
@@ -2569,6 +2680,7 @@ export function useSerReader() {
                         }
                     }
                 }
+                analysisStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
 
                 if (!combinedResults) break;
 
@@ -2722,6 +2834,21 @@ export function useSerReader() {
                 isFirstBatch = false;
             }
 
+            // Log analysis phase performance summary
+            const analysisElapsed = performance.now() - analysisStats.startTime;
+            const avgLoad = analysisStats.frameLoadMs.length ? (analysisStats.frameLoadMs.reduce((a, b) => a + b, 0) / analysisStats.frameLoadMs.length).toFixed(1) : '0';
+            const avgDemosaic = analysisStats.gpuDemosaicMs.length ? (analysisStats.gpuDemosaicMs.reduce((a, b) => a + b, 0) / analysisStats.gpuDemosaicMs.length).toFixed(1) : '0';
+            const totalLoad = analysisStats.frameLoadMs.reduce((a, b) => a + b, 0);
+            const totalDemosaic = analysisStats.gpuDemosaicMs.reduce((a, b) => a + b, 0);
+            const pctLoad = analysisElapsed > 0 ? ((totalLoad / analysisElapsed) * 100).toFixed(0) : '0';
+            const pctDemosaic = analysisElapsed > 0 ? ((totalDemosaic / analysisElapsed) * 100).toFixed(0) : '0';
+
+            addLog(`─── Analysis Performance Summary ───`);
+            addLog(`Total time: ${(analysisElapsed / 1000).toFixed(1)}s for ${completedFrames} frames`);
+            addLog(`Frame loading (disk): ${avgLoad}ms avg, ${(totalLoad / 1000).toFixed(1)}s total (${pctLoad}%)`);
+            addLog(`GPU demosaic (8-bit): ${avgDemosaic}ms avg, ${(totalDemosaic / 1000).toFixed(1)}s total (${pctDemosaic}%)`);
+            addLog(`────────────────────────────────────`);
+
             // Create multi-file frameReReader for two-pass stacking
             if (frameCenters.size > 0) {
                 frameReReader = {
@@ -2736,6 +2863,7 @@ export function useSerReader() {
                     bayerChoice,
                     cropRegion,
                     frameCenters, // Map: globalIndex -> {x, y, fileInfo, localIndex}
+                    analysisStartTime: analysisStats.startTime, // For total time calculation
 
                     async getFrame(globalIndex, centerOverride = null) {
                         const centerInfo = centerOverride || this.frameCenters.get(globalIndex);
