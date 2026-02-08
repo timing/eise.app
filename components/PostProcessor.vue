@@ -197,7 +197,7 @@
 				<button class="export-option" @click="downloadCanvasAsPNG">
 					⬇ Processed PNG (8-bit)
 				</button>
-				<button v-if="use16bit && sharpenedImage16" class="export-option" @click="download16BitProcessedPNG">
+				<button v-if="sharpenedImage16" class="export-option" @click="download16BitProcessedPNG">
 					⬇ Processed PNG (16-bit)
 				</button>
 				<button class="export-option" @click="downloadUnprocessedPNG">
@@ -237,7 +237,6 @@ import { ref, onMounted, watch, defineProps, reactive, onUnmounted, computed, ne
 import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import { encodeAvi } from '@/utils/aviEncoder.js'
-import { initWebGL, processWithWebGL, isWebGLAvailable, disposeWebGL } from '@/utils/webglProcessor.js'
 import { deconvolveWebGL, deconvolveWebGL16, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
 import { Image16 } from '@/utils/Image16.js'
 import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2, blurWithWebGL2 } from '@/utils/webgl2Processor.js'
@@ -311,13 +310,11 @@ const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
 const zoomableCanvasRef = ref(null);
 let canvas;
-let useWebGL = false;
 let useWebGL2 = false;
 
-// 16-bit processing state
-const use16bit = ref(true); // Enable 16-bit mode by default
-let image16 = null; // Image16 container for 16-bit processing
-let sharpenedImage16 = null; // Sharpened result in 16-bit
+// 16-bit processing state (all processing is 16-bit, display is 8-bit)
+let image16 = null; // Image16 container for source data
+let sharpenedImage16 = null; // Processed result in 16-bit
 
 const handleCanvasReady = (canvasRef) => {
 	// canvasRef is the direct ref to the canvas element
@@ -666,21 +663,8 @@ async function loadImage(file) {
 		}
 		sharpenedImage16 = null;
 
-		// Initialize WebGL2 for 16-bit processing (preferred)
+		// Initialize WebGL2 for GPU-accelerated color adjustments
 		useWebGL2 = initWebGL2(img.width, img.height);
-		if (useWebGL2) {
-			console.log('WebGL2 acceleration enabled for 16-bit color adjustments');
-		} else {
-			console.log('WebGL2 not available, falling back to WebGL1/CPU');
-		}
-
-		// Initialize WebGL1 for legacy/fallback processing
-		useWebGL = initWebGL(img.width, img.height);
-		if (useWebGL && !useWebGL2) {
-			console.log('WebGL1 acceleration enabled for 8-bit color adjustments');
-		} else if (!useWebGL && !useWebGL2) {
-			console.log('Using CPU for color adjustments');
-		}
 
 		isLoadingImage.value = false;
 
@@ -694,73 +678,6 @@ async function loadImage(file) {
 
 	};
 	img.src = URL.createObjectURL(file);
-}
-
-// Apply gain, contrast, gamma, saturation, and vibrance in a single pass for efficiency
-function applyColorAdjustments(sourceData, width, height, gainVal, contrastVal, gammaVal, saturationVal, vibranceVal) {
-	const data = sourceData.data;
-	const newData = new Uint8ClampedArray(data.length);
-
-	// Precompute gamma LUT for performance
-	const gammaLUT = new Uint8Array(256);
-	const invGamma = 1 / gammaVal;
-	for (let i = 0; i < 256; i++) {
-		gammaLUT[i] = Math.round(Math.pow(i / 255, invGamma) * 255);
-	}
-
-	for (let i = 0; i < data.length; i += 4) {
-		let r = data[i];
-		let g = data[i + 1];
-		let b = data[i + 2];
-
-		// Apply gain
-		r *= gainVal;
-		g *= gainVal;
-		b *= gainVal;
-
-		// Apply contrast: (value - 128) * contrast + 128
-		r = (r - 128) * contrastVal + 128;
-		g = (g - 128) * contrastVal + 128;
-		b = (b - 128) * contrastVal + 128;
-
-		// Clamp before gamma (need valid 0-255 range for LUT)
-		r = Math.max(0, Math.min(255, r));
-		g = Math.max(0, Math.min(255, g));
-		b = Math.max(0, Math.min(255, b));
-
-		// Apply gamma using LUT
-		r = gammaLUT[Math.round(r)];
-		g = gammaLUT[Math.round(g)];
-		b = gammaLUT[Math.round(b)];
-
-		// Apply saturation
-		// Luminance (Rec. 709)
-		const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-		r = lum + saturationVal * (r - lum);
-		g = lum + saturationVal * (g - lum);
-		b = lum + saturationVal * (b - lum);
-
-		// Apply vibrance (saturation that affects less-saturated colors more)
-		if (vibranceVal !== 0) {
-			const maxC = Math.max(r, g, b);
-			const minC = Math.min(r, g, b);
-			const currentSat = maxC > 0 ? (maxC - minC) / maxC : 0;
-			// Less saturated colors get more boost
-			const vibranceAmount = vibranceVal * (1 - currentSat);
-			const lum2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-			r = r + (r - lum2) * vibranceAmount;
-			g = g + (g - lum2) * vibranceAmount;
-			b = b + (b - lum2) * vibranceAmount;
-		}
-
-		// Final clamp
-		newData[i] = Math.max(0, Math.min(255, r));
-		newData[i + 1] = Math.max(0, Math.min(255, g));
-		newData[i + 2] = Math.max(0, Math.min(255, b));
-		newData[i + 3] = data[i + 3]; // Alpha unchanged
-	}
-
-	return new ImageData(newData, width, height);
 }
 
 // Apply color adjustments in 16-bit (Float32Array, 0.0-1.0 range)
@@ -824,220 +741,106 @@ function applyColorAdjustments16(data, width, height, gainVal, contrastVal, gamm
 	return newData;
 }
 
-// Apply color adjustments using WebGL or CPU
-function doColorAdjustments(sourceData) {
-	if (useWebGL) {
-		const webglResult = processWithWebGL(
-			sourceData,
+// Debounced processing - waits for user to stop dragging before heavy processing
+const applyProcessingInternal = async() => {
+	if (!image16) {
+		console.warn('No image16 data available');
+		return;
+	}
+
+	isProcessing.value = true;
+
+	const width = canvas.value.width;
+	const height = canvas.value.height;
+
+	let workingData = new Float32Array(image16.data); // Copy for processing
+
+	// STEP 0: Chromatic aberration correction (FIRST - before any other processing)
+	// This fixes spatial misalignment of color channels before sharpening amplifies artifacts
+	workingData = applyChromaticAberrationCorrection16(
+		workingData,
+		width,
+		height,
+		fixedAberration.red,
+		fixedAberration.blue
+	);
+
+	// STEP 0.5: Auto color balance (gray world)
+	// Corrects color cast before sharpening amplifies color differences
+	if (autoColorBalance.value) {
+		workingData = applyAutoColorBalance16(workingData, width, height);
+	}
+
+	// STEP 1: Sharpening (based on selected method)
+	if (sharpeningMethod.value === 'usm' && usmAmount.value > 0) {
+		try {
+			workingData = await usmSharpenInWorker16(
+				workingData,
+				width,
+				height,
+				parseFloat(usmRadius.value),
+				parseFloat(usmAmount.value),
+				parseFloat(usmThreshold.value),
+				sharpenLuminanceOnly.value
+			);
+		} catch (e) {
+			console.log('USM rejected (newer task running)');
+			isProcessing.value = false;
+			return;
+		}
+	} else if (sharpeningMethod.value === 'wavelets' && waveletsAmount.value > 0) {
+		try {
+			workingData = await waveletSharpenInWorker16(
+				workingData,
+				width,
+				height,
+				parseFloat(waveletsAmount.value),
+				parseFloat(waveletsRadius.value),
+				sharpenLuminanceOnly.value
+			);
+		} catch (e) {
+			console.log('Wavelet sharpening rejected (newer task running)');
+			isProcessing.value = false;
+			return;
+		}
+	}
+
+	// STEP 2: Apply color adjustments (WebGL2 or CPU fallback)
+	if (useWebGL2) {
+		const colorResult = processWithWebGL2(
+			workingData,
+			width,
+			height,
 			gain.value,
 			contrast.value,
 			gamma.value,
 			saturation.value,
 			vibrance.value
 		);
-		if (webglResult) return webglResult;
-	}
-	// Fallback to CPU
-	return applyColorAdjustments(
-		sourceData,
-		canvas.value.width,
-		canvas.value.height,
-		gain.value,
-		contrast.value,
-		gamma.value,
-		saturation.value,
-		vibrance.value
-	);
-}
-
-// Debounced processing - waits for user to stop dragging before heavy processing
-const applyProcessingInternal = async() => {
-	console.log('applyProcessing', use16bit.value ? '(16-bit)' : '(8-bit)');
-	isProcessing.value = true;
-
-	const width = canvas.value.width;
-	const height = canvas.value.height;
-
-	// Choose processing path based on 16-bit mode
-	if (use16bit.value && image16) {
-		// ==================== 16-BIT PROCESSING PATH ====================
-		let workingData = new Float32Array(image16.data); // Copy for processing
-
-		// STEP 0: Chromatic aberration correction (FIRST - before any other processing)
-		// This fixes spatial misalignment of color channels before sharpening amplifies artifacts
-		workingData = applyChromaticAberrationCorrection16(
-			workingData,
-			width,
-			height,
-			fixedAberration.red,
-			fixedAberration.blue
-		);
-
-		// STEP 0.5: Auto color balance (gray world)
-		// Corrects color cast before sharpening amplifies color differences
-		if (autoColorBalance.value) {
-			workingData = applyAutoColorBalance16(workingData, width, height);
-		}
-
-		// STEP 1: Sharpening (based on selected method)
-		if (sharpeningMethod.value === 'usm' && usmAmount.value > 0) {
-			console.log(`USM 16-bit (radius=${usmRadius.value}, amount=${usmAmount.value}%, threshold=${usmThreshold.value}, lumOnly=${sharpenLuminanceOnly.value})`);
-			try {
-				workingData = await usmSharpenInWorker16(
-					workingData,
-					width,
-					height,
-					parseFloat(usmRadius.value),
-					parseFloat(usmAmount.value),
-					parseFloat(usmThreshold.value),
-					sharpenLuminanceOnly.value
-				);
-			} catch (e) {
-				console.log('USM rejected (newer task running)');
-				isProcessing.value = false;
-				return;
-			}
-		} else if (sharpeningMethod.value === 'wavelets' && waveletsAmount.value > 0) {
-			console.log(`wavelets 16-bit (lumOnly=${sharpenLuminanceOnly.value})`);
-			try {
-				workingData = await waveletSharpenInWorker16(
-					workingData,
-					width,
-					height,
-					parseFloat(waveletsAmount.value),
-					parseFloat(waveletsRadius.value),
-					sharpenLuminanceOnly.value
-				);
-			} catch (e) {
-				console.log('Recent sharpening rejected because newer task is doing work');
-				isProcessing.value = false;
-				return;
-			}
-		}
-
-		// STEP 2: Apply color adjustments (WebGL2 16-bit or CPU)
-		if (useWebGL2) {
-			console.log('color adjustments (WebGL2 16-bit)');
-			const colorResult = processWithWebGL2(
-				workingData,
-				width,
-				height,
-				gain.value,
-				contrast.value,
-				gamma.value,
-				saturation.value,
-				vibrance.value
-			);
-			if (colorResult) {
-				workingData = colorResult;
-			} else {
-				// Fallback to CPU 16-bit color adjustments
-				console.log('WebGL2 failed, using CPU 16-bit');
-				workingData = applyColorAdjustments16(workingData, width, height, gain.value, contrast.value, gamma.value, saturation.value, vibrance.value);
-			}
+		if (colorResult) {
+			workingData = colorResult;
 		} else {
-			console.log('color adjustments (CPU 16-bit)');
 			workingData = applyColorAdjustments16(workingData, width, height, gain.value, contrast.value, gamma.value, saturation.value, vibrance.value);
 		}
-
-		// STEP 3: Noise reduction (only with wavelets) - WebGL2 Gaussian blur
-		if (sharpeningMethod.value === 'wavelets' && postNoiseReduction.value >= 3) {
-			const ksize = parseInt(postNoiseReduction.value, 10) | 1;
-			console.log('noise reduction (WebGL2, kernel=' + ksize + ')');
-			const blurResult = blurWithWebGL2(workingData, width, height, ksize);
-			if (blurResult) {
-				workingData = blurResult;
-			} else {
-				console.warn('WebGL2 blur failed, skipping noise reduction');
-			}
-		}
-
-		// Store 16-bit result
-		sharpenedImage16 = Image16.fromFloat32Array(workingData, width, height);
-
-		// Convert to 8-bit for display
-		sharpenedImageData = sharpenedImage16.toImageData();
-		ctx.putImageData(sharpenedImageData, 0, 0);
-
 	} else {
-		// ==================== 8-BIT PROCESSING PATH (LEGACY) ====================
-		let workingImage = initCanvasImageData;
-
-		// STEP 0: Chromatic aberration correction (FIRST - before any other processing)
-		workingImage = applyChromaticAberrationCorrection8(
-			workingImage,
-			fixedAberration.red,
-			fixedAberration.blue
-		);
-
-		// STEP 0.5: Auto color balance (gray world)
-		if (autoColorBalance.value) {
-			workingImage = applyAutoColorBalance8(workingImage);
-		}
-
-		// STEP 1: Sharpening (based on selected method)
-		if (sharpeningMethod.value === 'usm' && usmAmount.value > 0) {
-			console.log(`USM (radius=${usmRadius.value}, amount=${usmAmount.value}%, threshold=${usmThreshold.value}, lumOnly=${sharpenLuminanceOnly.value})`);
-			try {
-				workingImage = await usmSharpenInWorker(
-					workingImage,
-					parseFloat(usmRadius.value),
-					parseFloat(usmAmount.value),
-					parseFloat(usmThreshold.value),
-					sharpenLuminanceOnly.value
-				);
-			} catch (e) {
-				console.log('USM rejected (newer task running)');
-				isProcessing.value = false;
-				return;
-			}
-		} else if (sharpeningMethod.value === 'wavelets' && waveletsAmount.value > 0) {
-			console.log(`wavelets (lumOnly=${sharpenLuminanceOnly.value})`);
-			try {
-				workingImage = await waveletSharpenInWorker(
-					workingImage,
-					parseFloat(waveletsAmount.value),
-					parseFloat(waveletsRadius.value),
-					sharpenLuminanceOnly.value
-				);
-			} catch (e) {
-				console.log('Recent sharpening rejected because newer task is doing work');
-				isProcessing.value = false;
-				return;
-			}
-		}
-
-		// STEP 2: Apply color adjustments
-		console.log('color adjustments', useWebGL ? '(WebGL)' : '(CPU)');
-		workingImage = doColorAdjustments(workingImage);
-
-		// STEP 3: Noise reduction (only with wavelets) - WebGL2 Gaussian blur
-		if (sharpeningMethod.value === 'wavelets' && postNoiseReduction.value >= 3) {
-			const ksize = parseInt(postNoiseReduction.value, 10) | 1;
-			console.log('noise reduction (WebGL2, kernel=' + ksize + ')');
-			// Convert ImageData to Float32Array for WebGL2
-			const floatData = new Float32Array(workingImage.width * workingImage.height * 4);
-			for (let i = 0; i < workingImage.data.length; i++) {
-				floatData[i] = workingImage.data[i] / 255.0;
-			}
-			const blurResult = blurWithWebGL2(floatData, workingImage.width, workingImage.height, ksize);
-			if (blurResult) {
-				// Convert back to ImageData
-				const pixels = new Uint8ClampedArray(blurResult.length);
-				for (let i = 0; i < blurResult.length; i++) {
-					pixels[i] = Math.round(Math.max(0, Math.min(1, blurResult[i])) * 255);
-				}
-				workingImage = new ImageData(pixels, workingImage.width, workingImage.height);
-			} else {
-				console.warn('WebGL2 blur failed, skipping noise reduction');
-			}
-		}
-
-		// Store and display result
-		sharpenedImageData = workingImage;
-		sharpenedImage16 = null; // No 16-bit data in 8-bit mode
-		ctx.putImageData(sharpenedImageData, 0, 0);
+		workingData = applyColorAdjustments16(workingData, width, height, gain.value, contrast.value, gamma.value, saturation.value, vibrance.value);
 	}
+
+	// STEP 3: Noise reduction (only with wavelets) - WebGL2 Gaussian blur
+	if (sharpeningMethod.value === 'wavelets' && postNoiseReduction.value >= 3) {
+		const ksize = parseInt(postNoiseReduction.value, 10) | 1;
+		const blurResult = blurWithWebGL2(workingData, width, height, ksize);
+		if (blurResult) {
+			workingData = blurResult;
+		}
+	}
+
+	// Store 16-bit result
+	sharpenedImage16 = Image16.fromFloat32Array(workingData, width, height);
+
+	// Convert to 8-bit for display
+	sharpenedImageData = sharpenedImage16.toImageData();
+	ctx.putImageData(sharpenedImageData, 0, 0);
 
 	isProcessing.value = false;
 };
@@ -1103,74 +906,7 @@ function applyConditionalGain(imageData, gain, threshold, reducedGainFactor) {
 	return new ImageData(newData, width, height);
 }
 
-let currentTaskId = 0;
-let lastReturnedTaskId = 0;
-function waveletSharpenInWorker(imageData, amount, radius, luminanceOnly = false){
-	const width = imageData.width
-	const height = imageData.height;
-	currentTaskId++;
-	const workerId = currentTaskId % waveletWorkers.length;
-
-	return new Promise((resolve, reject) => {
-
-		function handleWorkerMsg(e){
-			const { imageData, taskId } = e.data;
-
-			waveletWorkers[workerId].removeEventListener('message', handleWorkerMsg)
-
-			if( currentTaskId == taskId || taskId > lastReturnedTaskId ){
-				lastReturnedTaskId = taskId;
-				resolve(imageData);
-			} else {
-				console.log('reject', currentTaskId, taskId);
-				reject();
-			}
-		}
-
-		waveletWorkers[workerId].addEventListener('message', handleWorkerMsg);
-
-		// Create a copy for transfer (original imageData needs to stay intact)
-		const dataCopy = new Uint8ClampedArray(imageData.data);
-		waveletWorkers[workerId].postMessage(
-			{ imageData: dataCopy, width, height, amount, radius, taskId: currentTaskId, luminanceOnly },
-			[dataCopy.buffer] // Transfer the buffer for zero-copy
-		);
-	});
-}
-
-let usmTaskId = 0;
-let lastUsmTaskId = 0;
-function usmSharpenInWorker(imageData, radius, amount, threshold, luminanceOnly = false) {
-	const width = imageData.width;
-	const height = imageData.height;
-	usmTaskId++;
-	const currentTask = usmTaskId;
-
-	return new Promise((resolve, reject) => {
-		function handleWorkerMsg(e) {
-			const { imageData: resultData, taskId } = e.data;
-			usmWorker.removeEventListener('message', handleWorkerMsg);
-
-			if (currentTask === taskId || taskId > lastUsmTaskId) {
-				lastUsmTaskId = taskId;
-				resolve(new ImageData(resultData, width, height));
-			} else {
-				reject(new Error('USM task superseded'));
-			}
-		}
-
-		usmWorker.addEventListener('message', handleWorkerMsg);
-
-		// Create a copy for transfer
-		const dataCopy = new Uint8ClampedArray(imageData.data);
-		usmWorker.postMessage(
-			{ imageData: dataCopy, width, height, radius, amount, threshold, taskId: currentTask, luminanceOnly },
-			[dataCopy.buffer]
-		);
-	});
-}
-
-// 16-bit wavelet sharpening worker wrapper
+// Wavelet sharpening worker wrapper
 let currentTaskId16 = 0;
 let lastReturnedTaskId16 = 0;
 function waveletSharpenInWorker16(data, width, height, amount, radius, luminanceOnly = false) {
@@ -1318,85 +1054,6 @@ function shiftChannel16(srcData, dstData, width, height, channelIndex, offsetX, 
 	}
 }
 
-// Apply chromatic aberration correction to 8-bit ImageData
-function applyChromaticAberrationCorrection8(imageData, redOffset, blueOffset) {
-	const hasRedOffset = redOffset && (redOffset.x || redOffset.y);
-	const hasBlueOffset = blueOffset && (blueOffset.x || blueOffset.y);
-
-	if (!hasRedOffset && !hasBlueOffset) return imageData;
-
-	const width = imageData.width;
-	const height = imageData.height;
-	const srcData = imageData.data;
-	const dstData = new Uint8ClampedArray(srcData.length);
-	// Copy all data first
-	dstData.set(srcData);
-
-	// Apply red channel shift
-	if (hasRedOffset) {
-		shiftChannel8(srcData, dstData, width, height, 0, -(redOffset.x || 0), -(redOffset.y || 0));
-	}
-
-	// Apply blue channel shift
-	if (hasBlueOffset) {
-		shiftChannel8(srcData, dstData, width, height, 2, -(blueOffset.x || 0), -(blueOffset.y || 0));
-	}
-
-	return new ImageData(dstData, width, height);
-}
-
-// Shift a single channel using bilinear interpolation (8-bit)
-function shiftChannel8(srcData, dstData, width, height, channelIndex, offsetX, offsetY) {
-	const needsInterpolation = (offsetX % 1 !== 0) || (offsetY % 1 !== 0);
-
-	for (let y = 0; y < height; y++) {
-		for (let x = 0; x < width; x++) {
-			const dstIdx = (y * width + x) * 4 + channelIndex;
-
-			const srcX = x + offsetX;
-			const srcY = y + offsetY;
-
-			if (needsInterpolation) {
-				const x0 = Math.floor(srcX);
-				const y0 = Math.floor(srcY);
-				const x1 = x0 + 1;
-				const y1 = y0 + 1;
-				const fx = srcX - x0;
-				const fy = srcY - y0;
-
-				if (x0 >= 0 && x1 < width && y0 >= 0 && y1 < height) {
-					const v00 = srcData[(y0 * width + x0) * 4 + channelIndex];
-					const v01 = srcData[(y0 * width + x1) * 4 + channelIndex];
-					const v10 = srcData[(y1 * width + x0) * 4 + channelIndex];
-					const v11 = srcData[(y1 * width + x1) * 4 + channelIndex];
-
-					dstData[dstIdx] = Math.round(
-						v00 * (1 - fx) * (1 - fy) +
-						v01 * fx * (1 - fy) +
-						v10 * (1 - fx) * fy +
-						v11 * fx * fy
-					);
-				} else {
-					const clampedX = Math.max(0, Math.min(width - 1, Math.round(srcX)));
-					const clampedY = Math.max(0, Math.min(height - 1, Math.round(srcY)));
-					dstData[dstIdx] = srcData[(clampedY * width + clampedX) * 4 + channelIndex];
-				}
-			} else {
-				const srcXi = Math.round(srcX);
-				const srcYi = Math.round(srcY);
-
-				if (srcXi >= 0 && srcXi < width && srcYi >= 0 && srcYi < height) {
-					dstData[dstIdx] = srcData[(srcYi * width + srcXi) * 4 + channelIndex];
-				} else {
-					const clampedX = Math.max(0, Math.min(width - 1, srcXi));
-					const clampedY = Math.max(0, Math.min(height - 1, srcYi));
-					dstData[dstIdx] = srcData[(clampedY * width + clampedX) * 4 + channelIndex];
-				}
-			}
-		}
-	}
-}
-
 // ==================== AUTO COLOR BALANCE ====================
 // Gray World assumption: adjusts R/G/B so their averages match (using green as reference)
 
@@ -1440,50 +1097,6 @@ function applyAutoColorBalance16(data, width, height) {
 	}
 
 	return result;
-}
-
-// Apply auto color balance to 8-bit ImageData
-function applyAutoColorBalance8(imageData) {
-	const width = imageData.width;
-	const height = imageData.height;
-	const data = imageData.data;
-	const pixelCount = width * height;
-
-	// Calculate average for each channel
-	let sumR = 0, sumG = 0, sumB = 0;
-	for (let i = 0; i < pixelCount; i++) {
-		const idx = i * 4;
-		sumR += data[idx];
-		sumG += data[idx + 1];
-		sumB += data[idx + 2];
-	}
-
-	const avgR = sumR / pixelCount;
-	const avgG = sumG / pixelCount;
-	const avgB = sumB / pixelCount;
-
-	// Use green as reference
-	const scaleR = avgG / avgR;
-	const scaleB = avgG / avgB;
-
-	// Skip if already balanced
-	if (Math.abs(scaleR - 1) < 0.001 && Math.abs(scaleB - 1) < 0.001) {
-		return imageData;
-	}
-
-	console.log(`Auto color balance: R×${scaleR.toFixed(3)}, B×${scaleB.toFixed(3)}`);
-
-	// Apply scaling
-	const result = new Uint8ClampedArray(data.length);
-	for (let i = 0; i < pixelCount; i++) {
-		const idx = i * 4;
-		result[idx] = Math.min(255, Math.round(data[idx] * scaleR));
-		result[idx + 1] = data[idx + 1]; // Green unchanged
-		result[idx + 2] = Math.min(255, Math.round(data[idx + 2] * scaleB));
-		result[idx + 3] = data[idx + 3]; // Alpha unchanged
-	}
-
-	return new ImageData(result, width, height);
 }
 
 // Crop functions
@@ -1662,9 +1275,8 @@ function applyCrop() {
 	// Keep existing RGB alignment - CA is a global optical property, same offset applies to cropped region
 	// (Don't re-run auto-alignment on crop - correlation often fails on smaller/different regions)
 
-	// Reinitialize WebGL/WebGL2 for new dimensions
+	// Reinitialize WebGL2 for new dimensions
 	useWebGL2 = initWebGL2(sel.width, sel.height);
-	useWebGL = initWebGL(sel.width, sel.height);
 
 	// Exit crop mode
 	cropMode.value = false;
@@ -1720,9 +1332,8 @@ function undoCrop() {
 	preCropRotationState = null;
 	canUndoCrop.value = false;
 
-	// Reinitialize WebGL/WebGL2 for restored dimensions
+	// Reinitialize WebGL2 for restored dimensions
 	useWebGL2 = initWebGL2(canvas.value.width, canvas.value.height);
-	useWebGL = initWebGL(canvas.value.width, canvas.value.height);
 
 	// Reprocess with existing alignment settings
 	applyProcessing();
@@ -1775,9 +1386,8 @@ function applyRotation() {
 
 	// Keep existing RGB alignment - CA is a global optical property
 
-	// Reinitialize WebGL/WebGL2 for new dimensions
+	// Reinitialize WebGL2 for new dimensions
 	useWebGL2 = initWebGL2(rotatedData.width, rotatedData.height);
-	useWebGL = initWebGL(rotatedData.width, rotatedData.height);
 
 	hasAppliedRotation.value = true;
 	appliedRotation = rotation.value;
@@ -1825,9 +1435,8 @@ function resetRotation() {
 	appliedRotation = 0;
 	hasAppliedRotation.value = false;
 
-	// Reinitialize WebGL/WebGL2 for original dimensions
+	// Reinitialize WebGL2 for original dimensions
 	useWebGL2 = initWebGL2(canvas.value.width, canvas.value.height);
-	useWebGL = initWebGL(canvas.value.width, canvas.value.height);
 
 	// Reprocess with existing alignment settings
 	applyProcessing();
@@ -1874,8 +1483,10 @@ function onAutoAlignCheckboxChange() {
 
 // Auto-detect RGB alignment using cross-correlation
 async function autoAlignRGB() {
-	// Work on original image data to detect true offsets (before any CA correction is applied)
-	if (!image16 && !initCanvasImageData) return;
+	// Use pre-crop image if available (larger image = more reliable correlation)
+	// CA is a global optical property, so detecting on full image works for cropped regions too
+	const sourceImage = preCropImage16 || image16;
+	if (!sourceImage) return;
 
 	isAutoAligning.value = true;
 
@@ -1883,38 +1494,18 @@ async function autoAlignRGB() {
 	await new Promise(resolve => setTimeout(resolve, 10));
 
 	try {
-		// Use pre-crop image if available (larger image = more reliable correlation)
-		// CA is a global optical property, so detecting on full image works for cropped regions too
-		const sourceImage = preCropImage16 || image16;
-		const sourceImageData = preCropImageData || initCanvasImageData;
+		// Extract channels from 16-bit data (scale to 0-255 for correlation)
+		const width = sourceImage.width;
+		const height = sourceImage.height;
+		const data = sourceImage.data;
+		const red = new Float32Array(width * height);
+		const green = new Float32Array(width * height);
+		const blue = new Float32Array(width * height);
 
-		let width, height;
-		const red = use16bit.value && sourceImage
-			? new Float32Array(sourceImage.width * sourceImage.height)
-			: new Float32Array(sourceImageData.width * sourceImageData.height);
-		const green = new Float32Array(red.length);
-		const blue = new Float32Array(red.length);
-
-		if (use16bit.value && sourceImage) {
-			// Use original 16-bit data (0.0-1.0 range, scale to 0-255 for correlation)
-			width = sourceImage.width;
-			height = sourceImage.height;
-			const data = sourceImage.data;
-			for (let i = 0; i < width * height; i++) {
-				red[i] = data[i * 4] * 255;
-				green[i] = data[i * 4 + 1] * 255;
-				blue[i] = data[i * 4 + 2] * 255;
-			}
-		} else {
-			// Use original 8-bit data
-			width = sourceImageData.width;
-			height = sourceImageData.height;
-			const data = sourceImageData.data;
-			for (let i = 0; i < width * height; i++) {
-				red[i] = data[i * 4];
-				green[i] = data[i * 4 + 1];
-				blue[i] = data[i * 4 + 2];
-			}
+		for (let i = 0; i < width * height; i++) {
+			red[i] = data[i * 4] * 255;
+			green[i] = data[i * 4 + 1] * 255;
+			blue[i] = data[i * 4 + 2] * 255;
 		}
 
 		// Find offset using cross-correlation (green is reference)
