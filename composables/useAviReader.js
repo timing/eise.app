@@ -30,10 +30,11 @@ function isMjpegFourCC(fourCC) {
 }
 
 /**
- * Parse MJPEG frame index from movi list - builds array of {offset, size} for each frame
- * MJPEG frames have variable sizes, so we need to read chunk headers
+ * Parse AVI frame index from movi list - builds array of {offset, size} for each video frame
+ * Scans chunk headers to find actual video frames, skipping audio and other chunks.
+ * Works for all AVI formats (MJPEG, DIB, Y800, etc.) - not just variable-size formats.
  */
-async function parseMjpegFrameIndex(file, moviListOffset, moviListSize, maxFrames = -1) {
+async function parseAviFrameIndex(file, moviListOffset, moviListSize, maxFrames = -1) {
     const frameIndex = [];
     const chunkHeaderSize = 8; // 4 bytes FourCC + 4 bytes size
     const fileSize = file.size;
@@ -505,7 +506,7 @@ export function useAviReader() {
     }
 
     // Detect bounds for a sample of frames to determine crop region
-    async function detectCropRegion(file, aviHeader, frameCount, cropMarginPercent = 10) {
+    async function detectCropRegion(file, aviHeader, frameCount, cropMarginPercent = 10, frameIndex = null) {
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: frameCount });
 
@@ -552,16 +553,26 @@ export function useAviReader() {
 
         for (let idx = 0; idx < sampleIndices.length; idx++) {
             const i = sampleIndices[idx];
-            const frameOffset = aviHeader.moviListOffset + i * (frameChunkHeaderSize + frameDataLength + (frameDataLength % 2));
-            const frameDataStart = frameOffset + frameChunkHeaderSize;
 
-            if (frameDataStart + frameDataLength > file.size) break;
+            // Use frame index if available (handles interleaved audio chunks correctly)
+            // Otherwise fall back to calculated offset (legacy behavior)
+            let frameDataStart, actualFrameSize;
+            if (frameIndex && frameIndex[i]) {
+                frameDataStart = frameIndex[i].offset;
+                actualFrameSize = frameIndex[i].size;
+            } else {
+                const frameOffset = aviHeader.moviListOffset + i * (frameChunkHeaderSize + frameDataLength + (frameDataLength % 2));
+                frameDataStart = frameOffset + frameChunkHeaderSize;
+                actualFrameSize = frameDataLength;
+            }
+
+            if (frameDataStart + actualFrameSize > file.size) break;
 
             await acquireSlot();
 
             let frameBuffer;
             try {
-                frameBuffer = await file.slice(frameDataStart, frameDataStart + frameDataLength).arrayBuffer();
+                frameBuffer = await file.slice(frameDataStart, frameDataStart + actualFrameSize).arrayBuffer();
             } catch (readError) {
                 releaseSlot();
                 console.error(`Crop detection: File read error at sample ${idx} (frame ${i}):`, readError);
@@ -890,13 +901,25 @@ export function useAviReader() {
 
         const frameCount = (maxFrames === -1) ? aviHeader.frameCount : Math.min(aviHeader.frameCount, maxFrames);
 
+        // Build frame index by scanning chunk headers (handles interleaved audio correctly)
+        emit('set-caption', 'Parsing AVI frame index...');
+        const frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
+        addLog(`Found ${frameIndex.length} video frames in AVI`);
+
+        if (frameIndex.length === 0) {
+            addLog('No video frames found in AVI file');
+            emit('upload-error', 'No video frames found in AVI file.');
+            emit('stop-loading');
+            return;
+        }
+
         // Determine if we should auto-crop (only for frames larger than minimum)
         const MIN_SIZE_FOR_CROP = 300;
         let cropRegion = null;
 
         if (aviHeader.width >= MIN_SIZE_FOR_CROP && aviHeader.height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${aviHeader.width}x${aviHeader.height} qualifies for auto-crop`);
-            cropRegion = await detectCropRegion(file, aviHeader, frameCount);
+            cropRegion = await detectCropRegion(file, aviHeader, frameCount, 10, frameIndex);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
@@ -982,21 +1005,20 @@ export function useAviReader() {
             bpp: aviHeader.bpp
         };
 
-        // Loop through frames from moviListOffset
-        let currentMoviOffset = aviHeader.moviListOffset;
-        const frameChunkHeaderSize = 8;
-        const frameDataLength = aviHeader.frameDataSize;
+        // Loop through frames using frame index (handles interleaved audio correctly)
+        const actualFrameCount = Math.min(frameCount, frameIndex.length);
 
-        for (let i = 0; i < frameCount; i++) {
+        for (let i = 0; i < actualFrameCount; i++) {
             if (errorCount >= maxConsecutiveErrors) {
                 addLog(`Stopping due to ${errorCount} consecutive errors. Check console for details.`);
                 break;
             }
 
-            const frameOffset = currentMoviOffset;
-            const frameDataStart = frameOffset + frameChunkHeaderSize;
+            const frame = frameIndex[i];
+            const frameDataStart = frame.offset;
+            const frameSize = frame.size;
 
-            if (frameDataStart + frameDataLength > file.size) {
+            if (frameDataStart + frameSize > file.size) {
                 addLog(`Stopping at frame ${i} due to reaching end of file.`);
                 break;
             }
@@ -1006,7 +1028,7 @@ export function useAviReader() {
 
             let frameBuffer;
             try {
-                frameBuffer = await file.slice(frameDataStart, frameDataStart + frameDataLength).arrayBuffer();
+                frameBuffer = await file.slice(frameDataStart, frameDataStart + frameSize).arrayBuffer();
             } catch (readError) {
                 releaseSlot();
                 addLog(`File read error at frame ${i}: ${readError.message}`);
@@ -1021,7 +1043,7 @@ export function useAviReader() {
             }
 
             // Determine if this frame should capture pre-crop for comparison video
-            const preCropSampleInterval = Math.max(1, Math.floor(frameCount / 10));
+            const preCropSampleInterval = Math.max(1, Math.floor(actualFrameCount / 10));
             const shouldCapturePreCrop = cropRegion && (i % preCropSampleInterval === 0);
 
             const dataToWorker = {
@@ -1050,7 +1072,7 @@ export function useAviReader() {
                         }
                         completedFrames++;
                         if (result.index % 10 === 0) {
-                            emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
+                            emit('update-loading', { progress: (completedFrames / actualFrameCount) * 100, current: completedFrames, total: actualFrameCount });
                             emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: completedFrames });
                         }
                         return;
@@ -1058,7 +1080,7 @@ export function useAviReader() {
 
                     // Capture pre-crop frame if available (for comparison video)
                     if (result.preCropRgbaBuffer && result.preCropWidth && result.preCropHeight) {
-                        capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, frameCount);
+                        capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, actualFrameCount);
                     }
 
                     const currentFrame = {
@@ -1075,9 +1097,9 @@ export function useAviReader() {
 
                     completedFrames++;
 
-                    if (result.index % 10 === 0 || result.index === frameCount - 1) {
-                        emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
-                        addLog(`Analyzed frame ${completedFrames}/${frameCount}`);
+                    if (result.index % 10 === 0 || result.index === actualFrameCount - 1) {
+                        emit('update-loading', { progress: (completedFrames / actualFrameCount) * 100, current: completedFrames, total: actualFrameCount });
+                        addLog(`Analyzed frame ${completedFrames}/${actualFrameCount}`);
 
                         if (bestFrameSoFar) {
                             emit('best-frame-updated', bestFrameSoFar);
@@ -1098,9 +1120,6 @@ export function useAviReader() {
                     releaseSlot();
                 });
             workerPromises.push(promise);
-
-            currentMoviOffset += frameChunkHeaderSize + frameDataLength;
-            if (frameDataLength % 2 !== 0) currentMoviOffset++;
         }
 
         await Promise.all(workerPromises);
@@ -1811,7 +1830,7 @@ export function useAviReader() {
 
         // Parse MJPEG frame index
         emit('set-caption', 'Parsing MJPEG frame index...');
-        const frameIndex = await parseMjpegFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
+        const frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
 
         if (frameIndex.length === 0) {
             addLog('No MJPEG frames found in file');
