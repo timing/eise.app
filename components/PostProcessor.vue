@@ -241,6 +241,7 @@ import { deconvolveWebGL, deconvolveWebGL16, disposeDeconvWebGL } from '@/utils/
 import { Image16 } from '@/utils/Image16.js'
 import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2, blurWithWebGL2 } from '@/utils/webgl2Processor.js'
 import { download16BitPNG, decodePNG } from '@/utils/png16Encoder.js'
+import { decodeTIFF } from '@/utils/tiffDecoder.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
@@ -612,10 +613,13 @@ async function loadImage(file) {
 	const hasFloat32Data = props.float32Data && props.imageDimensions &&
 		props.imageDimensions.width && props.imageDimensions.height;
 
-	// Try to decode 16-bit PNG directly (before browser clamps to 8-bit)
+	// Try to decode 16-bit images directly (before browser clamps to 8-bit)
 	let decoded16Bit = null;
 	if (!hasFloat32Data) {
-		const isPNG = file.type === 'image/png' || file.name?.toLowerCase().endsWith('.png');
+		const fileName = file.name?.toLowerCase() || '';
+		const isPNG = file.type === 'image/png' || fileName.endsWith('.png');
+		const isTIFF = file.type === 'image/tiff' || fileName.endsWith('.tif') || fileName.endsWith('.tiff');
+
 		if (isPNG) {
 			try {
 				const buffer = await file.arrayBuffer();
@@ -630,41 +634,51 @@ async function loadImage(file) {
 			} catch (err) {
 				console.warn('Failed to decode PNG:', err);
 			}
+		} else if (isTIFF) {
+			try {
+				const buffer = await file.arrayBuffer();
+				const decoded = await decodeTIFF(buffer);
+				// decodeTIFF always returns float32Data (even for 8-bit source)
+				decoded16Bit = {
+					data: decoded.float32Data,
+					width: decoded.width,
+					height: decoded.height
+				};
+				console.log(`TIFF decoded: ${decoded.width}x${decoded.height}, ${decoded.depth}-bit source`);
+			} catch (err) {
+				console.warn('Failed to decode TIFF:', err);
+			}
 		}
 	}
 
-	const img = new Image();
-	img.onload = function() {
-		canvas.value.width = img.width;
-		canvas.value.height = img.height;
-		// Use willReadFrequently for better performance with getImageData
+	// Helper to finalize image loading
+	function finalizeImageLoad(width, height, imageDataForCanvas) {
+		canvas.value.width = width;
+		canvas.value.height = height;
 		ctx = canvas.value.getContext('2d', { willReadFrequently: true });
-		ctx.drawImage(img, 0, 0);
+		ctx.putImageData(imageDataForCanvas, 0, 0);
 
 		initCanvas = canvas;
-		initCanvasImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
-		gainedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
-		preNoiseReducedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
-		sharpenedImageData = ctx.getImageData(0, 0, canvas.value.width, canvas.value.height);
+		initCanvasImageData = ctx.getImageData(0, 0, width, height);
+		gainedImageData = ctx.getImageData(0, 0, width, height);
+		preNoiseReducedImageData = ctx.getImageData(0, 0, width, height);
+		sharpenedImageData = ctx.getImageData(0, 0, width, height);
 
 		// Initialize 16-bit image container
 		if (hasFloat32Data) {
-			// Use Float32Array directly from stacking (full precision preserved)
 			image16 = Image16.fromFloat32Array(props.float32Data, props.imageDimensions.width, props.imageDimensions.height);
 			console.log('16-bit image initialized from stacking data:', props.imageDimensions.width, 'x', props.imageDimensions.height);
 		} else if (decoded16Bit) {
-			// Use decoded 16-bit PNG data (full precision preserved)
 			image16 = Image16.fromFloat32Array(decoded16Bit.data, decoded16Bit.width, decoded16Bit.height);
-			console.log('16-bit image initialized from PNG file:', decoded16Bit.width, 'x', decoded16Bit.height);
+			console.log('16-bit image initialized from decoded file:', decoded16Bit.width, 'x', decoded16Bit.height);
 		} else {
-			// Upscale from 8-bit (fallback for direct file uploads)
 			image16 = Image16.fromImageData(initCanvasImageData);
-			console.log('8-bit image loaded:', img.width, 'x', img.height);
+			console.log('8-bit image loaded:', width, 'x', height);
 		}
 		sharpenedImage16 = null;
 
 		// Initialize WebGL2 for GPU-accelerated color adjustments
-		useWebGL2 = initWebGL2(img.width, img.height);
+		useWebGL2 = initWebGL2(width, height);
 
 		isLoadingImage.value = false;
 
@@ -673,9 +687,42 @@ async function loadImage(file) {
 			zoomableCanvasRef.value?.centerCanvas();
 		});
 
-		// give a small processing improvement
 		applyProcessing();
+	}
 
+	// If we decoded the image ourselves (TIFF or 16-bit PNG), create canvas from decoded data
+	// This handles browsers that don't support TIFF natively (Chrome, Firefox)
+	if (decoded16Bit) {
+		const { data, width, height } = decoded16Bit;
+		const imageData = new ImageData(width, height);
+		const pixels = imageData.data;
+
+		// Convert Float32 (0-1) to Uint8 (0-255) for canvas display
+		for (let i = 0; i < width * height; i++) {
+			pixels[i * 4] = Math.round(Math.min(1, Math.max(0, data[i * 4])) * 255);
+			pixels[i * 4 + 1] = Math.round(Math.min(1, Math.max(0, data[i * 4 + 1])) * 255);
+			pixels[i * 4 + 2] = Math.round(Math.min(1, Math.max(0, data[i * 4 + 2])) * 255);
+			pixels[i * 4 + 3] = Math.round(Math.min(1, Math.max(0, data[i * 4 + 3])) * 255);
+		}
+
+		finalizeImageLoad(width, height, imageData);
+		return;
+	}
+
+	// For other formats, use browser's native image decoding
+	const img = new Image();
+	img.onload = function() {
+		canvas.value.width = img.width;
+		canvas.value.height = img.height;
+		ctx = canvas.value.getContext('2d', { willReadFrequently: true });
+		ctx.drawImage(img, 0, 0);
+		const imageData = ctx.getImageData(0, 0, img.width, img.height);
+
+		finalizeImageLoad(img.width, img.height, imageData);
+	};
+	img.onerror = function() {
+		console.error('Browser failed to load image:', file.name);
+		isLoadingImage.value = false;
 	};
 	img.src = URL.createObjectURL(file);
 }

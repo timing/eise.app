@@ -5,9 +5,16 @@ import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
+import { decodeTIFF } from '@/utils/tiffDecoder.js';
 
 // Native image formats that browsers can decode directly
 const NATIVE_FORMATS = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'];
+
+// Check if file is a TIFF
+function isTiffFile(file) {
+    const fileName = file.name?.toLowerCase() || '';
+    return file.type === 'image/tiff' || fileName.endsWith('.tif') || fileName.endsWith('.tiff');
+}
 
 export function useImageReader() {
     const { addLog, emit } = useEventBus();
@@ -314,23 +321,46 @@ export function useImageReader() {
         for (let i = 0; i < frameCount; i++) {
             const file = files[i];
             const isNative = NATIVE_FORMATS.includes(file.type);
+            const isTiff = isTiffFile(file);
 
             try {
-                let pngData;
-                if (isNative) {
-                    pngData = await nativeImageToPngBuffer(file);
+                let rgba;
+
+                if (isTiff) {
+                    // Use lightweight UTIF decoder for TIFF files (no FFmpeg needed)
+                    const buffer = await file.arrayBuffer();
+                    const decoded = await decodeTIFF(buffer);
+
+                    // Convert Float32 (0-1) to Uint8ClampedArray RGBA
+                    const pixelCount = decoded.width * decoded.height;
+                    const uint8Data = new Uint8ClampedArray(pixelCount * 4);
+                    const float32 = decoded.float32Data;
+
+                    for (let j = 0; j < pixelCount; j++) {
+                        uint8Data[j * 4] = Math.round(Math.min(1, Math.max(0, float32[j * 4])) * 255);
+                        uint8Data[j * 4 + 1] = Math.round(Math.min(1, Math.max(0, float32[j * 4 + 1])) * 255);
+                        uint8Data[j * 4 + 2] = Math.round(Math.min(1, Math.max(0, float32[j * 4 + 2])) * 255);
+                        uint8Data[j * 4 + 3] = Math.round(Math.min(1, Math.max(0, float32[j * 4 + 3])) * 255);
+                    }
+
+                    rgba = { data: uint8Data, width: decoded.width, height: decoded.height };
+                    pngDataArray.push(null); // No PNG data for TIFF, but rgbaFrames has what we need
+                } else if (isNative) {
+                    const pngData = await nativeImageToPngBuffer(file);
+                    pngDataArray.push(pngData);
+                    rgba = await decodeToRgba(pngData);
                 } else {
+                    // Use FFmpeg for other non-native formats
                     if (!ffmpegLoaded) {
                         addLog(`Converting ${file.name} using FFmpeg...`);
                         await loadFFmpeg();
                         ffmpegLoaded = true;
                     }
-                    pngData = await convertImageToPng(file, ffmpeg, loadFFmpeg);
+                    const pngData = await convertImageToPng(file, ffmpeg, loadFFmpeg);
+                    pngDataArray.push(pngData);
+                    rgba = await decodeToRgba(pngData);
                 }
-                pngDataArray.push(pngData);
 
-                // Decode to RGBA for GPU
-                const rgba = await decodeToRgba(pngData);
                 rgbaFrames.push(rgba);
 
                 if (i === 0) {
