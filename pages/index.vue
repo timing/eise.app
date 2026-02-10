@@ -58,7 +58,7 @@ const videoProcessorRef = ref(null);
 useHead({
 	title: 'eise.app - Easy (planetary) Image Stacker in your browser for your Astrophotography',
 	meta: [
-		{ name: 'description', content: 'Easy (planetary) Image Stacker Engine, made to work in your browser. Turn your blurry videos of planets into sharp images. Perfect for beginners in Astrophotography. Using Planetary System Stacker under the hood.' },
+		{ name: 'description', content: 'Easy (planetary) Image Stacker Engine, made to work in your browser. Turn your blurry videos of planets into sharp images. Perfect for beginners in Astrophotography.' },
 	],
 });
 </script>
