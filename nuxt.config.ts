@@ -4,6 +4,16 @@ export default defineNuxtConfig({
 	devtools: { enabled: true },
 	app: {
 		head: {
+			meta: [
+				{ property: 'og:type', content: 'website' },
+				{ property: 'og:site_name', content: 'eise.app' },
+				{ property: 'og:image', content: 'https://eise.app/screenshot-1.png' },
+				{ property: 'og:image:width', content: '1928' },
+				{ property: 'og:image:height', content: '1500' },
+				{ property: 'og:image:alt', content: 'eise.app - Browser-based planetary image stacker for astrophotography' },
+				{ name: 'twitter:card', content: 'summary_large_image' },
+				{ name: 'twitter:image', content: 'https://eise.app/screenshot-1.png' },
+			],
 			script: [
 				{
 					src: 'https://scripts.simpleanalyticscdn.com/latest.js',
