@@ -382,8 +382,15 @@ body {
 .clearb {
 	clear: both;
 }
-header {
+.top-bar {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	flex-wrap: wrap;
 	padding: 0 10px;
+}
+header {
+	padding: 0;
 }
 header h1 {
 	margin: 0;
@@ -395,21 +402,39 @@ header .subtitle {
 	font-size: 12px;
 	font-weight: normal;
 }
-header .info {
-	float: right;
-	color: #8CCF7E;
-	line-height: 50px;
-	padding-right: 10px;
-}
 header a {
 	color: #8CCF7E;
 	text-decoration: none;
 }
 .tabs {
-	float: right;
 	border-radius: 5px;
-	margin: 10px 10px 0 0;
 	overflow: hidden;
+	margin: 10px 0;
+}
+@media (max-width: 700px) {
+	.top-bar {
+		flex-direction: column;
+		align-items: stretch;
+		padding: 0 20px;
+	}
+	header {
+		text-align: center;
+	}
+	header h1 {
+		line-height: 1.4;
+		padding: 10px 0 5px 0;
+	}
+	.tabs {
+		display: flex;
+		margin: 0;
+	}
+	.tabs a {
+		flex: 1;
+		text-align: center;
+		padding: 8px 5px;
+		font-size: 11px;
+		white-space: nowrap;
+	}
 }
 button, a.button, .tabs a {
 	background-color: #eee;
@@ -545,7 +570,7 @@ canvas {
 	border: 1px solid #ffc107;
 	color: #fff;
 	padding: 10px 15px;
-	margin: 10px 50px;
+	margin: 10px 20px 0px 20px;
 	border-radius: 5px;
 	font-size: 13px;
 }

@@ -19,18 +19,22 @@
 			<button class="cancel-button" @click="cancelProcessing">Cancel</button>
 		</div>
 
-		<!-- Lite mode info (WebGPU warning is now shown in app.vue banner) -->
-
 		<!-- Initial state: file selection and settings (hidden during processing) -->
 		<template v-if="!isProcessing">
-			<label for="file-upload">
-				<h3>Select file(s)</h3>
+			<h3>Select file(s)</h3>
+			<div class="file-input-wrapper">
 				<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
-			</label>
+				<label for="file-upload" class="file-label">
+					{{ selectedFiles.length > 0 ? selectedFilesDescription : 'Choose files...' }}
+				</label>
+			</div>
+			<p class="supported-formats">SER, AVI, MP4, PNG, TIFF, JPEG</p>
+
+			<div v-if="liteModeClient" class="lite-mode-warning">
+				Stacking on mobile devices will likely not work due to memory limitations. For best results, use eise.app on a laptop or desktop computer.
+			</div>
 
 			<div v-if="selectedFiles.length > 0" class="selected-files">
-				<p><strong>Selected:</strong> {{ selectedFilesDescription }}</p>
-
 				<div v-if="showMemoryOptimization" class="memory-optimization-box">
 					<p class="optimization-hint">
 						Memory optimization options:
@@ -128,18 +132,19 @@
 					<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
 				</template>
 
-				<div class="separator"></div>
-
-				<template v-if="!showMemoryOptimization">
-					<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
-					<label>
-						<input type="checkbox" v-model="enableMaxFrames" />
-						Limit frames
-					</label>
-					<input type="range" min="2" max="5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
-					{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
-					<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
 				</template>
+
+			<!-- Max frames - always visible (important for lite mode) -->
+			<template v-if="!showMemoryOptimization">
+				<div class="separator"></div>
+				<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
+				<label>
+					<input type="checkbox" v-model="enableMaxFrames" />
+					Limit frames
+				</label>
+				<input type="range" min="2" :max="liteModeClient ? 100 : 5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
+				{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
+				<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
 			</template>
 		</template>
 	</div>
@@ -155,11 +160,10 @@
 			<li>Select multiple image files (TIFF, PNG, JPG, etc.) for stacking and post processing.</li>
 			<li>Select one image file for post processing only.</li>
 		</ul>
-		<p>When stacking, eise.app analyzes all frames by sharpness, then you select which ones to include using a quality graph or percentage threshold.</p>
+		<p>When stacking, eise.app analyzes, crops, centers and ranks all frames by sharpness and circularity, and it drops frames that are (almost) cut-off. No need for PIPP!</p>
 		<p><strong>Tip:</strong> For Moon or Sun surface closeups, select "Surface" mode above to handle larger frame-to-frame drift.</p>
 		<h3>More information, bugs and feature requests?</h3>
-		<p>Read more about Eise.app on the <a href="#" @click.prevent="showAbout">About page</a>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>.</p>
-		<p>Have feedback or running into issues? <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
+		<p>Read more on the <a href="#" @click.prevent="showAbout">About page</a>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
 		<p class="build-date">Latest release: {{ buildDate }}</p>
 		<div class="comparison-images">
 			<img src="/jupiter-singleframe.png" alt="Single frame" />
@@ -302,6 +306,12 @@ onMounted(async () => {
 	loadSettings();
 	isMobileClient.value = isMobile.value;
 	liteModeClient.value = liteMode.value;
+
+	// In lite mode, enable max frames with default of 100
+	if (liteMode.value) {
+		enableMaxFrames.value = true;
+		selectedMaxFrames.value = 100;
+	}
 });
 
 const selectedFiles = ref([]);
@@ -929,15 +939,46 @@ async function processFiles(files) {
 			return;
 		}
 
-		if (['image/png', 'image/jpg', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'].indexOf(imageFiles[0].type) == -1) {
+		const file = imageFiles[0];
+		const fileName = file.name?.toLowerCase() || '';
+		const isTiff = file.type === 'image/tiff' || fileName.endsWith('.tif') || fileName.endsWith('.tiff');
+		const isNativeFormat = ['image/png', 'image/jpg', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'].includes(file.type);
 
+		if (isTiff) {
+			// Use lightweight TIFF decoder (no FFmpeg needed)
+			addLog('One TIFF image selected, decoding...');
+			const { decodeTIFF } = await import('@/utils/tiffDecoder.js');
+			const buffer = await file.arrayBuffer();
+			const decoded = await decodeTIFF(buffer);
+
+			// Convert Float32 to PNG blob for post processor
+			const pixelCount = decoded.width * decoded.height;
+			const uint8Data = new Uint8ClampedArray(pixelCount * 4);
+			const float32 = decoded.float32Data;
+
+			for (let i = 0; i < pixelCount; i++) {
+				uint8Data[i * 4] = Math.round(Math.min(1, Math.max(0, float32[i * 4])) * 255);
+				uint8Data[i * 4 + 1] = Math.round(Math.min(1, Math.max(0, float32[i * 4 + 1])) * 255);
+				uint8Data[i * 4 + 2] = Math.round(Math.min(1, Math.max(0, float32[i * 4 + 2])) * 255);
+				uint8Data[i * 4 + 3] = Math.round(Math.min(1, Math.max(0, float32[i * 4 + 3])) * 255);
+			}
+
+			const imageData = new ImageData(uint8Data, decoded.width, decoded.height);
+			const canvas = new OffscreenCanvas(decoded.width, decoded.height);
+			const ctx = canvas.getContext('2d');
+			ctx.putImageData(imageData, 0, 0);
+			const blob = await canvas.convertToBlob({ type: 'image/png' });
+
+			addLog('Load post processing');
+			emit('postProcessing', blob);
+		} else if (!isNativeFormat) {
 			addLog('One image selected that is not natively supported by browsers, converting..');
 
 			await $loadFFmpeg();
 
 			let imageData;
 			try {
-				imageData = await fetchFile(imageFiles[0]);
+				imageData = await fetchFile(file);
 			} catch (fetchErr) {
 				if (fetchErr.name === 'InvalidStateError' || fetchErr.code === 11) {
 					eventBusEmit('upload-error', 'The file could not be read. Please re-select the file and try again.');
@@ -946,24 +987,23 @@ async function processFiles(files) {
 				}
 				throw fetchErr;
 			}
-			$ffmpeg.FS('writeFile', imageFiles[0].name, imageData);
+			$ffmpeg.FS('writeFile', file.name, imageData);
 
-			await $ffmpeg.run('-i', imageFiles[0].name, imageFiles[0].name + '.png');
+			await $ffmpeg.run('-i', file.name, file.name + '.png');
 
-			const data = $ffmpeg.FS('readFile', imageFiles[0].name + '.png');
+			const data = $ffmpeg.FS('readFile', file.name + '.png');
 
 			const blob = new Blob([data.buffer], { type: 'image/png' });
 
-			$ffmpeg.FS('unlink', imageFiles[0].name);
-			$ffmpeg.FS('unlink', imageFiles[0].name + '.png');
+			$ffmpeg.FS('unlink', file.name);
+			$ffmpeg.FS('unlink', file.name + '.png');
 
 			addLog('Load post processing');
 
 			emit('postProcessing', blob);
 		} else {
-
 			addLog('One image selected that is supported right away, load post processing');
-			emit('postProcessing', imageFiles[0]);
+			emit('postProcessing', file);
 		}
 	}
 }
@@ -1000,21 +1040,56 @@ async function processFiles(files) {
 	border-radius: 5px;
 	font-weight: bold;
 }
-.file-upload-wrapper {
-	display: block;
-	color: #003366;
-	border: 3px dashed #003366;
-	border-radius: 10px;
-	margin: 20px auto;
-	padding: 20px 40px;
+.file-input-wrapper {
+	position: relative;
+	margin-bottom: 10px;
+}
+
+.file-input-wrapper input[type="file"] {
+	position: absolute;
+	opacity: 0;
+	width: 100%;
+	height: 100%;
 	cursor: pointer;
 }
-.file-upload-wrapper ul {
-	padding-left: 0;
+
+.file-label {
+	display: block;
+	padding: 10px 15px;
+	background: #f5f5f5;
+	border: 2px dashed #ccc;
+	border-radius: 5px;
+	text-align: center;
+	cursor: pointer;
+	transition: all 0.2s;
+	color: #666;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
-.file-upload-wrapper:hover {
-	background: #ffeeff;
+
+.file-label:hover {
+	border-color: #8CCF7E;
+	background: #f0fff0;
 }
+
+.supported-formats {
+	font-size: 12px;
+	color: #888;
+	margin: 0 0 15px 0;
+}
+
+.lite-mode-warning {
+	background: #fff3cd;
+	border: 1px solid #ffc107;
+	color: #856404;
+	padding: 10px 12px;
+	border-radius: 5px;
+	font-size: 12px;
+	line-height: 1.4;
+	margin-bottom: 15px;
+}
+
 .selected-files {
 	margin-top: 15px;
 	padding: 10px;

@@ -1,7 +1,26 @@
 <template>
 <div class="page-layout page-layout-wide">
 	<div class="card">
-		<div class="controls">
+		<!-- Intro state when no image loaded -->
+		<template v-if="!imageLoaded">
+			<h3>Select file</h3>
+			<div class="file-input-wrapper">
+				<input
+					type="file"
+					ref="directFileInput"
+					accept="image/*"
+					id="post-processor-file-input"
+					@change="handleDirectFileSelect"
+				/>
+				<label for="post-processor-file-input" class="file-label">
+					Select image...
+				</label>
+			</div>
+			<p class="supported-formats">PNG, TIFF, JPEG</p>
+		</template>
+
+		<!-- Controls shown when image is loaded -->
+		<div v-else class="controls">
 			<div class="processing-indicator" v-if="isProcessing">
 				<div class="spinner"></div>
 			</div>
@@ -140,33 +159,21 @@
 		</div>
 	</div>
 	<div class="content">
-		<div v-if="!props.file" class="empty-state">
-			<h2>Post-processor</h2>
-			<p>Load any image (PNG, TIFF, JPEG) to apply sharpening, color adjustments, and other processing.</p>
-			<div class="empty-state-buttons">
-				<input
-					type="file"
-					ref="directFileInput"
-					accept="image/*"
-					style="display: none"
-					@change="handleDirectFileSelect"
-				/>
-				<button class="primary-btn" @click="triggerDirectFileSelect">Select image</button>
-				<NuxtLink to="/" class="secondary-btn">Go to stacking</NuxtLink>
-			</div>
-			<div class="feature-list">
-				<h4>Features</h4>
-				<ul>
-					<li><strong>Wavelet sharpening</strong> - multi-scale sharpening with denoise option</li>
-					<li><strong>Unsharp mask</strong> - radius, amount, and threshold controls</li>
-					<li><strong>Deconvolution</strong> - Richardson-Lucy iterative deconvolution</li>
-					<li><strong>Color adjustments</strong> - gain, contrast, gamma, saturation, vibrance</li>
-					<li><strong>RGB alignment</strong> - fix chromatic aberration with auto-detect or manual sub-pixel shifts</li>
-					<li><strong>Rotation and crop</strong> - straighten and trim your image</li>
-					<li><strong>16-bit support</strong> - maintains precision when loading 16-bit PNGs</li>
-				</ul>
-			</div>
-		</div>
+		<template v-if="!imageLoaded">
+			<h2>Post processor</h2>
+			<h3>Sharpen your planetary images</h3>
+			<p>The post-processor helps you bring out detail in stacked planetary images. All processing runs locally in your browser.</p>
+
+			<h4>Features</h4>
+			<ul>
+				<li><strong>Wavelet sharpening</strong><br/>Sharpening that brings out surface details. Includes denoise to reduce noise (by blurring again, weird!). Works on luminance only to avoid color noise.</li>
+				<li><strong>Unsharp mask</strong><br/> Another sharpening option. Sometimes works better than wavelets, sometimes worse. Try both!</li>
+				<li><strong>Color adjustments</strong><br/> Tweak brightness, contrast, gamma, and saturation. Vibrance is like saturation but gentler on already-colorful areas.</li>
+				<li><strong>RGB alignment</strong><br/> Fixes the colored fringes you get from atmospheric dispersion. Auto-detect usually works, or nudge the channels manually.</li>
+				<li><strong>Rotation and crop</strong><br/> Straighten things up and cut off the messy edges.</li>
+				<li><strong>16-bit processing</strong><br/> Every image is processed in 16-bit, so adjustments are more precise and you won't lose detail.</li>
+			</ul>
+		</template>
 		<template v-else>
 			<ZoomableCanvas ref="zoomableCanvasRef" id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" :previewRotation="previewRotationAngle">
 				<template #overlay>
@@ -509,6 +516,7 @@ const postNoiseReduction = ref(0);
 const blueDown = ref(0);
 const isProcessing = ref(false);
 const isLoadingImage = ref(false);
+const imageLoaded = ref(false);
 const sharpeningMethod = ref('wavelets'); // 'usm', 'wavelets', or 'none'
 const sharpenLuminanceOnly = ref(false); // Sharpen only luminance channel to reduce color noise
 const rotation = ref(0); // degrees (slider value)
@@ -603,6 +611,10 @@ function valueIsChanged(prop, value){
 
 async function loadImage(file) {
 	isLoadingImage.value = true;
+	imageLoaded.value = true; // Show canvas immediately so it's available for loading
+
+	// Wait for Vue to render the canvas
+	await nextTick();
 
 	// Lazy-load workers when first image is loaded
 	initializeWorkers();
@@ -2014,69 +2026,49 @@ button.download:hover {
 	background-color: #ddd;
 }
 
-.empty-state {
+
+.file-input-wrapper {
+	position: relative;
+	margin-bottom: 10px;
+}
+
+.file-input-wrapper input[type="file"] {
+	position: absolute;
+	opacity: 0;
+	width: 100%;
+	height: 100%;
+	cursor: pointer;
+}
+
+.file-label {
+	display: block;
+	padding: 10px 15px;
+	background: #f5f5f5;
+	border: 2px dashed #ccc;
+	border-radius: 5px;
 	text-align: center;
-	padding: 40px 20px;
-}
-
-.empty-state-buttons {
-	display: flex;
-	flex-direction: column;
-	gap: 12px;
-	margin-top: 24px;
-	align-items: center;
-}
-
-.empty-state-buttons .primary-btn {
-	background-color: #8CCF7E;
-	color: #111;
-	padding: 12px 24px;
-	border: none;
-	border-radius: 5px;
 	cursor: pointer;
-	font-size: 14px;
-	font-weight: bold;
+	transition: all 0.2s;
+	color: #666;
 }
 
-.empty-state-buttons .primary-btn:hover {
-	background-color: #7ABF6E;
+.file-label:hover {
+	border-color: #8CCF7E;
+	background: #f0fff0;
 }
 
-.empty-state-buttons .secondary-btn {
-	display: inline-block;
-	background-color: transparent;
-	color: #c6fffd;
-	padding: 10px 20px;
-	border: 1px solid #c6fffd;
-	border-radius: 5px;
-	cursor: pointer;
-	font-size: 14px;
-	text-decoration: none;
-}
-
-.empty-state-buttons .secondary-btn:hover {
-	background-color: rgba(198, 255, 253, 0.1);
-}
-
-.feature-list {
-	margin-top: 32px;
-	text-align: left;
-	max-width: 500px;
-}
-
-.feature-list h4 {
-	margin-bottom: 12px;
-}
-
-.feature-list ul {
-	list-style: none;
-	padding: 0;
+.supported-formats {
+	font-size: 12px;
+	color: #888;
 	margin: 0;
 }
 
-.feature-list li {
-	padding: 6px 0;
-	font-size: 14px;
+/* Feature list styling - muted descriptions with bold titles */
+.content ul li {
+	color: #9ab0c0;
+}
+.content ul li strong {
+	color: #c6fffd;
 }
 </style>
 

@@ -1,14 +1,16 @@
 <template>
 	<div>
-		<nav class="tabs">
-			<NuxtLink to="/" :class="{ active: route.path === '/' }">✨ &nbsp; Stack & Process</NuxtLink>
-			<NuxtLink to="/tools/" :class="{ active: route.path.startsWith('/tools') }">🛠️ &nbsp; Tools</NuxtLink>
-			<NuxtLink to="/about/" style="float:right;" :class="{ active: route.path.startsWith('/about') }">ℹ️  &nbsp; About</NuxtLink>
-		</nav>
-
-		<header>
-			<h1><a href="/">eise.app</a> <span class="subtitle">- Easy (planetary) Image Stacker Engine</span></h1>
-		</header>
+		<div class="top-bar">
+			<header>
+				<h1><a href="/">eise.app</a> <span class="subtitle">- Easy (planetary) Image Stacker Engine</span></h1>
+			</header>
+			<nav class="tabs">
+				<NuxtLink to="/" :class="{ active: route.path === '/' }">Stack</NuxtLink>
+				<NuxtLink to="/post-processor/" :class="{ active: route.path.startsWith('/post-processor') }">Post Processor</NuxtLink>
+				<NuxtLink to="/tools/" :class="{ active: route.path.startsWith('/tools') }">Tools</NuxtLink>
+				<NuxtLink to="/about/" :class="{ active: route.path.startsWith('/about') }">About</NuxtLink>
+			</nav>
+		</div>
 
 		<slot />
 

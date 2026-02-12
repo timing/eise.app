@@ -1,7 +1,7 @@
 <template>
     <div class="page-layout">
     <div class="card tools-card">
-        <h2>SER Analyzer, Player & Trimmer</h2>
+        <h3>SER Analyzer, Player & Trimmer</h3>
 
         <div class="tool-section">
             <div class="file-input-wrapper">
