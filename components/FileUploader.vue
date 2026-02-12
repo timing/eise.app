@@ -158,12 +158,12 @@
 			<li>Select one or more SER files for stacking followed by post processing. (Multiple SER files will be combined)</li>
 			<li>Select one video file (AVI, MP4, etc.) for stacking followed by post processing.</li>
 			<li>Select multiple image files (TIFF, PNG, JPG, etc.) for stacking and post processing.</li>
-			<li>Select one image file for post processing only.</li>
+			<li>Select one image file for <NuxtLink to="/post-processor/">post processing</NuxtLink> only.</li>
 		</ul>
 		<p>When stacking, eise.app analyzes, crops, centers and ranks all frames by sharpness and circularity, and it drops frames that are (almost) cut-off. No need for PIPP!</p>
 		<p><strong>Tip:</strong> For Moon or Sun surface closeups, select "Surface" mode above to handle larger frame-to-frame drift.</p>
 		<h3>More information, bugs and feature requests?</h3>
-		<p>Read more on the <a href="#" @click.prevent="showAbout">About page</a>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
+		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
 		<p class="build-date">Latest release: {{ buildDate }}</p>
 		<div class="comparison-images">
 			<img src="/jupiter-singleframe.png" alt="Single frame" />
@@ -318,7 +318,7 @@ const selectedFiles = ref([]);
 const isProcessing = ref(false);
 const fileInput = ref(null);
 
-const emit = defineEmits(['frames', 'postProcessing', 'processing-started', 'showAbout']);
+const emit = defineEmits(['frames', 'postProcessing', 'processing-started']);
 
 const selectedFilesDescription = computed(() => {
 	if (selectedFiles.value.length === 0) return '';
