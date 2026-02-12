@@ -1,5 +1,14 @@
 <template>
-<div class="page-layout page-layout-wide">
+<!-- Hidden file input always available for "Load another image" -->
+<input
+	type="file"
+	ref="directFileInput"
+	accept="image/*"
+	@change="handleDirectFileSelect"
+	style="display: none;"
+/>
+
+<div class="page-layout" :class="{ 'page-layout-wide': imageLoaded }">
 	<div class="card">
 		<!-- Intro state when no image loaded -->
 		<template v-if="!imageLoaded">
@@ -7,7 +16,6 @@
 			<div class="file-input-wrapper">
 				<input
 					type="file"
-					ref="directFileInput"
 					accept="image/*"
 					id="post-processor-file-input"
 					@change="handleDirectFileSelect"
@@ -182,9 +190,22 @@
 					</span>
 				</template>
 				<template #toolbar>
-					<button class="export-btn" @click="openExportPopup">
-						⬇ Export
-					</button>
+					<div class="toolbar-actions">
+						<button class="export-btn" @click="openExportPopup">
+							⬇ Export
+						</button>
+						<div class="kebab-menu">
+							<button class="kebab-btn" @click="showKebabMenu = !showKebabMenu" title="More options">
+								⋮
+							</button>
+							<div v-if="showKebabMenu" class="kebab-backdrop" @click="showKebabMenu = false"></div>
+							<div v-if="showKebabMenu" class="kebab-dropdown">
+								<button @click="loadAnotherImage">Load another image</button>
+								<button @click="startNewStack">Start new stack</button>
+								<button @click="closePostProcessor">Close Post Processor</button>
+							</div>
+						</div>
+					</div>
 				</template>
 			</ZoomableCanvas>
 		</template>
@@ -277,6 +298,7 @@ const exportProgress = ref('');
 const showExportPopup = ref(false);
 const exportFilename = ref('');
 const sentryAvailable = ref(false);
+const showKebabMenu = ref(false);
 
 // Direct file loading for when user arrives on this page without a file
 function triggerDirectFileSelect() {
@@ -297,6 +319,30 @@ async function handleDirectFileSelect(event) {
 
 function goBackToStart() {
 	navigateTo('/');
+}
+
+// Kebab menu actions
+function loadAnotherImage() {
+	showKebabMenu.value = false;
+	directFileInput.value?.click();
+}
+
+function startNewStack() {
+	showKebabMenu.value = false;
+	navigateTo('/');
+}
+
+function closePostProcessor() {
+	showKebabMenu.value = false;
+	// Reset state to show landing page
+	imageLoaded.value = false;
+	selectedFile.value = null;
+	// Clear canvas and image data
+	if (ctx) {
+		ctx.clearRect(0, 0, canvas.width, canvas.height);
+	}
+	image16 = null;
+	sharpenedImage16 = null;
 }
 
 function openExportPopup() {
@@ -1688,6 +1734,67 @@ canvas {
 .content {
 	max-width: none;
 }
+
+/* Toolbar actions wrapper */
+.toolbar-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+/* Kebab menu */
+.kebab-menu {
+	position: relative;
+	display: inline-block;
+}
+.kebab-btn {
+	background: rgba(0, 0, 0, 0.5);
+	border: none;
+	color: #fff;
+	font-size: 20px;
+	padding: 4px 10px;
+	cursor: pointer;
+	border-radius: 4px;
+	line-height: 1;
+}
+.kebab-btn:hover {
+	background: rgba(0, 0, 0, 0.7);
+}
+.kebab-backdrop {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	z-index: 99;
+}
+.kebab-dropdown {
+	position: absolute;
+	top: 100%;
+	right: 0;
+	margin-top: 4px;
+	background: #fff;
+	border-radius: 6px;
+	box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+	z-index: 100;
+	min-width: 180px;
+	overflow: hidden;
+}
+.kebab-dropdown button {
+	display: block;
+	width: 100%;
+	padding: 10px 15px;
+	border: none;
+	background: none;
+	text-align: left;
+	cursor: pointer;
+	font-size: 14px;
+	color: #333;
+}
+.kebab-dropdown button:hover {
+	background: #f0f0f0;
+}
+
 .color-alignment h4 {
 	display: flex;
 	align-items: center;

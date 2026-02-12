@@ -602,10 +602,6 @@ function clearSelection() {
 	errorMessage.value = null;
 }
 
-function showAbout() {
-	emit('showAbout');
-}
-
 // Unsupported RAW camera formats
 const RAW_EXTENSIONS = ['.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2', '.raf'];
 const isRawFile = (file) => RAW_EXTENSIONS.some(ext => file.name.toLowerCase().endsWith(ext));
