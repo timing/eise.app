@@ -33,7 +33,6 @@ const qualityUseWebGPU = ref(false);
 const qualityFrameReReader = ref(null);
 const qualityDrizzleScale = ref(1.5);
 const croppedSerData = ref(null);
-const croppedAviData = ref(null);
 
 // WebGPU state
 const showWebGPUChoice = ref(false);
@@ -72,7 +71,6 @@ provide('isSelectingQuality', isSelectingQuality);
 provide('qualityFrames', qualityFrames);
 provide('showWebGPUChoice', showWebGPUChoice);
 provide('croppedSerData', croppedSerData);
-provide('croppedAviData', croppedAviData);
 
 provide('liteMode', liteMode);
 provide('useGPU', useGPU);
@@ -169,9 +167,6 @@ onMounted(async () => {
 	on('quality-selection-ready', handleQualitySelectionReady);
 	on('cropped-ser-ready', (data) => {
 		croppedSerData.value = data;
-	});
-	on('cropped-avi-ready', (data) => {
-		croppedAviData.value = data;
 	});
 	on('stack-failed', (data) => {
 		track('stack_failed');

@@ -860,30 +860,6 @@ export function useStacker() {
         }
         addLog(`Prepared ${frameData.length} frames for stacking`);
 
-        // Emit frame data for AVI export BEFORE transfer
-        // AVI export needs Uint8 data, so convert Float32 if needed
-        if (frameData.length <= 500) {
-            const aviFrameData = frameData.map(f => {
-                let rgbaBuffer = null;
-                if (f.isFloat32 && f.float32Buffer) {
-                    // Convert Float32 to Uint8 for AVI export
-                    rgbaBuffer = float32ToUint8(f.float32Buffer, f.width, f.height);
-                } else if (f.rgbaBuffer instanceof ArrayBuffer) {
-                    rgbaBuffer = f.rgbaBuffer.slice(0);
-                }
-                return { rgbaBuffer, width: f.width, height: f.height };
-            }).filter(f => f.rgbaBuffer !== null);
-            emit('cropped-avi-ready', {
-                frames: aviFrameData,
-                width: frameData[0].width,
-                height: frameData[0].height,
-                frameCount: aviFrameData.length
-            });
-            addLog(`AVI export data ready: ${aviFrameData.length} frames`);
-        } else {
-            addLog(`Skipping AVI export for ${frameData.length} frames (memory optimization)`);
-        }
-
         // WebGPU path: orchestrate GPU worker directly from main thread
         // Will throw WebGPUUnavailableError if GPU not available - caller should handle
         if (useWebGPU) {

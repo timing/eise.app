@@ -72,16 +72,9 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 - AVI: Direct parsing with FourCC detection
 - Images: PNG, JPG, WebP, AVIF (direct), others (FFmpeg converted)
 
-**AVI Export**: `utils/aviEncoder.js` can export cropped/debayered frames as uncompressed AVI (DIB format). Useful for exporting processed frames for use in other stacking software.
-
 **Event Bus Pattern**: Cross-component communication via `composables/eventBus.js`. Key events: `set-caption`, `update-loading`, `stop-loading`, `upload-error`, `postProcessing`, `stacking-started`, `stacked-image-ready`.
 
 **SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`.
-
-## File Limits
-
-- Max file size: 2GB (larger files can be trimmed)
-- Max frames: 5000 configurable
 
 ## Technical Reference
 

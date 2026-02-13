@@ -4,7 +4,6 @@
 		:float32Data="stackedFloat32Data"
 		:imageDimensions="stackedImageDimensions"
 		:croppedSerData="croppedSerData"
-		:croppedAviData="croppedAviData"
 	/>
 </template>
 
@@ -15,7 +14,6 @@ const selectedFile = inject('selectedFile');
 const stackedFloat32Data = inject('stackedFloat32Data');
 const stackedImageDimensions = inject('stackedImageDimensions');
 const croppedSerData = inject('croppedSerData');
-const croppedAviData = inject('croppedAviData');
 
 useHead({
 	title: 'Post Processing - eise.app',

@@ -234,9 +234,6 @@
 				<button v-if="props.croppedSerData" class="export-option secondary" @click="downloadCroppedSer">
 					⬇ Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})
 				</button>
-				<button v-if="props.croppedAviData" class="export-option secondary" @click="downloadCroppedAvi">
-					⬇ Cropped AVI ({{ props.croppedAviData.frameCount }} frames)
-				</button>
 				<button
 					class="export-option video"
 					@click="downloadComparisonVideo"
@@ -264,7 +261,6 @@
 import { ref, onMounted, watch, defineProps, reactive, onUnmounted, computed, nextTick, inject } from 'vue';
 import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
-import { encodeAvi } from '@/utils/aviEncoder.js'
 import { deconvolveWebGL, deconvolveWebGL16, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
 import { Image16 } from '@/utils/Image16.js'
 import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2, blurWithWebGL2 } from '@/utils/webgl2Processor.js'
@@ -472,28 +468,6 @@ const downloadCroppedSer = () => {
 	openFeedbackAfterDownload();
 };
 
-const downloadCroppedAvi = () => {
-	if (!props.croppedAviData) return;
-
-	track('download_cropped_avi');
-	try {
-		const aviBlob = encodeAvi(props.croppedAviData.frames, 25);
-		const url = URL.createObjectURL(aviBlob);
-		const a = document.createElement('a');
-		a.href = url;
-		const filename = exportFilename.value || inputFilename.value || 'eise_app';
-		a.download = `${filename}_cropped.avi`;
-		document.body.appendChild(a);
-		a.click();
-		document.body.removeChild(a);
-		URL.revokeObjectURL(url);
-		showExportPopup.value = false;
-		openFeedbackAfterDownload();
-	} catch (e) {
-		console.error('AVI encoding error:', e);
-	}
-};
-
 const download16BitProcessedPNG = async () => {
 	if (!sharpenedImage16) return;
 
@@ -538,8 +512,7 @@ const props = defineProps({
 	file: Object,
 	float32Data: Object,  // Float32Array from 16-bit stacking (RGBA, 0.0-1.0 range)
 	imageDimensions: Object,  // { width, height } for float32Data
-	croppedSerData: Object,
-	croppedAviData: Object
+	croppedSerData: Object
 });
 
 const gain = ref(1);
