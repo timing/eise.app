@@ -42,12 +42,10 @@
 <script setup>
 import { onMounted, ref, watch, defineProps, onBeforeUpdate, nextTick } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
-import { useUploader } from '@/composables/useUploader';
 import { useTracking } from '@/composables/useTracking';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
 const { on, addLog, emit } = useEventBus();
-const { uploadFrames } = useUploader();
 const { track } = useTracking();
 const { workerUrl } = useWorkerUrl();
 
@@ -359,8 +357,6 @@ async function processImageFrames(files) {
 		} catch(e) {}
 	}
 	addLog('Cleaning up done');
-
-    await uploadFrames(bestFramesForStacking.map(f => ({ pngFile: [f.blob] })));
 }
 </script>
 

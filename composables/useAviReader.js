@@ -1,7 +1,6 @@
 // composables/useAviReader.js
 
 import { useEventBus } from '@/composables/eventBus';
-import { useUploader } from '@/composables/useUploader';
 import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
 import { useComparisonExport } from '@/composables/useComparisonExport';
@@ -303,7 +302,6 @@ function autoStretchRgba(rgba) {
 
 export function useAviReader() {
     const { addLog, emit } = useEventBus();
-    const { uploadFrames } = useUploader();
     const { stackFramesLocally } = useStacker();
     const { capturePreCropFrame, capturePostCropFrame, resetCaptures } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();

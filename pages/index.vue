@@ -4,7 +4,7 @@
 			<strong>Lite Mode</strong><span v-if="forceLiteMode"> (forced)</span><span v-else-if="isMobile"> ({{ useGPU ? 'GPU' : 'CPU' }})</span><span v-else> (no WebGPU)</span> · Frame limit auto-adjusted for memory.
 		</div>
 
-		<FileUploader v-show="!isProcessing && !isSelectingQuality" @frames="handleFrames" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" @showAbout="navigateTo('/about')" />
+		<FileUploader v-show="!isProcessing && !isSelectingQuality" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
 		<ColorProfileSelector v-show="isSelectingColorProfile" />
 		<QualitySelector v-show="isSelectingQuality" :frames="qualityFrames" @threshold-selected="handleThresholdSelected" />
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="isProcessing && !isSelectingColorProfile && !isSelectingQuality"
@@ -46,7 +46,6 @@ const isSelectingQuality = inject('isSelectingQuality');
 const qualityFrames = inject('qualityFrames');
 const showWebGPUChoice = inject('showWebGPUChoice');
 
-const handleFrames = inject('handleFrames');
 const handlePostProcessing = inject('handlePostProcessing');
 const handleProcessingStarted = inject('handleProcessingStarted');
 const handleThresholdSelected = inject('handleThresholdSelected');

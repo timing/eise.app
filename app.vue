@@ -81,7 +81,6 @@ provide('forceLiteMode', forceLiteMode);
 provide('isMounted', isMounted);
 
 // Provide handlers
-provide('handleFrames', handleFrames);
 provide('handlePostProcessing', handlePostProcessing);
 provide('handleProcessingStarted', handleProcessingStarted);
 provide('handleThresholdSelected', handleThresholdSelected);
@@ -335,10 +334,6 @@ async function handleStackedImageReady(data) {
 	isProcessing.value = false;
 	track('stack_finished');
 	navigateTo('/post-processor/');
-}
-
-async function handleFrames(data) {
-	frames.value = data;
 }
 
 function handleProcessingStarted() {

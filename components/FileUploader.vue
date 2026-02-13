@@ -318,7 +318,7 @@ const selectedFiles = ref([]);
 const isProcessing = ref(false);
 const fileInput = ref(null);
 
-const emit = defineEmits(['frames', 'postProcessing', 'processing-started']);
+const emit = defineEmits(['postProcessing', 'processing-started']);
 
 const selectedFilesDescription = computed(() => {
 	if (selectedFiles.value.length === 0) return '';
