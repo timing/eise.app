@@ -82,7 +82,7 @@ struct AP {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> frameRgba: array<u32>;     // Input frame RGBA packed
+@group(0) @binding(1) var<storage, read> frameRgba: array<f32>;     // Input frame RGBA as Float32 (4 floats per pixel, 0.0-1.0 range)
 @group(0) @binding(2) var<storage, read> apData: array<AP>;         // AP positions + shifts
 @group(0) @binding(3) var<storage, read_write> accumR: array<f32>;
 @group(0) @binding(4) var<storage, read_write> accumG: array<f32>;
@@ -108,17 +108,18 @@ fn sampleFrame(x: f32, y: f32) -> vec4<f32> {
     let cx1 = clamp(x1, 0, w - 1);
     let cy1 = clamp(y1, 0, h - 1);
 
-    // Sample 4 corners
-    let p00 = frameRgba[cy0 * w + cx0];
-    let p10 = frameRgba[cy0 * w + cx1];
-    let p01 = frameRgba[cy1 * w + cx0];
-    let p11 = frameRgba[cy1 * w + cx1];
+    // Sample 4 corners (4 floats per pixel: R, G, B, A)
+    // Cast to u32 for array indexing
+    let i00 = u32((cy0 * w + cx0) * 4);
+    let i10 = u32((cy0 * w + cx1) * 4);
+    let i01 = u32((cy1 * w + cx0) * 4);
+    let i11 = u32((cy1 * w + cx1) * 4);
 
-    // Unpack RGBA
-    let c00 = vec4<f32>(f32(p00 & 0xFFu), f32((p00 >> 8u) & 0xFFu), f32((p00 >> 16u) & 0xFFu), f32((p00 >> 24u) & 0xFFu));
-    let c10 = vec4<f32>(f32(p10 & 0xFFu), f32((p10 >> 8u) & 0xFFu), f32((p10 >> 16u) & 0xFFu), f32((p10 >> 24u) & 0xFFu));
-    let c01 = vec4<f32>(f32(p01 & 0xFFu), f32((p01 >> 8u) & 0xFFu), f32((p01 >> 16u) & 0xFFu), f32((p01 >> 24u) & 0xFFu));
-    let c11 = vec4<f32>(f32(p11 & 0xFFu), f32((p11 >> 8u) & 0xFFu), f32((p11 >> 16u) & 0xFFu), f32((p11 >> 24u) & 0xFFu));
+    // Read Float32 RGBA directly (0.0-1.0 range) and scale to 0-255 for accumulation consistency
+    let c00 = vec4<f32>(frameRgba[i00], frameRgba[i00+1u], frameRgba[i00+2u], frameRgba[i00+3u]) * 255.0;
+    let c10 = vec4<f32>(frameRgba[i10], frameRgba[i10+1u], frameRgba[i10+2u], frameRgba[i10+3u]) * 255.0;
+    let c01 = vec4<f32>(frameRgba[i01], frameRgba[i01+1u], frameRgba[i01+2u], frameRgba[i01+3u]) * 255.0;
+    let c11 = vec4<f32>(frameRgba[i11], frameRgba[i11+1u], frameRgba[i11+2u], frameRgba[i11+3u]) * 255.0;
 
     // Bilinear blend
     let c0 = mix(c00, c10, fx);
@@ -301,7 +302,7 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
     const outPixels = outWidth * outHeight;
 
     const requiredSizes = {
-        frameSize: inPixels * 4,
+        frameSize: inPixels * 16,  // Float32 RGBA: 4 floats * 4 bytes = 16 bytes per pixel
         apSize: numAPs * 6 * 4,  // 6 floats per AP
         accumSize: outPixels * 4
     };
@@ -403,6 +404,7 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
 
 /**
  * Process a single frame: warp and accumulate
+ * @param {Float32Array} frameRgba - Frame data as Float32 RGBA (4 floats per pixel, 0.0-1.0 range)
  */
 async function warpAndAccumulateFrame(frameRgba, width, height, outWidth, outHeight,
     alignmentPoints, shifts, patchSize, drizzleScale, frameWeight, brightnessScale,
@@ -418,12 +420,9 @@ async function warpAndAccumulateFrame(frameRgba, width, height, outWidth, outHei
     const buffers = getStackingBuffers(width, height, outWidth, outHeight, alignmentPoints.length);
     const numAPs = alignmentPoints.length;
 
-    // Pack frame data
-    const frameData = new Uint32Array(width * height);
-    const src = new Uint8Array(frameRgba);
-    for (let i = 0; i < width * height; i++) {
-        frameData[i] = src[i*4] | (src[i*4+1] << 8) | (src[i*4+2] << 16) | (src[i*4+3] << 24);
-    }
+    // Write Float32 RGBA frame data directly (no packing needed)
+    // frameRgba should be a Float32Array with 4 floats per pixel (RGBA, 0.0-1.0 range)
+    const frameData = frameRgba instanceof Float32Array ? frameRgba : new Float32Array(frameRgba);
     stackQueue.writeBuffer(buffers.frameBuffer, 0, frameData);
 
     // Pack AP data (x, y, dx, dy, quality, pad)

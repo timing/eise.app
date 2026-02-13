@@ -296,9 +296,11 @@ self.addEventListener('message', async (e) => {
 });
 
 // Helper: calculate mean brightness (for normalization)
+// Supports both Float32Array (0.0-1.0) and Uint8Array (0-255)
 function calcMeanBrightness(rgbaBuffer, width, height) {
-    const data = new Uint8Array(rgbaBuffer);
-    const blackCutoff = 10;
+    const isFloat32 = rgbaBuffer instanceof Float32Array;
+    const data = isFloat32 ? rgbaBuffer : new Uint8Array(rgbaBuffer);
+    const blackCutoff = isFloat32 ? 10/255 : 10;
     let sum = 0;
     let count = 0;
     const step = 8;
@@ -313,5 +315,7 @@ function calcMeanBrightness(rgbaBuffer, width, height) {
             }
         }
     }
-    return count > 0 ? sum / count : 1;
+    // Return in 0-255 scale for consistency with existing brightnessScale logic
+    const avgBrightness = count > 0 ? sum / count : 1;
+    return isFloat32 ? avgBrightness * 255 : avgBrightness;
 }

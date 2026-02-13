@@ -61,7 +61,7 @@ export function useStacker() {
     }
 
     /**
-     * Convert Float32 buffer to Uint8 buffer (for GPU workers that expect Uint8)
+     * Convert Float32 buffer to Uint8 buffer (for display/export)
      */
     function float32ToUint8(float32Buffer, width, height) {
         const float32Data = new Float32Array(float32Buffer);
@@ -653,9 +653,9 @@ export function useStacker() {
                     }
                 }
 
-                // Send batch to GPU stacker
+                // Send batch to GPU stacker (pass Float32 directly for 16-bit precision)
                 const batchForStacker = gpuResults.map((r, i) => ({
-                    rgbaBuffer: float32ToUint8(r.float32Buffer, cropSize, cropSize),
+                    rgbaBuffer: r.float32Buffer,  // Float32Array, 0.0-1.0 range
                     sharpness: batchFrames[i].sharpness
                 }));
                 const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
@@ -825,7 +825,7 @@ export function useStacker() {
         addLog(`Sending ${validFrames.length} frames to stacking worker${drizzleStr}${useWebGPU ? ' (WebGPU)' : ''}`);
 
         // Prepare frame data - only include cloneable/transferable properties
-        // Use float32Buffer (16-bit path) if available, otherwise fall back to rgbaBuffer (8-bit legacy)
+        // Use float32Buffer (16-bit input) if available, otherwise rgbaBuffer (8-bit input)
         const frameData = [];
         for (let i = 0; i < validFrames.length; i++) {
             const f = validFrames[i];
@@ -1102,12 +1102,18 @@ export function useStacker() {
 
                 for (let i = batchStart; i < batchEnd; i++) {
                     const frame = frameData[i];
-                    // GPU worker expects Uint8 rgbaBuffer, convert Float32 if needed
+                    // GPU stacker accepts Float32 (0.0-1.0 range)
                     let rgbaBuffer;
                     if (frame.isFloat32 && frame.float32Buffer) {
-                        rgbaBuffer = float32ToUint8(frame.float32Buffer, frame.width, frame.height);
-                    } else {
-                        rgbaBuffer = frame.rgbaBuffer;
+                        // 16-bit input (SER/AVI) - already Float32
+                        rgbaBuffer = new Float32Array(frame.float32Buffer);
+                    } else if (frame.rgbaBuffer) {
+                        // 8-bit input (JPEG/PNG/8-bit SER) - convert to Float32
+                        const uint8Data = new Uint8Array(frame.rgbaBuffer);
+                        rgbaBuffer = new Float32Array(uint8Data.length);
+                        for (let j = 0; j < uint8Data.length; j++) {
+                            rgbaBuffer[j] = uint8Data[j] / 255;
+                        }
                     }
                     batchFrames.push({
                         rgbaBuffer,
