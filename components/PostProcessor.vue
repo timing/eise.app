@@ -33,7 +33,7 @@
 				<div class="spinner"></div>
 			</div>
 
-			<!-- Pipeline order: RGB Alignment → Color Balance → Sharpening → Color Adjustments → Crop → Rotation -->
+			<!-- Pipeline order: RGB Alignment → Color Balance → Auto Stretch → Sharpening → Color Adjustments → Crop → Rotation -->
 
 			<div class="color-alignment">
 				<h4>RGB Alignment <a href="#" class="manual-link" @click.prevent="showManualRgbControls = !showManualRgbControls">{{ showManualRgbControls ? 'hide manual' : 'manual' }}</a></h4>
@@ -62,6 +62,10 @@
 				<label class="checkbox-label">
 					<input type="checkbox" v-model="autoColorBalance" @change="applyProcessing" />
 					Auto (gray world)
+				</label>
+				<label class="checkbox-label">
+					<input type="checkbox" v-model="autoStretch" @change="applyProcessing" />
+					Auto stretch (levels)
 				</label>
 			</div>
 
@@ -173,14 +177,13 @@
 			<p>The post-processor helps you bring out detail in stacked planetary images. All processing runs locally in your browser.</p>
 
 			<h4>Features</h4>
-			<ul>
-				<li><strong>Wavelet sharpening</strong><br/>Sharpening that brings out surface details. Includes denoise to reduce noise (by blurring again, weird!). Works on luminance only to avoid color noise.</li>
-				<li><strong>Unsharp mask</strong><br/> Another sharpening option. Sometimes works better than wavelets, sometimes worse. Try both!</li>
-				<li><strong>Color adjustments</strong><br/> Tweak brightness, contrast, gamma, and saturation. Vibrance is like saturation but gentler on already-colorful areas.</li>
-				<li><strong>RGB alignment</strong><br/> Fixes the colored fringes you get from atmospheric dispersion. Auto-detect usually works, or nudge the channels manually.</li>
-				<li><strong>Rotation and crop</strong><br/> Straighten things up and cut off the messy edges.</li>
-				<li><strong>16-bit processing</strong><br/> Every image is processed in 16-bit, so adjustments are more precise and you won't lose detail.</li>
-			</ul>
+			<p><strong>Wavelet sharpening</strong><br/>Sharpening that brings out surface details. Includes denoise to reduce noise (by blurring again, weird!). Works on luminance only to avoid color noise.</p>
+			<p><strong>Unsharp mask</strong><br/>Another sharpening option. Sometimes works better than wavelets, sometimes worse. Try both!</p>
+			<p><strong>Color adjustments</strong><br/>Tweak brightness, contrast, gamma, and saturation. Vibrance is like saturation but gentler on already-colorful areas.</p>
+			<p><strong>RGB alignment</strong><br/>Fixes the colored fringes you get from atmospheric dispersion. Auto-detect usually works, or nudge the channels manually.</p>
+			<p><strong>Auto stretch</strong><br/>Automatically adjusts black and white points to use the full brightness range. Great starting point before manual tweaking.</p>
+			<p><strong>Rotation and crop</strong><br/>Straighten things up and cut off the messy edges.</p>
+			<p><strong>16-bit processing</strong><br/>Every image is processed in 16-bit, so adjustments are more precise and you won't lose detail.</p>
 		</template>
 		<template v-else>
 			<ZoomableCanvas ref="zoomableCanvasRef" id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" :previewRotation="previewRotationAngle">
@@ -521,6 +524,7 @@ const gamma = ref(1);
 const saturation = ref(1);
 const vibrance = ref(0);
 const autoColorBalance = ref(false);
+const autoStretch = ref(false);
 const preNoiseReduction = ref(0);
 const waveletsRadius = ref(0);
 const waveletsAmount = ref(0);
@@ -849,6 +853,12 @@ const applyProcessingInternal = async() => {
 		workingData = applyAutoColorBalance16(workingData, width, height);
 	}
 
+	// STEP 0.6: Auto stretch (levels)
+	// Stretches black/white points to full range before sharpening
+	if (autoStretch.value) {
+		workingData = applyAutoStretch16(workingData, width, height);
+	}
+
 	// STEP 1: Sharpening (based on selected method)
 	if (sharpeningMethod.value === 'usm' && usmAmount.value > 0) {
 		try {
@@ -1171,6 +1181,70 @@ function applyAutoColorBalance16(data, width, height) {
 		result[idx] = Math.min(1, data[idx] * scaleR);
 		result[idx + 1] = data[idx + 1]; // Green unchanged
 		result[idx + 2] = Math.min(1, data[idx + 2] * scaleB);
+		result[idx + 3] = data[idx + 3]; // Alpha unchanged
+	}
+
+	return result;
+}
+
+// ==================== AUTO STRETCH ====================
+// Applies levels adjustment: maps black/white points to 0/1 range
+
+function applyAutoStretch16(data, width, height) {
+	const pixelCount = width * height;
+
+	// Sample every Nth pixel for speed (max ~100k samples)
+	const sampleStep = Math.max(1, Math.floor(pixelCount / 100000));
+
+	// Collect luminance values (excluding near-black background)
+	const luminances = [];
+	for (let i = 0; i < pixelCount; i += sampleStep) {
+		const idx = i * 4;
+		const r = data[idx];
+		const g = data[idx + 1];
+		const b = data[idx + 2];
+		// Standard luminance formula
+		const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+		// Skip pure black pixels (likely background)
+		if (lum > 0.005) {
+			luminances.push(lum);
+		}
+	}
+
+	if (luminances.length < 100) {
+		console.warn('Auto stretch: not enough non-black pixels, skipping');
+		return data;
+	}
+
+	// Sort to find percentiles
+	luminances.sort((a, b) => a - b);
+
+	// Find 0.5% and 99.5% percentiles
+	const lowIdx = Math.floor(luminances.length * 0.005);
+	const highIdx = Math.floor(luminances.length * 0.995);
+	const blackPoint = luminances[lowIdx];
+	const whitePoint = luminances[highIdx];
+	const range = whitePoint - blackPoint;
+
+	if (range < 0.01) {
+		console.warn('Auto stretch: image already has full range, skipping');
+		return data;
+	}
+
+	console.log(`Auto stretch: black=${blackPoint.toFixed(4)}, white=${whitePoint.toFixed(4)}, range=${range.toFixed(4)}`);
+
+	// Apply levels with headroom for sharpening
+	// Stretch to 0.0-0.9 range (90%) to leave room for wavelet boosts
+	const targetMax = 0.9;
+	const scale = targetMax / range;
+
+	const result = new Float32Array(data.length);
+	for (let i = 0; i < pixelCount; i++) {
+		const idx = i * 4;
+		// Stretch each channel using same black/white points, with headroom
+		result[idx] = Math.max(0, Math.min(1, (data[idx] - blackPoint) * scale));
+		result[idx + 1] = Math.max(0, Math.min(1, (data[idx + 1] - blackPoint) * scale));
+		result[idx + 2] = Math.max(0, Math.min(1, (data[idx + 2] - blackPoint) * scale));
 		result[idx + 3] = data[idx + 3]; // Alpha unchanged
 	}
 

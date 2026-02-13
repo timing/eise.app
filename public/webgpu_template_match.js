@@ -163,8 +163,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-// Batch shader with GPU-side max reduction - outputs only (dx, dy, quality) per (frame, AP)
+// Batch shader with GPU-side max reduction and sub-pixel refinement
 // Uses workgroup shared memory for parallel reduction
+// After finding integer peak, applies parabolic fitting to neighboring scores for sub-pixel precision
 //
 // PRECISION NOTE: Frame grayscale data is stored as packed u8 (4 pixels per u32) for memory efficiency.
 // This is sufficient for alignment because:
@@ -319,17 +320,46 @@ fn main(
         workgroupBarrier();
     }
 
-    // Thread 0 writes final result: (dx, dy, score) for this (frame, AP)
+    // Thread 0 does sub-pixel refinement and writes final result
     if (threadIdx == 0u) {
         let finalOffset = sharedOffsets[0];
-        let finalDx = i32(finalOffset & 0xFFFFu) - searchRadius;
-        let finalDy = i32(finalOffset >> 16u) - searchRadius;
-        let finalScore = sharedScores[0];
+        let intDx = i32(finalOffset & 0xFFFFu) - searchRadius;
+        let intDy = i32(finalOffset >> 16u) - searchRadius;
+        let centerScore = sharedScores[0];
+
+        // Sub-pixel refinement using parabolic fitting
+        // Sample the 4 neighbors (if within search bounds)
+        var subDx: f32 = 0.0;
+        var subDy: f32 = 0.0;
+
+        // X-direction refinement
+        if (intDx > -searchRadius && intDx < searchRadius) {
+            let scoreLeft = computeBatchNCC(frameIdx, apIdx, intDx - 1, intDy);
+            let scoreRight = computeBatchNCC(frameIdx, apIdx, intDx + 1, intDy);
+            let denom = scoreLeft - 2.0 * centerScore + scoreRight;
+            if (abs(denom) > 0.0001) {
+                subDx = 0.5 * (scoreLeft - scoreRight) / denom;
+                // Clamp to [-0.5, 0.5] to avoid extrapolation
+                subDx = clamp(subDx, -0.5, 0.5);
+            }
+        }
+
+        // Y-direction refinement
+        if (intDy > -searchRadius && intDy < searchRadius) {
+            let scoreUp = computeBatchNCC(frameIdx, apIdx, intDx, intDy - 1);
+            let scoreDown = computeBatchNCC(frameIdx, apIdx, intDx, intDy + 1);
+            let denom = scoreUp - 2.0 * centerScore + scoreDown;
+            if (abs(denom) > 0.0001) {
+                subDy = 0.5 * (scoreUp - scoreDown) / denom;
+                // Clamp to [-0.5, 0.5] to avoid extrapolation
+                subDy = clamp(subDy, -0.5, 0.5);
+            }
+        }
 
         let resultIdx = (frameIdx * params.numAPs + apIdx) * 3u;
-        results[resultIdx] = f32(finalDx);
-        results[resultIdx + 1u] = f32(finalDy);
-        results[resultIdx + 2u] = finalScore;
+        results[resultIdx] = f32(intDx) + subDx;
+        results[resultIdx + 1u] = f32(intDy) + subDy;
+        results[resultIdx + 2u] = centerScore;
     }
 }
 `;
@@ -1453,22 +1483,58 @@ async function matchTemplatesGPU(refGrayData, frameGrayData, width, height, alig
     const shifts = [];
     const gridSize = 2 * searchRadius + 1;
 
+    // Helper to get score at grid position, returns -1 if out of bounds
+    const getScore = (apIdx, gx, gy) => {
+        if (gx < 0 || gx >= gridSize || gy < 0 || gy >= gridSize) return -1;
+        return resultsData[apIdx * numSearchPositions + gy * gridSize + gx];
+    };
+
     for (let i = 0; i < numAPs; i++) {
         let bestScore = -1;
-        let bestDx = 0;
-        let bestDy = 0;
+        let bestGx = 0;  // Grid position (0 to gridSize-1)
+        let bestGy = 0;
 
-        for (let dy = 0; dy < gridSize; dy++) {
-            for (let dx = 0; dx < gridSize; dx++) {
-                const score = resultsData[i * numSearchPositions + dy * gridSize + dx];
+        // Find integer peak
+        for (let gy = 0; gy < gridSize; gy++) {
+            for (let gx = 0; gx < gridSize; gx++) {
+                const score = resultsData[i * numSearchPositions + gy * gridSize + gx];
                 if (score > bestScore) {
                     bestScore = score;
-                    bestDx = dx - searchRadius;
-                    bestDy = dy - searchRadius;
+                    bestGx = gx;
+                    bestGy = gy;
                 }
             }
         }
-        shifts.push({ dx: bestDx, dy: bestDy, quality: bestScore });
+
+        // Sub-pixel refinement using parabolic fitting
+        let subDx = 0;
+        let subDy = 0;
+
+        // X-direction refinement (if not at edge)
+        if (bestGx > 0 && bestGx < gridSize - 1) {
+            const scoreLeft = getScore(i, bestGx - 1, bestGy);
+            const scoreRight = getScore(i, bestGx + 1, bestGy);
+            const denom = scoreLeft - 2 * bestScore + scoreRight;
+            if (Math.abs(denom) > 0.0001) {
+                subDx = 0.5 * (scoreLeft - scoreRight) / denom;
+                subDx = Math.max(-0.5, Math.min(0.5, subDx));  // Clamp
+            }
+        }
+
+        // Y-direction refinement (if not at edge)
+        if (bestGy > 0 && bestGy < gridSize - 1) {
+            const scoreUp = getScore(i, bestGx, bestGy - 1);
+            const scoreDown = getScore(i, bestGx, bestGy + 1);
+            const denom = scoreUp - 2 * bestScore + scoreDown;
+            if (Math.abs(denom) > 0.0001) {
+                subDy = 0.5 * (scoreUp - scoreDown) / denom;
+                subDy = Math.max(-0.5, Math.min(0.5, subDy));  // Clamp
+            }
+        }
+
+        const finalDx = (bestGx - searchRadius) + subDx;
+        const finalDy = (bestGy - searchRadius) + subDy;
+        shifts.push({ dx: finalDx, dy: finalDy, quality: bestScore });
     }
 
     return shifts;
