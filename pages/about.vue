@@ -8,7 +8,7 @@
 		<div class="content">
 			<h2>About eise.app - Image Stacker for Planets, Moon & Sun</h2>
 			<h3>100% browser-based - no uploads, no installs</h3>
-			<p>eise.app is the first fully browser-based planetary image stacking tool.
+			<p>eise.app is the first fully browser-based planetary image stacking tool for astrophotography.
 			Everything runs locally on your machine using WebAssembly and Web Workers - your data never leaves your computer.
 			</p>
 			<p>
@@ -81,7 +81,7 @@
 			</ClientOnly>
 
 			<h3>Alternative software</h3>
-			<p>eise.app works well for quick results without installing anything. For more advanced features you might want to try:</p>
+			<p>eise.app works well for quick astrophotography results without installing anything. For more advanced features you might want to try:</p>
 			<ul>
 				<li><a href="https://www.autostakkert.com/" target="_blank">AutoStakkert!</a> - Popular planetary stacking software (Windows)</li>
 				<li><a href="https://github.com/Rolf-Hempel/PlanetarySystemStacker" target="_blank">Planetary System Stacker</a> - Open-source stacker (Python, cross-platform)</li>

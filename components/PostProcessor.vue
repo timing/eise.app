@@ -174,7 +174,7 @@
 		<template v-if="!imageLoaded">
 			<h2>Post processor</h2>
 			<h3>Sharpen your planetary images</h3>
-			<p>The post-processor helps you bring out detail in stacked planetary images. All processing runs locally in your browser.</p>
+			<p>The post-processor helps you bring out detail in your astrophotography. Works great on stacked planetary images, but you can also load any image directly. All processing runs locally in your browser.</p>
 
 			<h4>Features</h4>
 			<p><strong>Wavelet sharpening</strong><br/>Sharpening that brings out surface details. Includes denoise to reduce noise (by blurring again, weird!). Works on luminance only to avoid color noise.</p>

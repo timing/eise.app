@@ -153,7 +153,7 @@
 	<div class="content" v-if="!isProcessing">
 		<h2>Welcome to eise.app</h2>
 		<h3>An easy image stacker for planetary astrophotography</h3>
-		<p>Turn your blurry and shaky videos of planets, Moon, or Sun into one stacked and sharp image using <em>lucky imaging</em>.</p>
+		<p>Turn your blurry and shaky videos of planets, Moon, or Sun into one stacked and sharp image using <em>lucky imaging</em> - a classic astrophotography technique.</p>
 		<ul>
 			<li>Select one or more SER files for stacking followed by post processing. (Multiple SER files will be combined)</li>
 			<li>Select one video file (AVI, MP4, etc.) for stacking followed by post processing.</li>
