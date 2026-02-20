@@ -398,7 +398,6 @@ header a {
 }
 .tabs {
 	border-radius: 5px;
-	overflow: hidden;
 	margin: 10px 0;
 }
 @media (max-width: 700px) {
@@ -459,6 +458,9 @@ button:hover, a.button:hover, .tabs a:hover {
 	margin: 0 auto;
 }
 .page-layout.page-layout-wide {
+	max-width: 800px;
+}
+.page-layout.page-layout-wide .content {
 	max-width: none;
 }
 .page-layout .card {

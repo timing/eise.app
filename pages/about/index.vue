@@ -1,10 +1,5 @@
 <template>
-	<div class="page-layout">
-		<div class="comparison-images vertical">
-			<img src="/jupiter-stacked.png" alt="Stacked result" />
-			<span class="arrow">&uarr;</span>
-			<img src="/jupiter-singleframe.png" alt="Single frame" />
-		</div>
+	<div class="page-layout page-layout-wide">
 		<div class="content">
 			<h2>About eise.app - Image Stacker for Planets, Moon & Sun</h2>
 			<h3>100% browser-based - no uploads, no installs</h3>
@@ -16,18 +11,13 @@
 			The project started from frustrations getting existing software running on ARM-based Macs - AutoStakkert4! didn't work in Wine, PSS had dependency issues, Lynkeos crashed continuously.
 			</p>
 
-			<h3>How it works</h3>
-			<ul>
-				<li><strong>File support:</strong> SER files (recommended), AVI (uncompressed), or any video format via FFmpeg.js</li>
-				<li><strong>Frame ranking:</strong> Laplacian variance calculates sharpness for each frame. Manual threshold selection with quality graph.</li>
-				<li><strong>Auto-crop:</strong> Detects and centers the target in each frame. For planets, rejects cut-off frames.</li>
-				<li><strong>Surface mode:</strong> For Moon/Sun closeups with drift tracking to handle larger frame-to-frame motion</li>
-				<li><strong>Local alignment:</strong> Alignment Points (APs) track motion across the frame using OpenCV's matchTemplate</li>
-				<li><strong>De-warping:</strong> Displacement maps correct atmospheric wobble using inverse distance weighted interpolation</li>
-				<li><strong>Drizzle:</strong> 1.5x output resolution using sub-pixel frame offsets</li>
-				<li><strong>Stacking:</strong> Quality-weighted averaging with brightness normalization</li>
-				<li><strong>Post-processing:</strong> Wavelet sharpening, deconvolution, RGB alignment (auto-detect + sub-pixel), rotation, crop</li>
-			</ul>
+			<p>
+				The stacking pipeline includes automatic frame ranking, per-frame cropping and centering, local alignment with de-warping,
+				drizzle upscaling, and quality-weighted frame accumulation. The integrated post-processor offers wavelet sharpening,
+				RGB alignment, and color correction.
+				<NuxtLink to="/about/help/">Learn how eise.app works</NuxtLink> or
+				<NuxtLink to="/about/planetary-stacking-software-comparison/">compare it to other stacking software</NuxtLink>.
+			</p>
 			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image - just open a PNG or TIFF for wavelet sharpening, RGB alignment, and other adjustments without stacking.</p>
 
 			<!-- Screenshot carousel -->
@@ -60,17 +50,8 @@
 			<p>Built with Nuxt/Vue, OpenCV.js (WebAssembly), Web Workers for parallel processing, and FFmpeg.js for video decoding.
 			All processing happens in your browser - works on any OS without installation.</p>
 
-			<h3>Browser Requirements (WebGPU)</h3>
-			<p>eise.app uses WebGPU for fast GPU-accelerated processing. Minimum requirements:</p>
-			<table class="compat-table">
-				<tr><th>Platform</th><th>Minimum Version</th></tr>
-				<tr><td>Chrome</td><td>113+ (Android: 121+)</td></tr>
-				<tr><td>Edge</td><td>113+</td></tr>
-				<tr><td>Safari</td><td>18+ (macOS Sequoia / iOS 18)</td></tr>
-				<tr><td>Firefox</td><td>141+ (Windows only for now)</td></tr>
-				<tr><td>Android</td><td>Chrome 121+ with Android 12+</td></tr>
-				<tr><td>iOS</td><td>Safari 18+ (iOS 18+)</td></tr>
-			</table>
+			<h3>Browser Requirements</h3>
+			<p>eise.app uses WebGPU for fast GPU-accelerated processing. See <NuxtLink to="/about/help/">browser requirements</NuxtLink> for minimum versions.</p>
 			<ClientOnly>
 				<div class="compat-status" :class="{ compatible: webGPUSupported === true, incompatible: webGPUSupported === false, checking: webGPUSupported === null }">
 					<strong>Your browser:</strong> {{ detectedBrowser }}<br/>
@@ -81,14 +62,11 @@
 			</ClientOnly>
 
 			<h3>Alternative software</h3>
-			<p>eise.app works well for quick astrophotography results without installing anything. For more advanced features you might want to try:</p>
-			<ul>
-				<li><a href="https://www.autostakkert.com/" target="_blank">AutoStakkert!</a> - Popular planetary stacking software (Windows)</li>
-				<li><a href="https://github.com/Rolf-Hempel/PlanetarySystemStacker" target="_blank">Planetary System Stacker</a> - Open-source stacker (Python, cross-platform)</li>
-				<li><a href="https://www.astronomie.be/registax/" target="_blank">Registax</a> - Stacking software with wavelet sharpening (Windows)</li>
-				<li><a href="https://lynkeos.sourceforge.io/" target="_blank">Lynkeos</a> - Native macOS stacking application</li>
-				<li><a href="https://siril.org/" target="_blank">Siril</a> - Astrophotography suite (cross-platform)</li>
-			</ul>
+			<p>
+				eise.app works well for quick astrophotography results without installing anything.
+				For a detailed comparison with AutoStakkert!, Planetary System Stacker, Registax, and other tools,
+				see our <NuxtLink to="/about/planetary-stacking-software-comparison/">stacking software comparison</NuxtLink>.
+			</p>
 
 			<h3>Acknowledgments</h3>
 			<p>
@@ -133,9 +111,10 @@ function prevScreenshot() {
 }
 
 useHead({
-	title: 'About - eise.app',
+	title: 'About eise.app - Browser-Based Planetary Image Stacking',
 	meta: [
-		{ name: 'description', content: 'About eise.app - the browser-based planetary image stacking tool for astrophotography.' },
+		{ name: 'description', content: 'eise.app is the first fully browser-based planetary image stacking tool for astrophotography. Process planets, Moon, and Sun images without installation - works on Mac, Windows, and Linux.' },
+		{ name: 'keywords', content: 'planetary image stacking, astrophotography software, browser-based stacking, lucky imaging, planetary photography' },
 	],
 });
 </script>
