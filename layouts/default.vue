@@ -61,7 +61,6 @@ watch(() => route.path, () => {
 	cursor: pointer;
 	transition: background-color 0.3s;
 	text-decoration: none;
-	font-size: 13px;
 	border-radius: 0;
 	border-right: 1px solid #ccc;
 	font-weight: bold;
@@ -94,8 +93,8 @@ watch(() => route.path, () => {
 	position: absolute;
 	top: 100%;
 	right: 0;
-	background: #2a2a2a;
-	border: 1px solid #444;
+	background: #eee;
+	border: 1px solid #ccc;
 	border-radius: 6px;
 	box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 	z-index: 100;
@@ -110,33 +109,41 @@ watch(() => route.path, () => {
 .dropdown-menu a {
 	display: block;
 	padding: 10px 16px;
-	color: #ccc;
+	color: #333;
 	text-decoration: none;
 	font-size: 13px;
-	border-bottom: 1px solid #333;
+	border-bottom: 1px solid #ccc;
 	background: transparent;
 }
 .dropdown-menu a:last-child {
 	border-bottom: none;
 }
 .dropdown-menu a:hover {
-	background: #333;
-	color: #fff;
+	background: #70f1ec;
+	color: #333;
 }
 @media (max-width: 700px) {
 	.dropdown {
 		flex: 1;
+		display: flex;
 	}
 	.dropdown-toggle {
-		width: 100%;
+		flex: 1;
 		text-align: center;
 		padding: 8px 5px;
-		font-size: 11px;
 		white-space: nowrap;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		box-sizing: border-box;
+	}
+	.dropdown-arrow {
+		font-size: 1em;
 	}
 	.dropdown-menu {
-		right: auto;
-		left: 0;
+		right: 0;
+		left: auto;
+		min-width: 200px;
 	}
 }
 </style>
