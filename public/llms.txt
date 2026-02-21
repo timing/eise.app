@@ -1,0 +1,70 @@
+# eise.app
+
+> eise.app is a free, browser-based planetary image stacking tool for astrophotography. It processes videos of planets, the Moon, and Sun using the lucky imaging technique - selecting and combining the sharpest frames to overcome atmospheric turbulence. All processing happens locally in your browser using WebAssembly and WebGPU. No installation, no uploads, works on any operating system.
+
+## What is Planetary Stacking?
+
+Planetary stacking (lucky imaging) combines hundreds or thousands of video frames to create a single sharp image. Atmospheric turbulence causes planets to shimmer and blur, but brief moments of steady air produce sharp frames. Stacking software ranks frames by sharpness, aligns them, and combines the best ones to reveal details like Jupiter's cloud bands, Saturn's rings, lunar craters, and sunspots.
+
+## Key Features
+
+- **Frame Analysis**: Automatic sharpness ranking using Laplacian variance. Quality histogram for manual threshold selection.
+- **Auto-Cropping**: Detects and centers the target in each frame. Rejects frames where the planet is cut off.
+- **Local Alignment**: Alignment Points (APs) distributed across the frame track local atmospheric distortion using template matching.
+- **De-warping**: Displacement maps correct atmospheric wobble using inverse distance weighted interpolation.
+- **Drizzle**: 1.5x output resolution using sub-pixel frame offsets.
+- **Wavelet Sharpening**: Built-in multi-layer wavelet sharpening to enhance surface details.
+- **RGB Alignment**: Automatic detection and correction of atmospheric dispersion (color fringing).
+- **GPU Accelerated**: WebGPU provides fast processing on modern browsers.
+- **Privacy**: 100% local processing - your images never leave your computer.
+
+## Supported File Formats
+
+- **SER**: Astronomical video format (recommended for planetary imaging)
+- **AVI**: Uncompressed AVI files
+- **Video**: MP4, MOV, WebM via FFmpeg.js
+- **Images**: PNG, TIFF, JPEG for post-processing only
+
+## Pages
+
+- [Home](https://eise.app/): Main stacking interface - upload videos and stack frames
+- [Post Processor](https://eise.app/post-processor/): Wavelet sharpening, RGB alignment, color correction, crop - can also be used standalone on any image
+- [Tools](https://eise.app/tools/): Additional utilities
+- [About](https://eise.app/about/): Project background and acknowledgments
+- [Help](https://eise.app/about/help/): Step-by-step guide and troubleshooting
+- [Software Comparison](https://eise.app/about/planetary-stacking-software-comparison/): Compare eise.app with AutoStakkert!, PSS, Registax, Planet Stacker X, and PIPP
+
+## Technical Stack
+
+- **Frontend**: Nuxt.js / Vue.js
+- **Image Processing**: OpenCV.js (WebAssembly)
+- **Video Decoding**: FFmpeg.js
+- **GPU Compute**: WebGPU for template matching and frame stacking
+- **Parallel Processing**: Web Workers
+
+## Browser Requirements
+
+Requires WebGPU support for optimal performance:
+- Chrome 113+ (Android 121+)
+- Edge 113+
+- Safari 18+ (macOS Sequoia / iOS 18)
+- Firefox 141+ (Windows only)
+
+Falls back to CPU processing (slower) if WebGPU is unavailable.
+
+## Comparison with Other Software
+
+eise.app is unique as the only fully browser-based planetary stacker. Alternatives include:
+- **AutoStakkert!**: Windows-only, gold standard for stacking, no built-in sharpening
+- **Planetary System Stacker (PSS)**: Cross-platform Python app, requires dependency setup
+- **Planet Stacker X**: macOS-only native app
+- **Registax**: Windows-only, famous for wavelet sharpening
+- **PIPP**: Windows-only preprocessor for centering and cropping
+
+## Open Source
+
+eise.app is open source: https://github.com/timing/eise.app
+
+## Contact
+
+For bugs or feature requests, visit the GitHub repository or use the in-app feedback form.

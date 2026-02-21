@@ -4,6 +4,9 @@ export default defineNuxtConfig({
 	devtools: { enabled: true },
 	app: {
 		head: {
+			link: [
+				{ rel: 'alternate', type: 'text/markdown', href: '/llms.txt' }
+			],
 			meta: [
 				{ property: 'og:type', content: 'website' },
 				{ property: 'og:site_name', content: 'eise.app' },
