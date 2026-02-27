@@ -172,6 +172,18 @@
 				<button v-if="rotation !== 0 || hasAppliedRotation" class="reset-rotation" @click="resetRotation">Reset</button>
 			</div>
 
+			<h4>Edge Mask</h4>
+			<div class="edge-mask-controls">
+				<button v-if="!edgeMaskMode && !edgeMaskEnabled" @click="startEdgeMaskMode">Add edge mask</button>
+				<button v-if="!edgeMaskMode && edgeMaskEnabled" @click="startEdgeMaskMode">Edit edge mask</button>
+				<button v-if="!edgeMaskMode && edgeMaskEnabled" class="remove-mask" @click="removeEdgeMask">Remove</button>
+				<template v-if="edgeMaskMode">
+					<span class="edge-mask-hint">Drag circle to move, drag edge to resize</span>
+					<button class="apply-mask" @click="applyEdgeMask">Apply</button>
+					<button class="cancel-mask" @click="cancelEdgeMask">Cancel</button>
+				</template>
+			</div>
+
 		</div>
 	</div>
 	<div class="content">
@@ -181,16 +193,10 @@
 			<p>The post-processor helps you bring out detail in your astrophotography. Works great on stacked planetary images, but you can also load any image directly. All processing runs locally in your browser.</p>
 
 			<h4>Features</h4>
-			<p><strong>Wavelet sharpening</strong><br/>Sharpening that brings out surface details. Includes denoise to reduce noise (by blurring again, weird!). Works on luminance only to avoid color noise.</p>
-			<p><strong>Unsharp mask</strong><br/>Another sharpening option. Sometimes works better than wavelets, sometimes worse. Try both!</p>
-			<p><strong>Color adjustments</strong><br/>Tweak brightness, contrast, gamma, and saturation. Vibrance is like saturation but gentler on already-colorful areas.</p>
-			<p><strong>RGB alignment</strong><br/>Fixes the colored fringes you get from atmospheric dispersion. Auto-detect usually works, or nudge the channels manually.</p>
-			<p><strong>Auto stretch</strong><br/>Automatically adjusts black and white points to use the full brightness range. Great starting point before manual tweaking.</p>
-			<p><strong>Rotation and crop</strong><br/>Straighten things up and cut off the messy edges.</p>
-			<p><strong>16-bit processing</strong><br/>Every image is processed in 16-bit, so adjustments are more precise and you won't lose detail.</p>
+			<p v-for="feature in features" :key="feature.title"><strong>{{ feature.title }}</strong><br/>{{ feature.desc }}</p>
 		</template>
 		<template v-else>
-			<ZoomableCanvas ref="zoomableCanvasRef" id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode" :previewRotation="previewRotationAngle">
+			<ZoomableCanvas ref="zoomableCanvasRef" id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode || edgeMaskMode" :previewRotation="previewRotationAngle">
 				<template #overlay>
 					<span v-if="isLoadingImage" class="loading-inline">
 						<span class="spinner"></span> Loading image...
@@ -210,6 +216,7 @@
 								<button @click="loadAnotherImage">Load another image</button>
 								<button @click="startNewStack">Start new stack</button>
 								<button @click="closePostProcessor">Close Post Processor</button>
+								<button @click="showHelpPopup = true; showKebabMenu = false">Help</button>
 							</div>
 						</div>
 					</div>
@@ -261,6 +268,19 @@
 		</div>
 	</div>
 
+	<!-- Help Popup -->
+	<div v-if="showHelpPopup" class="help-popup-overlay" @click.self="showHelpPopup = false">
+		<div class="help-popup">
+			<h3>Post Processor Help</h3>
+			<p>The post-processor helps you bring out detail in your astrophotography. Works great on stacked planetary images, but you can also load any image directly.</p>
+			<h4>Features</h4>
+			<p v-for="feature in features" :key="feature.title"><strong>{{ feature.title }}</strong><br/>{{ feature.desc }}</p>
+			<div class="help-popup-footer">
+				<button class="close-btn" @click="showHelpPopup = false">Close</button>
+			</div>
+		</div>
+	</div>
+
 </div>
 </template>
 
@@ -302,6 +322,19 @@ const showExportPopup = ref(false);
 const exportFilename = ref('');
 const sentryAvailable = ref(false);
 const showKebabMenu = ref(false);
+const showHelpPopup = ref(false);
+
+// Features list - shared between main page and help popup
+const features = [
+	{ title: 'Wavelet sharpening', desc: 'Sharpening that brings out surface details. Includes denoise to reduce noise (by blurring again, weird!). Works on luminance only to avoid color noise.' },
+	{ title: 'Unsharp mask', desc: 'Another sharpening option. Sometimes works better than wavelets, sometimes worse. Try both!' },
+	{ title: 'Color adjustments', desc: 'Tweak brightness, contrast, gamma, and saturation. Vibrance is like saturation but gentler on already-colorful areas.' },
+	{ title: 'RGB alignment', desc: 'Fixes the colored fringes you get from atmospheric dispersion. Auto-detect usually works, or nudge the channels manually.' },
+	{ title: 'Auto stretch', desc: 'Automatically adjusts black and white points to use the full brightness range. Great starting point before manual tweaking.' },
+	{ title: 'Rotation and crop', desc: 'Straighten things up and cut off the messy edges.' },
+	{ title: 'Edge mask', desc: 'Removes chromatic aberration fringes around planets by masking everything outside a circle with the true background color.' },
+	{ title: '16-bit processing', desc: 'Every image is processed in 16-bit, so adjustments are more precise and you won\'t lose detail.' }
+];
 
 // Direct file loading for when user arrives on this page without a file
 function triggerDirectFileSelect() {
@@ -556,6 +589,19 @@ const isAutoAligning = ref(false);
 const rgbAlignmentIsAuto = ref(false); // Track if alignment was set via Auto (to re-run after crop/rotation)
 const showManualRgbControls = ref(false); // Toggle visibility of manual RGB adjustment buttons
 const showSharpeningInfo = ref(false); // Toggle visibility of sharpening info
+
+// Edge mask state
+const edgeMaskMode = ref(false); // Whether we're editing the edge mask
+const edgeMaskEnabled = ref(false); // Whether to apply the edge mask during processing
+const edgeMaskCenterX = ref(0); // Circle center X (in image coords)
+const edgeMaskCenterY = ref(0); // Circle center Y (in image coords)
+const edgeMaskRadius = ref(100); // Circle radius (in image coords)
+const edgeMaskBackgroundColor = ref([0, 0, 0]); // Sampled background color [r, g, b] in 0-1 range
+let edgeMaskDragging = false;
+let edgeMaskResizing = false;
+let edgeMaskDragStart = { x: 0, y: 0 };
+let edgeMaskOriginalCenter = { x: 0, y: 0 };
+let edgeMaskOriginalRadius = 0;
 
 // Check if any RGB alignment offset has been applied
 const hasAlignmentOffset = computed(() => {
@@ -829,6 +875,45 @@ function applyColorAdjustments16(data, width, height, gainVal, contrastVal, gamm
 	return newData;
 }
 
+// Apply circular edge mask - pixels outside the circle become the background color
+// With anti-aliased edge: 1px outside = 50% blend, 2px outside = 20% blend, beyond = 0%
+function applyEdgeMaskToData(data, width, height) {
+	const newData = new Float32Array(data.length);
+	const cx = edgeMaskCenterX.value;
+	const cy = edgeMaskCenterY.value;
+	const r = edgeMaskRadius.value;
+	const [bgR, bgG, bgB] = edgeMaskBackgroundColor.value;
+
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			const idx = (y * width + x) * 4;
+			const dx = x - cx;
+			const dy = y - cy;
+			const dist = Math.sqrt(dx * dx + dy * dy);
+
+			let blend; // 1 = full original, 0 = full background
+			if (dist <= r) {
+				blend = 1;
+			} else if (dist <= r + 1) {
+				blend = 0.8;
+			} else if (dist <= r + 2) {
+				blend = 0.5;
+			} else if (dist <= r + 3) {
+				blend = 0.2;
+			} else {
+				blend = 0;
+			}
+
+			newData[idx] = data[idx] * blend + bgR * (1 - blend);
+			newData[idx + 1] = data[idx + 1] * blend + bgG * (1 - blend);
+			newData[idx + 2] = data[idx + 2] * blend + bgB * (1 - blend);
+			newData[idx + 3] = data[idx + 3];
+		}
+	}
+
+	return newData;
+}
+
 // Debounced processing - waits for user to stop dragging before heavy processing
 const applyProcessingInternal = async() => {
 	if (!image16) {
@@ -930,12 +1015,26 @@ const applyProcessingInternal = async() => {
 		}
 	}
 
+	// STEP 4: Apply edge mask (fill outside circle with background color)
+	if (edgeMaskEnabled.value) {
+		workingData = applyEdgeMaskToData(workingData, width, height);
+	}
+
 	// Store 16-bit result
 	sharpenedImage16 = Image16.fromFloat32Array(workingData, width, height);
 
 	// Convert to 8-bit for display
 	sharpenedImageData = sharpenedImage16.toImageData();
 	ctx.putImageData(sharpenedImageData, 0, 0);
+
+	// Draw green circle overlay when in edge mask mode
+	if (edgeMaskMode.value) {
+		ctx.strokeStyle = '#00ff00';
+		ctx.lineWidth = 2;
+		ctx.beginPath();
+		ctx.arc(edgeMaskCenterX.value, edgeMaskCenterY.value, edgeMaskRadius.value, 0, Math.PI * 2);
+		ctx.stroke();
+	}
 
 	isProcessing.value = false;
 };
@@ -1375,6 +1474,9 @@ function drawCropOverlay() {
 function applyCrop() {
 	if (!cropSelection.value) return;
 
+	// Remove edge mask since coordinates become invalid after crop
+	edgeMaskEnabled.value = false;
+
 	const sel = cropSelection.value;
 
 	// Save current state for undo (both 8-bit and 16-bit)
@@ -1517,6 +1619,9 @@ function applyRotation() {
 		return;
 	}
 
+	// Remove edge mask since coordinates become invalid after rotation
+	edgeMaskEnabled.value = false;
+
 	// Save backup before first rotation
 	if (!preRotationImage16) {
 		preRotationImage16 = image16.clone();
@@ -1600,6 +1705,234 @@ function resetRotation() {
 	// Reprocess with existing alignment settings
 	applyProcessing();
 }
+
+// ============ Edge Mask Functions ============
+
+function startEdgeMaskMode() {
+	edgeMaskMode.value = true;
+
+	// Only auto-detect if no mask exists yet; otherwise keep existing position
+	if (!edgeMaskEnabled.value) {
+		autoDetectEdgeMaskCircle();
+	}
+
+	// Add mouse event listeners to canvas
+	const canvasEl = canvas.value;
+	canvasEl.style.cursor = 'move';
+	canvasEl.addEventListener('mousedown', onEdgeMaskMouseDown);
+	canvasEl.addEventListener('mousemove', onEdgeMaskMouseMove);
+	canvasEl.addEventListener('mouseup', onEdgeMaskMouseUp);
+	document.addEventListener('keydown', onEdgeMaskKeyDown);
+
+	// Redraw with the green circle
+	applyProcessing();
+}
+
+function autoDetectEdgeMaskCircle() {
+	if (!initCanvasImageData) return;
+
+	const width = initCanvasImageData.width;
+	const height = initCanvasImageData.height;
+	const data = image16 ? image16.data : initCanvasImageData.data;
+	const isFloat = image16 !== null;
+
+	// Find bounding box of bright pixels
+	let minX = width, maxX = 0, minY = height, maxY = 0;
+	const threshold = isFloat ? 0.1 : 25;
+
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			const idx = (y * width + x) * 4;
+			const brightness = isFloat
+				? (data[idx] + data[idx + 1] + data[idx + 2]) / 3
+				: (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+			if (brightness > threshold) {
+				minX = Math.min(minX, x);
+				maxX = Math.max(maxX, x);
+				minY = Math.min(minY, y);
+				maxY = Math.max(maxY, y);
+			}
+		}
+	}
+
+	if (maxX > minX && maxY > minY) {
+		edgeMaskCenterX.value = (minX + maxX) / 2;
+		edgeMaskCenterY.value = (minY + maxY) / 2;
+		// Use the larger dimension for radius, add small margin
+		edgeMaskRadius.value = Math.max(maxX - minX, maxY - minY) / 2 + 5;
+	} else {
+		// Fallback to center of image
+		edgeMaskCenterX.value = width / 2;
+		edgeMaskCenterY.value = height / 2;
+		edgeMaskRadius.value = Math.min(width, height) / 3;
+	}
+}
+
+function onEdgeMaskKeyDown(e) {
+	if (e.key === 'Escape') {
+		cancelEdgeMask();
+	}
+}
+
+function cancelEdgeMask() {
+	edgeMaskMode.value = false;
+
+	const canvasEl = canvas.value;
+	canvasEl.style.cursor = 'default';
+	canvasEl.removeEventListener('mousedown', onEdgeMaskMouseDown);
+	canvasEl.removeEventListener('mousemove', onEdgeMaskMouseMove);
+	canvasEl.removeEventListener('mouseup', onEdgeMaskMouseUp);
+	document.removeEventListener('keydown', onEdgeMaskKeyDown);
+
+	applyProcessing();
+}
+
+function onEdgeMaskMouseDown(e) {
+	const rect = canvas.value.getBoundingClientRect();
+	const scaleX = canvas.value.width / rect.width;
+	const scaleY = canvas.value.height / rect.height;
+	const x = (e.clientX - rect.left) * scaleX;
+	const y = (e.clientY - rect.top) * scaleY;
+
+	const dx = x - edgeMaskCenterX.value;
+	const dy = y - edgeMaskCenterY.value;
+	const dist = Math.sqrt(dx * dx + dy * dy);
+
+	// Check if near the edge (within 15px for resize)
+	if (Math.abs(dist - edgeMaskRadius.value) < 15) {
+		edgeMaskResizing = true;
+		edgeMaskOriginalRadius = edgeMaskRadius.value;
+	} else if (dist < edgeMaskRadius.value) {
+		// Inside circle - drag to move
+		edgeMaskDragging = true;
+		edgeMaskDragStart = { x, y };
+		edgeMaskOriginalCenter = { x: edgeMaskCenterX.value, y: edgeMaskCenterY.value };
+	}
+}
+
+function onEdgeMaskMouseMove(e) {
+	const rect = canvas.value.getBoundingClientRect();
+	const scaleX = canvas.value.width / rect.width;
+	const scaleY = canvas.value.height / rect.height;
+	const x = (e.clientX - rect.left) * scaleX;
+	const y = (e.clientY - rect.top) * scaleY;
+
+	if (edgeMaskDragging) {
+		const dx = x - edgeMaskDragStart.x;
+		const dy = y - edgeMaskDragStart.y;
+		edgeMaskCenterX.value = edgeMaskOriginalCenter.x + dx;
+		edgeMaskCenterY.value = edgeMaskOriginalCenter.y + dy;
+		redrawEdgeMaskCircle();
+	} else if (edgeMaskResizing) {
+		const dx = x - edgeMaskCenterX.value;
+		const dy = y - edgeMaskCenterY.value;
+		edgeMaskRadius.value = Math.max(10, Math.sqrt(dx * dx + dy * dy));
+		redrawEdgeMaskCircle();
+	} else {
+		// Update cursor based on position
+		const dx = x - edgeMaskCenterX.value;
+		const dy = y - edgeMaskCenterY.value;
+		const dist = Math.sqrt(dx * dx + dy * dy);
+		if (Math.abs(dist - edgeMaskRadius.value) < 15) {
+			canvas.value.style.cursor = 'ew-resize';
+		} else if (dist < edgeMaskRadius.value) {
+			canvas.value.style.cursor = 'move';
+		} else {
+			canvas.value.style.cursor = 'default';
+		}
+	}
+}
+
+function onEdgeMaskMouseUp() {
+	edgeMaskDragging = false;
+	edgeMaskResizing = false;
+}
+
+function applyEdgeMask() {
+	// Sample background color from corners
+	sampleBackgroundColor();
+
+	edgeMaskEnabled.value = true;
+	edgeMaskMode.value = false;
+
+	const canvasEl = canvas.value;
+	canvasEl.style.cursor = 'default';
+	canvasEl.removeEventListener('mousedown', onEdgeMaskMouseDown);
+	canvasEl.removeEventListener('mousemove', onEdgeMaskMouseMove);
+	canvasEl.removeEventListener('mouseup', onEdgeMaskMouseUp);
+	document.removeEventListener('keydown', onEdgeMaskKeyDown);
+
+	applyProcessing();
+}
+
+function sampleBackgroundColor() {
+	if (!image16) return;
+
+	const width = canvas.value.width;
+	const height = canvas.value.height;
+	const data = image16.data;
+	const cx = edgeMaskCenterX.value;
+	const cy = edgeMaskCenterY.value;
+	const r = edgeMaskRadius.value;
+	const rSq = r * r;
+
+	// Collect minimum channel values from all pixels outside the mask circle
+	const darkValues = [];
+
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			const dx = x - cx;
+			const dy = y - cy;
+			const distSq = dx * dx + dy * dy;
+
+			// Only sample pixels outside the circle
+			if (distSq > rSq) {
+				const idx = (y * width + x) * 4;
+				const pr = data[idx];
+				const pg = data[idx + 1];
+				const pb = data[idx + 2];
+				// Use minimum channel to ignore color fringe contamination
+				const minChannel = Math.min(pr, pg, pb);
+				darkValues.push(minChannel);
+			}
+		}
+	}
+
+	if (darkValues.length === 0) {
+		edgeMaskBackgroundColor.value = [0, 0, 0];
+		return;
+	}
+
+	// Sort and average the darkest 20%
+	darkValues.sort((a, b) => a - b);
+	const darkest20Count = Math.max(1, Math.floor(darkValues.length * 0.2));
+	let sum = 0;
+	for (let i = 0; i < darkest20Count; i++) {
+		sum += darkValues[i];
+	}
+	const avgDark = sum / darkest20Count;
+
+	edgeMaskBackgroundColor.value = [avgDark, avgDark, avgDark];
+}
+
+function removeEdgeMask() {
+	edgeMaskEnabled.value = false;
+	applyProcessing();
+}
+
+// Lightweight redraw - just redraws existing image + green circle (no reprocessing)
+function redrawEdgeMaskCircle() {
+	if (!sharpenedImageData) return;
+	const ctx = canvas.value.getContext('2d');
+	ctx.putImageData(sharpenedImageData, 0, 0);
+	ctx.strokeStyle = '#00ff00';
+	ctx.lineWidth = 2;
+	ctx.beginPath();
+	ctx.arc(edgeMaskCenterX.value, edgeMaskCenterY.value, edgeMaskRadius.value, 0, Math.PI * 2);
+	ctx.stroke();
+}
+
+// ============ End Edge Mask Functions ============
 
 function processChromaticAberration(channel, axis, magnitude){
 	// Manual adjustment - no longer auto-aligned
@@ -1955,6 +2288,37 @@ canvas {
 	font-size: 12px;
 	color: #666;
 }
+
+/* Edge mask controls */
+.edge-mask-controls {
+	display: flex;
+	gap: 10px;
+	align-items: center;
+	flex-wrap: wrap;
+}
+.edge-mask-controls button {
+	padding: 8px 16px;
+	border: none;
+	border-radius: 4px;
+	cursor: pointer;
+}
+.edge-mask-controls .apply-mask {
+	background-color: #8CCF7E;
+	color: #111;
+}
+.edge-mask-controls .cancel-mask {
+	background-color: #888;
+	color: white;
+}
+.edge-mask-controls .remove-mask {
+	background-color: #ff6b6b;
+	color: white;
+}
+.edge-mask-hint {
+	font-size: 12px;
+	color: #666;
+}
+
 .sharpening-frame {
 	border: none;
 	padding: 0;
@@ -2193,6 +2557,50 @@ button.download:hover {
 	background-color: #ddd;
 }
 
+/* Help popup */
+.help-popup-overlay {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: rgba(0, 0, 0, 0.6);
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	z-index: 1000;
+}
+.help-popup {
+	background: #fefefe;
+	color: #333;
+	border-radius: 10px;
+	padding: 25px 30px;
+	max-width: 500px;
+	width: 90%;
+	max-height: 80vh;
+	overflow-y: auto;
+	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+.help-popup h3 {
+	margin: 0 0 15px 0;
+	color: #333;
+	font-size: 18px;
+}
+.help-popup h4 {
+	margin: 20px 0 10px 0;
+	color: #333;
+}
+.help-popup p {
+	margin: 8px 0;
+	line-height: 1.5;
+}
+.help-popup-footer {
+	display: flex;
+	justify-content: flex-end;
+	padding-top: 15px;
+	margin-top: 15px;
+	border-top: 1px solid #eee;
+}
 
 .file-input-wrapper {
 	position: relative;
