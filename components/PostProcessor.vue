@@ -130,14 +130,19 @@
 				<span>{{ gain }}</span>
 			</div>
 			<div>
+				<label>Gamma:</label>
+				<input type="range" min="0.3" max="3" step="0.01" v-model="gamma" @input="applyProcessing"/>
+				<span>{{ gamma }}</span>
+			</div>
+			<div>
 				<label>Contrast:</label>
 				<input type="range" min="0.5" max="2" step="0.01" v-model="contrast" @input="applyProcessing"/>
 				<span>{{ contrast }}</span>
 			</div>
 			<div>
-				<label>Gamma:</label>
-				<input type="range" min="0.3" max="3" step="0.01" v-model="gamma" @input="applyProcessing"/>
-				<span>{{ gamma }}</span>
+				<label>Vibrance:</label>
+				<input type="range" min="-1" max="2" step="0.01" v-model="vibrance" @input="applyProcessing"/>
+				<span>{{ vibrance }}</span>
 			</div>
 			<div>
 				<label>Saturation:</label>
@@ -145,9 +150,8 @@
 				<span>{{ saturation }}</span>
 			</div>
 			<div>
-				<label>Vibrance:</label>
-				<input type="range" min="-1" max="2" step="0.01" v-model="vibrance" @input="applyProcessing"/>
-				<span>{{ vibrance }}</span>
+				<label>Saturation repeats:</label>
+				<input type="number" min="1" max="10" v-model.number="saturationRepeats" @input="applyProcessing" class="repeats-input"/>
 			</div>
 
 			<h4>Crop</h4>
@@ -522,6 +526,7 @@ const gain = ref(1);
 const contrast = ref(1);
 const gamma = ref(1);
 const saturation = ref(1);
+const saturationRepeats = ref(1);
 const vibrance = ref(0);
 const autoColorBalance = ref(false);
 const autoStretch = ref(false);
@@ -763,7 +768,7 @@ async function loadImage(file) {
 }
 
 // Apply color adjustments in 16-bit (Float32Array, 0.0-1.0 range)
-function applyColorAdjustments16(data, width, height, gainVal, contrastVal, gammaVal, saturationVal, vibranceVal) {
+function applyColorAdjustments16(data, width, height, gainVal, contrastVal, gammaVal, saturationVal, vibranceVal, saturationRepeatsVal = 1) {
 	const newData = new Float32Array(data.length);
 	const invGamma = 1 / gammaVal;
 	const pixelCount = width * height;
@@ -779,11 +784,6 @@ function applyColorAdjustments16(data, width, height, gainVal, contrastVal, gamm
 		g *= gainVal;
 		b *= gainVal;
 
-		// Apply contrast: (value - 0.5) * contrast + 0.5
-		r = (r - 0.5) * contrastVal + 0.5;
-		g = (g - 0.5) * contrastVal + 0.5;
-		b = (b - 0.5) * contrastVal + 0.5;
-
 		// Clamp before gamma (need positive values for pow)
 		r = Math.max(0, r);
 		g = Math.max(0, g);
@@ -794,12 +794,10 @@ function applyColorAdjustments16(data, width, height, gainVal, contrastVal, gamm
 		g = Math.pow(g, invGamma);
 		b = Math.pow(b, invGamma);
 
-		// Apply saturation
-		// Luminance (Rec. 709)
-		const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-		r = lum + saturationVal * (r - lum);
-		g = lum + saturationVal * (g - lum);
-		b = lum + saturationVal * (b - lum);
+		// Apply contrast: (value - 0.5) * contrast + 0.5
+		r = (r - 0.5) * contrastVal + 0.5;
+		g = (g - 0.5) * contrastVal + 0.5;
+		b = (b - 0.5) * contrastVal + 0.5;
 
 		// Apply vibrance (saturation that affects less-saturated colors more)
 		if (vibranceVal !== 0) {
@@ -807,10 +805,18 @@ function applyColorAdjustments16(data, width, height, gainVal, contrastVal, gamm
 			const minC = Math.min(r, g, b);
 			const currentSat = maxC > 0 ? (maxC - minC) / maxC : 0;
 			const vibranceAmount = vibranceVal * (1 - currentSat);
-			const lum2 = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-			r = r + (r - lum2) * vibranceAmount;
-			g = g + (g - lum2) * vibranceAmount;
-			b = b + (b - lum2) * vibranceAmount;
+			const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+			r = r + (r - lum) * vibranceAmount;
+			g = g + (g - lum) * vibranceAmount;
+			b = b + (b - lum) * vibranceAmount;
+		}
+
+		// Apply saturation (repeated for smoother boosting)
+		for (let rep = 0; rep < saturationRepeatsVal; rep++) {
+			const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+			r = lum + saturationVal * (r - lum);
+			g = lum + saturationVal * (g - lum);
+			b = lum + saturationVal * (b - lum);
 		}
 
 		// Final clamp to 0-1
@@ -903,15 +909,16 @@ const applyProcessingInternal = async() => {
 			contrast.value,
 			gamma.value,
 			saturation.value,
-			vibrance.value
+			vibrance.value,
+			saturationRepeats.value
 		);
 		if (colorResult) {
 			workingData = colorResult;
 		} else {
-			workingData = applyColorAdjustments16(workingData, width, height, gain.value, contrast.value, gamma.value, saturation.value, vibrance.value);
+			workingData = applyColorAdjustments16(workingData, width, height, gain.value, contrast.value, gamma.value, saturation.value, vibrance.value, saturationRepeats.value);
 		}
 	} else {
-		workingData = applyColorAdjustments16(workingData, width, height, gain.value, contrast.value, gamma.value, saturation.value, vibrance.value);
+		workingData = applyColorAdjustments16(workingData, width, height, gain.value, contrast.value, gamma.value, saturation.value, vibrance.value, saturationRepeats.value);
 	}
 
 	// STEP 3: Noise reduction (only with wavelets) - WebGL2 Gaussian blur
@@ -1780,6 +1787,12 @@ canvas {
 }
 .content {
 	max-width: none;
+}
+
+/* Saturation repeats input */
+.repeats-input {
+	width: 50px;
+	padding: 2px 4px;
 }
 
 /* Toolbar actions wrapper */

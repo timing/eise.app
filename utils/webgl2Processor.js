@@ -70,15 +70,13 @@ const fragmentShaderSource = `#version 300 es
 	uniform float u_gamma;
 	uniform float u_saturation;
 	uniform float u_vibrance;
+	uniform int u_saturationRepeats;
 
 	void main() {
 		vec4 color = texture(u_image, v_texCoord);
 
 		// Apply gain
 		vec3 rgb = color.rgb * u_gain;
-
-		// Apply contrast: (value - 0.5) * contrast + 0.5
-		rgb = (rgb - 0.5) * u_contrast + 0.5;
 
 		// Clamp before gamma (avoid negative values for pow)
 		rgb = max(rgb, vec3(0.0));
@@ -87,18 +85,22 @@ const fragmentShaderSource = `#version 300 es
 		float invGamma = 1.0 / u_gamma;
 		rgb = pow(rgb, vec3(invGamma));
 
-		// Apply saturation
-		// Luminance (Rec. 709)
-		float lum = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
-		rgb = vec3(lum) + u_saturation * (rgb - vec3(lum));
+		// Apply contrast: (value - 0.5) * contrast + 0.5
+		rgb = (rgb - 0.5) * u_contrast + 0.5;
 
 		// Apply vibrance (boosts less-saturated colors more)
 		float maxC = max(max(rgb.r, rgb.g), rgb.b);
 		float minC = min(min(rgb.r, rgb.g), rgb.b);
 		float currentSat = maxC > 0.0 ? (maxC - minC) / maxC : 0.0;
 		float vibranceAmount = u_vibrance * (1.0 - currentSat);
-		float lum2 = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
-		rgb = rgb + (rgb - vec3(lum2)) * vibranceAmount;
+		float lum = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+		rgb = rgb + (rgb - vec3(lum)) * vibranceAmount;
+
+		// Apply saturation (repeated for smoother boosting)
+		for (int i = 0; i < u_saturationRepeats; i++) {
+			float lumSat = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+			rgb = vec3(lumSat) + u_saturation * (rgb - vec3(lumSat));
+		}
 
 		// Final clamp (allow slight overshoot for HDR, clamp to 0-1 for display)
 		rgb = clamp(rgb, 0.0, 1.0);
@@ -308,7 +310,7 @@ export function uploadFloat32Data(data, width, height) {
  * @param {number} vibrance - Vibrance amount
  * @returns {Float32Array|null} Processed RGBA float data, or null on failure
  */
-export function processWithWebGL2(data, width, height, gain, contrast, gamma, saturation, vibrance) {
+export function processWithWebGL2(data, width, height, gain, contrast, gamma, saturation, vibrance, saturationRepeats = 1) {
 	if (!initialized || !gl) {
 		return null;
 	}
@@ -357,6 +359,7 @@ export function processWithWebGL2(data, width, height, gain, contrast, gamma, sa
 	gl.uniform1f(gl.getUniformLocation(program, 'u_gamma'), gamma);
 	gl.uniform1f(gl.getUniformLocation(program, 'u_saturation'), saturation);
 	gl.uniform1f(gl.getUniformLocation(program, 'u_vibrance'), vibrance);
+	gl.uniform1i(gl.getUniformLocation(program, 'u_saturationRepeats'), saturationRepeats);
 
 	// Draw
 	gl.viewport(0, 0, width, height);
