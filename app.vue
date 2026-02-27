@@ -426,7 +426,7 @@ header a {
 	}
 }
 button, a.button, .tabs a {
-	background-color: #eee;
+	background-color: #fefefe;
 	border: none;
 	color: #333;
 	padding: 10px 20px;

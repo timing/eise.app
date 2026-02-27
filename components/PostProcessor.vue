@@ -2141,17 +2141,18 @@ canvas {
 	display: inline-block;
 }
 .kebab-btn {
-	background: rgba(0, 0, 0, 0.5);
+	background: #fefefe;
 	border: none;
-	color: #fff;
-	font-size: 20px;
-	padding: 4px 10px;
+	color: #333;
+	font-size: 14px;
+	padding: 8px 12px;
 	cursor: pointer;
-	border-radius: 4px;
+	border-radius: 5px;
+	font-weight: bold;
 	line-height: 1;
 }
 .kebab-btn:hover {
-	background: rgba(0, 0, 0, 0.7);
+	background: #f0f0f0;
 }
 .kebab-backdrop {
 	position: fixed;
@@ -2166,7 +2167,7 @@ canvas {
 	top: 100%;
 	right: 0;
 	margin-top: 4px;
-	background: #fff;
+	background: #fefefe;
 	border-radius: 6px;
 	box-shadow: 0 2px 10px rgba(0,0,0,0.2);
 	z-index: 100;
@@ -2182,6 +2183,7 @@ canvas {
 	text-align: left;
 	cursor: pointer;
 	font-size: 14px;
+	font-weight: bold;
 	color: #333;
 }
 .kebab-dropdown button:hover {
@@ -2425,6 +2427,7 @@ button.download:hover {
 	cursor: pointer;
 	font-weight: bold;
 	font-size: 14px;
+	line-height: 1;
 }
 .export-btn:hover {
 	background-color: #7ABF6E;

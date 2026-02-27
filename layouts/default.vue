@@ -54,7 +54,7 @@ watch(() => route.path, () => {
 }
 .dropdown-toggle {
 	/* Match .tabs a styling from app.vue */
-	background-color: #eee;
+	background-color: #fefefe;
 	border: none;
 	color: #333;
 	padding: 10px 20px;
@@ -93,12 +93,11 @@ watch(() => route.path, () => {
 	position: absolute;
 	top: 100%;
 	right: 0;
-	background: #eee;
-	border: 1px solid #ccc;
+	background: #fefefe;
 	border-radius: 6px;
-	box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+	box-shadow: 0 2px 10px rgba(0,0,0,0.2);
 	z-index: 100;
-	min-width: 240px;
+	min-width: 200px;
 	overflow: hidden;
 	margin-top: 4px;
 	display: none;
@@ -108,18 +107,14 @@ watch(() => route.path, () => {
 }
 .dropdown-menu a {
 	display: block;
-	padding: 10px 16px;
+	padding: 10px 15px;
 	color: #333;
 	text-decoration: none;
-	font-size: 13px;
-	border-bottom: 1px solid #ccc;
-	background: transparent;
-}
-.dropdown-menu a:last-child {
-	border-bottom: none;
+	font-size: 14px;
+	background: none;
 }
 .dropdown-menu a:hover {
-	background: #70f1ec;
+	background: #f5f5f5;
 	color: #333;
 }
 @media (max-width: 700px) {
