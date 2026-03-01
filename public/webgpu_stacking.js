@@ -70,6 +70,8 @@ struct Params {
     globalOffsetX: f32,
     globalOffsetY: f32,
     minQuality: f32,
+    inputFormat: u32,    // 0 = Float32 (4 floats/pixel), 1 = packed Uint8 (1 u32/pixel)
+    _pad: u32,
 }
 
 struct AP {
@@ -82,12 +84,34 @@ struct AP {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> frameRgba: array<f32>;     // Input frame RGBA as Float32 (4 floats per pixel, 0.0-1.0 range)
+@group(0) @binding(1) var<storage, read> frameData: array<u32>;     // Input: packed Uint8 (1 u32/pixel) or Float32 (reinterpreted)
 @group(0) @binding(2) var<storage, read> apData: array<AP>;         // AP positions + shifts
 @group(0) @binding(3) var<storage, read_write> accumR: array<f32>;
 @group(0) @binding(4) var<storage, read_write> accumG: array<f32>;
 @group(0) @binding(5) var<storage, read_write> accumB: array<f32>;
 @group(0) @binding(6) var<storage, read_write> accumW: array<f32>;
+
+// Read a pixel as vec4<f32> in 0-255 range
+fn readPixel(pixelIdx: u32) -> vec4<f32> {
+    if (params.inputFormat == 1u) {
+        // Packed Uint8: 4 bytes per pixel stored as 1 u32 (RGBA little-endian)
+        let packed = frameData[pixelIdx];
+        let r = f32(packed & 0xFFu);
+        let g = f32((packed >> 8u) & 0xFFu);
+        let b = f32((packed >> 16u) & 0xFFu);
+        let a = f32((packed >> 24u) & 0xFFu);
+        return vec4<f32>(r, g, b, a);
+    } else {
+        // Float32: 4 floats per pixel, stored as 4 u32s (bitcast)
+        let baseIdx = pixelIdx * 4u;
+        let r = bitcast<f32>(frameData[baseIdx]);
+        let g = bitcast<f32>(frameData[baseIdx + 1u]);
+        let b = bitcast<f32>(frameData[baseIdx + 2u]);
+        let a = bitcast<f32>(frameData[baseIdx + 3u]);
+        // Float32 is 0.0-1.0 range, scale to 0-255
+        return vec4<f32>(r, g, b, a) * 255.0;
+    }
+}
 
 fn sampleFrame(x: f32, y: f32) -> vec4<f32> {
     // Bilinear interpolation
@@ -108,18 +132,16 @@ fn sampleFrame(x: f32, y: f32) -> vec4<f32> {
     let cx1 = clamp(x1, 0, w - 1);
     let cy1 = clamp(y1, 0, h - 1);
 
-    // Sample 4 corners (4 floats per pixel: R, G, B, A)
-    // Cast to u32 for array indexing
-    let i00 = u32((cy0 * w + cx0) * 4);
-    let i10 = u32((cy0 * w + cx1) * 4);
-    let i01 = u32((cy1 * w + cx0) * 4);
-    let i11 = u32((cy1 * w + cx1) * 4);
+    // Sample 4 corners using readPixel helper
+    let i00 = u32(cy0 * w + cx0);
+    let i10 = u32(cy0 * w + cx1);
+    let i01 = u32(cy1 * w + cx0);
+    let i11 = u32(cy1 * w + cx1);
 
-    // Read Float32 RGBA directly (0.0-1.0 range) and scale to 0-255 for accumulation consistency
-    let c00 = vec4<f32>(frameRgba[i00], frameRgba[i00+1u], frameRgba[i00+2u], frameRgba[i00+3u]) * 255.0;
-    let c10 = vec4<f32>(frameRgba[i10], frameRgba[i10+1u], frameRgba[i10+2u], frameRgba[i10+3u]) * 255.0;
-    let c01 = vec4<f32>(frameRgba[i01], frameRgba[i01+1u], frameRgba[i01+2u], frameRgba[i01+3u]) * 255.0;
-    let c11 = vec4<f32>(frameRgba[i11], frameRgba[i11+1u], frameRgba[i11+2u], frameRgba[i11+3u]) * 255.0;
+    let c00 = readPixel(i00);
+    let c10 = readPixel(i10);
+    let c01 = readPixel(i01);
+    let c11 = readPixel(i11);
 
     // Bilinear blend
     let c0 = mix(c00, c10, fx);
@@ -330,7 +352,7 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
 
     cachedStackBuffers = {
         paramsBuffer: stackDevice.createBuffer({
-            size: 48,  // 12 floats/u32
+            size: 56,  // 14 u32/f32: width, height, outWidth, outHeight, numAPs, patchSize, drizzleScale, frameWeight, brightnessScale, globalOffsetX, globalOffsetY, minQuality, inputFormat, pad
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         }),
         frameBuffer: stackDevice.createBuffer({
@@ -404,9 +426,11 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
 
 /**
  * Process a single frame: warp and accumulate
- * @param {Float32Array} frameRgba - Frame data as Float32 RGBA (4 floats per pixel, 0.0-1.0 range)
+ * @param {Float32Array|Uint8Array|Uint8ClampedArray} frameData - Frame RGBA data
+ *        Float32Array: 4 floats per pixel (0.0-1.0 range) - 16-bit sources
+ *        Uint8Array/Uint8ClampedArray: 4 bytes per pixel (0-255) - 8-bit sources, GPU converts
  */
-async function warpAndAccumulateFrame(frameRgba, width, height, outWidth, outHeight,
+async function warpAndAccumulateFrame(frameData, width, height, outWidth, outHeight,
     alignmentPoints, shifts, patchSize, drizzleScale, frameWeight, brightnessScale,
     globalOffsetX, globalOffsetY) {
 
@@ -420,10 +444,19 @@ async function warpAndAccumulateFrame(frameRgba, width, height, outWidth, outHei
     const buffers = getStackingBuffers(width, height, outWidth, outHeight, alignmentPoints.length);
     const numAPs = alignmentPoints.length;
 
-    // Write Float32 RGBA frame data directly (no packing needed)
-    // frameRgba should be a Float32Array with 4 floats per pixel (RGBA, 0.0-1.0 range)
-    const frameData = frameRgba instanceof Float32Array ? frameRgba : new Float32Array(frameRgba);
-    stackQueue.writeBuffer(buffers.frameBuffer, 0, frameData);
+    // Detect input format: 0 = Float32, 1 = Uint8
+    const isUint8 = frameData instanceof Uint8Array || frameData instanceof Uint8ClampedArray;
+    const inputFormat = isUint8 ? 1 : 0;
+
+    // Write frame data to GPU
+    if (isUint8) {
+        // Uint8: write directly (4 bytes per pixel = 1 u32 per pixel, GPU converts to float)
+        stackQueue.writeBuffer(buffers.frameBuffer, 0, frameData);
+    } else {
+        // Float32: write directly (4 floats per pixel)
+        const float32Data = frameData instanceof Float32Array ? frameData : new Float32Array(frameData);
+        stackQueue.writeBuffer(buffers.frameBuffer, 0, float32Data);
+    }
 
     // Pack AP data (x, y, dx, dy, quality, pad)
     const apData = new Float32Array(numAPs * 6);
@@ -437,8 +470,8 @@ async function warpAndAccumulateFrame(frameRgba, width, height, outWidth, outHei
     }
     stackQueue.writeBuffer(buffers.apBuffer, 0, apData);
 
-    // Pack params
-    const paramsData = new ArrayBuffer(48);
+    // Pack params (56 bytes: 14 x u32/f32)
+    const paramsData = new ArrayBuffer(56);
     const paramsU32 = new Uint32Array(paramsData);
     const paramsF32 = new Float32Array(paramsData);
     paramsU32[0] = width;
@@ -453,6 +486,8 @@ async function warpAndAccumulateFrame(frameRgba, width, height, outWidth, outHei
     paramsF32[9] = globalOffsetX;
     paramsF32[10] = globalOffsetY;
     paramsF32[11] = 0.3;  // minQuality
+    paramsU32[12] = inputFormat;  // 0 = Float32, 1 = Uint8
+    paramsU32[13] = 0;  // padding
     stackQueue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
 
     // Create bind group

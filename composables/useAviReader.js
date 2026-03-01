@@ -482,7 +482,7 @@ export function useAviReader() {
                     resolve({
                         sharpness: e.data.sharpness,
                         pngBlob: e.data.pngBlob,
-                        float32Buffer: e.data.float32Buffer,
+                        uint8Buffer: e.data.uint8Buffer,
                         width: e.data.width,
                         height: e.data.height,
                         index: e.data.index,
@@ -935,14 +935,9 @@ export function useAviReader() {
 
         function rankFrame(frame) { // frame is {sharpness, blob}
             // Capture post-crop frames for comparison export (sample evenly)
-            // Convert Float32 to Uint8 for video export
-            if (frame.float32Buffer && frame.width && frame.height) {
-                const float32Data = new Float32Array(frame.float32Buffer);
-                const uint8Data = new Uint8ClampedArray(float32Data.length);
-                for (let i = 0; i < float32Data.length; i++) {
-                    uint8Data[i] = Math.round(float32Data[i] * 255);
-                }
-                capturePostCropFrame(uint8Data.buffer, frame.width, frame.height, frame.index, frameCount);
+            // Use uint8Buffer directly (no conversion needed)
+            if (frame.uint8Buffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.uint8Buffer, frame.width, frame.height, frame.index, frameCount);
             }
 
             // Store all frames when manual threshold is enabled
@@ -1084,7 +1079,7 @@ export function useAviReader() {
                     const currentFrame = {
                         sharpness: result.sharpness,
                         blob: result.pngBlob,
-                        float32Buffer: result.float32Buffer,
+                        uint8Buffer: result.uint8Buffer,
                         width: result.width,
                         height: result.height,
                         index: result.index,
@@ -1140,7 +1135,7 @@ export function useAviReader() {
                 noiseRobustAlignment,
                 useWebGPU,
                 drizzleScale,
-                frameReReader: null // AVI frames already have float32Buffer loaded
+                frameReReader: null // AVI frames already have uint8Buffer loaded
             });
             return; // Don't terminate workers yet - they'll be used for stacking
         }
@@ -1257,14 +1252,9 @@ export function useAviReader() {
             frame.frameIndex = frameIndex;
 
             // Capture post-crop frames for comparison export (sample evenly)
-            // Convert Float32 to Uint8 for video export
-            if (frame.float32Buffer && frame.width && frame.height) {
-                const float32Data = new Float32Array(frame.float32Buffer);
-                const uint8Data = new Uint8ClampedArray(float32Data.length);
-                for (let i = 0; i < float32Data.length; i++) {
-                    uint8Data[i] = Math.round(float32Data[i] * 255);
-                }
-                capturePostCropFrame(uint8Data.buffer, frame.width, frame.height, frameIndex, frameCount);
+            // Use uint8Buffer directly (no conversion needed)
+            if (frame.uint8Buffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.uint8Buffer, frame.width, frame.height, frameIndex, frameCount);
             }
 
             // Store all frames when manual threshold is enabled
@@ -1373,7 +1363,7 @@ export function useAviReader() {
                         const currentFrame = {
                             sharpness: result.sharpness,
                             blob: result.pngBlob,
-                            float32Buffer: result.float32Buffer,
+                            uint8Buffer: result.uint8Buffer,
                             width: result.width,
                             height: result.height,
                             index: result.index,
@@ -1429,7 +1419,7 @@ export function useAviReader() {
                 noiseRobustAlignment,
                 useWebGPU,
                 drizzleScale,
-                frameReReader: null // AVI frames already have float32Buffer loaded
+                frameReReader: null // AVI frames already have uint8Buffer loaded
             });
             return; // Don't terminate workers yet - they'll be used for stacking
         }
@@ -2271,13 +2261,9 @@ export function useAviReader() {
         function rankFrame(frame, frameIndex) {
             frame.frameIndex = frameIndex;
 
-            if (frame.float32Buffer && frame.width && frame.height) {
-                const float32Data = new Float32Array(frame.float32Buffer);
-                const uint8Data = new Uint8ClampedArray(float32Data.length);
-                for (let i = 0; i < float32Data.length; i++) {
-                    uint8Data[i] = Math.round(float32Data[i] * 255);
-                }
-                capturePostCropFrame(uint8Data.buffer, frame.width, frame.height, frameIndex, totalFrames);
+            // Use uint8Buffer directly (no conversion needed)
+            if (frame.uint8Buffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.uint8Buffer, frame.width, frame.height, frameIndex, totalFrames);
             }
 
             if (manualThreshold) {
@@ -2344,7 +2330,7 @@ export function useAviReader() {
                 rankFrame({
                     sharpness: result.sharpness,
                     blob: result.pngBlob,
-                    float32Buffer: result.float32Buffer,
+                    uint8Buffer: result.uint8Buffer,
                     width: result.width,
                     height: result.height,
                     index: result.index,

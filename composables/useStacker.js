@@ -89,6 +89,18 @@ export function useStacker() {
     }
 
     /**
+     * Create a PNG blob from uint8Buffer for preview display
+     */
+    async function uint8ToBlob(uint8Buffer, width, height) {
+        const uint8Data = new Uint8ClampedArray(uint8Buffer);
+        const imageData = new ImageData(uint8Data, width, height);
+        const canvas = new OffscreenCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        ctx.putImageData(imageData, 0, 0);
+        return await canvas.convertToBlob({ type: 'image/png' });
+    }
+
+    /**
      * Convert RGBA buffer to grayscale for alignment (supports both Float32 and Uint8 input)
      * Returns Uint8Array (8-bit grayscale) because:
      * - NCC alignment normalizes by mean/variance, so relative patterns matter, not precision
@@ -244,14 +256,17 @@ export function useStacker() {
      * See rgbaToGrayscale() for why 8-bit is sufficient for alignment.
      */
     function prepareAlignmentData(refFrame, surfaceMode = false) {
-        if (!refFrame || !refFrame.float32Buffer || !refFrame.width || !refFrame.height) {
+        // Support both uint8Buffer (new) and float32Buffer (legacy)
+        const buffer = refFrame.uint8Buffer || refFrame.float32Buffer;
+        const isFloat32 = !refFrame.uint8Buffer && !!refFrame.float32Buffer;
+        if (!refFrame || !buffer || !refFrame.width || !refFrame.height) {
             throw new Error('Invalid reference frame');
         }
 
         const { width, height } = refFrame;
 
-        // Convert Float32 RGBA to grayscale
-        const refGrayData = rgbaToGrayscale(refFrame.float32Buffer, width, height, true);
+        // Convert RGBA to grayscale
+        const refGrayData = rgbaToGrayscale(buffer, width, height, isFloat32);
 
         // Create AP grid
         const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode);
@@ -449,10 +464,10 @@ export function useStacker() {
             // Load reference frame
             const { frames: refFrames, centers: refCenters } = await loadRawBatch([refFrameMeta]);
             const refResults = await processGpuBatch(refFrames, refCenters);
-            const refBlob = await float32ToBlob(refResults[0].float32Buffer, cropSize, cropSize);
+            const refBlob = await uint8ToBlob(refResults[0].uint8Buffer, cropSize, cropSize);
             const refFrame = {
                 ...refFrameMeta,
-                float32Buffer: refResults[0].float32Buffer,
+                uint8Buffer: refResults[0].uint8Buffer,
                 width: cropSize,
                 height: cropSize,
                 blob: refBlob
@@ -463,7 +478,7 @@ export function useStacker() {
             // Step 2: Prepare alignment points (pure JS, no OpenCV)
             emit('set-caption', 'Preparing alignment points...');
             const refFrameData = {
-                float32Buffer: refFrame.float32Buffer.slice(0),
+                uint8Buffer: refFrame.uint8Buffer.slice(0),
                 width: cropSize,
                 height: cropSize,
                 sharpness: refFrame.sharpness
@@ -474,7 +489,7 @@ export function useStacker() {
             addLog(`Alignment prepared: ${alignmentPoints.length} APs`);
 
             // Calculate reference brightness for normalization
-            const refBrightness = calcMeanBrightness(refFrame.float32Buffer, cropSize, cropSize, true) * 255;
+            const refBrightness = calcMeanBrightness(refFrame.uint8Buffer, cropSize, cropSize, false);
 
             // Step 3: Initialize GPU stacker
             await new Promise((resolve, reject) => {
@@ -591,8 +606,8 @@ export function useStacker() {
                 // Capture frames for comparison video (both raw pre-crop and processed post-crop)
                 for (let i = 0; i < gpuResults.length; i++) {
                     const globalIndex = batchStart + i;
-                    // Post-crop: convert float32 to uint8
-                    const uint8Buffer = float32ToUint8(gpuResults[i].float32Buffer, cropSize, cropSize);
+                    // Post-crop: use uint8Buffer directly (already uint8)
+                    const uint8Buffer = new Uint8Array(gpuResults[i].uint8Buffer);
                     capturePostCropFrame(uint8Buffer, cropSize, cropSize, globalIndex, frameCount);
                     // Pre-crop: store raw Bayer data for lazy demosaic later
                     const rawFrame = rawBatch.frames[i];
@@ -602,7 +617,7 @@ export function useStacker() {
                 // Calculate shifts for batch via GPU template matching
                 const t0Gray = performance.now();
                 const frameGrayDatas = gpuResults.map(r =>
-                    rgbaToGrayscale(r.float32Buffer, cropSize, cropSize, true)
+                    rgbaToGrayscale(r.uint8Buffer, cropSize, cropSize, false)
                 );
                 stackingStats.grayscaleMs.push(performance.now() - t0Gray);
 
@@ -653,9 +668,9 @@ export function useStacker() {
                     }
                 }
 
-                // Send batch to GPU stacker (pass Float32 directly for 16-bit precision)
+                // Send batch to GPU stacker (Uint8 - GPU converts to Float32)
                 const batchForStacker = gpuResults.map((r, i) => ({
-                    rgbaBuffer: r.float32Buffer,  // Float32Array, 0.0-1.0 range
+                    rgbaBuffer: new Uint8Array(r.uint8Buffer),
                     sharpness: batchFrames[i].sharpness
                 }));
                 const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
@@ -761,7 +776,7 @@ export function useStacker() {
 
         // TWO-PASS MODE: If frameReReader is provided and frames don't have buffers,
         // use pipelined stacking (load + stack concurrently)
-        const hasTwoPassFrames = frames.length > 0 && !frames[0].float32Buffer && !frames[0].rgbaBuffer && frameReReader;
+        const hasTwoPassFrames = frames.length > 0 && !frames[0].uint8Buffer && !frames[0].float32Buffer && !frames[0].rgbaBuffer && frameReReader;
 
         if (hasTwoPassFrames && useWebGPU) {
             // Use pipelined approach: load batch → align → stack, while loading next batch
@@ -769,15 +784,15 @@ export function useStacker() {
             return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode, noiseRobustAlignment);
         }
 
-        // Filter frames that have valid buffer (float32Buffer preferred, rgbaBuffer for legacy) and sharpness
+        // Filter frames that have valid buffer (uint8Buffer preferred, float32Buffer/rgbaBuffer for legacy) and sharpness
         // DEBUG: Log filtering stats
-        const noBuffer = frames.filter(f => !f.float32Buffer && !f.rgbaBuffer).length;
+        const noBuffer = frames.filter(f => !f.uint8Buffer && !f.float32Buffer && !f.rgbaBuffer).length;
         const noWidth = frames.filter(f => !f.width).length;
         const noHeight = frames.filter(f => !f.height).length;
         const noSharpness = frames.filter(f => !f.sharpness || f.sharpness <= 0).length;
         addLog(`Stacker input: ${frames.length} frames, filtering: noBuffer=${noBuffer}, noWidth=${noWidth}, noHeight=${noHeight}, noSharpness=${noSharpness}`);
 
-        const validFrames = frames.filter(f => (f.float32Buffer || f.rgbaBuffer) && f.width && f.height && f.sharpness > 0);
+        const validFrames = frames.filter(f => (f.uint8Buffer || f.float32Buffer || f.rgbaBuffer) && f.width && f.height && f.sharpness > 0);
         addLog(`Stacker: ${validFrames.length} valid frames after filtering`);
 
         if (validFrames.length === 0) {
@@ -825,12 +840,13 @@ export function useStacker() {
         addLog(`Sending ${validFrames.length} frames to stacking worker${drizzleStr}${useWebGPU ? ' (WebGPU)' : ''}`);
 
         // Prepare frame data - only include cloneable/transferable properties
-        // Use float32Buffer (16-bit input) if available, otherwise rgbaBuffer (8-bit input)
+        // Use uint8Buffer (GPU converts to Float32) - avoids slow JS conversion loops
         const frameData = [];
         for (let i = 0; i < validFrames.length; i++) {
             const f = validFrames[i];
-            const isFloat32 = !!f.float32Buffer;
-            let buffer = f.float32Buffer || f.rgbaBuffer;
+            // Prefer uint8Buffer (new optimized path), fall back to float32Buffer or rgbaBuffer
+            let buffer = f.uint8Buffer || f.float32Buffer || f.rgbaBuffer;
+            const isUint8 = !!f.uint8Buffer || (!f.float32Buffer && !!f.rgbaBuffer);
             if (buffer && !(buffer instanceof ArrayBuffer)) {
                 if (buffer.buffer instanceof ArrayBuffer) {
                     buffer = buffer.buffer;
@@ -844,9 +860,9 @@ export function useStacker() {
                 continue;
             }
             frameData.push({
-                float32Buffer: isFloat32 ? buffer : null,
-                rgbaBuffer: isFloat32 ? null : buffer,
-                isFloat32,
+                uint8Buffer: isUint8 ? buffer : null,
+                float32Buffer: isUint8 ? null : buffer,
+                isUint8,
                 width: f.width,
                 height: f.height,
                 sharpness: f.sharpness,
@@ -906,23 +922,16 @@ export function useStacker() {
             const refFrame = frameData[refIndex];
 
             // Only clone the reference frame buffer for alignment preparation
-            // Worker expects float32Buffer and converts internally
-            let refBuffer;
-            if (refFrame.isFloat32 && refFrame.float32Buffer) {
-                refBuffer = refFrame.float32Buffer.slice(0);
-            } else if (refFrame.rgbaBuffer) {
-                // Convert Uint8 to Float32 for the worker
-                const uint8Data = new Uint8Array(refFrame.rgbaBuffer);
-                const float32Data = new Float32Array(uint8Data.length);
-                for (let i = 0; i < uint8Data.length; i++) {
-                    float32Data[i] = uint8Data[i] / 255.0;
-                }
-                refBuffer = float32Data.buffer;
-            } else {
+            // Prefer uint8Buffer (new optimized path)
+            let refBuffer = refFrame.uint8Buffer || refFrame.float32Buffer || refFrame.rgbaBuffer;
+            if (!refBuffer) {
                 throw new Error('Reference frame has no valid buffer');
             }
+            refBuffer = refBuffer.slice(0);
+            const isUint8Ref = !!refFrame.uint8Buffer || (!refFrame.float32Buffer && !!refFrame.rgbaBuffer);
             const refFrameData = {
-                float32Buffer: refBuffer,
+                uint8Buffer: isUint8Ref ? refBuffer : undefined,
+                float32Buffer: !isUint8Ref ? refBuffer : undefined,
                 width: refFrame.width,
                 height: refFrame.height,
                 sharpness: refFrame.sharpness
@@ -979,12 +988,13 @@ export function useStacker() {
                 const batchEnd = Math.min(batchStart + batchSize, framesToProcess.length);
                 const batchIndices = framesToProcess.slice(batchStart, batchEnd);
 
-                // Convert batch frames to grayscale (handle both Float32 and Uint8)
+                // Convert batch frames to grayscale (handle Uint8 and Float32)
                 const t0Gray = performance.now();
                 const frameGrayDatas = batchIndices.map(f => {
                     const frame = frameData[f];
-                    const buffer = frame.isFloat32 ? frame.float32Buffer : frame.rgbaBuffer;
-                    return rgbaToGrayscale(buffer, width, height, frame.isFloat32);
+                    const buffer = frame.uint8Buffer || frame.float32Buffer || frame.rgbaBuffer;
+                    const isFloat32 = !frame.isUint8 && !!frame.float32Buffer;
+                    return rgbaToGrayscale(buffer, width, height, isFloat32);
                 });
                 stackingStats.grayscaleMs.push(performance.now() - t0Gray);
 
@@ -1061,13 +1071,14 @@ export function useStacker() {
             // Calculate total sharpness for weighting
             const totalSharpness = frameData.reduce((sum, f) => sum + f.sharpness, 0);
 
-            // Calculate reference brightness (refFrame already defined above, handle Float32)
-            // GPU worker's calcMeanBrightness uses Uint8 (0-255 range), so we need to match that
+            // Calculate reference brightness (refFrame already defined above)
+            // calcMeanBrightness returns 0-255 for Uint8, 0-1 for Float32
             const refFrameForBrightness = frameData[refIndex];
-            const refBrightnessBuffer = refFrameForBrightness.isFloat32 ? refFrameForBrightness.float32Buffer : refFrameForBrightness.rgbaBuffer;
-            let refBrightness = calcMeanBrightness(refBrightnessBuffer, width, height, refFrameForBrightness.isFloat32);
+            const refBrightnessBuffer = refFrameForBrightness.uint8Buffer || refFrameForBrightness.float32Buffer || refFrameForBrightness.rgbaBuffer;
+            const isFloat32Ref = !refFrameForBrightness.isUint8 && !!refFrameForBrightness.float32Buffer;
+            let refBrightness = calcMeanBrightness(refBrightnessBuffer, width, height, isFloat32Ref);
             // Convert to 0-255 range if calculated from Float32 data (0-1 range)
-            if (refFrameForBrightness.isFloat32) {
+            if (isFloat32Ref) {
                 refBrightness *= 255;
             }
 
@@ -1102,18 +1113,14 @@ export function useStacker() {
 
                 for (let i = batchStart; i < batchEnd; i++) {
                     const frame = frameData[i];
-                    // GPU stacker accepts Float32 (0.0-1.0 range)
+                    // GPU stacker handles both Uint8 and Float32 input (converts Uint8→Float32 on GPU)
                     let rgbaBuffer;
-                    if (frame.isFloat32 && frame.float32Buffer) {
-                        // 16-bit input (SER/AVI) - already Float32
+                    if (frame.isUint8 && frame.uint8Buffer) {
+                        // Uint8 input - GPU converts to Float32
+                        rgbaBuffer = new Uint8Array(frame.uint8Buffer);
+                    } else if (frame.float32Buffer) {
+                        // Float32 input - pass directly
                         rgbaBuffer = new Float32Array(frame.float32Buffer);
-                    } else if (frame.rgbaBuffer) {
-                        // 8-bit input (JPEG/PNG/8-bit SER) - convert to Float32
-                        const uint8Data = new Uint8Array(frame.rgbaBuffer);
-                        rgbaBuffer = new Float32Array(uint8Data.length);
-                        for (let j = 0; j < uint8Data.length; j++) {
-                            rgbaBuffer[j] = uint8Data[j] / 255;
-                        }
                     }
                     batchFrames.push({
                         rgbaBuffer,
@@ -1280,9 +1287,9 @@ export function useStacker() {
                 worker.addEventListener('message', messageHandler);
 
                 // Use Set to deduplicate - same buffer may be referenced by multiple frames
-                // Include both float32Buffer and rgbaBuffer for hybrid mode
+                // Include uint8Buffer, float32Buffer and rgbaBuffer for hybrid mode
                 const transferables = [...new Set(
-                    frameData.flatMap(f => [f.float32Buffer, f.rgbaBuffer]).filter(b => b instanceof ArrayBuffer && b.byteLength > 0)
+                    frameData.flatMap(f => [f.uint8Buffer, f.float32Buffer, f.rgbaBuffer]).filter(b => b instanceof ArrayBuffer && b.byteLength > 0)
                 )];
                 worker.postMessage({
                     type: 'stack-frames',

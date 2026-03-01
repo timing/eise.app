@@ -53,50 +53,78 @@ async function safeMapAsync(buffer, mode) {
 }
 
 // Helper function to prepare Bayer data for GPU upload with auto-stretch for 16-bit
+let prepareBayerDataTime = 0;
+let prepareBayerDataCount = 0;
+
 function prepareBayerData(frames, pixelCount, skipStretch = false) {
+    const t0 = performance.now();
     const batchSize = frames.length;
-    const bayerData = new Uint32Array(batchSize * pixelCount);
     const is16bit = frames[0]?.data instanceof Uint16Array;
 
-    let scale16bit = 1;
-    if (is16bit && !skipStretch) {
-        // Sample pixels to find a robust max (ignoring hot pixels)
-        // Use 99th percentile of a sample instead of absolute max
-        const sampleSize = Math.min(10000, frames[0].data.length);
-        const sample = [];
-        for (let i = 0; i < batchSize && sample.length < sampleSize; i++) {
-            const data = frames[i].data;
-            const step = Math.max(1, Math.floor(data.length / (sampleSize / batchSize)));
-            for (let j = 0; j < data.length && sample.length < sampleSize; j += step) {
-                sample.push(data[j]);
-            }
-        }
-        sample.sort((a, b) => a - b);
-        const p99 = sample[Math.floor(sample.length * 0.99)];
-        const actualMax = sample[sample.length - 1];
+    let bayerData;
 
-        // Stretch to bring 99th percentile to ~50% of range, capped at 2x
-        if (p99 > 0 && p99 < 32768) {
-            const idealScale = 32768 / p99;
-            scale16bit = Math.min(idealScale, 2.0);
-        }
-    }
+    if (is16bit) {
+        // 16-bit: pack 2 pixels per u32 for fast copying
+        const totalPixels = batchSize * pixelCount;
+        const u32Count = Math.ceil(totalPixels / 2);
+        bayerData = new Uint32Array(u32Count);
 
-    for (let i = 0; i < batchSize; i++) {
-        const frame = frames[i];
-        const offset = i * pixelCount;
-        if (is16bit) {
-            for (let j = 0; j < pixelCount; j++) {
-                bayerData[offset + j] = Math.min(65535, Math.round(frame.data[j] * scale16bit));
+        // Calculate stretch scale (GPU will apply it)
+        let scale16bit = 1.0;
+        if (!skipStretch) {
+            const sampleSize = Math.min(10000, frames[0].data.length);
+            const sample = [];
+            for (let i = 0; i < batchSize && sample.length < sampleSize; i++) {
+                const data = frames[i].data;
+                const step = Math.max(1, Math.floor(data.length / (sampleSize / batchSize)));
+                for (let j = 0; j < data.length && sample.length < sampleSize; j += step) {
+                    sample.push(data[j]);
+                }
             }
-        } else {
-            // 8-bit data, scale up
-            for (let j = 0; j < pixelCount; j++) {
-                bayerData[offset + j] = frame.data[j] * 257;
+            sample.sort((a, b) => a - b);
+            const p99 = sample[Math.floor(sample.length * 0.99)];
+            if (p99 > 0 && p99 < 32768) {
+                scale16bit = Math.min(32768 / p99, 2.0);
             }
         }
+
+        // Always use fast path - GPU will apply scale
+        const u16View = new Uint16Array(bayerData.buffer);
+        for (let i = 0; i < batchSize; i++) {
+            const frame = frames[i];
+            const u16Offset = i * pixelCount;
+            u16View.set(frame.data, u16Offset);
+        }
+
+        prepareBayerDataTime += performance.now() - t0;
+        prepareBayerDataCount++;
+        if (prepareBayerDataCount % 10 === 0) {
+            console.log(`[prepareBayerData] avg: ${(prepareBayerDataTime/prepareBayerDataCount).toFixed(1)}ms`);
+        }
+        return { data: bayerData, bitDepth: 16, scale: scale16bit };
+    } else {
+        // 8-bit: pack 4 pixels per u32, use fast TypedArray.set()
+        const totalPixels = batchSize * pixelCount;
+        const u32Count = Math.ceil(totalPixels / 4);
+        bayerData = new Uint32Array(u32Count);
+
+        // Create a Uint8Array view of the Uint32Array buffer for fast copying
+        const byteView = new Uint8Array(bayerData.buffer);
+
+        for (let i = 0; i < batchSize; i++) {
+            const frame = frames[i];
+            const byteOffset = i * pixelCount;
+            // Fast native copy using TypedArray.set()
+            byteView.set(frame.data, byteOffset);
+        }
+
+        prepareBayerDataTime += performance.now() - t0;
+        prepareBayerDataCount++;
+        if (prepareBayerDataCount % 10 === 0) {
+            console.log(`[prepareBayerData] avg: ${(prepareBayerDataTime/prepareBayerDataCount).toFixed(1)}ms`);
+        }
+        return { data: bayerData, bitDepth: 8, scale: 1.0 };
     }
-    return bayerData;
 }
 
 // Pipelines
@@ -128,18 +156,32 @@ struct Params {
     batchSize: u32,
     bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
     useVng: u32,        // 0=bilinear, 1=VNG
-    _pad1: u32,
-    _pad2: u32,
+    bitDepth: u32,      // 8 or 16
+    scale: f32,         // stretch scale for 16-bit (1.0 = no stretch)
     _pad3: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;  // Raw Bayer data (packed as u32 for 16-bit)
+@group(0) @binding(1) var<storage, read> input: array<u32>;  // Raw Bayer data (packed: 4 pixels/u32 for 8-bit, 2 pixels/u32 for 16-bit)
 @group(0) @binding(2) var<storage, read_write> output: array<u32>;  // RGBA output
 
 fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    return f32(input[idx] & 0xFFFFu) / 65535.0;
+    let pixelIdx = frameIdx * params.width * params.height + y * params.width + x;
+    if (params.bitDepth == 8u) {
+        // 8-bit packed: 4 pixels per u32
+        let u32Idx = pixelIdx / 4u;
+        let bytePos = pixelIdx % 4u;
+        let packed = input[u32Idx];
+        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
+        return f32(rawValue) / 255.0;
+    } else {
+        // 16-bit packed: 2 pixels per u32, with GPU-side stretch
+        let u32Idx = pixelIdx / 2u;
+        let halfPos = pixelIdx % 2u;
+        let packed = input[u32Idx];
+        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
+        return min(1.0, f32(rawValue) * params.scale / 65535.0);
+    }
 }
 
 fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
@@ -495,8 +537,8 @@ struct Params {
     bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
     batchSize: u32,
     useVng: u32,        // 0=bilinear, 1=VNG
-    _pad1: u32,
-    _pad2: u32,
+    bitDepth: u32,      // 8 or 16
+    scale: f32,         // stretch scale for 16-bit (1.0 = no stretch)
 }
 
 struct CropCenter {
@@ -510,8 +552,22 @@ struct CropCenter {
 @group(0) @binding(3) var<storage, read_write> output: array<u32>;    // Cropped RGBA output
 
 fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let idx = frameIdx * params.srcWidth * params.srcHeight + y * params.srcWidth + x;
-    return f32(input[idx] & 0xFFFFu) / 65535.0;
+    let pixelIdx = frameIdx * params.srcWidth * params.srcHeight + y * params.srcWidth + x;
+    if (params.bitDepth == 8u) {
+        // 8-bit packed: 4 pixels per u32
+        let u32Idx = pixelIdx / 4u;
+        let bytePos = pixelIdx % 4u;
+        let packed = input[u32Idx];
+        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
+        return f32(rawValue) / 255.0;
+    } else {
+        // 16-bit packed: 2 pixels per u32, with GPU-side stretch
+        let u32Idx = pixelIdx / 2u;
+        let halfPos = pixelIdx % 2u;
+        let packed = input[u32Idx];
+        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
+        return min(1.0, f32(rawValue) * params.scale / 65535.0);
+    }
 }
 
 fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
@@ -940,8 +996,8 @@ struct Params {
     batchSize: u32,
     bayerPattern: u32,
     useVng: u32,        // 0=bilinear, 1=VNG
-    _pad1: u32,
-    _pad2: u32,
+    bitDepth: u32,      // 8 or 16
+    scale: f32,         // stretch scale for 16-bit (1.0 = no stretch)
     _pad3: u32,
 }
 
@@ -951,8 +1007,22 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> grayOutput: array<f32>;
 
 fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    return f32(input[idx] & 0xFFFFu) / 65535.0;
+    let pixelIdx = frameIdx * params.width * params.height + y * params.width + x;
+    if (params.bitDepth == 8u) {
+        // 8-bit packed: 4 pixels per u32
+        let u32Idx = pixelIdx / 4u;
+        let bytePos = pixelIdx % 4u;
+        let packed = input[u32Idx];
+        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
+        return f32(rawValue) / 255.0;
+    } else {
+        // 16-bit packed: 2 pixels per u32, with GPU-side stretch
+        let u32Idx = pixelIdx / 2u;
+        let halfPos = pixelIdx % 2u;
+        let packed = input[u32Idx];
+        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
+        return min(1.0, f32(rawValue) * params.scale / 65535.0);
+    }
 }
 
 fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
@@ -1969,11 +2039,14 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
 
     if (needsDemosaic) {
         // Upload Bayer data to input buffer (auto-stretch for 16-bit to handle dark data)
-        const bayerData = prepareBayerData(frames, pixelCount, false);
+        const { data: bayerData, bitDepth, scale } = prepareBayerData(frames, pixelCount, false);
         queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
 
-        // Demosaic params
-        queue.writeBuffer(buffers.paramsBuffer, 0, new Uint32Array([width, height, batchSize, bayerPattern, useVng ? 1 : 0, 0, 0, 0]));
+        // Demosaic params (mixed u32/f32 for scale)
+        const paramsData = new ArrayBuffer(32);
+        new Uint32Array(paramsData).set([width, height, batchSize, bayerPattern, useVng ? 1 : 0, bitDepth, 0, 0]);
+        new Float32Array(paramsData)[6] = scale;
+        queue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
 
         // Run fused demosaic + grayscale (outputs both RGBA and grayscale in one pass)
         const demosaicGrayBindGroup = device.createBindGroup({
@@ -1995,14 +2068,13 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         queue.submit([encoder.finish()]);
         grayAlreadyComputed = true;
     } else {
-        // Input is already RGBA - upload to rgba buffer
-        const rgbaData = new Uint32Array(batchSize * pixelCount);
+        // Input is already RGBA - write each frame directly to GPU buffer (no staging buffer)
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
-            const offset = i * pixelCount;
+            const byteOffset = i * pixelCount * 4;  // 4 bytes per RGBA pixel
             // Handle both Uint8Array and ArrayBuffer inputs
             let src;
-            if (frame.data instanceof Uint8Array) {
+            if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
                 src = frame.data;
             } else if (frame.data instanceof ArrayBuffer) {
                 src = new Uint8Array(frame.data);
@@ -2019,11 +2091,9 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
                 continue;
             }
 
-            for (let j = 0; j < pixelCount; j++) {
-                rgbaData[offset + j] = src[j*4] | (src[j*4+1] << 8) | (src[j*4+2] << 16) | (src[j*4+3] << 24);
-            }
+            // Write directly to GPU buffer at offset
+            queue.writeBuffer(buffers.rgbaBuffer, byteOffset, src);
         }
-        queue.writeBuffer(buffers.rgbaBuffer, 0, rgbaData);
     }
 
     // Update params for grayscale/laplacian
@@ -2123,43 +2193,27 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         pass.end();
     }
 
-    // Laplacian (Tenengrad)
+    // Combined pass: Laplacian + Moments + Bounds (all read from grayBuffer, independent outputs)
     pass = encoder.beginComputePass();
     pass.setPipeline(laplacianPipeline);
     pass.setBindGroup(0, lapBindGroup);
     pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
-    pass.end();
-
-    // Laplacian reduction
-    pass = encoder.beginComputePass();
-    pass.setPipeline(reductionPipeline);
-    pass.setBindGroup(0, reductionBindGroup);
-    pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
-    pass.end();
-
-    // Moments calculation
-    pass = encoder.beginComputePass();
     pass.setPipeline(momentsPipeline);
     pass.setBindGroup(0, momentsBindGroup);
     pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
-    pass.end();
-
-    // Moments reduction
-    pass = encoder.beginComputePass();
-    pass.setPipeline(momentsReductionPipeline);
-    pass.setBindGroup(0, momentsReductionBindGroup);
-    pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
-    pass.end();
-
-    // Bounds calculation (planet detection)
-    pass = encoder.beginComputePass();
     pass.setPipeline(boundsPipeline);
     pass.setBindGroup(0, boundsBindGroup);
     pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
     pass.end();
 
-    // Bounds reduction
+    // Combined pass: All reductions (independent of each other)
     pass = encoder.beginComputePass();
+    pass.setPipeline(reductionPipeline);
+    pass.setBindGroup(0, reductionBindGroup);
+    pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
+    pass.setPipeline(momentsReductionPipeline);
+    pass.setBindGroup(0, momentsReductionBindGroup);
+    pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
     pass.setPipeline(boundsReductionPipeline);
     pass.setBindGroup(0, boundsReductionBindGroup);
     pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
@@ -2292,18 +2346,14 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
                 height
             });
         } else {
-            // Stacking phase: Convert to Float32 (0.0-1.0) for full precision
-            const float32Data = new Float32Array(frameRgba.length);
-            for (let j = 0; j < frameRgba.length; j++) {
-                float32Data[j] = frameRgba[j] / 255.0;
-            }
-
+            // Return uint8Buffer directly - stacking shader converts to Float32 on GPU
             results.push({
                 sharpness,
                 circularity,
                 bounds,
-                rgbaBuffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
-                float32Buffer: float32Data.buffer
+                uint8Buffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
+                width,
+                height
             });
         }
     }
@@ -2360,6 +2410,10 @@ function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize) {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         }),
         inputBuffer: device.createBuffer({
+            size: requiredSizes.inputSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        }),
+        inputBufferAlt: device.createBuffer({
             size: requiredSizes.inputSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         }),
@@ -2475,11 +2529,24 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     }
     queue.writeBuffer(buffers.centersBuffer, 0, centersData);
 
-    // Set crop params (including useVng for demosaic)
-    const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, useVng ? 1 : 0, 0, 0]);
-    queue.writeBuffer(buffers.paramsBuffer, 0, cropParams);
-
     const needsDemosaic = bayerPattern >= 0;
+
+    // Prepare Bayer data early to get bitDepth and scale
+    let bayerData = null;
+    let bitDepth = 8;
+    let scale = 1.0;
+    if (needsDemosaic) {
+        const prepared = prepareBayerData(frames, srcPixelCount, false);
+        bayerData = prepared.data;
+        bitDepth = prepared.bitDepth;
+        scale = prepared.scale;
+    }
+
+    // Set crop params (including useVng for demosaic, bitDepth, and scale)
+    const cropParams = new ArrayBuffer(32);
+    new Uint32Array(cropParams).set([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, useVng ? 1 : 0, bitDepth, 0]);
+    new Float32Array(cropParams)[7] = scale;
+    queue.writeBuffer(buffers.paramsBuffer, 0, cropParams);
 
     // Prepare all bind groups and parameters upfront
     queue.writeBuffer(buffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
@@ -2542,8 +2609,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const encoder = device.createCommandEncoder();
 
     if (needsDemosaic) {
-        // Upload Bayer data
-        const bayerData = prepareBayerData(frames, srcPixelCount, false);
+        // Upload Bayer data (already prepared above)
         queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
 
         const demosaicCropBindGroup = device.createBindGroup({
@@ -2563,11 +2629,10 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
         pass.end();
     } else {
-        // RGBA input - upload directly
-        const rgbaData = new Uint32Array(batchSize * srcPixelCount);
+        // RGBA input - write each frame directly to GPU buffer at offset (no staging buffer)
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
-            const offset = i * srcPixelCount;
+            const byteOffset = i * srcPixelCount * 4;  // 4 bytes per RGBA pixel
             let src;
             if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
                 src = frame.data;
@@ -2579,12 +2644,9 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
                 console.error('Unknown frame data type:', typeof frame.data);
                 continue;
             }
-
-            for (let j = 0; j < srcPixelCount; j++) {
-                rgbaData[offset + j] = src[j*4] | (src[j*4+1] << 8) | (src[j*4+2] << 16) | (src[j*4+3] << 24);
-            }
+            // Write directly to GPU buffer at offset
+            queue.writeBuffer(buffers.inputBuffer, byteOffset, src);
         }
-        queue.writeBuffer(buffers.inputBuffer, 0, rgbaData);
 
         const rgbaCropBindGroup = device.createBindGroup({
             layout: rgbaCropPipeline.getBindGroupLayout(0),
@@ -2611,29 +2673,21 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
     pass.end();
 
-    // Laplacian pass
+    // Combined pass: Laplacian + Moments (both read from grayBuffer, independent outputs)
     pass = encoder.beginComputePass();
     pass.setPipeline(laplacianPipeline);
     pass.setBindGroup(0, lapBindGroup);
     pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-    pass.end();
-
-    // Reduction pass
-    pass = encoder.beginComputePass();
-    pass.setPipeline(reductionPipeline);
-    pass.setBindGroup(0, reduceBindGroup);
-    pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
-    pass.end();
-
-    // Moments pass
-    pass = encoder.beginComputePass();
     pass.setPipeline(momentsPipeline);
     pass.setBindGroup(0, momentsBindGroup);
     pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
     pass.end();
 
-    // Moments reduction pass
+    // Combined pass: Both reductions (independent of each other)
     pass = encoder.beginComputePass();
+    pass.setPipeline(reductionPipeline);
+    pass.setBindGroup(0, reduceBindGroup);
+    pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
     pass.setPipeline(momentsReductionPipeline);
     pass.setBindGroup(0, momentsReduceBindGroup);
     pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
@@ -2736,16 +2790,13 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
                 height: cropSize
             });
         } else {
-            // Pass 2 / legacy: Convert to Float32 (0.0-1.0) for 16-bit stacking pipeline
-            const float32Data = new Float32Array(frameRgba.length);
-            for (let j = 0; j < frameRgba.length; j++) {
-                float32Data[j] = frameRgba[j] / 255.0;
-            }
+            // Return uint8Buffer directly - stacking shader converts to Float32 on GPU
+            // (Avoids slow JS loop that was here before)
             results.push({
                 sharpness,
                 circularity,
                 index: frames[i].index,
-                float32Buffer: float32Data.buffer,
+                uint8Buffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
                 width: cropSize,
                 height: cropSize
             });
@@ -2767,10 +2818,18 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
  * 5. Calculate sharpness on cropped
  * @param {boolean} useVng - If true, use VNG demosaic; otherwise bilinear
  */
+// Timing stats for detectCropAnalyzeBatch
+let dcaBatchCount = 0;
+let dcaPrepTime = 0;
+let dcaGpuSubmitTime = 0;
+let dcaMapAsyncTime = 0;
+let dcaResultBuildTime = 0;
+
 async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false, useVng = true) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
+    const t0 = performance.now();
     const batchSize = frames.length;
     const srcPixelCount = srcWidth * srcHeight;
     const cropPixelCount = cropSize * cropSize;
@@ -2788,9 +2847,13 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // ===== STEP 1: Upload raw data and demosaic to full RGBA =====
     if (needsDemosaic) {
         // Upload Bayer data (auto-stretch for 16-bit to handle very dark data)
-        const bayerData = prepareBayerData(frames, srcPixelCount, false);
+        const { data: bayerData, bitDepth, scale } = prepareBayerData(frames, srcPixelCount, false);
         queue.writeBuffer(analyzeBuffers.inputBuffer, 0, bayerData);
-        queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, bayerPattern, useVng ? 1 : 0, 0, 0, 0]));
+        // Demosaic params (mixed u32/f32 for scale)
+        const paramsData = new ArrayBuffer(32);
+        new Uint32Array(paramsData).set([srcWidth, srcHeight, batchSize, bayerPattern, useVng ? 1 : 0, bitDepth, 0, 0]);
+        new Float32Array(paramsData)[6] = scale;
+        queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, paramsData);
 
         const demosaicBindGroup = device.createBindGroup({
             layout: demosaicPipeline.getBindGroupLayout(0),
@@ -2809,19 +2872,16 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         pass.end();
         queue.submit([encoder.finish()]);
     } else {
-        // RGBA input
-        const rgbaData = new Uint32Array(batchSize * srcPixelCount);
+        // RGBA input - write each frame directly to GPU buffer at offset (no staging buffer)
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
-            const offset = i * srcPixelCount;
+            const byteOffset = i * srcPixelCount * 4;  // 4 bytes per RGBA pixel
             let src = frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray
                 ? frame.data
                 : new Uint8Array(frame.data.buffer || frame.data);
-            for (let j = 0; j < srcPixelCount; j++) {
-                rgbaData[offset + j] = src[j*4] | (src[j*4+1] << 8) | (src[j*4+2] << 16) | (src[j*4+3] << 24);
-            }
+            // Write directly to GPU buffer at offset
+            queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, src);
         }
-        queue.writeBuffer(analyzeBuffers.rgbaBuffer, 0, rgbaData);
     }
 
     // ===== STEP 2: Grayscale + bounds detection on full frame =====
@@ -3022,6 +3082,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     encoder.copyBufferToBuffer(cropBuffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroupsCrop * 8);
     encoder.copyBufferToBuffer(cropBuffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * 4);
     queue.submit([encoder.finish()]);
+    const tAfterSubmit = performance.now();
+    dcaPrepTime += (tAfterSubmit - t0);
 
     // Rotate buffers for next batch
     rotateCropBuffers();
@@ -3031,6 +3093,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         safeMapAsync(readbackBuf, GPUMapMode.READ),
         safeMapAsync(croppedReadbackBuf, GPUMapMode.READ)
     ]);
+    const tAfterMapAsync = performance.now();
+    dcaMapAsyncTime += (tAfterMapAsync - tAfterSubmit);
 
     const reductionData = new Float32Array(readbackBuf.getMappedRange().slice(0));
     const croppedData = new Uint8Array(croppedReadbackBuf.getMappedRange().slice(0));
@@ -3061,10 +3125,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
                 height: cropSize
             });
         } else {
-            const float32Data = new Float32Array(frameRgba.length);
-            for (let j = 0; j < frameRgba.length; j++) {
-                float32Data[j] = frameRgba[j] / 255.0;
-            }
+            // Return uint8Buffer directly - stacking shader converts to Float32 on GPU
             results.push({
                 sharpness,
                 circularity: bounds[i]?.circularity || 0,
@@ -3072,11 +3133,21 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
                 bounds: bounds[i],
                 centerX: centers[i]?.x,
                 centerY: centers[i]?.y,
-                float32Buffer: float32Data.buffer,
+                uint8Buffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
                 width: cropSize,
                 height: cropSize
             });
         }
+    }
+
+    // Timing stats
+    const tEnd = performance.now();
+    dcaResultBuildTime += (tEnd - tAfterMapAsync);
+    dcaBatchCount++;
+
+    // Log every 10 batches
+    if (dcaBatchCount % 10 === 0) {
+        console.log(`[GPU Timing] ${dcaBatchCount} batches: prep=${(dcaPrepTime/dcaBatchCount).toFixed(1)}ms, mapAsync=${(dcaMapAsyncTime/dcaBatchCount).toFixed(1)}ms, resultBuild=${(dcaResultBuildTime/dcaBatchCount).toFixed(1)}ms`);
     }
 
     return results;
@@ -3104,26 +3175,26 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
 
     const pixelCount = srcWidth * srcHeight;
 
-    // Convert raw data to Uint32Array (handles both 8-bit and 16-bit)
-    let inputData;
+    // Convert raw data to packed Uint32Array (2 pixels per u32 for 16-bit)
+    const u32Count = Math.ceil(pixelCount / 2);
+    let inputData = new Uint32Array(u32Count);
+    const u16View = new Uint16Array(inputData.buffer);
+
     if (pixelDepth > 8) {
+        // 16-bit: direct copy using TypedArray.set
         const src = new Uint16Array(rawData);
-        inputData = new Uint32Array(pixelCount);
-        for (let i = 0; i < pixelCount; i++) {
-            inputData[i] = src[i];
-        }
+        u16View.set(src);
     } else {
+        // 8-bit: scale to 16-bit range
         const src = new Uint8Array(rawData);
-        inputData = new Uint32Array(pixelCount);
         for (let i = 0; i < pixelCount; i++) {
-            // Scale 8-bit to 16-bit range for consistent shader processing
-            inputData[i] = src[i] << 8;
+            u16View[i] = src[i] << 8;
         }
     }
 
     // Create GPU buffers
     const inputBuffer = device.createBuffer({
-        size: pixelCount * 4,
+        size: u32Count * 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
     queue.writeBuffer(inputBuffer, 0, inputData);
@@ -3162,7 +3233,11 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             }
         } else {
             // Demosaic with GPU (use bilinear for thumbnails for speed)
-            queue.writeBuffer(paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, 1, pattern, 0, 0, 0, 0]));
+            // bitDepth=16 since 8-bit data was already scaled to 16-bit range above, scale=1.0
+            const paramsData = new ArrayBuffer(32);
+            new Uint32Array(paramsData).set([srcWidth, srcHeight, 1, pattern, 0, 16, 0, 0]);
+            new Float32Array(paramsData)[6] = 1.0;  // No stretch needed
+            queue.writeBuffer(paramsBuffer, 0, paramsData);
 
             const bindGroup = device.createBindGroup({
                 layout: demosaicPipeline.getBindGroupLayout(0),
