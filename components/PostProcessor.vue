@@ -2269,6 +2269,8 @@ canvas {
 	border: none;
 	border-radius: 4px;
 	cursor: pointer;
+	background-color: #e8e8e8;
+	color: #555;
 }
 .crop-controls .apply-crop {
 	background-color: #8CCF7E;
@@ -2303,6 +2305,8 @@ canvas {
 	border: none;
 	border-radius: 4px;
 	cursor: pointer;
+	background-color: #e8e8e8;
+	color: #555;
 }
 .edge-mask-controls .apply-mask {
 	background-color: #8CCF7E;
