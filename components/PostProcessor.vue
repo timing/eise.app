@@ -12,7 +12,7 @@
 	<div class="card">
 		<!-- Intro state when no image loaded -->
 		<template v-if="!imageLoaded">
-			<h3>Select file</h3>
+			<h3>Select file for post processing</h3>
 			<div class="file-input-wrapper">
 				<input
 					type="file"

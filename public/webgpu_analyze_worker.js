@@ -52,6 +52,11 @@ async function safeMapAsync(buffer, mode) {
     }
 }
 
+// Helper to detect bit depth from frame data (fast check, no processing)
+function detectBitDepth(frames) {
+    return frames[0]?.data instanceof Uint16Array ? 16 : 8;
+}
+
 // Helper function to prepare Bayer data for GPU upload with auto-stretch for 16-bit
 let prepareBayerDataTime = 0;
 let prepareBayerDataCount = 0;
@@ -517,14 +522,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
     }
 
-    // Pack as RGBA (8-bit per channel for output)
-    let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
-    let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
-    let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
-    let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-
     let outIdx = frameIdx * params.width * params.height + y * params.width + x;
-    output[outIdx] = rgba;
+
+    if (params.bitDepth == 16u) {
+        // 16-bit input: output Float32 RGBA to preserve precision through stacking
+        // Stacker receives Float32 directly (inputFormat=0)
+        let baseIdx = outIdx * 4u;
+        output[baseIdx] = bitcast<u32>(rgb.x);
+        output[baseIdx + 1u] = bitcast<u32>(rgb.y);
+        output[baseIdx + 2u] = bitcast<u32>(rgb.z);
+        output[baseIdx + 3u] = bitcast<u32>(1.0);
+    } else {
+        // 8-bit input: pack as Uint8 RGBA (saves memory, stacker converts to Float32 on GPU)
+        // Stacker receives Uint8 and converts via inputFormat=1
+        let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
+        let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
+        let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
+        let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
+        output[outIdx] = rgba;
+    }
 }
 `;
 
@@ -894,13 +910,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
     }
 
-    let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
-    let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
-    let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
-    let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-
     let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
-    output[outIdx] = rgba;
+
+    if (params.bitDepth == 16u) {
+        // 16-bit: output Float32 RGBA (4 u32s per pixel via bitcast)
+        let baseIdx = outIdx * 4u;
+        output[baseIdx] = bitcast<u32>(rgb.x);
+        output[baseIdx + 1u] = bitcast<u32>(rgb.y);
+        output[baseIdx + 2u] = bitcast<u32>(rgb.z);
+        output[baseIdx + 3u] = bitcast<u32>(1.0);
+    } else {
+        // 8-bit: pack as RGBA (1 u32 per pixel)
+        let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
+        let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
+        let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
+        let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
+        output[outIdx] = rgba;
+    }
 }
 `;
 
@@ -1337,14 +1363,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let g = rgb.y;
     let b = rgb.z;
 
-    // Output RGBA (8-bit packed)
-    let ri = u32(clamp(r * 255.0, 0.0, 255.0));
-    let gi = u32(clamp(g * 255.0, 0.0, 255.0));
-    let bi = u32(clamp(b * 255.0, 0.0, 255.0));
-    let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-
     let idx = frameIdx * params.width * params.height + y * params.width + x;
-    rgbaOutput[idx] = rgba;
+
+    // Output RGBA - format depends on bit depth
+    if (params.bitDepth == 16u) {
+        // 16-bit: output Float32 RGBA (4 u32s per pixel via bitcast)
+        let baseIdx = idx * 4u;
+        rgbaOutput[baseIdx] = bitcast<u32>(r);
+        rgbaOutput[baseIdx + 1u] = bitcast<u32>(g);
+        rgbaOutput[baseIdx + 2u] = bitcast<u32>(b);
+        rgbaOutput[baseIdx + 3u] = bitcast<u32>(1.0);
+    } else {
+        // 8-bit: pack as RGBA (1 u32 per pixel)
+        let ri = u32(clamp(r * 255.0, 0.0, 255.0));
+        let gi = u32(clamp(g * 255.0, 0.0, 255.0));
+        let bi = u32(clamp(b * 255.0, 0.0, 255.0));
+        let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
+        rgbaOutput[idx] = rgba;
+    }
 
     // Output grayscale (fused - avoids separate pass)
     let gray = 0.299 * r + 0.587 * g + 0.114 * b;
@@ -1856,17 +1892,39 @@ reinitializeGpu = async function() {
  * Get or create cached buffers for frame analysis
  * Reuses buffers across batches to avoid allocation overhead
  */
-function getAnalyzeBuffers(batchSize, width, height) {
+/**
+ * Get or create cached buffers for frame analysis.
+ *
+ * IMPORTANT: 16-bit SER files require 4x larger RGBA buffers.
+ *
+ * Why we preserve 16-bit through demosaic:
+ * - 8-bit SER: demosaic outputs 8-bit packed RGBA (4 bytes/pixel) → stack in Float32 → 16-bit output
+ * - 16-bit SER: demosaic outputs Float32 RGBA (16 bytes/pixel) → stack in Float32 → 16-bit output
+ *
+ * If we converted 16-bit to 8-bit at demosaic, we'd lose precision BEFORE stacking,
+ * which defeats the purpose of capturing in 16-bit. The stacker accumulates in Float32,
+ * so feeding it Float32 data preserves the full dynamic range from 16-bit sensors.
+ *
+ * @param {number} bitDepth - 8 or 16, determines RGBA buffer size
+ */
+function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const pixelCount = width * height;
     const numWorkgroups = Math.ceil(pixelCount / 256);
+
+    // RGBA buffer size depends on bit depth:
+    // - 8-bit: 4 bytes/pixel (packed RGBA as u32)
+    // - 16-bit: 16 bytes/pixel (4 floats as 4 u32s via bitcast)
+    const rgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
 
     // Calculate required buffer sizes
     const requiredSizes = {
         batchSize,
         pixelCount,
         numWorkgroups,
+        bitDepth,
         paramsSize: 16,
-        pixelBufferSize: batchSize * pixelCount * 4,
+        pixelBufferSize: batchSize * pixelCount * 4,  // Input: always 4 bytes/pixel max
+        rgbaBufferSize: batchSize * pixelCount * rgbaBytesPerPixel,  // Output: depends on bitDepth
         momentsPixelSize: batchSize * pixelCount * 6 * 4,
         boundsPixelSize: batchSize * pixelCount * 4 * 4,  // 4 u32 per pixel
         reductionSize: batchSize * numWorkgroups * 2 * 4,
@@ -1875,8 +1933,10 @@ function getAnalyzeBuffers(batchSize, width, height) {
     };
 
     // Check if we can reuse cached buffers
+    // Note: rgbaBufferSize check ensures we have enough space for 16-bit Float32 output
     if (cachedAnalyzeBuffers && cachedAnalyzeConfig &&
         cachedAnalyzeConfig.pixelBufferSize >= requiredSizes.pixelBufferSize &&
+        cachedAnalyzeConfig.rgbaBufferSize >= requiredSizes.rgbaBufferSize &&
         cachedAnalyzeConfig.momentsPixelSize >= requiredSizes.momentsPixelSize &&
         cachedAnalyzeConfig.boundsPixelSize >= requiredSizes.boundsPixelSize &&
         cachedAnalyzeConfig.reductionSize >= requiredSizes.reductionSize &&
@@ -1886,6 +1946,7 @@ function getAnalyzeBuffers(batchSize, width, height) {
         cachedAnalyzeConfig.batchSize = batchSize;
         cachedAnalyzeConfig.pixelCount = pixelCount;
         cachedAnalyzeConfig.numWorkgroups = numWorkgroups;
+        cachedAnalyzeConfig.bitDepth = bitDepth;
         return cachedAnalyzeBuffers;
     }
 
@@ -1901,6 +1962,7 @@ function getAnalyzeBuffers(batchSize, width, height) {
     // Helper to align buffer sizes to multiple of 4 (WebGPU requirement)
     const align4 = (size) => Math.ceil(size / 4) * 4;
     const pixelBufferSize = align4(Math.ceil(requiredSizes.pixelBufferSize * headroom));
+    const rgbaBufferSize = align4(Math.ceil(requiredSizes.rgbaBufferSize * headroom));  // 4x larger for 16-bit
     const momentsPixelSize = align4(Math.ceil(requiredSizes.momentsPixelSize * headroom));
     const boundsPixelSize = align4(Math.ceil(requiredSizes.boundsPixelSize * headroom));
     const reductionSize = align4(Math.ceil(requiredSizes.reductionSize * headroom));
@@ -1916,8 +1978,9 @@ function getAnalyzeBuffers(batchSize, width, height) {
             size: pixelBufferSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         }),
+        // RGBA buffer: 4x larger for 16-bit to hold Float32 output (preserves precision for stacking)
         rgbaBuffer: device.createBuffer({
-            size: pixelBufferSize,
+            size: rgbaBufferSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
         }),
         grayBuffer: device.createBuffer({
@@ -1960,8 +2023,9 @@ function getAnalyzeBuffers(batchSize, width, height) {
             size: momentsReductionSize,
             usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
         }),
+        // RGBA readback: matches rgbaBuffer size for 16-bit Float32 support
         rgbaReadback: device.createBuffer({
-            size: pixelBufferSize,
+            size: rgbaBufferSize,
             usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
         }),
         boundsBuffer: device.createBuffer({
@@ -1986,7 +2050,9 @@ function getAnalyzeBuffers(batchSize, width, height) {
         batchSize,
         pixelCount,
         numWorkgroups,
+        bitDepth,
         pixelBufferSize,
+        rgbaBufferSize,  // Tracks 16-bit vs 8-bit output size
         momentsPixelSize,
         boundsPixelSize,
         reductionSize,
@@ -2030,19 +2096,24 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         throw new Error(`Memory limit: ${batchSize} frames of ${width}x${height} needs ${neededMB}MB (limit: 512MB). Try processing fewer frames or use smaller resolution. Max batch: ${maxFrames} frames.`);
     }
 
-    // Get cached buffers (creates if needed, reuses if possible)
-    const buffers = getAnalyzeBuffers(batchSize, width, height);
-
     // Determine if we need demosaic (bayerPattern >= 0 means Bayer data)
     const needsDemosaic = bayerPattern >= 0;
+
+    // Detect bit depth early so we allocate correct buffer sizes
+    // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
+    const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+
+    // Get cached buffers (creates if needed, reuses if possible)
+    const buffers = getAnalyzeBuffers(batchSize, width, height, bitDepth);
     let grayAlreadyComputed = false;
 
     if (needsDemosaic) {
         // Upload Bayer data to input buffer (auto-stretch for 16-bit to handle dark data)
-        const { data: bayerData, bitDepth, scale } = prepareBayerData(frames, pixelCount, false);
+        const { data: bayerData, scale } = prepareBayerData(frames, pixelCount, false);
         queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
 
         // Demosaic params (mixed u32/f32 for scale)
+        // Note: bitDepth already determined above via detectBitDepth()
         const paramsData = new ArrayBuffer(32);
         new Uint32Array(paramsData).set([width, height, batchSize, bayerPattern, useVng ? 1 : 0, bitDepth, 0, 0]);
         new Float32Array(paramsData)[6] = scale;
@@ -2223,7 +2294,9 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     const reductionCopySize = batchSize * numWorkgroups * 2 * 4;
     const momentsCopySize = batchSize * numWorkgroups * 6 * 4;
     const boundsCopySize = batchSize * numWorkgroups * 4 * 4;
-    const rgbaCopySize = batchSize * pixelCount * 4;
+    // RGBA copy size: 4x larger for 16-bit (Float32 output vs packed Uint8)
+    const rgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
+    const rgbaCopySize = batchSize * pixelCount * rgbaBytesPerPixel;
 
     encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, buffers.reductionReadback, 0, reductionCopySize);
     encoder.copyBufferToBuffer(buffers.momentsReductionBuffer, 0, buffers.momentsReadback, 0, momentsCopySize);
@@ -2241,7 +2314,11 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     const reductionData = new Float32Array(buffers.reductionReadback.getMappedRange().slice(0, reductionCopySize));
     const momentsData = new Float32Array(buffers.momentsReadback.getMappedRange().slice(0, momentsCopySize));
     const boundsData = new Uint32Array(buffers.boundsReadback.getMappedRange().slice(0, boundsCopySize));
-    const rgbaData = new Uint8Array(buffers.rgbaReadback.getMappedRange().slice(0, rgbaCopySize));
+    // RGBA data type depends on bit depth:
+    // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
+    // - 16-bit: Float32Array (4 floats/pixel, values in 0-1 range)
+    const rgbaRawBuffer = buffers.rgbaReadback.getMappedRange().slice(0, rgbaCopySize);
+    const rgbaData = bitDepth === 16 ? new Float32Array(rgbaRawBuffer) : new Uint8Array(rgbaRawBuffer);
 
     buffers.reductionReadback.unmap();
     buffers.momentsReadback.unmap();
@@ -2333,29 +2410,30 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         }
 
         // Extract RGBA for this frame
-        const frameRgba = rgbaData.slice(i * pixelCount * 4, (i + 1) * pixelCount * 4);
+        // Size depends on bit depth: 4 bytes/pixel (8-bit) or 16 bytes/pixel (16-bit Float32)
+        const elementsPerPixel = bitDepth === 16 ? 4 : 4;  // 4 floats or 4 bytes
+        const frameRgba = rgbaData.slice(i * pixelCount * elementsPerPixel, (i + 1) * pixelCount * elementsPerPixel);
 
-        if (metadataOnly) {
-            // Analyze phase: return only metadata + 8-bit data for preview
-            results.push({
-                sharpness,
-                circularity,
-                bounds,
-                uint8Buffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
-                width,
-                height
-            });
+        // Return buffer in appropriate format for stacking
+        // - 8-bit: uint8Buffer (packed RGBA) - GPU stacker converts to float32 on GPU
+        // - 16-bit: float32Buffer (4 floats/pixel, 0-1 range) - preserves full precision for stacking
+        const result = {
+            sharpness,
+            circularity,
+            bounds,
+            width,
+            height
+        };
+
+        if (bitDepth === 16) {
+            // 16-bit: return Float32 buffer (preserves precision through stacking)
+            result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
         } else {
-            // Return uint8Buffer directly - stacking shader converts to Float32 on GPU
-            results.push({
-                sharpness,
-                circularity,
-                bounds,
-                uint8Buffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
-                width,
-                height
-            });
+            // 8-bit: return Uint8 buffer (GPU stacker converts to float32 on GPU)
+            result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
         }
+
+        results.push(result);
     }
 
     // Buffers are cached and reused - no cleanup here
@@ -2367,33 +2445,42 @@ let cachedCropBuffers = null;
 let cachedCropConfig = null;
 
 /**
- * Get or create buffers for crop+analyze operation
+ * Get or create buffers for crop+analyze operation.
+ *
+ * IMPORTANT: Like getAnalyzeBuffers, 16-bit SER files need 4x larger RGBA buffers
+ * to hold Float32 output and preserve precision through stacking.
+ *
+ * @param {number} bitDepth - 8 or 16, determines cropped RGBA buffer size
  */
-function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize) {
+function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth = 8) {
     const srcPixelCount = srcWidth * srcHeight;
     const cropPixelCount = cropSize * cropSize;
     const numWorkgroups = Math.ceil(cropPixelCount / 256);
 
+    // Cropped RGBA size: 4x larger for 16-bit (Float32 output)
+    const croppedRgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
+
     const requiredSizes = {
         inputSize: batchSize * srcPixelCount * 4,       // Raw Bayer (u32 per pixel)
         centersSize: batchSize * 8,                     // 2 floats per frame (x, y)
-        croppedRgbaSize: batchSize * cropPixelCount * 4, // Cropped RGBA output
-        graySize: batchSize * cropPixelCount * 4,       // Grayscale float
+        croppedRgbaSize: batchSize * cropPixelCount * croppedRgbaBytesPerPixel, // Cropped RGBA output (16-bit = 4x)
+        graySize: batchSize * cropPixelCount * 4,       // Grayscale float (always f32)
         laplacianSize: batchSize * cropPixelCount * 4,
         laplacianSqSize: batchSize * cropPixelCount * 4,
         reductionSize: batchSize * numWorkgroups * 8,
         momentsSize: batchSize * cropPixelCount * 6 * 4,      // 6 floats per pixel
-        momentsReductionSize: batchSize * numWorkgroups * 6 * 4  // 6 floats per workgroup
+        momentsReductionSize: batchSize * numWorkgroups * 6 * 4,  // 6 floats per workgroup
+        bitDepth
     };
 
     // Validate cache - check sizes that determine buffer requirements
-    // graySize, laplacianSize, laplacianSqSize all equal croppedRgbaSize so one check covers them
     if (cachedCropBuffers && cachedCropConfig &&
         cachedCropConfig.inputSize >= requiredSizes.inputSize &&
         cachedCropConfig.croppedRgbaSize >= requiredSizes.croppedRgbaSize &&
         cachedCropConfig.momentsSize >= requiredSizes.momentsSize &&
         cachedCropConfig.reductionSize >= requiredSizes.reductionSize &&
         cachedCropConfig.momentsReductionSize >= requiredSizes.momentsReductionSize) {
+        cachedCropConfig.bitDepth = bitDepth;
         return cachedCropBuffers;
     }
 
@@ -2519,7 +2606,13 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const cropPixelCount = cropSize * cropSize;
     const numWorkgroups = Math.ceil(cropPixelCount / 256);
 
-    const buffers = getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize);
+    const needsDemosaic = bayerPattern >= 0;
+
+    // Detect bitDepth FIRST so we allocate correct buffer sizes
+    // 16-bit SER needs 4x larger RGBA buffers for Float32 output
+    const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+
+    const buffers = getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
 
     // Upload centers
     const centersData = new Float32Array(batchSize * 2);
@@ -2529,16 +2622,12 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     }
     queue.writeBuffer(buffers.centersBuffer, 0, centersData);
 
-    const needsDemosaic = bayerPattern >= 0;
-
-    // Prepare Bayer data early to get bitDepth and scale
+    // Prepare Bayer data (we already know bitDepth)
     let bayerData = null;
-    let bitDepth = 8;
     let scale = 1.0;
     if (needsDemosaic) {
         const prepared = prepareBayerData(frames, srcPixelCount, false);
         bayerData = prepared.data;
-        bitDepth = prepared.bitDepth;
         scale = prepared.scale;
     }
 
@@ -2724,7 +2813,11 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const momentsData = new Float32Array(momentsReadbackBuf.getMappedRange().slice(0));
     momentsReadbackBuf.unmap();
 
-    const croppedData = new Uint8Array(croppedReadbackBuf.getMappedRange().slice(0));
+    // Cropped RGBA data type depends on bit depth:
+    // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
+    // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
+    const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
+    const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
     croppedReadbackBuf.unmap();
 
     // Process results
@@ -2776,31 +2869,27 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
             }
         }
 
-        // Extract cropped RGBA for this frame (8-bit)
-        const frameRgba = croppedData.slice(i * cropPixelCount * 4, (i + 1) * cropPixelCount * 4);
+        // Return buffer in appropriate format for stacking
+        // - 8-bit: uint8Buffer (packed RGBA) - stacker converts to Float32 on GPU
+        // - 16-bit: float32Buffer (4 floats/pixel) - preserves precision
+        const elementsPerPixel = bitDepth === 16 ? 4 : 4;  // 4 floats or 4 bytes
+        const frameRgba = croppedData.slice(i * cropPixelCount * elementsPerPixel, (i + 1) * cropPixelCount * elementsPerPixel);
 
-        if (metadataOnly) {
-            // Pass 1: Return only metadata + 8-bit data for preview
-            results.push({
-                sharpness,
-                circularity,
-                index: frames[i].index,
-                uint8Buffer: frameRgba.buffer, // 8-bit for preview
-                width: cropSize,
-                height: cropSize
-            });
+        const result = {
+            sharpness,
+            circularity,
+            index: frames[i].index,
+            width: cropSize,
+            height: cropSize
+        };
+
+        if (bitDepth === 16) {
+            result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
         } else {
-            // Return uint8Buffer directly - stacking shader converts to Float32 on GPU
-            // (Avoids slow JS loop that was here before)
-            results.push({
-                sharpness,
-                circularity,
-                index: frames[i].index,
-                uint8Buffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
-                width: cropSize,
-                height: cropSize
-            });
+            result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
         }
+
+        results.push(result);
     }
 
     return results;
@@ -2836,18 +2925,23 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     const numWorkgroupsFull = Math.ceil(srcPixelCount / 256);
     const numWorkgroupsCrop = Math.ceil(cropPixelCount / 256);
 
+    const needsDemosaic = bayerPattern >= 0;
+
+    // Detect bit depth early for correct buffer allocation
+    // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
+    const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+
     // Get buffers for full-frame analysis
-    const analyzeBuffers = getAnalyzeBuffers(batchSize, srcWidth, srcHeight);
+    const analyzeBuffers = getAnalyzeBuffers(batchSize, srcWidth, srcHeight, bitDepth);
 
     // Get buffers for cropped analysis (reuses some, creates others)
-    const cropBuffers = getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize);
-
-    const needsDemosaic = bayerPattern >= 0;
+    const cropBuffers = getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
 
     // ===== STEP 1: Upload raw data and demosaic to full RGBA =====
     if (needsDemosaic) {
         // Upload Bayer data (auto-stretch for 16-bit to handle very dark data)
-        const { data: bayerData, bitDepth, scale } = prepareBayerData(frames, srcPixelCount, false);
+        // Note: bitDepth already determined above via detectBitDepth()
+        const { data: bayerData, scale } = prepareBayerData(frames, srcPixelCount, false);
         queue.writeBuffer(analyzeBuffers.inputBuffer, 0, bayerData);
         // Demosaic params (mixed u32/f32 for scale)
         const paramsData = new ArrayBuffer(32);
@@ -3079,8 +3173,10 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     const croppedReadbackBuf = useAlt ? cropBuffers.croppedReadbackBufferAlt : cropBuffers.croppedReadbackBuffer;
 
     // Copy results for readback
+    // Cropped RGBA size: 4x larger for 16-bit (Float32 output)
+    const croppedRgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
     encoder.copyBufferToBuffer(cropBuffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroupsCrop * 8);
-    encoder.copyBufferToBuffer(cropBuffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * 4);
+    encoder.copyBufferToBuffer(cropBuffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * croppedRgbaBytesPerPixel);
     queue.submit([encoder.finish()]);
     const tAfterSubmit = performance.now();
     dcaPrepTime += (tAfterSubmit - t0);
@@ -3097,7 +3193,11 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     dcaMapAsyncTime += (tAfterMapAsync - tAfterSubmit);
 
     const reductionData = new Float32Array(readbackBuf.getMappedRange().slice(0));
-    const croppedData = new Uint8Array(croppedReadbackBuf.getMappedRange().slice(0));
+    // Cropped RGBA type depends on bit depth:
+    // - 8-bit: Uint8Array (packed RGBA)
+    // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
+    const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
+    const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
     readbackBuf.unmap();
     croppedReadbackBuf.unmap();
 
@@ -3110,34 +3210,30 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         }
         const sharpness = (tenengradSum / cropPixelCount) * 65025;
 
-        const frameRgba = croppedData.slice(i * cropPixelCount * 4, (i + 1) * cropPixelCount * 4);
+        // Return buffer in appropriate format for stacking
+        // - 8-bit: uint8Buffer (packed RGBA) - stacker converts to Float32 on GPU
+        // - 16-bit: float32Buffer (4 floats/pixel) - preserves precision
+        const elementsPerPixel = 4;  // 4 floats or 4 bytes
+        const frameRgba = croppedData.slice(i * cropPixelCount * elementsPerPixel, (i + 1) * cropPixelCount * elementsPerPixel);
 
-        if (metadataOnly) {
-            results.push({
-                sharpness,
-                circularity: bounds[i]?.circularity || 0,
-                index: frames[i].index,
-                bounds: bounds[i],
-                centerX: centers[i]?.x,
-                centerY: centers[i]?.y,
-                uint8Buffer: frameRgba.buffer,
-                width: cropSize,
-                height: cropSize
-            });
+        const result = {
+            sharpness,
+            circularity: bounds[i]?.circularity || 0,
+            index: frames[i].index,
+            bounds: bounds[i],
+            centerX: centers[i]?.x,
+            centerY: centers[i]?.y,
+            width: cropSize,
+            height: cropSize
+        };
+
+        if (bitDepth === 16) {
+            result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
         } else {
-            // Return uint8Buffer directly - stacking shader converts to Float32 on GPU
-            results.push({
-                sharpness,
-                circularity: bounds[i]?.circularity || 0,
-                index: frames[i].index,
-                bounds: bounds[i],
-                centerX: centers[i]?.x,
-                centerY: centers[i]?.y,
-                uint8Buffer: frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength),
-                width: cropSize,
-                height: cropSize
-            });
+            result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
         }
+
+        results.push(result);
     }
 
     // Timing stats
@@ -3193,6 +3289,10 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
     }
 
     // Create GPU buffers
+    // Note: Demosaic outputs Float32 RGBA (16 bytes/pixel) when bitDepth=16
+    // We use bitDepth=16 for input reading, so output is Float32
+    const outputBytesPerPixel = 16;  // Float32 RGBA
+
     const inputBuffer = device.createBuffer({
         size: u32Count * 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
@@ -3200,12 +3300,12 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
     queue.writeBuffer(inputBuffer, 0, inputData);
 
     const outputBuffer = device.createBuffer({
-        size: pixelCount * 4,  // RGBA output
+        size: pixelCount * outputBytesPerPixel,  // Float32 RGBA output
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
     });
 
     const readbackBuffer = device.createBuffer({
-        size: pixelCount * 4,
+        size: pixelCount * outputBytesPerPixel,
         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
     });
 
@@ -3254,12 +3354,24 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             pass.setBindGroup(0, bindGroup);
             pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), 1);
             pass.end();
-            encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, pixelCount * 4);
+            encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, pixelCount * outputBytesPerPixel);
             queue.submit([encoder.finish()]);
 
             await safeMapAsync(readbackBuffer, GPUMapMode.READ);
-            fullRgba = new Uint8ClampedArray(readbackBuffer.getMappedRange().slice(0));
+            // Demosaic outputs Float32 RGBA (4 floats per pixel, values 0-1)
+            // Convert to Uint8 for thumbnail display
+            const float32Data = new Float32Array(readbackBuffer.getMappedRange().slice(0));
             readbackBuffer.unmap();
+
+            fullRgba = new Uint8ClampedArray(pixelCount * 4);
+            for (let i = 0; i < pixelCount; i++) {
+                const srcIdx = i * 4;
+                const dstIdx = i * 4;
+                fullRgba[dstIdx] = Math.min(255, Math.max(0, Math.round(float32Data[srcIdx] * 255)));
+                fullRgba[dstIdx + 1] = Math.min(255, Math.max(0, Math.round(float32Data[srcIdx + 1] * 255)));
+                fullRgba[dstIdx + 2] = Math.min(255, Math.max(0, Math.round(float32Data[srcIdx + 2] * 255)));
+                fullRgba[dstIdx + 3] = 255;
+            }
         }
 
         // Auto-stretch: find min/max and normalize

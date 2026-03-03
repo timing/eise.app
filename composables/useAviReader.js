@@ -482,7 +482,8 @@ export function useAviReader() {
                     resolve({
                         sharpness: e.data.sharpness,
                         pngBlob: e.data.pngBlob,
-                        uint8Buffer: e.data.uint8Buffer,
+                        uint8Buffer: e.data.uint8Buffer,        // GPU path
+                        float32Buffer: e.data.float32Buffer,    // CPU fallback path
                         width: e.data.width,
                         height: e.data.height,
                         index: e.data.index,
@@ -1079,7 +1080,8 @@ export function useAviReader() {
                     const currentFrame = {
                         sharpness: result.sharpness,
                         blob: result.pngBlob,
-                        uint8Buffer: result.uint8Buffer,
+                        uint8Buffer: result.uint8Buffer,        // GPU path
+                        float32Buffer: result.float32Buffer,    // CPU fallback path
                         width: result.width,
                         height: result.height,
                         index: result.index,
@@ -1363,7 +1365,8 @@ export function useAviReader() {
                         const currentFrame = {
                             sharpness: result.sharpness,
                             blob: result.pngBlob,
-                            uint8Buffer: result.uint8Buffer,
+                            uint8Buffer: result.uint8Buffer,        // GPU path
+                            float32Buffer: result.float32Buffer,    // CPU fallback path
                             width: result.width,
                             height: result.height,
                             index: result.index,
@@ -1612,6 +1615,7 @@ export function useAviReader() {
             return true;
         } catch (error) {
             console.error('GPU worker init failed:', error);
+            addLog(`GPU worker init failed: ${error.message}, falling back to CPU`);
             reportError(error, { component: 'useAviReader', action: 'initializeGpuWorker' });
             gpuWorker.terminate();
             gpuWorker = null;
@@ -2330,7 +2334,8 @@ export function useAviReader() {
                 rankFrame({
                     sharpness: result.sharpness,
                     blob: result.pngBlob,
-                    uint8Buffer: result.uint8Buffer,
+                    uint8Buffer: result.uint8Buffer,        // GPU path
+                    float32Buffer: result.float32Buffer,    // CPU fallback path
                     width: result.width,
                     height: result.height,
                     index: result.index,

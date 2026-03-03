@@ -48,6 +48,7 @@ export function useImageReader() {
             return true;
         } catch (error) {
             console.error('GPU worker init failed:', error);
+            addLog(`GPU worker init failed: ${error.message}, falling back to CPU`);
             reportError(error, { component: 'useImageReader', action: 'initializeGpuWorker' });
             gpuWorker.terminate();
             gpuWorker = null;

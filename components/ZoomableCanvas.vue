@@ -1,7 +1,15 @@
 <template>
 	<div class="zoomable-canvas-outer">
 		<div class="canvas-topbar">
-			<span class="zoom-indicator">Zoom: {{ Math.round(zoomLevel * 100) }}%</span>
+			<span class="zoom-indicator">Zoom: <input
+				type="number"
+				:value="Math.round(zoomLevel * 100)"
+				@change="setZoomFromInput"
+				min="30"
+				max="1500"
+				step="1"
+				class="zoom-input"
+			/>%</span>
 			<slot name="toolbar"></slot>
 		</div>
 		<div class="zoomable-canvas-wrapper">
@@ -42,6 +50,13 @@ onMounted(async () => {
 	await nextTick();
 	emit('canvasReady', canvas);
 });
+
+const setZoomFromInput = (event) => {
+	const value = parseInt(event.target.value, 10);
+	if (!isNaN(value) && value >= 30 && value <= 1500) {
+		zoomLevel.value = value / 100;
+	}
+};
 
 const handleWheel = (event) => {
 	event.preventDefault(); // Prevent the page from scrolling
@@ -183,6 +198,20 @@ defineExpose({ centerCanvas });
 }
 .zoom-indicator {
 	font-size: 13px;
+}
+.zoom-input {
+	width: 50px;
+	background: transparent;
+	border: 1px solid #666;
+	border-radius: 3px;
+	color: white;
+	font-size: 13px;
+	padding: 2px 4px;
+	text-align: right;
+}
+.zoom-input:focus {
+	outline: none;
+	border-color: #888;
 }
 .zoomable-canvas-wrapper {
 	height: calc(100vh - 240px);

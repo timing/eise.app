@@ -1691,7 +1691,8 @@ export function useSerReader() {
                             // For no-crop mode, center is fixed at frame center
                             const currentFrame = {
                                 sharpness: result.sharpness,
-                                uint8Buffer: result.uint8Buffer, // 8-bit for preview only
+                                uint8Buffer: result.uint8Buffer,        // GPU path
+                                float32Buffer: result.float32Buffer,    // CPU fallback path
                                 width: processWidth,
                                 height: processHeight,
                                 index: frameIndex,
@@ -1855,7 +1856,8 @@ export function useSerReader() {
                             sharpness: result.sharpness,
                             blob: result.pngBlob,
                             croppedBuffer: result.croppedBuffer,
-                            uint8Buffer: result.uint8Buffer,
+                            uint8Buffer: result.uint8Buffer,        // GPU path
+                            float32Buffer: result.float32Buffer,    // CPU fallback path
                             width: result.width,
                             height: result.height,
                             index: result.index,
@@ -3148,7 +3150,8 @@ export function useSerReader() {
                                 sharpness: result.sharpness,
                                 blob: result.pngBlob,
                                 croppedBuffer: result.croppedBuffer,
-                                uint8Buffer: result.uint8Buffer,
+                                uint8Buffer: result.uint8Buffer,        // GPU path
+                                float32Buffer: result.float32Buffer,    // CPU fallback path
                                 width: result.width,
                                 height: result.height,
                                 index: result.index,

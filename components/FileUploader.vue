@@ -21,7 +21,7 @@
 
 		<!-- Initial state: file selection and settings (hidden during processing) -->
 		<template v-if="!isProcessing">
-			<h3>Select file(s)</h3>
+			<h3>Select file(s) for stacking and/or post processing</h3>
 			<div class="file-input-wrapper">
 				<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
 				<label for="file-upload" class="file-label">
