@@ -336,7 +336,11 @@ export function useStacker() {
             throw new Error('Unknown frameReReader type');
         }
 
-        addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}${noiseRobustAlignment ? ' (two-phase)' : ''}`);
+        // Detect 16-bit source: SER files have pixelDepth in header, images are always 8-bit
+        // 16-bit sources return float32Buffer from GPU analyze, 8-bit returns uint8Buffer
+        const is16bit = isSerFile && frameReReader.header?.pixelDepth > 8;
+
+        addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}${is16bit ? ' (16-bit)' : ''}${noiseRobustAlignment ? ' (two-phase)' : ''}`);
         emit('set-caption', 'Initializing GPU workers...');
 
         // Initialize GPU workers (no OpenCV worker needed - alignment prep is pure JS)
@@ -464,10 +468,16 @@ export function useStacker() {
             // Load reference frame
             const { frames: refFrames, centers: refCenters } = await loadRawBatch([refFrameMeta]);
             const refResults = await processGpuBatch(refFrames, refCenters);
-            const refBlob = await uint8ToBlob(refResults[0].uint8Buffer, cropSize, cropSize);
+
+            // Use appropriate buffer type based on bit depth
+            // 16-bit: float32Buffer (0.0-1.0), 8-bit: uint8Buffer (0-255)
+            const refBuffer = is16bit ? refResults[0].float32Buffer : refResults[0].uint8Buffer;
+            const refBlob = is16bit
+                ? await float32ToBlob(refBuffer, cropSize, cropSize)
+                : await uint8ToBlob(refBuffer, cropSize, cropSize);
             const refFrame = {
                 ...refFrameMeta,
-                uint8Buffer: refResults[0].uint8Buffer,
+                ...(is16bit ? { float32Buffer: refBuffer } : { uint8Buffer: refBuffer }),
                 width: cropSize,
                 height: cropSize,
                 blob: refBlob
@@ -478,7 +488,7 @@ export function useStacker() {
             // Step 2: Prepare alignment points (pure JS, no OpenCV)
             emit('set-caption', 'Preparing alignment points...');
             const refFrameData = {
-                uint8Buffer: refFrame.uint8Buffer.slice(0),
+                ...(is16bit ? { float32Buffer: refBuffer.slice(0) } : { uint8Buffer: refBuffer.slice(0) }),
                 width: cropSize,
                 height: cropSize,
                 sharpness: refFrame.sharpness
@@ -489,7 +499,8 @@ export function useStacker() {
             addLog(`Alignment prepared: ${alignmentPoints.length} APs`);
 
             // Calculate reference brightness for normalization
-            const refBrightness = calcMeanBrightness(refFrame.uint8Buffer, cropSize, cropSize, false);
+            // calcMeanBrightness returns 0-255 scale for both formats
+            const refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, is16bit);
 
             // Step 3: Initialize GPU stacker
             await new Promise((resolve, reject) => {
@@ -606,9 +617,12 @@ export function useStacker() {
                 // Capture frames for comparison video (both raw pre-crop and processed post-crop)
                 for (let i = 0; i < gpuResults.length; i++) {
                     const globalIndex = batchStart + i;
-                    // Post-crop: use uint8Buffer directly (already uint8)
-                    const uint8Buffer = new Uint8Array(gpuResults[i].uint8Buffer);
-                    capturePostCropFrame(uint8Buffer, cropSize, cropSize, globalIndex, frameCount);
+                    // Post-crop: convert to uint8 for capture (16-bit needs conversion)
+                    const frameBuffer = is16bit ? gpuResults[i].float32Buffer : gpuResults[i].uint8Buffer;
+                    const uint8ForCapture = is16bit
+                        ? new Uint8Array(float32ToUint8(frameBuffer, cropSize, cropSize))
+                        : new Uint8Array(frameBuffer);
+                    capturePostCropFrame(uint8ForCapture, cropSize, cropSize, globalIndex, frameCount);
                     // Pre-crop: store raw Bayer data for lazy demosaic later
                     const rawFrame = rawBatch.frames[i];
                     capturePreCropFrame(rawFrame.data, srcWidth, srcHeight, globalIndex, frameCount, bayerPattern);
@@ -616,9 +630,10 @@ export function useStacker() {
 
                 // Calculate shifts for batch via GPU template matching
                 const t0Gray = performance.now();
-                const frameGrayDatas = gpuResults.map(r =>
-                    rgbaToGrayscale(r.uint8Buffer, cropSize, cropSize, false)
-                );
+                const frameGrayDatas = gpuResults.map(r => {
+                    const buffer = is16bit ? r.float32Buffer : r.uint8Buffer;
+                    return rgbaToGrayscale(buffer, cropSize, cropSize, is16bit);
+                });
                 stackingStats.grayscaleMs.push(performance.now() - t0Gray);
 
                 // For surface mode, pass searchOffset to shift search region without affecting template extraction
@@ -668,9 +683,13 @@ export function useStacker() {
                     }
                 }
 
-                // Send batch to GPU stacker (Uint8 - GPU converts to Float32)
+                // Send batch to GPU stacker
+                // 16-bit: Float32Array (0.0-1.0) with inputFormat=0
+                // 8-bit: Uint8Array (0-255) with inputFormat=1 (GPU converts to float)
                 const batchForStacker = gpuResults.map((r, i) => ({
-                    rgbaBuffer: new Uint8Array(r.uint8Buffer),
+                    rgbaBuffer: is16bit
+                        ? new Float32Array(r.float32Buffer)
+                        : new Uint8Array(r.uint8Buffer),
                     sharpness: batchFrames[i].sharpness
                 }));
                 const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
