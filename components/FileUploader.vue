@@ -113,9 +113,10 @@
 				</div>
 
 				<label class="checkbox-option">
-					AP quality threshold:
-					<input type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="small-number-input" />
+					<input type="checkbox" v-model="useVngDemosaic" />
+					VNG demosaicing
 				</label>
+
 
 				<label class="checkbox-option">
 					AP size:
@@ -123,10 +124,11 @@
 				</label>
 
 				<label class="checkbox-option">
-					<input type="checkbox" v-model="useVngDemosaic" />
-					VNG demosaicing
+					AP quality threshold:
+					<input type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="small-number-input" />
 				</label>
-				<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 20 is a safe middle ground.<br><strong>VNG demosaicing:</strong> Variable Number of Gradients - higher quality color interpolation for raw Bayer data. When disabled, uses faster bilinear interpolation.</p>
+
+								<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 30 is a safe middle ground.<br><strong>VNG demosaicing:</strong> Variable Number of Gradients - higher quality color interpolation for raw Bayer data. When disabled, uses faster bilinear interpolation.</p>
 
 				<template v-if="targetType !== 'sun-moon'">
 					<div class="separator"></div>
@@ -169,6 +171,7 @@
 		<p><strong>Tip:</strong> For Moon or Sun surface closeups, select "Surface" mode above to handle larger frame-to-frame drift.</p>
 		<h3>More information, bugs and feature requests?</h3>
 		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
+
 		<p class="build-date">Latest release: {{ buildDate }}</p>
 		<div class="comparison-images">
 			<img src="/jupiter-singleframe.png" alt="Single frame" />
@@ -243,7 +246,7 @@ const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 const noiseRobustAlignment = ref(false);
 const useVngDemosaic = ref(true); // VNG demosaic (default) vs bilinear
 const minApQuality = ref(0.3); // Alignment point quality threshold (NCC score)
-const apPatchSize = ref(20); // Alignment point patch size in pixels
+const apPatchSize = ref(30); // Alignment point patch size in pixels
 // Computed for checkbox binding - shows unchecked when GPU is on
 const noiseRobustAlignmentVisible = computed({
 	get: () => useGPU.value ? false : noiseRobustAlignment.value,

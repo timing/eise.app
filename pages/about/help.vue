@@ -70,6 +70,13 @@
 				<dt>The edges have artifacts</dt>
 				<dd>This is normal - use the Crop tool in the Post Processor to trim the edges.</dd>
 
+				<dt>Polygon artefacts in stacked image</dt>
+				<dd>
+					<p>If you see polygon or grid-like artefacts like in the image below, try increasing the <strong>AP size</strong> setting (e.g., from 30 to 50). This makes alignment patches larger and more robust for low-contrast or noisy data.</p>
+					<img src="/screenshot-artefact.png" alt="Example of polygon artefacts" class="troubleshooting-image" />
+					<p>Alternatively, increase the <strong>AP quality threshold</strong> (e.g., from 0.3 to 0.5) to reject uncertain alignment matches.</p>
+				</dd>
+
 				<dt>Colors look wrong</dt>
 				<dd>Enable "Auto color balance" in the Post Processor, or manually adjust saturation and RGB alignment.</dd>
 			</dl>
@@ -108,5 +115,13 @@ dt {
 dd {
 	margin-left: 0;
 	margin-top: 0.25rem;
+}
+.troubleshooting-image {
+	max-width: 100%;
+	max-height: 200px;
+	display: block;
+	margin: 0.5rem 0;
+	border-radius: 4px;
+	border: 1px solid #444;
 }
 </style>
