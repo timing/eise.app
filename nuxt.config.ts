@@ -1,5 +1,10 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
 // also trying to fix this: https://github.com/nuxt/nuxt/issues/22141
+
+// Cloudflare Pages sets CF_PAGES_BRANCH during build
+const isProduction = process.env.CF_PAGES_BRANCH === 'main';
+const robotsContent = isProduction ? 'index, follow' : 'noindex, nofollow';
+
 export default defineNuxtConfig({
 	devtools: { enabled: true },
 	app: {
@@ -8,6 +13,7 @@ export default defineNuxtConfig({
 				{ rel: 'alternate', type: 'text/markdown', href: '/llms.txt' }
 			],
 			meta: [
+				{ name: 'robots', content: robotsContent },
 				{ property: 'og:type', content: 'website' },
 				{ property: 'og:site_name', content: 'eise.app' },
 				{ property: 'og:image', content: 'https://eise.app/screenshot-1.png' },
