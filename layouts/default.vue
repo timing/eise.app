@@ -25,8 +25,6 @@
 		<div class="clearb"></div>
 
 		<Logger />
-
-		<img v-if="loadPixel" src="https://analytics.tijmentiming.workers.dev/pixel.gif"/>
 	</div>
 </template>
 
@@ -34,12 +32,7 @@
 import Logger from '@/components/Logger.vue';
 
 const route = useRoute();
-const loadPixel = ref(false);
 const aboutDropdownOpen = ref(false);
-
-onMounted(() => {
-	loadPixel.value = true;
-});
 
 // Close dropdown when route changes
 watch(() => route.path, () => {
