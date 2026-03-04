@@ -21,7 +21,7 @@ async function loadFastPng() {
 }
 
 /**
- * Encode Float32Array image data as 16-bit PNG
+ * Encode Float32Array image data as 16-bit PNG (RGB, 48-bit)
  * @param {Float32Array} data - RGBA data in 0.0-1.0 range
  * @param {number} width - Image width
  * @param {number} height - Image height
@@ -30,29 +30,34 @@ async function loadFastPng() {
 export async function encode16BitPNG(data, width, height) {
 	const { encode } = await loadFastPng();
 
-	// Convert Float32Array (0.0-1.0) to Uint16Array (0-65535)
-	const uint16Data = new Uint16Array(data.length);
+	// Convert Float32Array RGBA (0.0-1.0) to Uint16Array RGB (0-65535)
+	// Skip alpha channel for compatibility with astro software (LSW, etc.)
+	const pixelCount = width * height;
+	const uint16Data = new Uint16Array(pixelCount * 3);
 	const scale = 65535;
 
-	for (let i = 0; i < data.length; i++) {
-		// Clamp to 0-1 range and scale to 16-bit
-		uint16Data[i] = Math.round(Math.max(0, Math.min(1, data[i])) * scale);
+	for (let i = 0; i < pixelCount; i++) {
+		const srcIdx = i * 4;
+		const dstIdx = i * 3;
+		uint16Data[dstIdx] = Math.round(Math.max(0, Math.min(1, data[srcIdx])) * scale);
+		uint16Data[dstIdx + 1] = Math.round(Math.max(0, Math.min(1, data[srcIdx + 1])) * scale);
+		uint16Data[dstIdx + 2] = Math.round(Math.max(0, Math.min(1, data[srcIdx + 2])) * scale);
 	}
 
-	// fast-png encode with 16-bit depth
+	// fast-png encode with 16-bit depth, RGB (48-bit, compatible with AutoStakkert/LSW)
 	const pngBuffer = encode({
 		width,
 		height,
 		data: uint16Data,
 		depth: 16,
-		channels: 4  // RGBA
+		channels: 3  // RGB
 	});
 
 	return new Blob([pngBuffer], { type: 'image/png' });
 }
 
 /**
- * Encode Uint16Array image data as 16-bit PNG
+ * Encode Uint16Array image data as 16-bit PNG (RGB, 48-bit)
  * @param {Uint16Array} uint16Data - RGBA data in 0-65535 range
  * @param {number} width - Image width
  * @param {number} height - Image height
@@ -61,12 +66,24 @@ export async function encode16BitPNG(data, width, height) {
 export async function encode16BitPNGFromUint16(uint16Data, width, height) {
 	const { encode } = await loadFastPng();
 
+	// Convert RGBA to RGB (skip alpha channel)
+	const pixelCount = width * height;
+	const rgbData = new Uint16Array(pixelCount * 3);
+
+	for (let i = 0; i < pixelCount; i++) {
+		const srcIdx = i * 4;
+		const dstIdx = i * 3;
+		rgbData[dstIdx] = uint16Data[srcIdx];
+		rgbData[dstIdx + 1] = uint16Data[srcIdx + 1];
+		rgbData[dstIdx + 2] = uint16Data[srcIdx + 2];
+	}
+
 	const pngBuffer = encode({
 		width,
 		height,
-		data: uint16Data,
+		data: rgbData,
 		depth: 16,
-		channels: 4
+		channels: 3  // RGB
 	});
 
 	return new Blob([pngBuffer], { type: 'image/png' });
