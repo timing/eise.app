@@ -29,81 +29,6 @@ function isMjpegFourCC(fourCC) {
 }
 
 /**
- * Parse idx1 index chunk to build frame index quickly (instead of scanning all frame data)
- * Returns array of {offset, size} for each video frame, or null if idx1 not found/invalid
- */
-async function parseIdx1Index(file, moviListOffset, maxFrames = -1) {
-    const fileSize = file.size;
-
-    // idx1 is typically right after movi list, search last 1MB of file
-    const searchSize = Math.min(1024 * 1024, fileSize);
-    const searchStart = fileSize - searchSize;
-    const searchBuffer = await file.slice(searchStart, fileSize).arrayBuffer();
-    const searchView = new DataView(searchBuffer);
-
-    // Find 'idx1' marker
-    let idx1Offset = -1;
-    for (let i = 0; i < searchBuffer.byteLength - 8; i++) {
-        if (searchView.getUint8(i) === 0x69 &&     // 'i'
-            searchView.getUint8(i + 1) === 0x64 && // 'd'
-            searchView.getUint8(i + 2) === 0x78 && // 'x'
-            searchView.getUint8(i + 3) === 0x31) { // '1'
-            idx1Offset = searchStart + i;
-            break;
-        }
-    }
-
-    if (idx1Offset === -1) {
-        return null;
-    }
-
-    // Read idx1 header
-    const idx1Header = await file.slice(idx1Offset, idx1Offset + 8).arrayBuffer();
-    const idx1View = new DataView(idx1Header);
-    const idx1Size = idx1View.getUint32(4, true);
-
-    // Sanity check
-    if (idx1Size > fileSize - idx1Offset || idx1Size < 16) {
-        return null;
-    }
-
-    // Read entire idx1 data
-    const idx1Data = await file.slice(idx1Offset + 8, idx1Offset + 8 + idx1Size).arrayBuffer();
-    const dataView = new DataView(idx1Data);
-
-    const frameIndex = [];
-    const entrySize = 16; // Each idx1 entry is 16 bytes
-    const numEntries = Math.floor(idx1Size / entrySize);
-
-    for (let i = 0; i < numEntries; i++) {
-        if (maxFrames > 0 && frameIndex.length >= maxFrames) break;
-
-        const entryOffset = i * entrySize;
-        const chunkId = String.fromCharCode(
-            dataView.getUint8(entryOffset),
-            dataView.getUint8(entryOffset + 1),
-            dataView.getUint8(entryOffset + 2),
-            dataView.getUint8(entryOffset + 3)
-        );
-
-        // Video chunks: '00dc', '01dc' (compressed) or '00db', '01db' (uncompressed)
-        if (chunkId.match(/^\d\ddc$/i) || chunkId.match(/^\d\ddb$/i)) {
-            const offset = dataView.getUint32(entryOffset + 8, true);
-            const size = dataView.getUint32(entryOffset + 12, true);
-
-            // idx1 offsets are relative to movi list start (after 'movi' tag)
-            // Add 8 for chunk header, and adjust for movi list position
-            frameIndex.push({
-                offset: moviListOffset + offset + 8,
-                size: size
-            });
-        }
-    }
-
-    return frameIndex.length > 0 ? frameIndex : null;
-}
-
-/**
  * Parse AVI frame index from movi list - builds array of {offset, size} for each video frame
  * Scans chunk headers to find actual video frames, skipping audio and other chunks.
  * Works for all AVI formats (MJPEG, DIB, Y800, etc.) - not just variable-size formats.
@@ -989,16 +914,10 @@ export function useAviReader() {
 
         addLog(`Easy AVI detected. Header: ${aviHeader.width}x${aviHeader.height}, ${aviHeader.frameCount} frames, FourCC: ${aviHeader.fourCC}, FrameSize: ${aviHeader.frameDataSize} bytes.`);
 
-        // Build frame index - try idx1 first (fast), fall back to scanning (slow)
+        // Build frame index by scanning chunk headers
         emit('set-caption', 'Parsing AVI frame index...');
-        let frameIndex = await parseIdx1Index(file, aviHeader.moviListOffset, maxFrames);
-        if (frameIndex) {
-            addLog(`Found ${frameIndex.length} video frames via idx1 index`);
-        } else {
-            addLog('idx1 index not available, scanning frame data...');
-            frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
-            addLog(`Found ${frameIndex.length} video frames by scanning`);
-        }
+        const frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
+        addLog(`Found ${frameIndex.length} video frames in AVI`);
 
         // Use scanned frame count (header frameCount can be wrong for large files)
         const frameCount = frameIndex.length;
@@ -1916,16 +1835,9 @@ export function useAviReader() {
             return 'fallback';
         }
 
-        // Parse MJPEG frame index - try idx1 first (fast), fall back to scanning (slow)
+        // Parse MJPEG frame index by scanning chunk headers
         emit('set-caption', 'Parsing MJPEG frame index...');
-        let frameIndex = await parseIdx1Index(file, aviHeader.moviListOffset, maxFrames);
-        if (frameIndex) {
-            addLog(`Found ${frameIndex.length} MJPEG frames via idx1 index`);
-        } else {
-            addLog('idx1 index not available, scanning frame data...');
-            frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
-            addLog(`Found ${frameIndex.length} MJPEG frames by scanning`);
-        }
+        const frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
 
         if (frameIndex.length === 0) {
             addLog('No MJPEG frames found in file');
