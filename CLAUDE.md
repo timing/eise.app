@@ -74,6 +74,13 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 
 **Event Bus Pattern**: Cross-component communication via `composables/eventBus.js`. Key events: `set-caption`, `update-loading`, `stop-loading`, `upload-error`, `postProcessing`, `stacking-started`, `stacked-image-ready`.
 
+**Shared Processing State**: `composables/useProcessingState.js` stores shared state accessible from any composable without passing through function parameters. Used for:
+- `minApQuality` - AP quality threshold for alignment (NCC score, default 0.3)
+- `apPatchSize` - Alignment point patch size in pixels (default 20)
+- `inputFilename` - Current input filename for output naming
+
+UI settings in FileUploader.vue sync to this shared state via watchers, and useStacker.js reads from it via getter functions (`getMinApQuality()`, `getApPatchSize()`).
+
 **SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`.
 
 ## Technical Reference

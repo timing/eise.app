@@ -2497,7 +2497,7 @@ function filterAPsByQuality(alignmentPoints, refGray, width, height, patchSize, 
  * @param globalOffsetX - Global X offset to align frame with reference (from sub-pixel crop centering)
  * @param globalOffsetY - Global Y offset to align frame with reference (from sub-pixel crop centering)
  */
-function buildDisplacementMaps(mapX, mapY, outWidth, outHeight, alignmentPoints, shifts, patchSize, globalOffsetX = 0, globalOffsetY = 0, drizzleScale = 1.0) {
+function buildDisplacementMaps(mapX, mapY, outWidth, outHeight, alignmentPoints, shifts, patchSize, globalOffsetX = 0, globalOffsetY = 0, drizzleScale = 1.0, minApQuality = 0.3) {
     const mapXData = mapX.data32F;
     const mapYData = mapY.data32F;
 
@@ -2508,7 +2508,7 @@ function buildDisplacementMaps(mapX, mapY, outWidth, outHeight, alignmentPoints,
     const sigma2 = sigma * sigma * 2;
 
     // Minimum quality threshold - ignore poor matches
-    const minQuality = 0.3;
+    const minQuality = minApQuality;
 
     // For drizzle, output is larger than input
     // Each output pixel maps back to a sub-pixel location in input space

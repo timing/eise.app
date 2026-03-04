@@ -432,7 +432,7 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
  */
 async function warpAndAccumulateFrame(frameData, width, height, outWidth, outHeight,
     alignmentPoints, shifts, patchSize, drizzleScale, frameWeight, brightnessScale,
-    globalOffsetX, globalOffsetY) {
+    globalOffsetX, globalOffsetY, minApQuality = 0.3) {
 
     if (!isStackingReady) {
         const initialized = await initStackingGPU();
@@ -485,7 +485,7 @@ async function warpAndAccumulateFrame(frameData, width, height, outWidth, outHei
     paramsF32[8] = brightnessScale;
     paramsF32[9] = globalOffsetX;
     paramsF32[10] = globalOffsetY;
-    paramsF32[11] = 0.3;  // minQuality
+    paramsF32[11] = minApQuality;  // minQuality
     paramsU32[12] = inputFormat;  // 0 = Float32, 1 = Uint8
     paramsU32[13] = 0;  // padding
     stackQueue.writeBuffer(buffers.paramsBuffer, 0, paramsData);

@@ -133,7 +133,7 @@ self.addEventListener('message', async (e) => {
     // GPU Stacking - streaming approach to avoid memory issues
     // Step 1: Initialize stacking
     if (type === 'init-stacking') {
-        const { width, height, drizzleScale, alignmentPoints, patchSize, refBrightness } = e.data;
+        const { width, height, drizzleScale, alignmentPoints, patchSize, refBrightness, minApQuality = 0.3 } = e.data;
 
         try {
             if (!stackingReady) {
@@ -155,7 +155,7 @@ self.addEventListener('message', async (e) => {
             // Store stacking context
             self.stackingContext = {
                 width, height, outWidth, outHeight,
-                alignmentPoints, patchSize, drizzleScale, refBrightness
+                alignmentPoints, patchSize, drizzleScale, refBrightness, minApQuality
             };
 
             self.postMessage({ type: 'init-stacking-done', outWidth, outHeight });
@@ -194,7 +194,8 @@ self.addEventListener('message', async (e) => {
                     ctx.drizzleScale,
                     frameWeights[i],
                     brightnessScale,
-                    0, 0  // globalOffset disabled
+                    0, 0,  // globalOffset disabled
+                    ctx.minApQuality
                 );
             }
 

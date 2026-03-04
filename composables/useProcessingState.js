@@ -5,6 +5,8 @@ import { ref } from 'vue';
 
 const inputFilename = ref('');
 const inputFilenameWithExt = ref('');
+const minApQuality = ref(0.3);
+const apPatchSize = ref(20);
 
 export function useProcessingState() {
     function setInputFilename(filename) {
@@ -23,10 +25,32 @@ export function useProcessingState() {
         return inputFilenameWithExt.value;
     }
 
+    function setMinApQuality(value) {
+        minApQuality.value = value;
+    }
+
+    function getMinApQuality() {
+        return minApQuality.value;
+    }
+
+    function setApPatchSize(value) {
+        apPatchSize.value = value;
+    }
+
+    function getApPatchSize() {
+        return apPatchSize.value;
+    }
+
     return {
         inputFilename,
         setInputFilename,
         getOutputFilename,
-        getInputFilename
+        getInputFilename,
+        minApQuality,
+        setMinApQuality,
+        getMinApQuality,
+        apPatchSize,
+        setApPatchSize,
+        getApPatchSize
     };
 }

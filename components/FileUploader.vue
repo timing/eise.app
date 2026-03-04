@@ -112,16 +112,21 @@
 					</label>
 				</div>
 
-				<label class="checkbox-option" :class="{ disabled: useGPU }" :title="useGPU ? 'Not optimized for GPU mode yet' : ''">
-					<input type="checkbox" v-model="noiseRobustAlignmentVisible" :disabled="useGPU" />
-					Pre-blur alignment
+				<label class="checkbox-option">
+					AP quality threshold:
+					<input type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="small-number-input" />
+				</label>
+
+				<label class="checkbox-option">
+					AP size:
+					<input type="number" min="10" max="64" step="2" v-model.number="apPatchSize" class="small-number-input" />
 				</label>
 
 				<label class="checkbox-option">
 					<input type="checkbox" v-model="useVngDemosaic" />
 					VNG demosaicing
 				</label>
-				<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Pre-blur alignment:</strong> Aligns on blurred frames first, then refines on original. Better for turbulent seeing conditions. CPU only.<br><strong>VNG demosaicing:</strong> Variable Number of Gradients - higher quality color interpolation for raw Bayer data. When disabled, uses faster bilinear interpolation.</p>
+				<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 20 is a safe middle ground.<br><strong>VNG demosaicing:</strong> Variable Number of Gradients - higher quality color interpolation for raw Bayer data. When disabled, uses faster bilinear interpolation.</p>
 
 				<template v-if="targetType !== 'sun-moon'">
 					<div class="separator"></div>
@@ -237,6 +242,8 @@ const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 const noiseRobustAlignment = ref(false);
 const useVngDemosaic = ref(true); // VNG demosaic (default) vs bilinear
+const minApQuality = ref(0.3); // Alignment point quality threshold (NCC score)
+const apPatchSize = ref(20); // Alignment point patch size in pixels
 // Computed for checkbox binding - shows unchecked when GPU is on
 const noiseRobustAlignmentVisible = computed({
 	get: () => useGPU.value ? false : noiseRobustAlignment.value,
@@ -273,6 +280,8 @@ function loadSettings() {
 			if (settings.selectedMaxFrames) selectedMaxFrames.value = settings.selectedMaxFrames;
 			if (settings.targetType) targetType.value = settings.targetType;
 			if (settings.useVngDemosaic !== undefined) useVngDemosaic.value = settings.useVngDemosaic;
+			if (settings.minApQuality !== undefined) minApQuality.value = settings.minApQuality;
+			if (settings.apPatchSize !== undefined) apPatchSize.value = settings.apPatchSize;
 		}
 	} catch (e) {
 		console.warn('Failed to load settings:', e);
@@ -291,7 +300,9 @@ function saveSettings() {
 			enableMaxFrames: enableMaxFrames.value,
 			selectedMaxFrames: selectedMaxFrames.value,
 			targetType: targetType.value,
-			useVngDemosaic: useVngDemosaic.value
+			useVngDemosaic: useVngDemosaic.value,
+			minApQuality: minApQuality.value,
+			apPatchSize: apPatchSize.value
 		};
 		localStorage.setItem('eise-settings', JSON.stringify(settings));
 	} catch (e) {
@@ -300,7 +311,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, useVngDemosaic], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, useVngDemosaic, minApQuality, apPatchSize], saveSettings);
 
 onMounted(async () => {
 	loadSettings();
@@ -373,6 +384,11 @@ watch([selectedFiles, isMobileDevice, liteMode], () => {
 }, { immediate: true });
 
 const { addLog, emit: eventBusEmit, on, logs } = useEventBus();
+const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatchSize } = useProcessingState();
+
+// Sync stacking settings to shared state for stacker to use
+watch(minApQuality, (val) => setSharedMinApQuality(val), { immediate: true });
+watch(apPatchSize, (val) => setSharedApPatchSize(val), { immediate: true });
 
 // Listen for upload errors to display them
 on('upload-error', (message) => {
@@ -1199,6 +1215,13 @@ async function processFiles(files) {
 .percentage-input:disabled {
 	background: #eee;
 	color: #999;
+}
+.small-number-input {
+	width: 55px;
+	padding: 3px 5px;
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	text-align: center;
 }
 .memory-optimization-box {
 	background: #fff8e1;

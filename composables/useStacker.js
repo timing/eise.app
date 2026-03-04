@@ -2,6 +2,7 @@ import { useEventBus } from '@/composables/eventBus';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { useLiteMode } from '@/composables/useLiteMode';
+import { useProcessingState } from '@/composables/useProcessingState';
 
 // Custom error for WebGPU unavailability - callers can catch this to show user choice
 export class WebGPUUnavailableError extends Error {
@@ -15,6 +16,7 @@ export function useStacker() {
     const { addLog, emit } = useEventBus();
     const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
+    const { getMinApQuality, getApPatchSize } = useProcessingState();
 
     // Timing stats collector for performance analysis
     let stackingStats = null;
@@ -177,7 +179,7 @@ export function useStacker() {
      * PSS defaults: patchSize=20, searchRadius=8 (planets) or 34 (surface)
      */
     function createAPGrid(width, height, surfaceMode = false) {
-        const patchSize = 20;
+        const patchSize = getApPatchSize();
         const searchRadius = surfaceMode ? 34 : 8;
 
         // Adaptive spacing based on image size
@@ -521,7 +523,8 @@ export function useStacker() {
                     drizzleScale,
                     alignmentPoints,
                     patchSize,
-                    refBrightness
+                    refBrightness,
+                    minApQuality: getMinApQuality()
                 });
             });
             addLog('GPU stacker initialized');
@@ -1115,7 +1118,7 @@ export function useStacker() {
                 gpuWorker.addEventListener('message', handler);
                 gpuWorker.postMessage({
                     type: 'init-stacking',
-                    width, height, drizzleScale, alignmentPoints, patchSize, refBrightness
+                    width, height, drizzleScale, alignmentPoints, patchSize, refBrightness, minApQuality: getMinApQuality()
                 });
             });
 
