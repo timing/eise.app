@@ -1,5 +1,6 @@
 // composables/useImageReader.js
-// GPU-accelerated image reader with two-pass memory optimization
+// GPU-accelerated image reader with memory-efficient on-demand frame loading
+// Images are decoded on-demand rather than keeping all in memory
 
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
@@ -14,6 +15,11 @@ const NATIVE_FORMATS = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'i
 function isTiffFile(file) {
     const fileName = file.name?.toLowerCase() || '';
     return file.type === 'image/tiff' || fileName.endsWith('.tif') || fileName.endsWith('.tiff');
+}
+
+// Check if file requires FFmpeg conversion
+function requiresFFmpeg(file) {
+    return !NATIVE_FORMATS.includes(file.type) && !isTiffFile(file);
 }
 
 export function useImageReader() {
@@ -79,6 +85,49 @@ export function useImageReader() {
             width: img.width,
             height: img.height
         };
+    }
+
+    // Decode a File directly to RGBA (for native formats)
+    async function decodeFileToRgba(file) {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+
+        await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = () => reject(new Error('Image failed to decode'));
+            img.src = url;
+        });
+        URL.revokeObjectURL(url);
+
+        const canvas = new OffscreenCanvas(img.width, img.height);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, img.width, img.height);
+
+        return {
+            data: imageData.data,
+            width: img.width,
+            height: img.height
+        };
+    }
+
+    // Decode a TIFF file to RGBA
+    async function decodeTiffToRgba(file) {
+        const buffer = await file.arrayBuffer();
+        const decoded = await decodeTIFF(buffer);
+
+        const pixelCount = decoded.width * decoded.height;
+        const uint8Data = new Uint8ClampedArray(pixelCount * 4);
+        const float32 = decoded.float32Data;
+
+        for (let j = 0; j < pixelCount; j++) {
+            uint8Data[j * 4] = Math.round(Math.min(1, Math.max(0, float32[j * 4])) * 255);
+            uint8Data[j * 4 + 1] = Math.round(Math.min(1, Math.max(0, float32[j * 4 + 1])) * 255);
+            uint8Data[j * 4 + 2] = Math.round(Math.min(1, Math.max(0, float32[j * 4 + 2])) * 255);
+            uint8Data[j * 4 + 3] = Math.round(Math.min(1, Math.max(0, float32[j * 4 + 3])) * 255);
+        }
+
+        return { data: uint8Data, width: decoded.width, height: decoded.height };
     }
 
     // GPU batch analysis for RGBA images
@@ -163,105 +212,6 @@ export function useImageReader() {
         return data;
     }
 
-    // Convert a native format image to PNG ArrayBuffer
-    async function nativeImageToPngBuffer(file) {
-        const img = new Image();
-        const url = URL.createObjectURL(file);
-
-        await new Promise((resolve, reject) => {
-            img.onload = resolve;
-            img.onerror = () => reject(new Error('Image failed to load - file may be corrupted or unsupported'));
-            img.src = url;
-        });
-        URL.revokeObjectURL(url);
-
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-
-        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-        return new Uint8Array(await blob.arrayBuffer());
-    }
-
-    // Detect crop region using GPU
-    async function detectCropRegionGpu(rgbaFrames, frameWidth, frameHeight) {
-        emit('set-caption', 'Detecting planet position...');
-        emit('update-loading', { progress: 0, current: 0, total: rgbaFrames.length });
-
-        // Sample every Nth frame
-        const sampleInterval = Math.max(1, Math.floor(rgbaFrames.length / 50));
-        const sampleFrames = [];
-        const sampleIndices = [];
-        for (let i = 0; i < rgbaFrames.length; i += sampleInterval) {
-            sampleFrames.push({ data: rgbaFrames[i].data, index: i });
-            sampleIndices.push(i);
-        }
-
-        addLog(`Sampling ${sampleFrames.length} images for crop detection (GPU)...`);
-
-        // Process in batches
-        const BATCH_SIZE = 32;
-        let canCropCount = 0;
-        const detectedCenters = [];
-        const detectedSizes = [];
-
-        for (let batchStart = 0; batchStart < sampleFrames.length; batchStart += BATCH_SIZE) {
-            const batchEnd = Math.min(batchStart + BATCH_SIZE, sampleFrames.length);
-            const batch = sampleFrames.slice(batchStart, batchEnd);
-
-            const results = await analyzeRgbaBatchGpu(batch, frameWidth, frameHeight);
-
-            for (const result of results) {
-                if (result.bounds) {
-                    canCropCount++;
-                    detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
-                    detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
-                }
-            }
-
-            emit('update-loading', {
-                progress: (batchEnd / sampleFrames.length) * 100,
-                current: batchEnd,
-                total: sampleFrames.length
-            });
-        }
-
-        const cropThreshold = sampleFrames.length * 0.5;
-        if (canCropCount < cropThreshold) {
-            addLog(`Only ${canCropCount}/${sampleFrames.length} images can be cropped. Skipping auto-crop.`);
-            return null;
-        }
-
-        // Calculate median size (more robust than max which can be skewed by moons/noise)
-        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
-        const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
-
-        // Use median size with 5% margin, capped at frame dimensions
-        const desiredSize = Math.ceil(medianSize * 1.05 / 2) * 2;
-        const maxAllowedSize = Math.min(frameWidth, frameHeight);
-        let finalSize = Math.min(desiredSize, maxAllowedSize);
-
-        if (desiredSize > maxAllowedSize) {
-            addLog(`Crop size ${desiredSize} (from median ${Math.round(medianSize)}) exceeds frame size ${maxAllowedSize}, clamping`);
-        }
-
-        if (detectedCenters.length === 0) {
-            addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}`);
-            return { size: finalSize, medianObjectSize: medianSize };
-        }
-
-        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
-        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
-        const medianX = sortedX[Math.floor(sortedX.length / 2)];
-        const medianY = sortedY[Math.floor(sortedY.length / 2)];
-
-        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}`);
-
-        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-    }
-
     async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         // Initialize GPU worker
         const gpuOk = await initializeGpuWorker();
@@ -313,70 +263,63 @@ export function useImageReader() {
         let cutOffFrames = 0;
         let oversizedFrames = 0;
 
-        // First pass: convert all files to PNG, then decode to RGBA
-        emit('set-caption', 'Loading images...');
-        const pngDataArray = []; // Keep PNG data for frameReReader
-        const rgbaFrames = [];
+        // Memory-efficient approach: don't keep all decoded images in memory
+        // - Native formats (PNG, JPEG, etc.): re-read from File on demand
+        // - TIFF: re-read from File on demand
+        // - FFmpeg-required formats: keep in memory (conversion is expensive, and rare)
+        emit('set-caption', 'Checking images...');
+        const rgbaCache = new Map(); // index -> RGBA for FFmpeg-converted files only
+        const validIndices = []; // indices of valid files
         let firstWidth = 0, firstHeight = 0;
 
+        // First pass: check dimensions, convert FFmpeg files (kept in memory)
         for (let i = 0; i < frameCount; i++) {
             const file = files[i];
             const isNative = NATIVE_FORMATS.includes(file.type);
             const isTiff = isTiffFile(file);
+            const needsFFmpeg = requiresFFmpeg(file);
 
             try {
-                let rgba;
+                let width, height;
 
-                if (isTiff) {
-                    // Use lightweight UTIF decoder for TIFF files (no FFmpeg needed)
-                    const buffer = await file.arrayBuffer();
-                    const decoded = await decodeTIFF(buffer);
-
-                    // Convert Float32 (0-1) to Uint8ClampedArray RGBA
-                    const pixelCount = decoded.width * decoded.height;
-                    const uint8Data = new Uint8ClampedArray(pixelCount * 4);
-                    const float32 = decoded.float32Data;
-
-                    for (let j = 0; j < pixelCount; j++) {
-                        uint8Data[j * 4] = Math.round(Math.min(1, Math.max(0, float32[j * 4])) * 255);
-                        uint8Data[j * 4 + 1] = Math.round(Math.min(1, Math.max(0, float32[j * 4 + 1])) * 255);
-                        uint8Data[j * 4 + 2] = Math.round(Math.min(1, Math.max(0, float32[j * 4 + 2])) * 255);
-                        uint8Data[j * 4 + 3] = Math.round(Math.min(1, Math.max(0, float32[j * 4 + 3])) * 255);
-                    }
-
-                    rgba = { data: uint8Data, width: decoded.width, height: decoded.height };
-                    pngDataArray.push(null); // No PNG data for TIFF, but rgbaFrames has what we need
-                } else if (isNative) {
-                    const pngData = await nativeImageToPngBuffer(file);
-                    pngDataArray.push(pngData);
-                    rgba = await decodeToRgba(pngData);
-                } else {
-                    // Use FFmpeg for other non-native formats
+                if (needsFFmpeg) {
+                    // Convert and keep in memory (FFmpeg conversion is expensive)
                     if (!ffmpegLoaded) {
                         addLog(`Converting ${file.name} using FFmpeg...`);
                         await loadFFmpeg();
                         ffmpegLoaded = true;
                     }
                     const pngData = await convertImageToPng(file, ffmpeg, loadFFmpeg);
-                    pngDataArray.push(pngData);
-                    rgba = await decodeToRgba(pngData);
+                    const rgba = await decodeToRgba(pngData);
+                    rgbaCache.set(i, rgba); // Keep FFmpeg results in memory
+                    width = rgba.width;
+                    height = rgba.height;
+                } else if (isTiff) {
+                    // Just get dimensions, re-read later
+                    const rgba = await decodeTiffToRgba(file);
+                    width = rgba.width;
+                    height = rgba.height;
+                } else if (isNative) {
+                    // Just get dimensions, re-read later
+                    const rgba = await decodeFileToRgba(file);
+                    width = rgba.width;
+                    height = rgba.height;
+                } else {
+                    continue; // Unknown format
                 }
-
-                rgbaFrames.push(rgba);
 
                 if (i === 0) {
-                    firstWidth = rgba.width;
-                    firstHeight = rgba.height;
+                    firstWidth = width;
+                    firstHeight = height;
                 }
+                validIndices.push(i);
 
                 if (i % 10 === 0) {
-                    emit('update-loading', { progress: (i / frameCount) * 30, current: i, total: frameCount });
+                    emit('update-loading', { progress: (i / frameCount) * 10, current: i, total: frameCount });
                 }
             } catch (error) {
-                addLog(`Error loading ${file.name}: ${error.message}`);
-                reportError(error, { component: 'useImageReader', action: 'loadImage' });
-                pngDataArray.push(null);
-                rgbaFrames.push(null);
+                addLog(`Error checking ${file.name}: ${error.message}`);
+                reportError(error, { component: 'useImageReader', action: 'checkImage' });
             }
         }
 
@@ -385,8 +328,8 @@ export function useImageReader() {
             try { ffmpeg.exit(); } catch (e) {}
         }
 
-        const validCount = rgbaFrames.filter(f => f !== null).length;
-        addLog(`Loaded ${validCount}/${frameCount} images`);
+        const validCount = validIndices.length;
+        addLog(`Found ${validCount}/${frameCount} valid images`);
 
         if (validCount === 0) {
             emit('upload-error', 'Failed to load any images. The files may be corrupted or in unsupported formats.');
@@ -394,37 +337,127 @@ export function useImageReader() {
             return;
         }
 
-        // Detect crop region using GPU
+        // Helper to load a single frame on-demand
+        async function loadFrameRgba(index) {
+            // FFmpeg files are cached in memory
+            if (rgbaCache.has(index)) {
+                return rgbaCache.get(index);
+            }
+            // Native/TIFF files are re-read from File
+            const file = files[index];
+            if (isTiffFile(file)) {
+                return await decodeTiffToRgba(file);
+            } else {
+                return await decodeFileToRgba(file);
+            }
+        }
+
+        // Detect crop region using GPU (loading frames on-demand)
         const MIN_SIZE_FOR_CROP = 300;
         let cropRegion = null;
 
         if (firstWidth >= MIN_SIZE_FOR_CROP && firstHeight >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${firstWidth}x${firstHeight} qualifies for auto-crop`);
-            const validRgba = rgbaFrames.filter(f => f !== null);
-            cropRegion = await detectCropRegionGpu(validRgba, firstWidth, firstHeight);
 
-            if (cropRegion) {
-                addLog(`Will crop images to ${cropRegion.size}x${cropRegion.size}`);
+            // Sample frames for crop detection
+            emit('set-caption', 'Detecting planet position...');
+            const sampleInterval = Math.max(1, Math.floor(validIndices.length / 50));
+            const sampleIndices = [];
+            for (let i = 0; i < validIndices.length; i += sampleInterval) {
+                sampleIndices.push(validIndices[i]);
+            }
+
+            addLog(`Sampling ${sampleIndices.length} images for crop detection (GPU)...`);
+
+            const BATCH_SIZE = 8; // Smaller batches for memory efficiency
+            let canCropCount = 0;
+            const detectedCenters = [];
+            const detectedSizes = [];
+
+            for (let batchStart = 0; batchStart < sampleIndices.length; batchStart += BATCH_SIZE) {
+                const batchEnd = Math.min(batchStart + BATCH_SIZE, sampleIndices.length);
+                const batchFrames = [];
+
+                // Load batch frames on-demand
+                for (let i = batchStart; i < batchEnd; i++) {
+                    const idx = sampleIndices[i];
+                    try {
+                        const rgba = await loadFrameRgba(idx);
+                        batchFrames.push({ data: rgba.data, index: idx });
+                    } catch (e) {
+                        // Skip failed frames
+                    }
+                }
+
+                if (batchFrames.length > 0) {
+                    const results = await analyzeRgbaBatchGpu(batchFrames, firstWidth, firstHeight);
+
+                    for (const result of results) {
+                        if (result.bounds) {
+                            canCropCount++;
+                            detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
+                            detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
+                        }
+                    }
+                }
+
+                emit('update-loading', {
+                    progress: 10 + (batchEnd / sampleIndices.length) * 20,
+                    current: batchEnd,
+                    total: sampleIndices.length
+                });
+            }
+
+            const cropThreshold = sampleIndices.length * 0.5;
+            if (canCropCount >= cropThreshold && detectedSizes.length > 0) {
+                const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+                const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
+                const desiredSize = Math.ceil(medianSize * 1.05 / 2) * 2;
+                const maxAllowedSize = Math.min(firstWidth, firstHeight);
+                const finalSize = Math.min(desiredSize, maxAllowedSize);
+
+                if (detectedCenters.length > 0) {
+                    const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+                    const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+                    cropRegion = {
+                        size: finalSize,
+                        referenceCenter: {
+                            x: sortedX[Math.floor(sortedX.length / 2)],
+                            y: sortedY[Math.floor(sortedY.length / 2)]
+                        },
+                        medianObjectSize: medianSize
+                    };
+                } else {
+                    cropRegion = { size: finalSize, medianObjectSize: medianSize };
+                }
+
+                addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}`);
+            } else {
+                addLog(`Only ${canCropCount}/${sampleIndices.length} images can be cropped. Skipping auto-crop.`);
             }
         }
 
-        // Second pass: GPU analyze (two-pass mode - metadata only)
+        // Second pass: GPU analyze (loading frames on-demand)
         emit('set-caption', cropRegion ? 'Cropping and analyzing images (GPU)' : 'Analyzing images (GPU)');
 
-        const BATCH_SIZE = 32;
+        const BATCH_SIZE = 8; // Smaller batches for memory efficiency
         const frameCenters = new Map(); // Store centers for frameReReader
         let completedFrames = 0;
 
-        for (let batchStart = 0; batchStart < frameCount; batchStart += BATCH_SIZE) {
-            const batchEnd = Math.min(batchStart + BATCH_SIZE, frameCount);
+        for (let batchStart = 0; batchStart < validIndices.length; batchStart += BATCH_SIZE) {
+            const batchEnd = Math.min(batchStart + BATCH_SIZE, validIndices.length);
 
-            // Collect valid frames for this batch
+            // Load frames on-demand for this batch
             const batchFrames = [];
             const batchIndices = [];
             for (let i = batchStart; i < batchEnd; i++) {
-                if (rgbaFrames[i]) {
-                    batchFrames.push({ data: rgbaFrames[i].data, index: i });
-                    batchIndices.push(i);
+                const idx = validIndices[i];
+                try {
+                    const rgba = await loadFrameRgba(idx);
+                    batchFrames.push({ data: rgba.data, index: idx });
+                    batchIndices.push(idx);
+                } catch (e) {
+                    // Skip failed frames
                 }
             }
 
@@ -555,9 +588,9 @@ export function useImageReader() {
             }
 
             emit('update-loading', {
-                progress: 30 + (completedFrames / frameCount) * 70,
+                progress: 30 + (completedFrames / validIndices.length) * 70,
                 current: completedFrames,
-                total: frameCount
+                total: validIndices.length
             });
 
             if (bestFrameSoFar && completedFrames % 50 === 0) {
@@ -572,11 +605,11 @@ export function useImageReader() {
         const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
         addLog(`Analyzed ${frameCount} images. Valid: ${allAnalyzedFrames.length || bestFramesForStacking.length}${skippedMsg}`);
 
-        // Create frameReReader for two-pass stacking
+        // Create frameReReader for two-pass stacking (re-reads files on demand)
         const frameReReader = {
             fileType: 'image',
-            pngDataArray,
-            rgbaFrames,
+            files,
+            rgbaCache,
             frameCenters,
             cropRegion,
             srcWidth: firstWidth,
@@ -584,19 +617,36 @@ export function useImageReader() {
 
             // Re-read a frame and return RGBA data for stacking
             async getFrame(frameIndex) {
-                const rgba = this.rgbaFrames[frameIndex];
-                if (!rgba) return null;
-
                 const center = this.frameCenters.get(frameIndex);
                 if (!center) return null;
 
-                return {
-                    data: rgba.data,
-                    width: rgba.width,
-                    height: rgba.height,
-                    centerX: center.x,
-                    centerY: center.y
-                };
+                try {
+                    let rgba;
+                    if (this.rgbaCache.has(frameIndex)) {
+                        // FFmpeg files are kept in memory
+                        rgba = this.rgbaCache.get(frameIndex);
+                    } else {
+                        // Native/TIFF files are re-read from File
+                        const file = this.files[frameIndex];
+                        if (!file) return null;
+                        if (isTiffFile(file)) {
+                            rgba = await decodeTiffToRgba(file);
+                        } else {
+                            rgba = await decodeFileToRgba(file);
+                        }
+                    }
+
+                    return {
+                        data: rgba.data,
+                        width: rgba.width,
+                        height: rgba.height,
+                        centerX: center.x,
+                        centerY: center.y
+                    };
+                } catch (e) {
+                    console.warn(`Failed to re-read frame ${frameIndex}:`, e);
+                    return null;
+                }
             }
         };
 
