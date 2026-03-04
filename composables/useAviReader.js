@@ -29,6 +29,81 @@ function isMjpegFourCC(fourCC) {
 }
 
 /**
+ * Parse idx1 index chunk to build frame index quickly (instead of scanning all frame data)
+ * Returns array of {offset, size} for each video frame, or null if idx1 not found/invalid
+ */
+async function parseIdx1Index(file, moviListOffset, maxFrames = -1) {
+    const fileSize = file.size;
+
+    // idx1 is typically right after movi list, search last 1MB of file
+    const searchSize = Math.min(1024 * 1024, fileSize);
+    const searchStart = fileSize - searchSize;
+    const searchBuffer = await file.slice(searchStart, fileSize).arrayBuffer();
+    const searchView = new DataView(searchBuffer);
+
+    // Find 'idx1' marker
+    let idx1Offset = -1;
+    for (let i = 0; i < searchBuffer.byteLength - 8; i++) {
+        if (searchView.getUint8(i) === 0x69 &&     // 'i'
+            searchView.getUint8(i + 1) === 0x64 && // 'd'
+            searchView.getUint8(i + 2) === 0x78 && // 'x'
+            searchView.getUint8(i + 3) === 0x31) { // '1'
+            idx1Offset = searchStart + i;
+            break;
+        }
+    }
+
+    if (idx1Offset === -1) {
+        return null;
+    }
+
+    // Read idx1 header
+    const idx1Header = await file.slice(idx1Offset, idx1Offset + 8).arrayBuffer();
+    const idx1View = new DataView(idx1Header);
+    const idx1Size = idx1View.getUint32(4, true);
+
+    // Sanity check
+    if (idx1Size > fileSize - idx1Offset || idx1Size < 16) {
+        return null;
+    }
+
+    // Read entire idx1 data
+    const idx1Data = await file.slice(idx1Offset + 8, idx1Offset + 8 + idx1Size).arrayBuffer();
+    const dataView = new DataView(idx1Data);
+
+    const frameIndex = [];
+    const entrySize = 16; // Each idx1 entry is 16 bytes
+    const numEntries = Math.floor(idx1Size / entrySize);
+
+    for (let i = 0; i < numEntries; i++) {
+        if (maxFrames > 0 && frameIndex.length >= maxFrames) break;
+
+        const entryOffset = i * entrySize;
+        const chunkId = String.fromCharCode(
+            dataView.getUint8(entryOffset),
+            dataView.getUint8(entryOffset + 1),
+            dataView.getUint8(entryOffset + 2),
+            dataView.getUint8(entryOffset + 3)
+        );
+
+        // Video chunks: '00dc', '01dc' (compressed) or '00db', '01db' (uncompressed)
+        if (chunkId.match(/^\d\ddc$/i) || chunkId.match(/^\d\ddb$/i)) {
+            const offset = dataView.getUint32(entryOffset + 8, true);
+            const size = dataView.getUint32(entryOffset + 12, true);
+
+            // idx1 offsets are relative to movi list start (after 'movi' tag)
+            // Add 8 for chunk header, and adjust for movi list position
+            frameIndex.push({
+                offset: moviListOffset + offset + 8,
+                size: size
+            });
+        }
+    }
+
+    return frameIndex.length > 0 ? frameIndex : null;
+}
+
+/**
  * Parse AVI frame index from movi list - builds array of {offset, size} for each video frame
  * Scans chunk headers to find actual video frames, skipping audio and other chunks.
  * Works for all AVI formats (MJPEG, DIB, Y800, etc.) - not just variable-size formats.
@@ -45,7 +120,10 @@ async function parseAviFrameIndex(file, moviListOffset, moviListSize, maxFrames 
     let position = moviListOffset;
     const scanEnd = scanWholeFile ? fileSize : moviListOffset + moviListSize;
 
-    console.log(`MJPEG parser: scanning from ${position} to ${scanEnd} (fileSize=${fileSize}, scanWholeFile=${scanWholeFile})`);
+    // Log scan range for debugging large file issues
+    if (scanWholeFile) {
+        console.log(`Frame scanner: scanning entire file (${(fileSize / 1024 / 1024).toFixed(0)}MB)`);
+    }
 
     while (position < scanEnd - chunkHeaderSize) {
         if (maxFrames > 0 && frameIndex.length >= maxFrames) break;
@@ -88,13 +166,12 @@ async function parseAviFrameIndex(file, moviListOffset, moviListSize, maxFrames 
         const paddedSize = (chunkSize + 1) & ~1;
         position += chunkHeaderSize + paddedSize;
 
-        // Log progress every 1000 frames
-        if (frameIndex.length % 1000 === 0 && frameIndex.length > 0) {
-            console.log(`MJPEG parser: found ${frameIndex.length} frames so far...`);
+        // Log progress every 5000 frames
+        if (frameIndex.length % 5000 === 0 && frameIndex.length > 0) {
+            console.log(`Frame scanner: ${frameIndex.length} frames found...`);
         }
     }
 
-    console.log(`MJPEG parser: finished, found ${frameIndex.length} frames`);
     return frameIndex;
 }
 
@@ -651,7 +728,8 @@ export function useAviReader() {
     }
 
     // Robust AVI header parser
-    async function parseFullAviHeader(buffer) {
+    // actualFileSize is optional - used for sanity checking frame count
+    async function parseFullAviHeader(buffer, actualFileSize = null) {
         const view = new DataView(buffer);
         const fileEnd = buffer.byteLength;
 
@@ -829,6 +907,15 @@ export function useAviReader() {
             }
             if (frameDataSize > 0) {
                 addLog(`Calculated frameDataSize: ${frameDataSize}`);
+
+                // Sanity check: estimate frame count from file size
+                // Some capture software writes incorrect frameCount in header
+                if (actualFileSize) {
+                    const estimatedFrames = Math.floor((actualFileSize - moviListOffset) / frameDataSize);
+                    if (frameCount <= 10 && estimatedFrames > 100) {
+                        addLog(`Header frameCount=${frameCount} appears incorrect (file size suggests ~${estimatedFrames} frames). Will scan for actual count.`);
+                    }
+                }
             }
 
             let bayerChoice = "MONO";
@@ -850,23 +937,27 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null, surfaceMode = false, useVngDemosaic = true) {
+    async function readAviFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null, surfaceMode = false, useVngDemosaic = true, preParsedHeader = null) {
         // Reset comparison export captures for new processing
         resetCaptures();
 
         emit('start-loading', 'Parsing AVI header...');
         emit('update-loading', 0);
 
-        // Use preloaded buffer if provided, otherwise read from file
-        let headerBuffer;
-        if (preloadedBuffer) {
-            const headerProbeSize = Math.min(preloadedBuffer.byteLength, 1024 * 1024 * 5);
-            headerBuffer = preloadedBuffer.buffer.slice(0, headerProbeSize);
-        } else {
-            const headerProbeSize = Math.min(file.size, 1024 * 1024 * 5);
-            headerBuffer = await file.slice(0, headerProbeSize).arrayBuffer();
+        // Use pre-parsed header if provided (avoids parsing twice)
+        let aviHeader = preParsedHeader;
+        if (!aviHeader) {
+            // Use preloaded buffer if provided, otherwise read from file
+            let headerBuffer;
+            if (preloadedBuffer) {
+                const headerProbeSize = Math.min(preloadedBuffer.byteLength, 1024 * 1024 * 5);
+                headerBuffer = preloadedBuffer.buffer.slice(0, headerProbeSize);
+            } else {
+                const headerProbeSize = Math.min(file.size, 1024 * 1024 * 5);
+                headerBuffer = await file.slice(0, headerProbeSize).arrayBuffer();
+            }
+            aviHeader = await parseFullAviHeader(headerBuffer, file.size);
         }
-        const aviHeader = await parseFullAviHeader(headerBuffer);
 
         if (!aviHeader) {
             addLog(`Failed to parse AVI header for ${file.name}.`);
@@ -898,12 +989,19 @@ export function useAviReader() {
 
         addLog(`Easy AVI detected. Header: ${aviHeader.width}x${aviHeader.height}, ${aviHeader.frameCount} frames, FourCC: ${aviHeader.fourCC}, FrameSize: ${aviHeader.frameDataSize} bytes.`);
 
-        const frameCount = (maxFrames === -1) ? aviHeader.frameCount : Math.min(aviHeader.frameCount, maxFrames);
-
-        // Build frame index by scanning chunk headers (handles interleaved audio correctly)
+        // Build frame index - try idx1 first (fast), fall back to scanning (slow)
         emit('set-caption', 'Parsing AVI frame index...');
-        const frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
-        addLog(`Found ${frameIndex.length} video frames in AVI`);
+        let frameIndex = await parseIdx1Index(file, aviHeader.moviListOffset, maxFrames);
+        if (frameIndex) {
+            addLog(`Found ${frameIndex.length} video frames via idx1 index`);
+        } else {
+            addLog('idx1 index not available, scanning frame data...');
+            frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
+            addLog(`Found ${frameIndex.length} video frames by scanning`);
+        }
+
+        // Use scanned frame count (header frameCount can be wrong for large files)
+        const frameCount = frameIndex.length;
 
         if (frameIndex.length === 0) {
             addLog('No video frames found in AVI file');
@@ -1000,9 +1098,7 @@ export function useAviReader() {
         };
 
         // Loop through frames using frame index (handles interleaved audio correctly)
-        const actualFrameCount = Math.min(frameCount, frameIndex.length);
-
-        for (let i = 0; i < actualFrameCount; i++) {
+        for (let i = 0; i < frameCount; i++) {
             if (errorCount >= maxConsecutiveErrors) {
                 addLog(`Stopping due to ${errorCount} consecutive errors. Check console for details.`);
                 break;
@@ -1037,7 +1133,7 @@ export function useAviReader() {
             }
 
             // Determine if this frame should capture pre-crop for comparison video
-            const preCropSampleInterval = Math.max(1, Math.floor(actualFrameCount / 10));
+            const preCropSampleInterval = Math.max(1, Math.floor(frameCount / 10));
             const shouldCapturePreCrop = cropRegion && (i % preCropSampleInterval === 0);
 
             const dataToWorker = {
@@ -1066,7 +1162,7 @@ export function useAviReader() {
                         }
                         completedFrames++;
                         if (result.index % 10 === 0) {
-                            emit('update-loading', { progress: (completedFrames / actualFrameCount) * 100, current: completedFrames, total: actualFrameCount });
+                            emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
                             emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: completedFrames });
                         }
                         return;
@@ -1074,7 +1170,7 @@ export function useAviReader() {
 
                     // Capture pre-crop frame if available (for comparison video)
                     if (result.preCropRgbaBuffer && result.preCropWidth && result.preCropHeight) {
-                        capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, actualFrameCount);
+                        capturePreCropFrame(result.preCropRgbaBuffer, result.preCropWidth, result.preCropHeight, result.index, frameCount);
                     }
 
                     const currentFrame = {
@@ -1092,9 +1188,9 @@ export function useAviReader() {
 
                     completedFrames++;
 
-                    if (result.index % 10 === 0 || result.index === actualFrameCount - 1) {
-                        emit('update-loading', { progress: (completedFrames / actualFrameCount) * 100, current: completedFrames, total: actualFrameCount });
-                        addLog(`Analyzed frame ${completedFrames}/${actualFrameCount}`);
+                    if (result.index % 10 === 0 || result.index === frameCount - 1) {
+                        emit('update-loading', { progress: (completedFrames / frameCount) * 100, current: completedFrames, total: frameCount });
+                        addLog(`Analyzed frame ${completedFrames}/${frameCount}`);
 
                         if (bestFrameSoFar) {
                             emit('best-frame-updated', bestFrameSoFar);
@@ -1820,9 +1916,16 @@ export function useAviReader() {
             return 'fallback';
         }
 
-        // Parse MJPEG frame index
+        // Parse MJPEG frame index - try idx1 first (fast), fall back to scanning (slow)
         emit('set-caption', 'Parsing MJPEG frame index...');
-        const frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
+        let frameIndex = await parseIdx1Index(file, aviHeader.moviListOffset, maxFrames);
+        if (frameIndex) {
+            addLog(`Found ${frameIndex.length} MJPEG frames via idx1 index`);
+        } else {
+            addLog('idx1 index not available, scanning frame data...');
+            frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
+            addLog(`Found ${frameIndex.length} MJPEG frames by scanning`);
+        }
 
         if (frameIndex.length === 0) {
             addLog('No MJPEG frames found in file');
@@ -2159,8 +2262,8 @@ export function useAviReader() {
     }
 
     // Quick format check - only parses header, doesn't initialize workers
-    async function checkAviFormat(headerBuffer) {
-        const aviHeader = await parseFullAviHeader(headerBuffer);
+    async function checkAviFormat(headerBuffer, actualFileSize = null) {
+        const aviHeader = await parseFullAviHeader(headerBuffer, actualFileSize);
 
         if (!aviHeader) {
             return { isEasy: false, isMjpeg: false, fourCC: 'unknown', error: 'Failed to parse header' };
@@ -2175,7 +2278,8 @@ export function useAviReader() {
             fourCC: aviHeader.fourCC,
             width: aviHeader.width,
             height: aviHeader.height,
-            frameCount: aviHeader.frameCount
+            frameCount: aviHeader.frameCount,
+            aviHeader // Include full header to avoid re-parsing
         };
     }
 

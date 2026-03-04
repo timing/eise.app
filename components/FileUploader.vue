@@ -710,12 +710,13 @@ async function processFiles(files) {
 			const headerSlice = fileToProcess.slice(0, headerProbeSize);
 			const headerBuffer = await headerSlice.arrayBuffer();
 
-			const formatInfo = await checkAviFormat(headerBuffer);
+			const formatInfo = await checkAviFormat(headerBuffer, fileToProcess.size);
 
 			if (formatInfo.isSupported) {
 				// Can process directly - readAviFile handles both uncompressed and MJPEG
+				// Pass pre-parsed header to avoid parsing twice
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, useVngDemosaic.value);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, useVngDemosaic.value, formatInfo.aviHeader);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);

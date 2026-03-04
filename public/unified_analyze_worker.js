@@ -22,6 +22,23 @@ async function safeConvertToBlob(canvas, options = { type: 'image/png' }) {
     }
 }
 
+/**
+ * Calculate bytes per pixel for AVI formats, accounting for 8-bit DIB (grayscale)
+ */
+function getAviBytesPerPixel(header) {
+    let fourCC = header.fourCC;
+    const bpp = header.bpp;
+    // Null fourCC from FFmpeg rawvideo is uncompressed BGR like DIB
+    if (fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00') {
+        fourCC = 'DIB ';
+    }
+    // DIB/RGB with bpp=8 is 8-bit grayscale, not 24-bit BGR
+    if ((fourCC === 'DIB ' || fourCC === 'RGB ') && bpp === 8) {
+        return 1;
+    }
+    return { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[fourCC] || 3;
+}
+
 // Load OpenCV
 self.importScripts('https://cdn.jsdelivr.net/npm/opencv-bindings@4.5.5/index.min.js');
 
@@ -180,7 +197,7 @@ async function handleMessage(e) {
                 if (header.fileId && header.fileId.startsWith('LUCAM-REC')) {
                     expectedSize = header.width * header.height * (header.pixelDepth > 8 ? 2 : 1);
                 } else {
-                    const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[header.fourCC] || 3;
+                    const bytesPerPixel = getAviBytesPerPixel(header);
                     expectedSize = header.width * header.height * bytesPerPixel;
                 }
                 if (frameBuffer.byteLength !== expectedSize) {
@@ -268,7 +285,7 @@ async function handleMessage(e) {
                 if (header.fileId && header.fileId.startsWith('LUCAM-REC')) {
                     expectedSize = header.width * header.height * (header.pixelDepth > 8 ? 2 : 1);
                 } else {
-                    const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[header.fourCC] || 3;
+                    const bytesPerPixel = getAviBytesPerPixel(header);
                     expectedSize = header.width * header.height * bytesPerPixel;
                 }
                 if (frameBuffer.byteLength !== expectedSize) {
@@ -372,7 +389,7 @@ async function handleMessage(e) {
             if (header.fileId && header.fileId.startsWith('LUCAM-REC')) {
                 expectedSize = header.width * header.height * (header.pixelDepth > 8 ? 2 : 1);
             } else {
-                const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[header.fourCC] || 3;
+                const bytesPerPixel = getAviBytesPerPixel(header);
                 expectedSize = header.width * header.height * bytesPerPixel;
             }
             if (frameBuffer.byteLength !== expectedSize) {
@@ -484,7 +501,7 @@ async function handleMessage(e) {
                 expectedSize = header.width * header.height * (header.pixelDepth > 8 ? 2 : 1);
             } else {
                 // AVI file (or RGBA from decoded PNG): use fourCC to determine channels
-                const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[header.fourCC] || 3;
+                const bytesPerPixel = getAviBytesPerPixel(header);
                 expectedSize = header.width * header.height * bytesPerPixel;
             }
             if (frameBuffer.byteLength !== expectedSize) {
@@ -918,12 +935,14 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
             // Null fourCC (\0\0\0\0) from FFmpeg rawvideo is uncompressed BGR like DIB
             const isNullFourCC = fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00';
             const normalizedFourCC = isNullFourCC ? 'DIB ' : fourCC;
-            const aviDataType = { 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[normalizedFourCC];
+            // DIB with bpp=8 is 8-bit grayscale, not 24-bit BGR
+            const isDib8bit = (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') && bpp === 8;
+            const aviDataType = isDib8bit ? _cv.CV_8UC1 : ({ 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[normalizedFourCC]);
             rawMat = new _cv.Mat(height, width, aviDataType);
             rawMat.data.set(new Uint8Array(frameBuffer));
 
-            // For AVI with Bayer (Y800), demosaic first then crop
-            if (normalizedFourCC === 'Y800' && bayerChoice && bayerChoice !== "MONO" && _cv[bayerChoice]) {
+            // For AVI with Bayer (Y800 or 8-bit DIB), demosaic first then crop
+            if ((normalizedFourCC === 'Y800' || isDib8bit) && bayerChoice && bayerChoice !== "MONO" && _cv[bayerChoice]) {
                 const vngChoice = bayerChoice + '_VNG';
                 const demosaicMethod = _cv[vngChoice] !== undefined ? vngChoice : bayerChoice;
                 const demosaiced = new _cv.Mat();
@@ -963,7 +982,10 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
                 }
 
                 grayMat = new _cv.Mat();
-                if (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') {
+                if (isDib8bit || normalizedFourCC === 'Y800') {
+                    // Already grayscale
+                    rawMat.copyTo(grayMat);
+                } else if (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') {
                     _cv.cvtColor(rawMat, grayMat, _cv.COLOR_BGR2GRAY);
                 } else if (normalizedFourCC === 'RGBA') {
                     _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
@@ -975,12 +997,12 @@ async function processRawFrameWithOpenCV(frameBuffer, header, bayerChoice, cropR
 
                 // Convert to RGBA
                 rgbaMat = new _cv.Mat();
-                if (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') {
+                if (isDib8bit || normalizedFourCC === 'Y800') {
+                    _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
+                } else if (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') {
                     _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_BGR2RGBA);
                 } else if (normalizedFourCC === 'RGBA') {
                     rawMat.copyTo(rgbaMat);
-                } else if (normalizedFourCC === 'Y800') {
-                    _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_GRAY2RGBA);
                 } else if (normalizedFourCC === 'YUY2' || normalizedFourCC === 'UYVY') {
                     _cv.cvtColor(rawMat, rgbaMat, _cv.COLOR_YUV2RGBA_YUY2);
                 }
@@ -1171,16 +1193,21 @@ async function calculateSharpnessLightweight(frameBuffer, header, bayerChoice, c
             const alpha = pixelDepth > 8 ? 1/256 : 1;
             rawMat.convertTo(grayMat, _cv.CV_8U, alpha);
         } else { // AVI file
-            const { fourCC } = header;
+            const { fourCC, bpp } = header;
             // Null fourCC from FFmpeg rawvideo is uncompressed BGR like DIB
             const isNullFourCC = fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00';
             const normalizedFourCC = isNullFourCC ? 'DIB ' : fourCC;
-            const aviDataType = { 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[normalizedFourCC];
+            // DIB with bpp=8 is 8-bit grayscale, not 24-bit BGR
+            const isDib8bit = (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') && bpp === 8;
+            const aviDataType = isDib8bit ? _cv.CV_8UC1 : ({ 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[normalizedFourCC]);
             rawMat = new _cv.Mat(height, width, aviDataType);
             rawMat.data.set(new Uint8Array(frameBuffer));
 
             grayMat = new _cv.Mat();
-            if (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') {
+            if (isDib8bit || normalizedFourCC === 'Y800') {
+                // Already grayscale
+                rawMat.copyTo(grayMat);
+            } else if (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') {
                 _cv.cvtColor(rawMat, grayMat, _cv.COLOR_BGR2GRAY);
             } else if (normalizedFourCC === 'RGBA') {
                 _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
@@ -1248,21 +1275,26 @@ async function detectObjectBounds(frameBuffer, header, bayerChoice) {
             const alpha = pixelDepth > 8 ? 1/256 : 1;
             rawMat.convertTo(grayMat, _cv.CV_8U, alpha);
         } else { // AVI file (or RGBA from decoded PNG)
-            const { fourCC } = header;
+            const { fourCC, bpp } = header;
             // Null fourCC from FFmpeg rawvideo is uncompressed BGR like DIB
             const isNullFourCC = fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00';
             const normalizedFourCC = isNullFourCC ? 'DIB ' : fourCC;
-            const bytesPerPixel = { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[normalizedFourCC] || 3;
+            // DIB with bpp=8 is 8-bit grayscale, not 24-bit BGR
+            const isDib8bit = (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') && bpp === 8;
+            const bytesPerPixel = getAviBytesPerPixel(header);
             const expectedSize = width * height * bytesPerPixel;
             if (frameBuffer.byteLength !== expectedSize) {
-                console.warn(`detectObjectBounds: AVI buffer size mismatch: got ${frameBuffer.byteLength}, expected ${expectedSize} (${width}x${height}, ${fourCC})`);
+                console.warn(`detectObjectBounds: AVI buffer size mismatch: got ${frameBuffer.byteLength}, expected ${expectedSize} (${width}x${height}, ${fourCC}, bpp=${bpp})`);
                 return { canCrop: false, reason: 'buffer-mismatch' };
             }
-            const aviDataType = { 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[normalizedFourCC];
+            const aviDataType = isDib8bit ? _cv.CV_8UC1 : ({ 'DIB ': _cv.CV_8UC3, 'RGB ': _cv.CV_8UC3, 'Y800': _cv.CV_8UC1, 'YUY2': _cv.CV_8UC2, 'UYVY': _cv.CV_8UC2, 'RGBA': _cv.CV_8UC4 }[normalizedFourCC]);
             rawMat = new _cv.Mat(height, width, aviDataType);
             rawMat.data.set(new Uint8Array(frameBuffer));
             grayMat = new _cv.Mat();
-            if (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') {
+            if (isDib8bit || normalizedFourCC === 'Y800') {
+                // Already grayscale
+                rawMat.copyTo(grayMat);
+            } else if (normalizedFourCC === 'DIB ' || normalizedFourCC === 'RGB ') {
                 _cv.cvtColor(rawMat, grayMat, _cv.COLOR_BGR2GRAY);
             } else if (normalizedFourCC === 'RGBA') {
                 _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);

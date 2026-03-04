@@ -1076,8 +1076,8 @@ export function useStacker() {
 
                 processedCount += batchIndices.length;
                 const progress = 5 + (processedCount / framesToProcess.length) * 45;
-                emit('set-caption', `Aligning frames ${processedCount}/${framesToProcess.length} (GPU batch)...`);
-                emit('update-loading', { progress, current: Math.round(progress), total: 100 });
+                emit('set-caption', `Aligning frames...`);
+                emit('update-loading', { progress, current: processedCount, total: framesToProcess.length });
             }
 
             if (surfaceMode) {
