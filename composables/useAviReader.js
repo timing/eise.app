@@ -29,6 +29,28 @@ function isMjpegFourCC(fourCC) {
 }
 
 /**
+ * Flip a raw frame buffer vertically (for DIB bottom-up storage)
+ * @param {ArrayBuffer|Uint8Array} buffer - Raw frame data
+ * @param {number} width - Frame width in pixels
+ * @param {number} height - Frame height in pixels
+ * @param {number} bytesPerPixel - Bytes per pixel (1 for 8-bit, 2 for 16-bit)
+ * @returns {Uint8Array} - Flipped frame data
+ */
+function flipFrameVertically(buffer, width, height, bytesPerPixel = 1) {
+    const src = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    const dst = new Uint8Array(src.length);
+    const rowBytes = width * bytesPerPixel;
+
+    for (let y = 0; y < height; y++) {
+        const srcOffset = y * rowBytes;
+        const dstOffset = (height - 1 - y) * rowBytes;
+        dst.set(src.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
+    }
+
+    return dst;
+}
+
+/**
  * Parse AVI frame index from movi list - builds array of {offset, size} for each video frame
  * Scans chunk headers to find actual video frames, skipping audio and other chunks.
  * Works for all AVI formats (MJPEG, DIB, Y800, etc.) - not just variable-size formats.
@@ -178,13 +200,15 @@ function yuvToRgba(y, u, v, rgba, offset) {
 
 // Simple bilinear Bayer demosaic for preview
 function demosaicBayerToRgba(src, rgba, width, height, bayerChoice) {
-    // Determine pattern: bayerChoice is like 'COLOR_BayerBG2RGB'
-    // BG = Blue at (0,0), Green at (0,1) and (1,0), Red at (1,1)
-    // RG = Red at (0,0), etc.
-    const pattern = bayerChoice.includes('BG') ? 'BGGR' :
-                    bayerChoice.includes('GB') ? 'GBRG' :
-                    bayerChoice.includes('RG') ? 'RGGB' :
-                    bayerChoice.includes('GR') ? 'GRBG' : 'RGGB';
+    // OpenCV uses inverted naming (see CLAUDE.md):
+    // COLOR_BayerBG2RGB = Industry RGGB
+    // COLOR_BayerRG2RGB = Industry BGGR
+    // COLOR_BayerGB2RGB = Industry GRBG
+    // COLOR_BayerGR2RGB = Industry GBRG
+    const pattern = bayerChoice.includes('BG') ? 'RGGB' :
+                    bayerChoice.includes('RG') ? 'BGGR' :
+                    bayerChoice.includes('GB') ? 'GRBG' :
+                    bayerChoice.includes('GR') ? 'GBRG' : 'RGGB';
 
     // For each pixel, determine what color it is and interpolate the others
     for (let y = 0; y < height; y++) {
@@ -807,7 +831,10 @@ export function useAviReader() {
             }
 
             const width = safeGetUint32(view, strfData.offset + 4, true);
-            const height = Math.abs(safeGetInt32(view, strfData.offset + 8, true));
+            const rawBiHeight = safeGetInt32(view, strfData.offset + 8, true);
+            const height = Math.abs(rawBiHeight);
+            const needsVerticalFlip = rawBiHeight > 0; // Positive biHeight = bottom-up storage
+            addLog(`DIB biHeight: ${rawBiHeight} (${needsVerticalFlip ? 'bottom-up, will flip' : 'top-down, no flip'})`);
             const bpp = safeGetUint16(view, strfData.offset + 14, true);
 
             const compression = safeReadFourCC(view, strfData.offset + 16);
@@ -897,7 +924,7 @@ export function useAviReader() {
                 addLog(`No Bayer pattern in strd, defaulting ${fourCC} (${bpp}bpp) to RGGB`);
             }
 
-            const result = { width, height, frameCount, fourCC, frameDataSize, bpp, bayerChoice, moviListOffset, moviListSize };
+            const result = { width, height, frameCount, fourCC, frameDataSize, bpp, bayerChoice, moviListOffset, moviListSize, needsVerticalFlip };
             addLog(`Final parsed header: ${JSON.stringify(result)}`);
             return result;
 
@@ -1697,6 +1724,47 @@ export function useAviReader() {
         }
     }
 
+    // Map OpenCV Bayer pattern names to GPU shader pattern indices
+    // OpenCV uses inverted naming: BG = industry RGGB, RG = industry BGGR
+    // GPU shader indices: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
+    function bayerChoiceToGpuPattern(bayerChoice) {
+        const mapping = {
+            'COLOR_BayerBG2RGB': 0,  // RGGB (OpenCV BG = industry RGGB)
+            'COLOR_BayerRG2RGB': 1,  // BGGR (OpenCV RG = industry BGGR)
+            'COLOR_BayerGB2RGB': 2,  // GRBG (OpenCV GB = industry GRBG)
+            'COLOR_BayerGR2RGB': 3,  // GBRG (OpenCV GR = industry GBRG)
+            'MONO': -1  // No demosaic needed
+        };
+        return mapping[bayerChoice] ?? 0;
+    }
+
+    // GPU batch analysis for raw Bayer frames (similar to SER's analyzeFrameBatchGpu)
+    async function analyzeBayerBatchGpu(frames, width, height, bayerPattern, threshold = 0.1, metadataOnly = false) {
+        return new Promise((resolve, reject) => {
+            const requestId = Date.now() + Math.random();
+            const handler = (e) => {
+                if (e.data.requestId !== requestId) return;
+                gpuWorker.removeEventListener('message', handler);
+                if (e.data.type === 'analyze-result') {
+                    resolve(e.data.results);
+                } else if (e.data.type === 'analyze-error') {
+                    reject(new Error(e.data.error));
+                }
+            };
+            gpuWorker.addEventListener('message', handler);
+            gpuWorker.postMessage({
+                type: 'analyze-batch',
+                frames,
+                width,
+                height,
+                bayerPattern,
+                threshold,
+                requestId,
+                metadataOnly
+            });
+        });
+    }
+
     // Decode JPEG data to RGBA using native browser decoding (hardware accelerated)
     async function decodeJpegToRgba(jpegData, width, height) {
         const blob = new Blob([jpegData], { type: 'image/jpeg' });
@@ -1792,6 +1860,34 @@ export function useAviReader() {
                 srcHeight,
                 cropSize,
                 bayerPattern: -1, // RGBA input, no demosaic
+                threshold,
+                requestId,
+                metadataOnly
+            });
+        });
+    }
+
+    // Combined detect + crop + analyze for raw Bayer frames with specified pattern
+    async function detectCropAnalyzeBayerGpu(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false) {
+        return new Promise((resolve, reject) => {
+            const requestId = Date.now() + Math.random();
+            const handler = (e) => {
+                if (e.data.requestId !== requestId) return;
+                gpuWorker.removeEventListener('message', handler);
+                if (e.data.type === 'detect-crop-analyze-result') {
+                    resolve(e.data.results);
+                } else if (e.data.type === 'detect-crop-analyze-error') {
+                    reject(new Error(e.data.error));
+                }
+            };
+            gpuWorker.addEventListener('message', handler);
+            gpuWorker.postMessage({
+                type: 'detect-crop-analyze-batch',
+                frames,
+                srcWidth,
+                srcHeight,
+                cropSize,
+                bayerPattern,
                 threshold,
                 requestId,
                 metadataOnly
@@ -1918,18 +2014,99 @@ export function useAviReader() {
         // Read first frame for color profile selector preview
         emit('set-caption', 'Loading preview frame...');
         const firstFrameInfo = frameIndex[0];
-        const previewBuffer = await file.slice(firstFrameInfo.offset, firstFrameInfo.offset + frameDataSize).arrayBuffer();
+        let previewBuffer = await file.slice(firstFrameInfo.offset, firstFrameInfo.offset + frameDataSize).arrayBuffer();
+
+        // Flip vertically if DIB bottom-up storage
+        if (aviHeader.needsVerticalFlip) {
+            previewBuffer = flipFrameVertically(previewBuffer, width, height, 1).buffer;
+        }
+
+        // Auto-detect based on what was parsed from strd chunk (if any)
+        const autoDetectedProfile = aviHeader.bayerChoice || 'COLOR_BayerBG2RGB';
 
         // Create header for ColorProfileSelector (mimics SER header format)
-        const headerForSelector = {
+        let previewHeader = {
             width,
             height,
             pixelDepth: 8,
             colorID: 8 // Treat as RGGB by default (will be overridden by user selection)
         };
 
-        // Auto-detect based on what was parsed from strd chunk (if any)
-        const autoDetectedProfile = aviHeader.bayerChoice || 'COLOR_BayerBG2RGB';
+        // Generate cropped previews for each Bayer pattern using GPU
+        const MIN_SIZE_FOR_CROP = 300;
+        let preRenderedThumbnails = null;
+
+        if (width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
+            emit('set-caption', 'Generating color profile previews...');
+            try {
+                const frameData = new Uint8Array(previewBuffer);
+                const frames = [{ data: frameData, index: 0 }];
+
+                // First detect bounds using pattern 0 to get object size
+                const detectResults = await detectCropAnalyzeBayerGpu(frames, width, height, Math.min(width, height), 0, 0.10, false);
+
+                let previewCropSize = Math.min(width, height);
+                if (detectResults && detectResults[0] && detectResults[0].bounds) {
+                    const detectedSize = Math.max(detectResults[0].bounds.width, detectResults[0].bounds.height);
+                    const margin = 1 + (cropMarginPercent / 100);
+                    previewCropSize = Math.min(Math.ceil(detectedSize * margin / 2) * 2, Math.min(width, height));
+                }
+
+                // Bayer patterns: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
+                const patterns = [
+                    { id: 'COLOR_BayerBG2RGB', pattern: 0 },  // RGGB
+                    { id: 'COLOR_BayerRG2RGB', pattern: 1 },  // BGGR
+                    { id: 'COLOR_BayerGR2RGB', pattern: 3 },  // GBRG
+                    { id: 'COLOR_BayerGB2RGB', pattern: 2 },  // GRBG
+                ];
+
+                preRenderedThumbnails = [];
+
+                for (const { id, pattern } of patterns) {
+                    const results = await detectCropAnalyzeBayerGpu(frames, width, height, previewCropSize, pattern, 0.10, false);
+                    if (results && results[0] && results[0].uint8Buffer) {
+                        preRenderedThumbnails.push({
+                            id,
+                            rgba: results[0].uint8Buffer,
+                            width: previewCropSize,
+                            height: previewCropSize
+                        });
+                    }
+                }
+
+                // Generate mono thumbnail from the first Bayer result (just use grayscale)
+                if (preRenderedThumbnails.length > 0) {
+                    const firstThumb = preRenderedThumbnails[0];
+                    const rgba = new Uint8Array(firstThumb.rgba);
+                    const monoRgba = new Uint8Array(rgba.length);
+                    // Convert to grayscale
+                    for (let i = 0; i < rgba.length; i += 4) {
+                        const gray = Math.round(0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2]);
+                        monoRgba[i] = gray;
+                        monoRgba[i + 1] = gray;
+                        monoRgba[i + 2] = gray;
+                        monoRgba[i + 3] = 255;
+                    }
+                    preRenderedThumbnails.push({
+                        id: 'MONO',
+                        rgba: monoRgba.buffer,
+                        width: firstThumb.width,
+                        height: firstThumb.height
+                    });
+                }
+
+                if (preRenderedThumbnails.length === 5) {
+                    addLog(`Generated ${preRenderedThumbnails.length} cropped preview thumbnails (${previewCropSize}x${previewCropSize})`);
+                } else {
+                    addLog(`Only generated ${preRenderedThumbnails.length}/5 thumbnails, falling back`);
+                    preRenderedThumbnails = null;
+                }
+            } catch (error) {
+                console.error(`[AVI Preview] Error generating thumbnails:`, error);
+                addLog(`Could not generate preview thumbnails: ${error.message}`);
+                preRenderedThumbnails = null;
+            }
+        }
 
         emit('set-caption', 'Select color profile');
 
@@ -1937,8 +2114,9 @@ export function useAviReader() {
         const bayerChoice = await new Promise((resolve) => {
             emit('show-color-profile-selector', {
                 frameBuffer: previewBuffer,
-                header: headerForSelector,
+                header: previewHeader,
                 autoDetectedProfile: autoDetectedProfile,
+                thumbnails: preRenderedThumbnails,
                 resolve: resolve
             });
         });
@@ -1957,7 +2135,6 @@ export function useAviReader() {
 
         emit('set-caption', 'Analyzing frames...');
 
-        const MIN_SIZE_FOR_CROP = 300;
         const needsCrop = width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP;
 
         // Detect crop region using first N frames
@@ -1987,12 +2164,18 @@ export function useAviReader() {
             const progress = Math.round((batchStart / frameCount) * 50);
             emit('update-loading', { progress, current: batchStart, total: frameCount });
 
-            // Load batch of raw frames
+            // Load batch of raw frames (store offsets for later use in stacking)
             const batchFrames = [];
+            const batchOffsets = []; // Store offsets so stacking doesn't need frameIndex
+            const needsFlip = aviHeader.needsVerticalFlip;
             for (let i = batchStart; i < batchEnd; i++) {
                 const frameInfo = frameIndex[i];
                 const rawBuffer = await file.slice(frameInfo.offset, frameInfo.offset + frameDataSize).arrayBuffer();
-                batchFrames.push({ index: i, data: new Uint8Array(rawBuffer) });
+                const frameData = needsFlip
+                    ? flipFrameVertically(rawBuffer, width, height, 1)
+                    : new Uint8Array(rawBuffer);
+                batchFrames.push({ index: i, data: frameData });
+                batchOffsets.push(frameInfo.offset);
             }
 
             // Analyze batch with GPU
@@ -2000,8 +2183,10 @@ export function useAviReader() {
 
             for (const result of batchResults) {
                 if (result.sharpness > 0) {
+                    const offsetIdx = result.index - batchStart;
                     allAnalyzedFrames.push({
                         index: result.index,
+                        offset: batchOffsets[offsetIdx], // Store offset directly for stacking phase
                         sharpness: result.sharpness,
                         centerX: result.centerX,
                         centerY: result.centerY,
@@ -2009,7 +2194,7 @@ export function useAviReader() {
                     });
                     frameCenters.set(result.index, { x: result.centerX, y: result.centerY });
                     if (!bestFrameSoFar || result.sharpness > bestFrameSoFar.sharpness) {
-                        bestFrameSoFar = { index: result.index, sharpness: result.sharpness, centerX: result.centerX, centerY: result.centerY };
+                        bestFrameSoFar = { index: result.index, sharpness: result.sharpness, centerX: result.centerX, centerY: result.centerY, circularity: result.circularity || 0 };
                     }
                 }
             }
@@ -2017,10 +2202,13 @@ export function useAviReader() {
             // Emit preview update every few batches
             if (bestFrameSoFar && batchStart % (batchSize * 4) === 0) {
                 const bestFrameInfo = frameIndex[bestFrameSoFar.index];
-                const previewBuffer = await file.slice(bestFrameInfo.offset, bestFrameInfo.offset + frameDataSize).arrayBuffer();
+                let previewBuffer = await file.slice(bestFrameInfo.offset, bestFrameInfo.offset + frameDataSize).arrayBuffer();
+                if (needsFlip) {
+                    previewBuffer = flipFrameVertically(previewBuffer, width, height, 1).buffer;
+                }
                 const previewBlob = await createBayerPreviewBlob(previewBuffer, width, height, bayerChoice, cropRegion, bestFrameSoFar.centerX, bestFrameSoFar.centerY);
                 if (previewBlob) {
-                    emit('best-frame-updated', { sharpness: bestFrameSoFar.sharpness, blob: previewBlob, width: cropSize, height: cropSize });
+                    emit('best-frame-updated', { sharpness: bestFrameSoFar.sharpness, circularity: bestFrameSoFar.circularity, blob: previewBlob, width: cropSize, height: cropSize });
                 }
             }
         }
@@ -2044,9 +2232,14 @@ export function useAviReader() {
         // Show best frame preview (during analysis phase)
         if (bestFramesForStacking.length > 0) {
             const bestFrame = bestFramesForStacking[0];
-            const bestFrameInfo = frameIndex[bestFrame.index];
             addLog(`Creating preview for best frame ${bestFrame.index} (sharpness: ${bestFrame.sharpness.toFixed(2)})`);
-            const bestFrameBuffer = await file.slice(bestFrameInfo.offset, bestFrameInfo.offset + frameDataSize).arrayBuffer();
+            // Use offset from frame metadata (stored during analysis)
+            let bestFrameBuffer = await file.slice(bestFrame.offset, bestFrame.offset + frameDataSize).arrayBuffer();
+
+            // Flip vertically if DIB bottom-up storage
+            if (aviHeader.needsVerticalFlip) {
+                bestFrameBuffer = flipFrameVertically(bestFrameBuffer, width, height, 1).buffer;
+            }
 
             // Create preview using simple demosaic
             const previewBlob = await createBayerPreviewBlob(bestFrameBuffer, width, height, bayerChoice, cropRegion, bestFrame.centerX, bestFrame.centerY);
@@ -2055,6 +2248,7 @@ export function useAviReader() {
                 // Emit best-frame-updated for preview display (doesn't navigate)
                 emit('best-frame-updated', {
                     sharpness: bestFrame.sharpness,
+                    circularity: bestFrame.circularity,
                     blob: previewBlob,
                     width: cropSize,
                     height: cropSize
@@ -2065,6 +2259,7 @@ export function useAviReader() {
         }
 
         // Create frameReReader for two-pass stacking
+        const needsFlip = aviHeader.needsVerticalFlip;
         const frameReReader = {
             fileType: 'ser-multi', // Use ser-multi to leverage getFrame() method in stacker
             file,
@@ -2075,31 +2270,30 @@ export function useAviReader() {
             },
             bayerChoice,
             cropRegion,
-            frameCenters,
-            frameIndex,
             frameDataSize,
             analysisStartTime,
             useVngDemosaic,
+            needsVerticalFlip: needsFlip,
 
             // Re-read a single frame and return raw buffer + center
-            async getFrame(frameIdx) {
-                const info = this.frameIndex[frameIdx];
-                if (!info) {
-                    console.warn(`No frame info for index ${frameIdx}`);
+            async getFrame(frame) {
+                const offset = frame.offset;
+                if (offset === undefined) {
+                    console.warn(`No offset for frame ${frame.index}`);
                     return null;
                 }
-                const frameBuffer = await this.file.slice(info.offset, info.offset + this.frameDataSize).arrayBuffer();
-                const center = this.frameCenters.get(frameIdx);
+                let frameBuffer = await this.file.slice(offset, offset + this.frameDataSize).arrayBuffer();
 
-                if (!center) {
-                    console.warn(`No center found for frame ${frameIdx}`);
-                    return null;
+                // Flip vertically if DIB bottom-up storage
+                if (this.needsVerticalFlip) {
+                    const flipped = flipFrameVertically(frameBuffer, this.header.width, this.header.height, 1);
+                    frameBuffer = flipped.buffer;
                 }
 
                 return {
                     frameBuffer,
-                    centerX: center.x,
-                    centerY: center.y
+                    centerX: frame.centerX,
+                    centerY: this.needsVerticalFlip ? (this.header.height - frame.centerY) : frame.centerY
                 };
             },
 
@@ -2112,8 +2306,8 @@ export function useAviReader() {
             },
 
             // Generate preview blob on-demand (for QualitySelector)
-            async getPreviewBlob(frameIdx) {
-                const frameData = await this.getFrame(frameIdx);
+            async getPreviewBlob(frame) {
+                const frameData = await this.getFrame(frame);
                 if (!frameData) return null;
 
                 const blob = await createBayerPreviewBlob(
@@ -2687,29 +2881,26 @@ export function useAviReader() {
         const frameReReader = {
             fileType: 'image', // Use 'image' type since MJPEG produces RGBA like images
             file,
-            frameIndex,
-            frameCenters,
+            frameIndex, // Still needed for MJPEG - variable frame sizes
             cropRegion,
             srcWidth: width,
             srcHeight: height,
 
-            async getFrame(frameIdx) {
-                const frame = this.frameIndex[frameIdx];
-                if (!frame) return null;
-
-                const center = this.frameCenters.get(frameIdx);
-                if (!center) return null;
+            async getFrame(frameObj) {
+                const frameIdx = frameObj.index ?? frameObj;
+                const frameInfo = this.frameIndex[frameIdx];
+                if (!frameInfo) return null;
 
                 try {
-                    const jpegData = await this.file.slice(frame.offset, frame.offset + frame.size).arrayBuffer();
+                    const jpegData = await this.file.slice(frameInfo.offset, frameInfo.offset + frameInfo.size).arrayBuffer();
                     const rgba = await decodeJpegToRgba(new Uint8Array(jpegData), this.srcWidth, this.srcHeight);
 
                     return {
                         data: rgba.data,
                         width: rgba.width,
                         height: rgba.height,
-                        centerX: center.x,
-                        centerY: center.y
+                        centerX: frameObj.centerX,
+                        centerY: frameObj.centerY
                     };
                 } catch (e) {
                     console.warn(`Failed to re-read MJPEG frame ${frameIdx}:`, e);

@@ -1551,13 +1551,14 @@ export function useSerReader() {
                             useVngDemosaic, // VNG demosaic for stacking phase
 
                             // Re-read a single frame and return float32Buffer
-                            async getFrame(frameIndex, centerOverride = null) {
+                            async getFrame(frame, centerOverride = null) {
+                                const frameIndex = frame.index ?? frame;
                                 const offset = 178 + (frameIndex * this.frameSize);
                                 const frameBuffer = await this.file.slice(offset, offset + this.frameSize).arrayBuffer();
 
-                                // Get center from stored centers or override
-                                const center = centerOverride || this.frameCenters.get(frameIndex);
-                                if (!center) {
+                                // Get center from frame object, stored centers, or override
+                                const center = centerOverride || { x: frame.centerX, y: frame.centerY } || this.frameCenters.get(frameIndex);
+                                if (!center || center.x === undefined) {
                                     console.warn(`No center found for frame ${frameIndex}`);
                                     return null;
                                 }
@@ -1762,7 +1763,8 @@ export function useSerReader() {
                         useVngDemosaic, // VNG demosaic for stacking phase
 
                         // Re-read a single frame by index
-                        async getFrame(frameIndex) {
+                        async getFrame(frame) {
+                            const frameIndex = frame.index ?? frame;
                             const offset = 178 + (frameIndex * this.frameSize);
                             const frameBuffer = await this.file.slice(offset, offset + this.frameSize).arrayBuffer();
 
@@ -2999,7 +3001,8 @@ export function useSerReader() {
                     analysisStartTime: analysisStats.startTime, // For total time calculation
                     useVngDemosaic, // VNG demosaic for stacking phase
 
-                    async getFrame(globalIndex, centerOverride = null) {
+                    async getFrame(frame, centerOverride = null) {
+                        const globalIndex = frame.index ?? frame;
                         const centerInfo = centerOverride || this.frameCenters.get(globalIndex);
                         if (!centerInfo) {
                             console.warn(`No center found for frame ${globalIndex}`);

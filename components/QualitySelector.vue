@@ -258,7 +258,7 @@ async function drawPreview() {
 			img = tempCanvas;
 		} else if (props.frameReReader?.getPreviewBlob && frame.index !== undefined) {
 			// Load preview on-demand from disk via frameReReader
-			const blob = await props.frameReReader.getPreviewBlob(frame.index);
+			const blob = await props.frameReReader.getPreviewBlob(frame);
 			if (blob) {
 				img = new Image();
 				url = URL.createObjectURL(blob);

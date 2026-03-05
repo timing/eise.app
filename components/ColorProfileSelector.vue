@@ -255,9 +255,45 @@ onMounted(() => {
 		visible.value = true;
 
 		await nextTick();
-		renderThumbnails();
+
+		// If pre-rendered thumbnails are provided, use them directly
+		if (data.thumbnails) {
+			displayPreRenderedThumbnails(data.thumbnails);
+		} else {
+			renderThumbnails();
+		}
 	});
 });
+
+function displayPreRenderedThumbnails(thumbnails) {
+	const maxSize = 150;
+
+	for (const thumb of thumbnails) {
+		const canvas = canvasRefs.value[thumb.id];
+		if (!canvas) continue;
+
+		// Scale to max 150px while maintaining aspect ratio
+		const scale = Math.min(maxSize / thumb.width, maxSize / thumb.height);
+		const displayWidth = Math.floor(thumb.width * scale);
+		const displayHeight = Math.floor(thumb.height * scale);
+
+		canvas.width = displayWidth;
+		canvas.height = displayHeight;
+
+		const ctx = canvas.getContext('2d');
+
+		// Create temp canvas at original size
+		const tempCanvas = new OffscreenCanvas(thumb.width, thumb.height);
+		const tempCtx = tempCanvas.getContext('2d');
+		const rgba = new Uint8ClampedArray(thumb.rgba);
+		const imageData = new ImageData(rgba, thumb.width, thumb.height);
+		tempCtx.putImageData(imageData, 0, 0);
+
+		// Draw scaled
+		ctx.drawImage(tempCanvas, 0, 0, displayWidth, displayHeight);
+	}
+	thumbnailsReady.value = true;
+}
 
 onUnmounted(() => {
 	if (gpuWorker) {

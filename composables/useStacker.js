@@ -380,7 +380,7 @@ export function useStacker() {
                     // Handle multi-file SER (uses getFrame method)
                     if (frameReReader.fileType === 'ser-multi') {
                         for (const frame of batchFrames) {
-                            const result = await frameReReader.getFrame(frame.index);
+                            const result = await frameReReader.getFrame(frame);
                             if (result) {
                                 const data = frameReReader.header.pixelDepth > 8
                                     ? new Uint16Array(result.frameBuffer)
@@ -407,7 +407,7 @@ export function useStacker() {
                         // Support both pre-loaded rgbaFrames array and getFrame() function (for MJPEG)
                         let rgba;
                         if (frameReReader.getFrame) {
-                            rgba = await frameReReader.getFrame(frame.index);
+                            rgba = await frameReReader.getFrame(frame);
                         } else if (frameReReader.rgbaFrames) {
                             rgba = frameReReader.rgbaFrames[frame.index];
                         }
