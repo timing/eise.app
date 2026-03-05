@@ -104,21 +104,17 @@ async function parseAviFrameIndex(file, moviListOffset, moviListSize, maxFrames 
 // Convert raw AVI frame data to RGBA for canvas display - no OpenCV needed
 // Supports DIB (BGR24), Y800 (grayscale/Bayer), YUY2/UYVY
 async function renderAviFrameToBlob(canvas, frameDataBuffer, aviHeader, fourCC, bayerChoice) {
-    const { width, height } = aviHeader;
+    const { width, height, bpp } = aviHeader;
     const src = new Uint8Array(frameDataBuffer);
     const rgba = new Uint8ClampedArray(width * height * 4);
 
     // Null fourCC from FFmpeg rawvideo is also uncompressed BGR
     const isUncompressedBGR = fourCC === 'DIB ' || fourCC === 'RGB ' || fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00' || !fourCC;
-    if (isUncompressedBGR) {
-        // BGR24 → RGBA (swap B and R)
-        for (let i = 0, j = 0; i < src.length; i += 3, j += 4) {
-            rgba[j] = src[i + 2];     // R ← B
-            rgba[j + 1] = src[i + 1]; // G
-            rgba[j + 2] = src[i];     // B ← R
-            rgba[j + 3] = 255;        // A
-        }
-    } else if (fourCC === 'Y800') {
+
+    // Check for 8-bit DIB (raw Bayer or grayscale) - same handling as Y800
+    const is8bitRaw = (fourCC === 'Y800') || (isUncompressedBGR && bpp === 8);
+
+    if (is8bitRaw) {
         if (bayerChoice && bayerChoice !== "MONO") {
             // Bayer demosaic - simple bilinear for preview (fast, good enough for preview)
             demosaicBayerToRgba(src, rgba, width, height, bayerChoice);
@@ -128,6 +124,14 @@ async function renderAviFrameToBlob(canvas, frameDataBuffer, aviHeader, fourCC, 
                 rgba[j] = rgba[j + 1] = rgba[j + 2] = src[i];
                 rgba[j + 3] = 255;
             }
+        }
+    } else if (isUncompressedBGR) {
+        // BGR24 → RGBA (swap B and R)
+        for (let i = 0, j = 0; i < src.length; i += 3, j += 4) {
+            rgba[j] = src[i + 2];     // R ← B
+            rgba[j + 1] = src[i + 1]; // G
+            rgba[j + 2] = src[i];     // B ← R
+            rgba[j + 3] = 255;        // A
         }
     } else if (fourCC === 'YUY2') {
         // YUY2 (YUYV) → RGBA: Y0 U Y1 V pattern
@@ -704,6 +708,7 @@ export function useAviReader() {
             let avihData = null;
             let strhData = null;
             let strfData = null;
+            let strdData = null;
             let moviListOffset = -1;
             let moviListSize = -1;
 
@@ -751,13 +756,15 @@ export function useAviReader() {
                                         const streamChunkSize = safeGetUint32(view, streamOffset + 4, true);
                                         const streamChunkPaddedSize = (streamChunkSize + 1) & ~1;
 
+                                        addLog(`        - Found '${streamChunkId}' chunk (${streamChunkSize} bytes)`);
                                         if (streamChunkId === 'strh' && streamOffset + 12 <= fileEnd && safeReadFourCC(view, streamOffset + 8) === 'vids') {
                                             videoStreamFound = true;
                                             strhData = { offset: streamOffset + 8, size: streamChunkSize };
-                                            addLog("        - Found video 'strh' chunk.");
                                         } else if (streamChunkId === 'strf' && videoStreamFound && !strfData) {
                                             strfData = { offset: streamOffset + 8, size: streamChunkSize };
-                                            addLog("        - Found video 'strf' chunk.");
+                                        } else if (streamChunkId === 'strd' && videoStreamFound) {
+                                            // Stream data chunk - may contain Bayer pattern info
+                                            strdData = { offset: streamOffset + 8, size: streamChunkSize };
                                         }
                                         streamOffset += 8 + streamChunkPaddedSize;
                                     }
@@ -844,9 +851,50 @@ export function useAviReader() {
             }
 
             let bayerChoice = "MONO";
-            if (fourCC === 'Y800' && (width % 2 === 0 && height % 2 === 0)) {
-                // Default to RGGB = BG (OpenCV's inverted naming)
+
+            // Try to detect Bayer pattern from strd chunk
+            if (!strdData) {
+                addLog(`No strd chunk found in AVI header`);
+            } else if (strdData.size === 0) {
+                addLog(`Found strd chunk but it's empty`);
+            }
+            if (strdData && strdData.size > 0) {
+                addLog(`Found strd chunk (${strdData.size} bytes), checking for Bayer pattern info...`);
+                try {
+                    // Read strd content as text to search for Bayer pattern strings
+                    const strdBytes = new Uint8Array(buffer, strdData.offset, Math.min(strdData.size, 256));
+                    const strdText = String.fromCharCode(...strdBytes);
+                    addLog(`strd content (first 256 bytes): ${strdText.replace(/[^\x20-\x7E]/g, '.')}`);
+
+                    // Search for common Bayer pattern identifiers
+                    const strdUpper = strdText.toUpperCase();
+                    if (strdUpper.includes('RGGB')) {
+                        bayerChoice = 'COLOR_BayerBG2RGB'; // OpenCV inverted naming
+                        addLog(`Detected RGGB Bayer pattern from strd`);
+                    } else if (strdUpper.includes('BGGR')) {
+                        bayerChoice = 'COLOR_BayerRG2RGB';
+                        addLog(`Detected BGGR Bayer pattern from strd`);
+                    } else if (strdUpper.includes('GRBG')) {
+                        bayerChoice = 'COLOR_BayerGB2RGB';
+                        addLog(`Detected GRBG Bayer pattern from strd`);
+                    } else if (strdUpper.includes('GBRG')) {
+                        bayerChoice = 'COLOR_BayerGR2RGB';
+                        addLog(`Detected GBRG Bayer pattern from strd`);
+                    } else if (strdUpper.includes('MONO') || strdUpper.includes('GREY') || strdUpper.includes('GRAY')) {
+                        bayerChoice = 'MONO';
+                        addLog(`Detected MONO/grayscale from strd`);
+                    }
+                } catch (e) {
+                    addLog(`Failed to parse strd chunk: ${e.message}`);
+                }
+            }
+
+            // If no Bayer pattern found in strd, default for raw 8-bit formats
+            const is8bitRaw = (fourCC === 'Y800') || (isUncompressedBGR && bpp === 8);
+            if (bayerChoice === "MONO" && is8bitRaw && (width % 2 === 0 && height % 2 === 0)) {
+                // Default to RGGB = BG (OpenCV's inverted naming) - common for planetary cameras
                 bayerChoice = 'COLOR_BayerBG2RGB';
+                addLog(`No Bayer pattern in strd, defaulting ${fourCC} (${bpp}bpp) to RGGB`);
             }
 
             const result = { width, height, frameCount, fourCC, frameDataSize, bpp, bayerChoice, moviListOffset, moviListSize };
@@ -896,6 +944,17 @@ export function useAviReader() {
             // MJPEG uses GPU path with native JPEG decoding
             addLog(`MJPEG AVI detected. Using GPU processing with native JPEG decoding.`);
             return await readMjpegAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode);
+        }
+
+        // Check for 8-bit raw Bayer data (Y800 or 8-bit DIB)
+        const fourCC = aviHeader.fourCC;
+        const isUncompressedBGR = fourCC === 'DIB ' || fourCC === 'RGB ' || fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00';
+        const is8bitRaw = (fourCC === 'Y800') || (isUncompressedBGR && aviHeader.bpp === 8);
+
+        if (is8bitRaw) {
+            // 8-bit raw Bayer uses SER-like two-pass flow with color selector + VNG demosaic
+            addLog(`8-bit raw AVI detected (${fourCC}, ${aviHeader.bpp}bpp). Using two-pass flow with VNG demosaic.`);
+            return await readRawBayerAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode, useVngDemosaic);
         }
 
         if (!isEasyAviFourCC(aviHeader.fourCC)) {
@@ -1626,7 +1685,7 @@ export function useAviReader() {
                 gpuWorker.postMessage({ type: 'init' });
             });
             gpuReady = true;
-            addLog('GPU worker initialized for MJPEG');
+            addLog('GPU analyze worker initialized');
             return true;
         } catch (error) {
             console.error('GPU worker init failed:', error);
@@ -1822,6 +1881,506 @@ export function useAviReader() {
         addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
 
         return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+    }
+
+    // Process 8-bit raw Bayer AVI file (Y800 or 8-bit DIB) with SER-like two-pass flow
+    // Phase 1: Show color selector, analyze frames (sharpness), store metadata only
+    // Phase 2: Re-read selected frames on-demand with VNG demosaic for stacking
+    async function readRawBayerAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode = false, useVngDemosaic = true) {
+        resetCaptures();
+
+        const { width, height, bpp } = aviHeader;
+        const frameDataSize = width * height; // 8-bit = 1 byte per pixel
+
+        // Initialize GPU worker for analysis and stacking
+        const gpuOk = await initializeGpuWorker();
+        if (!gpuOk) {
+            addLog('GPU not available for 8-bit raw AVI processing');
+            emit('upload-error', 'WebGPU required for 8-bit raw AVI processing');
+            emit('stop-loading');
+            return;
+        }
+
+        // Scan for frame index
+        emit('set-caption', 'Parsing AVI frame index...');
+        const frameIndex = await parseAviFrameIndex(file, aviHeader.moviListOffset, aviHeader.moviListSize, maxFrames);
+
+        if (frameIndex.length === 0) {
+            addLog('No frames found in AVI file');
+            emit('upload-error', 'No video frames found in AVI file.');
+            emit('stop-loading');
+            return;
+        }
+
+        const frameCount = frameIndex.length;
+        addLog(`Found ${frameCount} frames in 8-bit raw AVI (${width}x${height}, ${bpp}bpp)`);
+
+        // Read first frame for color profile selector preview
+        emit('set-caption', 'Loading preview frame...');
+        const firstFrameInfo = frameIndex[0];
+        const previewBuffer = await file.slice(firstFrameInfo.offset, firstFrameInfo.offset + frameDataSize).arrayBuffer();
+
+        // Create header for ColorProfileSelector (mimics SER header format)
+        const headerForSelector = {
+            width,
+            height,
+            pixelDepth: 8,
+            colorID: 8 // Treat as RGGB by default (will be overridden by user selection)
+        };
+
+        // Auto-detect based on what was parsed from strd chunk (if any)
+        const autoDetectedProfile = aviHeader.bayerChoice || 'COLOR_BayerBG2RGB';
+
+        emit('set-caption', 'Select color profile');
+
+        // Wait for user to select a color profile
+        const bayerChoice = await new Promise((resolve) => {
+            emit('show-color-profile-selector', {
+                frameBuffer: previewBuffer,
+                header: headerForSelector,
+                autoDetectedProfile: autoDetectedProfile,
+                resolve: resolve
+            });
+        });
+
+        addLog(`User selected color profile: ${bayerChoice}`);
+
+        // Handle MONO selection - no demosaicing needed
+        if (bayerChoice === 'MONO') {
+            addLog('MONO selected - treating as grayscale, no demosaicing');
+            // Fall back to regular AVI processing without Bayer
+            // Update aviHeader to mark as MONO and use existing path
+            aviHeader.bayerChoice = 'MONO';
+            emit('set-caption', 'Processing as grayscale...');
+            // Continue with simpler grayscale processing (TODO: could optimize this path too)
+        }
+
+        emit('set-caption', 'Analyzing frames...');
+
+        const MIN_SIZE_FOR_CROP = 300;
+        const needsCrop = width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP;
+
+        // Detect crop region using first N frames
+        let cropRegion = null;
+        if (needsCrop) {
+            addLog(`Frame size ${width}x${height} qualifies for auto-crop`);
+            cropRegion = await detectCropRegionForBayerAvi(file, frameIndex, width, height, frameDataSize, bayerChoice, cropMarginPercent);
+            if (cropRegion) {
+                addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
+            }
+        }
+
+        const cropSize = cropRegion?.size || Math.min(width, height);
+
+        emit('set-caption', cropRegion ? 'Cropping, centering, and analyzing frames' : 'Analyzing frames');
+
+        // Analyze frames in batches using GPU
+        const batchSize = 16;
+        const allAnalyzedFrames = [];
+        const frameCenters = new Map();
+        let bestFrameSoFar = null;
+
+        const analysisStartTime = performance.now();
+
+        for (let batchStart = 0; batchStart < frameCount; batchStart += batchSize) {
+            const batchEnd = Math.min(batchStart + batchSize, frameCount);
+            const progress = Math.round((batchStart / frameCount) * 50);
+            emit('update-loading', { progress, current: batchStart, total: frameCount });
+
+            // Load batch of raw frames
+            const batchFrames = [];
+            for (let i = batchStart; i < batchEnd; i++) {
+                const frameInfo = frameIndex[i];
+                const rawBuffer = await file.slice(frameInfo.offset, frameInfo.offset + frameDataSize).arrayBuffer();
+                batchFrames.push({ index: i, data: new Uint8Array(rawBuffer) });
+            }
+
+            // Analyze batch with GPU
+            const batchResults = await analyzeBayerBatchGpu(batchFrames, width, height, bayerChoice, cropRegion);
+
+            for (const result of batchResults) {
+                if (result.sharpness > 0) {
+                    allAnalyzedFrames.push({ index: result.index, sharpness: result.sharpness, centerX: result.centerX, centerY: result.centerY });
+                    frameCenters.set(result.index, { x: result.centerX, y: result.centerY });
+                    if (!bestFrameSoFar || result.sharpness > bestFrameSoFar.sharpness) {
+                        bestFrameSoFar = { index: result.index, sharpness: result.sharpness, centerX: result.centerX, centerY: result.centerY };
+                    }
+                }
+            }
+
+            // Emit preview update every few batches
+            if (bestFrameSoFar && batchStart % (batchSize * 4) === 0) {
+                const bestFrameInfo = frameIndex[bestFrameSoFar.index];
+                const previewBuffer = await file.slice(bestFrameInfo.offset, bestFrameInfo.offset + frameDataSize).arrayBuffer();
+                const previewBlob = await createBayerPreviewBlob(previewBuffer, width, height, bayerChoice, cropRegion, bestFrameSoFar.centerX, bestFrameSoFar.centerY);
+                if (previewBlob) {
+                    emit('best-frame-updated', { sharpness: bestFrameSoFar.sharpness, blob: previewBlob, width: cropSize, height: cropSize });
+                }
+            }
+        }
+
+        addLog(`Analyzed ${frameCount} frames, ${allAnalyzedFrames.length} valid`);
+
+        if (allAnalyzedFrames.length === 0) {
+            addLog('No valid frames found');
+            emit('upload-error', 'No valid frames found in AVI file.');
+            emit('stop-loading');
+            return;
+        }
+
+        // Sort by sharpness and select best frames
+        allAnalyzedFrames.sort((a, b) => b.sharpness - a.sharpness);
+        const bestFramesCapacity = Math.max(1, Math.floor(allAnalyzedFrames.length * stackPercentage / 100));
+        const bestFramesForStacking = allAnalyzedFrames.slice(0, bestFramesCapacity);
+
+        addLog(`Selected ${bestFramesForStacking.length} best frames for stacking (${stackPercentage}%)`);
+
+        // Show best frame preview (during analysis phase)
+        if (bestFramesForStacking.length > 0) {
+            const bestFrame = bestFramesForStacking[0];
+            const bestFrameInfo = frameIndex[bestFrame.index];
+            addLog(`Creating preview for best frame ${bestFrame.index} (sharpness: ${bestFrame.sharpness.toFixed(2)})`);
+            const bestFrameBuffer = await file.slice(bestFrameInfo.offset, bestFrameInfo.offset + frameDataSize).arrayBuffer();
+
+            // Create preview using simple demosaic
+            const previewBlob = await createBayerPreviewBlob(bestFrameBuffer, width, height, bayerChoice, cropRegion, bestFrame.centerX, bestFrame.centerY);
+            if (previewBlob) {
+                addLog(`Preview blob created: ${previewBlob.size} bytes`);
+                // Emit best-frame-updated for preview display (doesn't navigate)
+                emit('best-frame-updated', {
+                    sharpness: bestFrame.sharpness,
+                    blob: previewBlob,
+                    width: cropSize,
+                    height: cropSize
+                });
+            } else {
+                addLog('Preview blob creation failed');
+            }
+        }
+
+        // Create frameReReader for two-pass stacking
+        const frameReReader = {
+            fileType: 'ser-multi', // Use ser-multi to leverage getFrame() method in stacker
+            file,
+            header: {
+                width,
+                height,
+                pixelDepth: 8
+            },
+            bayerChoice,
+            cropRegion,
+            frameCenters,
+            frameIndex,
+            frameDataSize,
+            analysisStartTime,
+            useVngDemosaic,
+
+            // Re-read a single frame and return raw buffer + center
+            async getFrame(frameIdx) {
+                const info = this.frameIndex[frameIdx];
+                if (!info) {
+                    console.warn(`No frame info for index ${frameIdx}`);
+                    return null;
+                }
+                const frameBuffer = await this.file.slice(info.offset, info.offset + this.frameDataSize).arrayBuffer();
+                const center = this.frameCenters.get(frameIdx);
+
+                if (!center) {
+                    console.warn(`No center found for frame ${frameIdx}`);
+                    return null;
+                }
+
+                return {
+                    frameBuffer,
+                    centerX: center.x,
+                    centerY: center.y
+                };
+            },
+
+            // Re-read multiple frames in parallel
+            async getFrames(frameIndices) {
+                const results = await Promise.all(
+                    frameIndices.map(idx => this.getFrame(idx))
+                );
+                return results.filter(r => r !== null);
+            }
+        };
+
+        addLog(`Created frameReReader for two-pass stacking with VNG=${useVngDemosaic}`);
+
+        // Manual threshold: let user select frames
+        if (manualThreshold) {
+            // For manual threshold, frames need width/height for the selector UI
+            // Add cropSize to each frame for display
+            const framesWithSize = allAnalyzedFrames.map(f => ({
+                ...f,
+                width: cropSize,
+                height: cropSize
+            }));
+            const allFramesSorted = [...framesWithSize].sort((a, b) => b.sharpness - a.sharpness);
+            addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
+            emit('quality-selection-ready', {
+                frames: allFramesSorted,
+                workers: null, // Two-pass uses frameReReader instead
+                noiseRobustAlignment,
+                useWebGPU: true,
+                drizzleScale,
+                frameReReader,
+                surfaceMode
+            });
+            return; // Don't stack yet - user will select frames
+        }
+
+        // Check for no valid frames before stacking
+        if (bestFramesForStacking.length === 0) {
+            addLog('No valid frames found for stacking');
+            emit('upload-error', 'No valid frames found for stacking.');
+            emit('stop-loading');
+            return;
+        }
+
+        // Phase 2: Stack using GPU with VNG demosaic
+        emit('set-caption', 'Stacking frames...');
+        addLog(`Starting stacking of ${bestFramesForStacking.length} frames`);
+
+        const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, frameReReader, surfaceMode);
+
+        if (!stackResult || !stackResult.blob) {
+            addLog('Stacking failed');
+            emit('upload-error', 'Stacking failed. Please try again.');
+            emit('stop-loading');
+            return;
+        }
+
+        addLog(`Stacking complete: ${stackResult.width}x${stackResult.height}`);
+
+        // Emit stacked image ready - this triggers navigation to post-processor
+        emit('stacked-image-ready', {
+            blob: stackResult.blob,
+            float32Data: stackResult.float32Data,
+            width: stackResult.width,
+            height: stackResult.height
+        });
+
+        emit('stop-loading');
+    }
+
+    // Detect crop region for 8-bit Bayer AVI by analyzing sample frames
+    async function detectCropRegionForBayerAvi(file, frameIndex, width, height, frameDataSize, bayerChoice, cropMarginPercent) {
+        const sampleCount = Math.min(10, frameIndex.length);
+        const sampleIndices = [];
+
+        // Sample evenly spaced frames
+        for (let i = 0; i < sampleCount; i++) {
+            sampleIndices.push(Math.floor(i * frameIndex.length / sampleCount));
+        }
+
+        const detectedCenters = [];
+        const detectedSizes = [];
+
+        for (const idx of sampleIndices) {
+            const frameInfo = frameIndex[idx];
+            const rawBuffer = await file.slice(frameInfo.offset, frameInfo.offset + frameDataSize).arrayBuffer();
+
+            // Simple object detection on demosaiced frame
+            const result = await detectObjectInBayerFrame(rawBuffer, width, height, bayerChoice);
+            if (result) {
+                detectedCenters.push({ x: result.centerX, y: result.centerY });
+                detectedSizes.push(result.size);
+            }
+        }
+
+        if (detectedCenters.length === 0) {
+            addLog('Could not detect object in sample frames');
+            return null;
+        }
+
+        // Calculate median size with margin
+        detectedSizes.sort((a, b) => a - b);
+        const medianSize = detectedSizes[Math.floor(detectedSizes.length / 2)];
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        let finalSize = Math.ceil(medianSize * marginMultiplier);
+
+        // Round up to even number for Bayer alignment
+        if (finalSize % 2 !== 0) finalSize++;
+
+        // Clamp to frame dimensions
+        finalSize = Math.min(finalSize, width, height);
+
+        // Calculate median center
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        return {
+            size: finalSize,
+            referenceCenter: { x: medianX, y: medianY },
+            medianObjectSize: medianSize
+        };
+    }
+
+    // Analyze a batch of Bayer frames using GPU (simple demosaic for sharpness)
+    async function analyzeBayerBatchGpu(batchFrames, width, height, bayerChoice, cropRegion) {
+        // Map bayerChoice to GPU pattern
+        const bayerMap = {
+            'COLOR_BayerBG2RGB': 0, 'COLOR_BayerRG2RGB': 1,
+            'COLOR_BayerGB2RGB': 2, 'COLOR_BayerGR2RGB': 3
+        };
+        const bayerPattern = bayerMap[bayerChoice] ?? 0;
+
+        // Prepare frames array for batch processing - worker expects { data, index }
+        const framesData = batchFrames.map(f => ({ data: f.data, index: f.index }));
+        const cropSize = cropRegion?.size || Math.min(width, height);
+
+        try {
+            // Send batch to GPU worker for analysis with object detection
+            const batchResults = await new Promise((resolve, reject) => {
+                const requestId = `bayer_batch_${Date.now()}`;
+
+                const handler = (e) => {
+                    if (e.data.requestId === requestId) {
+                        gpuWorker.removeEventListener('message', handler);
+                        if (e.data.type === 'detect-crop-analyze-result') {
+                            resolve(e.data.results);
+                        } else if (e.data.type === 'detect-crop-analyze-error') {
+                            reject(new Error(e.data.error));
+                        }
+                    }
+                };
+                gpuWorker.addEventListener('message', handler);
+
+                gpuWorker.postMessage({
+                    type: 'detect-crop-analyze-batch',
+                    frames: framesData,
+                    srcWidth: width,
+                    srcHeight: height,
+                    cropSize,
+                    bayerPattern,
+                    threshold: 0.1,
+                    metadataOnly: true, // Just need sharpness + center, not float32 buffer
+                    requestId
+                });
+            });
+
+            // Map results back to frame indices
+            return batchFrames.map((frame, i) => {
+                const result = batchResults[i] || {};
+                return {
+                    index: frame.index,
+                    sharpness: result.sharpness || 0,
+                    centerX: result.centerX ?? width / 2,
+                    centerY: result.centerY ?? height / 2
+                };
+            });
+        } catch (err) {
+            addLog(`Batch analysis failed: ${err.message}`);
+            // Return default results on error
+            return batchFrames.map(frame => ({
+                index: frame.index,
+                sharpness: 0,
+                centerX: width / 2,
+                centerY: height / 2
+            }));
+        }
+    }
+
+    // Detect object bounds in a single Bayer frame (for crop region detection)
+    async function detectObjectInBayerFrame(rawBuffer, width, height, bayerChoice) {
+        const bayerMap = {
+            'COLOR_BayerBG2RGB': 0, 'COLOR_BayerRG2RGB': 1,
+            'COLOR_BayerGB2RGB': 2, 'COLOR_BayerGR2RGB': 3
+        };
+        const bayerPattern = bayerMap[bayerChoice] ?? 0;
+        const cropSize = Math.min(width, height);
+
+        try {
+            // Use batch API with single frame
+            const result = await new Promise((resolve, reject) => {
+                const requestId = `detect_${Date.now()}`;
+
+                const handler = (e) => {
+                    if (e.data.requestId === requestId) {
+                        gpuWorker.removeEventListener('message', handler);
+                        if (e.data.type === 'detect-crop-analyze-result') {
+                            resolve(e.data.results[0] || {});
+                        } else if (e.data.type === 'detect-crop-analyze-error') {
+                            reject(new Error(e.data.error));
+                        }
+                    }
+                };
+                gpuWorker.addEventListener('message', handler);
+
+                gpuWorker.postMessage({
+                    type: 'detect-crop-analyze-batch',
+                    frames: [{ data: new Uint8Array(rawBuffer), index: 0 }],
+                    srcWidth: width,
+                    srcHeight: height,
+                    cropSize,
+                    bayerPattern,
+                    threshold: 0.1,
+                    metadataOnly: true,
+                    requestId
+                });
+            });
+
+            if (result.bounds) {
+                return {
+                    centerX: result.bounds.centroidX,
+                    centerY: result.bounds.centroidY,
+                    size: result.bounds.size || Math.max(result.bounds.width, result.bounds.height)
+                };
+            }
+
+            // Fallback to center-based detection from GPU
+            if (result.centerX !== undefined && result.centerY !== undefined) {
+                return {
+                    centerX: result.centerX,
+                    centerY: result.centerY,
+                    size: Math.min(width, height) * 0.8
+                };
+            }
+        } catch (err) {
+            addLog(`Object detection failed: ${err.message}`);
+        }
+
+        return null;
+    }
+
+    // Create a preview blob from Bayer data with simple demosaic
+    async function createBayerPreviewBlob(rawBuffer, width, height, bayerChoice, cropRegion, centerX, centerY) {
+        try {
+            // Simple bilinear demosaic for preview
+            const src = new Uint8Array(rawBuffer);
+            const rgba = new Uint8ClampedArray(width * height * 4);
+
+            demosaicBayerToRgba(src, rgba, width, height, bayerChoice);
+            autoStretchRgba(rgba);
+
+            // Create canvas and render
+            const canvas = new OffscreenCanvas(width, height);
+            const ctx = canvas.getContext('2d');
+            const imageData = new ImageData(rgba, width, height);
+            ctx.putImageData(imageData, 0, 0);
+
+            // If crop region, extract cropped portion
+            if (cropRegion && centerX !== undefined && centerY !== undefined) {
+                const cropSize = cropRegion.size;
+                const cropX = Math.max(0, Math.min(width - cropSize, Math.round(centerX - cropSize / 2)));
+                const cropY = Math.max(0, Math.min(height - cropSize, Math.round(centerY - cropSize / 2)));
+
+                const croppedCanvas = new OffscreenCanvas(cropSize, cropSize);
+                const croppedCtx = croppedCanvas.getContext('2d');
+                croppedCtx.drawImage(canvas, cropX, cropY, cropSize, cropSize, 0, 0, cropSize, cropSize);
+
+                return await croppedCanvas.convertToBlob({ type: 'image/png' });
+            }
+
+            return await canvas.convertToBlob({ type: 'image/png' });
+        } catch (err) {
+            addLog(`Preview creation failed: ${err.message}`);
+            return null;
+        }
     }
 
     // Process MJPEG AVI file with GPU acceleration
