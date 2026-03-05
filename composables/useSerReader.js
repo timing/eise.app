@@ -359,11 +359,16 @@ export function useSerReader() {
             colorID: header.colorID
         };
 
-        for (let idx = 0; idx < sampleIndices.length; idx++) {
-            const i = sampleIndices[idx];
-            const offset = 178 + (i * frameSize);
-            const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+        // Pre-load all sample frames in parallel for better I/O throughput
+        const frameBuffers = await Promise.all(
+            sampleIndices.map(i => {
+                const offset = 178 + (i * frameSize);
+                return file.slice(offset, offset + frameSize).arrayBuffer();
+            })
+        );
 
+        for (let idx = 0; idx < sampleIndices.length; idx++) {
+            const frameBuffer = frameBuffers[idx];
             const workerIndex = idx % numWorkers;
 
             const dataToWorker = {
@@ -487,21 +492,19 @@ export function useSerReader() {
             const batchEnd = Math.min(batchStart + batchSize, sampleIndices.length);
             const batchIndices = sampleIndices.slice(batchStart, batchEnd);
 
-            // Load frame data for this batch
-            const frames = [];
-            for (const i of batchIndices) {
-                const offset = 178 + (i * frameSize);
-                const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
-
-                // Convert to appropriate typed array based on pixel depth
-                let data;
-                if (header.pixelDepth > 8) {
-                    data = new Uint16Array(frameBuffer);
-                } else {
-                    data = new Uint8Array(frameBuffer);
-                }
-                frames.push({ data, index: i });
-            }
+            // Load frame data for this batch (parallel reads for better I/O throughput)
+            const frameBuffers = await Promise.all(
+                batchIndices.map(i => {
+                    const offset = 178 + (i * frameSize);
+                    return file.slice(offset, offset + frameSize).arrayBuffer();
+                })
+            );
+            const frames = frameBuffers.map((frameBuffer, idx) => {
+                const data = header.pixelDepth > 8
+                    ? new Uint16Array(frameBuffer)
+                    : new Uint8Array(frameBuffer);
+                return { data, index: batchIndices[idx] };
+            });
 
             try {
                 // GPU analyze for bounds detection
@@ -1251,23 +1254,29 @@ export function useSerReader() {
                     // Store frame centers for re-reading during stacking
                     const frameCenters = new Map(); // index -> {x, y}
 
-                    // Helper to load a batch of frames from file
+                    // Helper to load a batch of frames from file (parallel reads for better I/O throughput)
                     async function loadBatch(batchStart, batchEnd) {
-                        const frames = [];
+                        // Build list of valid frame indices
+                        const indices = [];
                         for (let i = batchStart; i < batchEnd; i++) {
                             const offset = 178 + (i * frameSize);
                             if (offset + frameSize > file.size) break;
-                            const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
-                            let data;
-                            if (header.pixelDepth > 8) {
-                                data = new Uint16Array(frameBuffer);
-                                // Don't scale here - GPU worker handles auto-stretch
-                            } else {
-                                data = new Uint8Array(frameBuffer);
-                            }
-                            frames.push({ data, index: i });
+                            indices.push(i);
                         }
-                        return frames;
+                        // Parallel file reads
+                        const frameBuffers = await Promise.all(
+                            indices.map(i => {
+                                const offset = 178 + (i * frameSize);
+                                return file.slice(offset, offset + frameSize).arrayBuffer();
+                            })
+                        );
+                        // Convert to typed arrays
+                        return frameBuffers.map((frameBuffer, idx) => {
+                            const data = header.pixelDepth > 8
+                                ? new Uint16Array(frameBuffer)
+                                : new Uint8Array(frameBuffer);
+                            return { data, index: indices[idx] };
+                        });
                     }
 
                     // Double-buffer: load next batch while GPU processes current

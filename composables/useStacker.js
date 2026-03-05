@@ -379,41 +379,58 @@ export function useStacker() {
                 if (isSerFile) {
                     // Handle multi-file SER (uses getFrame method)
                     if (frameReReader.fileType === 'ser-multi') {
-                        for (const frame of batchFrames) {
-                            const result = await frameReReader.getFrame(frame);
+                        // Parallel reads via getFrame
+                        const results = await Promise.all(
+                            batchFrames.map(frame => frameReReader.getFrame(frame))
+                        );
+                        for (let i = 0; i < results.length; i++) {
+                            const result = results[i];
                             if (result) {
                                 const data = frameReReader.header.pixelDepth > 8
                                     ? new Uint16Array(result.frameBuffer)
                                     : new Uint8Array(result.frameBuffer);
-                                frames.push({ data, index: frame.index });
+                                frames.push({ data, index: batchFrames[i].index });
                                 centers.push({ x: result.centerX, y: result.centerY });
                             }
                         }
                     } else {
-                        // Single-file SER
+                        // Single-file SER - parallel file reads
                         const { file, frameSize, header } = frameReReader;
-                        for (const frame of batchFrames) {
-                            const offset = 178 + (frame.index * frameSize);
-                            const frameBuffer = await file.slice(offset, offset + frameSize).arrayBuffer();
+                        const frameBuffers = await Promise.all(
+                            batchFrames.map(frame => {
+                                const offset = 178 + (frame.index * frameSize);
+                                return file.slice(offset, offset + frameSize).arrayBuffer();
+                            })
+                        );
+                        for (let i = 0; i < frameBuffers.length; i++) {
                             const data = header.pixelDepth > 8
-                                ? new Uint16Array(frameBuffer)
-                                : new Uint8Array(frameBuffer);
-                            frames.push({ data, index: frame.index });
-                            centers.push({ x: frame.centerX, y: frame.centerY });
+                                ? new Uint16Array(frameBuffers[i])
+                                : new Uint8Array(frameBuffers[i]);
+                            frames.push({ data, index: batchFrames[i].index });
+                            centers.push({ x: batchFrames[i].centerX, y: batchFrames[i].centerY });
                         }
                     }
                 } else if (isImageFile) {
-                    for (const frame of batchFrames) {
-                        // Support both pre-loaded rgbaFrames array and getFrame() function (for MJPEG)
-                        let rgba;
-                        if (frameReReader.getFrame) {
-                            rgba = await frameReReader.getFrame(frame);
-                        } else if (frameReReader.rgbaFrames) {
-                            rgba = frameReReader.rgbaFrames[frame.index];
+                    if (frameReReader.getFrame) {
+                        // Parallel reads via getFrame (for MJPEG)
+                        const results = await Promise.all(
+                            batchFrames.map(frame => frameReReader.getFrame(frame))
+                        );
+                        for (let i = 0; i < results.length; i++) {
+                            const rgba = results[i];
+                            if (rgba) {
+                                frames.push({ data: rgba.data, index: batchFrames[i].index });
+                                centers.push({ x: batchFrames[i].centerX, y: batchFrames[i].centerY });
+                            }
                         }
-                        if (rgba) {
-                            frames.push({ data: rgba.data, index: frame.index });
-                            centers.push({ x: frame.centerX, y: frame.centerY });
+                    } else if (frameReReader.rgbaFrames) {
+                        // Pre-loaded frames - no I/O needed
+                        for (const frame of batchFrames) {
+                            const rgba = frameReReader.rgbaFrames[frame.index];
+                            if (rgba) {
+                                frames.push({ data: rgba.data, index: frame.index });
+                                centers.push({ x: frame.centerX, y: frame.centerY });
+                            }
                         }
                     }
                 }

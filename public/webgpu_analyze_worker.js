@@ -10,6 +10,11 @@ let reinitializing = false; // Prevent concurrent reinit attempts
 let reinitAttempts = 0;
 const MAX_REINIT_ATTEMPTS = 3;
 
+// Concurrency control for detectCropAnalyzeBatch (limit to match double-buffering)
+const MAX_CONCURRENT_BATCHES = 2;
+let activeBatchCount = 0;
+let batchWaiters = [];
+
 // Forward declaration - will be set after init() is defined
 let reinitializeGpu = null;
 
@@ -50,6 +55,47 @@ async function safeMapAsync(buffer, mode) {
         }
         throw err;
     }
+}
+
+// Acquire a batch slot (waits if max concurrent batches reached)
+async function acquireBatchSlot() {
+    if (activeBatchCount < MAX_CONCURRENT_BATCHES) {
+        activeBatchCount++;
+        return;
+    }
+    // Max batches in flight - wait for one to complete
+    return new Promise(resolve => {
+        batchWaiters.push(resolve);
+    });
+}
+
+// Release a batch slot
+function releaseBatchSlot() {
+    activeBatchCount--;
+    // If someone is waiting, let them proceed
+    if (batchWaiters.length > 0 && activeBatchCount < MAX_CONCURRENT_BATCHES) {
+        activeBatchCount++;
+        const resolve = batchWaiters.shift();
+        resolve();
+    }
+}
+
+// Wait for all batches to complete (for cleanup)
+function waitForAllBatchesComplete() {
+    if (activeBatchCount === 0) {
+        return Promise.resolve();
+    }
+    return new Promise(resolve => {
+        // Add a special waiter that fires when count reaches 0
+        const checkComplete = () => {
+            if (activeBatchCount === 0) {
+                resolve();
+            } else {
+                batchWaiters.push(checkComplete);
+            }
+        };
+        batchWaiters.push(checkComplete);
+    });
 }
 
 // Helper to detect bit depth from frame data (fast check, no processing)
@@ -144,6 +190,7 @@ let momentsPipeline = null;
 let momentsReductionPipeline = null;
 let boundsPipeline = null;
 let boundsReductionPipeline = null;
+let centroidPipeline = null;
 
 // Cached buffers for reuse across batches
 let cachedAnalyzeBuffers = null;
@@ -1724,6 +1771,67 @@ fn main(
 }
 `;
 
+// Centroid computation shader - reduces partial bounds to final centroids
+// This eliminates the need to read back bounds to CPU before cropping
+const centroidShader = `
+struct Params {
+    srcWidth: u32,
+    srcHeight: u32,
+    batchSize: u32,
+    numWorkgroups: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> boundsPartial: array<u32>;  // 4 values per workgroup per frame
+@group(0) @binding(2) var<storage, read_write> centers: array<f32>;  // 2 floats per frame (x, y)
+@group(0) @binding(3) var<storage, read_write> boundsOutput: array<u32>;  // 4 u32 per frame: minX, minY, maxX, maxY
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let frameIdx = gid.x;
+    if (frameIdx >= params.batchSize) {
+        return;
+    }
+
+    // Reduce all workgroup results for this frame
+    var minX: u32 = params.srcWidth;
+    var minY: u32 = params.srcHeight;
+    var maxX: u32 = 0u;
+    var maxY: u32 = 0u;
+
+    for (var w: u32 = 0u; w < params.numWorkgroups; w = w + 1u) {
+        let idx = (frameIdx * params.numWorkgroups + w) * 4u;
+        let wMinX = boundsPartial[idx + 0u];
+        let wMinY = boundsPartial[idx + 1u];
+        let wMaxX = boundsPartial[idx + 2u];
+        let wMaxY = boundsPartial[idx + 3u];
+
+        minX = min(minX, wMinX);
+        minY = min(minY, wMinY);
+        maxX = max(maxX, wMaxX);
+        maxY = max(maxY, wMaxY);
+    }
+
+    // Write final bounds for later CPU readback
+    let boundsIdx = frameIdx * 4u;
+    boundsOutput[boundsIdx + 0u] = minX;
+    boundsOutput[boundsIdx + 1u] = minY;
+    boundsOutput[boundsIdx + 2u] = maxX;
+    boundsOutput[boundsIdx + 3u] = maxY;
+
+    // Compute and write centroid
+    let centerIdx = frameIdx * 2u;
+    if (maxX > minX && maxY > minY) {
+        centers[centerIdx + 0u] = f32(minX + maxX) / 2.0;
+        centers[centerIdx + 1u] = f32(minY + maxY) / 2.0;
+    } else {
+        // No valid object found - use frame center
+        centers[centerIdx + 0u] = f32(params.srcWidth) / 2.0;
+        centers[centerIdx + 1u] = f32(params.srcHeight) / 2.0;
+    }
+}
+`;
+
 // ============================================================
 // INITIALIZATION
 // ============================================================
@@ -1862,6 +1970,12 @@ async function init() {
     boundsReductionPipeline = device.createComputePipeline({
         layout: 'auto',
         compute: { module: boundsReductionModule, entryPoint: 'main' }
+    });
+
+    const centroidModule = await createShader(centroidShader, 'centroid');
+    centroidPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: centroidModule, entryPoint: 'main' }
     });
 
     isReady = true;
@@ -2452,7 +2566,7 @@ let cachedCropConfig = null;
  *
  * @param {number} bitDepth - 8 or 16, determines cropped RGBA buffer size
  */
-function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth = 8) {
+async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth = 8) {
     const srcPixelCount = srcWidth * srcHeight;
     const cropPixelCount = cropSize * cropSize;
     const numWorkgroups = Math.ceil(cropPixelCount / 256);
@@ -2463,6 +2577,7 @@ function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDept
     const requiredSizes = {
         inputSize: batchSize * srcPixelCount * 4,       // Raw Bayer (u32 per pixel)
         centersSize: batchSize * 8,                     // 2 floats per frame (x, y)
+        boundsOutputSize: batchSize * 16,               // 4 u32 per frame (minX, minY, maxX, maxY)
         croppedRgbaSize: batchSize * cropPixelCount * croppedRgbaBytesPerPixel, // Cropped RGBA output (16-bit = 4x)
         graySize: batchSize * cropPixelCount * 4,       // Grayscale float (always f32)
         laplacianSize: batchSize * cropPixelCount * 4,
@@ -2479,16 +2594,25 @@ function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDept
         cachedCropConfig.croppedRgbaSize >= requiredSizes.croppedRgbaSize &&
         cachedCropConfig.momentsSize >= requiredSizes.momentsSize &&
         cachedCropConfig.reductionSize >= requiredSizes.reductionSize &&
-        cachedCropConfig.momentsReductionSize >= requiredSizes.momentsReductionSize) {
+        cachedCropConfig.momentsReductionSize >= requiredSizes.momentsReductionSize &&
+        cachedCropConfig.boundsOutputSize >= requiredSizes.boundsOutputSize) {
         cachedCropConfig.bitDepth = bitDepth;
         return cachedCropBuffers;
     }
 
-    // Cleanup old buffers
+    // Need to recreate buffers - wait for other batches to finish first
+    // (current batch already has a slot, so activeBatchCount >= 1)
+    while (activeBatchCount > 1) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+
+    // Cleanup old buffers (safe now - only current batch is active)
     if (cachedCropBuffers) {
         Object.values(cachedCropBuffers).forEach(buf => {
             if (buf && buf.destroy) buf.destroy();
         });
+        // Keep activeBatchCount at 1 (current batch still has its slot)
+        batchWaiters = [];
     }
 
     cachedCropBuffers = {
@@ -2507,6 +2631,23 @@ function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDept
         centersBuffer: device.createBuffer({
             size: requiredSizes.centersSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        }),
+        boundsOutputBuffer: device.createBuffer({
+            size: requiredSizes.boundsOutputSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+        }),
+        // Double-buffering for bounds readback (matches concurrency limit)
+        boundsOutputReadback: device.createBuffer({
+            size: requiredSizes.boundsOutputSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        boundsOutputReadbackAlt: device.createBuffer({
+            size: requiredSizes.boundsOutputSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        centroidParamsBuffer: device.createBuffer({
+            size: 16,  // 4 u32s: srcWidth, srcHeight, batchSize, numWorkgroups
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         }),
         croppedRgbaBuffer: device.createBuffer({
             size: requiredSizes.croppedRgbaSize,
@@ -2612,7 +2753,10 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     // 16-bit SER needs 4x larger RGBA buffers for Float32 output
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
 
-    const buffers = getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
+    // Wait for a batch slot BEFORE getting buffers (prevents buffer destruction while in use)
+    await acquireBatchSlot();
+
+    const buffers = await getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
 
     // Upload centers
     const centersData = new Float32Array(batchSize * 2);
@@ -2819,6 +2963,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
     const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
     croppedReadbackBuf.unmap();
+    releaseBatchSlot();  // Allow next batch to proceed
 
     // Process results
     const results = [];
@@ -2931,11 +3076,14 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
 
+    // Wait for a batch slot BEFORE getting buffers (prevents buffer destruction while in use)
+    await acquireBatchSlot();
+
     // Get buffers for full-frame analysis
     const analyzeBuffers = getAnalyzeBuffers(batchSize, srcWidth, srcHeight, bitDepth);
 
     // Get buffers for cropped analysis (reuses some, creates others)
-    const cropBuffers = getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
+    const cropBuffers = await getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
 
     // ===== STEP 1: Upload raw data and demosaic to full RGBA =====
     if (needsDemosaic) {
@@ -3033,65 +3181,28 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     pass.dispatchWorkgroups(numWorkgroupsFull, batchSize, 1);
     pass.end();
 
-    encoder.copyBufferToBuffer(analyzeBuffers.boundsReductionBuffer, 0, analyzeBuffers.boundsReadback, 0, batchSize * numWorkgroupsFull * 16);
+    // ===== STEP 3: Compute centroids on GPU (no CPU sync) =====
+    queue.writeBuffer(cropBuffers.centroidParamsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, numWorkgroupsFull]));
+
+    const centroidBindGroup = device.createBindGroup({
+        layout: centroidPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: cropBuffers.centroidParamsBuffer } },
+            { binding: 1, resource: { buffer: analyzeBuffers.boundsReductionBuffer } },
+            { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },
+            { binding: 3, resource: { buffer: cropBuffers.boundsOutputBuffer } }
+        ]
+    });
+
+    pass = encoder.beginComputePass();
+    pass.setPipeline(centroidPipeline);
+    pass.setBindGroup(0, centroidBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
+    pass.end();
+
     queue.submit([encoder.finish()]);
 
-    // ===== STEP 3: Read back bounds and compute centers =====
-    await safeMapAsync(analyzeBuffers.boundsReadback, GPUMapMode.READ);
-    const boundsData = new Uint32Array(analyzeBuffers.boundsReadback.getMappedRange().slice(0));
-    analyzeBuffers.boundsReadback.unmap();
-
-    const centers = [];
-    const validFrameIndices = [];
-    const bounds = [];
-
-    for (let i = 0; i < batchSize; i++) {
-        let minX = srcWidth, minY = srcHeight, maxX = 0, maxY = 0;
-        for (let w = 0; w < numWorkgroupsFull; w++) {
-            const idx = (i * numWorkgroupsFull + w) * 4;
-            if (boundsData[idx] < minX) minX = boundsData[idx];
-            if (boundsData[idx + 1] < minY) minY = boundsData[idx + 1];
-            if (boundsData[idx + 2] > maxX) maxX = boundsData[idx + 2];
-            if (boundsData[idx + 3] > maxY) maxY = boundsData[idx + 3];
-        }
-
-        if (maxX > minX && maxY > minY) {
-            const centroidX = (minX + maxX) / 2;
-            const centroidY = (minY + maxY) / 2;
-            const bboxWidth = maxX - minX;
-            const bboxHeight = maxY - minY;
-            // Simple circularity from bounding box aspect ratio (1.0 = circle, lower = elongated)
-            const circularity = Math.min(bboxWidth, bboxHeight) / Math.max(bboxWidth, bboxHeight);
-            centers.push({ x: centroidX, y: centroidY });
-            validFrameIndices.push(i);
-            bounds.push({
-                x: minX, y: minY,
-                width: bboxWidth, height: bboxHeight,
-                centroidX, centroidY,
-                size: Math.max(bboxWidth, bboxHeight),
-                circularity
-            });
-        } else {
-            centers.push(null);
-            bounds.push(null);
-        }
-    }
-
-    // ===== STEP 4: Crop from demosaiced RGBA using detected centers =====
-    // Upload centers for valid frames
-    const centersData = new Float32Array(batchSize * 2);
-    for (let i = 0; i < batchSize; i++) {
-        if (centers[i]) {
-            centersData[i * 2] = centers[i].x;
-            centersData[i * 2 + 1] = centers[i].y;
-        } else {
-            centersData[i * 2] = srcWidth / 2;
-            centersData[i * 2 + 1] = srcHeight / 2;
-        }
-    }
-    queue.writeBuffer(cropBuffers.centersBuffer, 0, centersData);
-
-    // Set params for RGBA crop (reuse from analyzeBuffers.rgbaBuffer)
+    // ===== STEP 4: Crop from demosaiced RGBA using GPU-computed centers =====
     const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, 0, batchSize, 0, 0, 0]);
     queue.writeBuffer(cropBuffers.paramsBuffer, 0, cropParams);
 
@@ -3168,15 +3279,18 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     pass.end();
 
     // Select readback buffers based on generation (double-buffering)
-    const useAlt = (cachedCropConfig?.bufferGen || 0) % 2 === 1;
+    const bufferGen = cachedCropConfig?.bufferGen || 0;
+    const useAlt = bufferGen % 2 === 1;
     const readbackBuf = useAlt ? cropBuffers.readbackBufferAlt : cropBuffers.readbackBuffer;
     const croppedReadbackBuf = useAlt ? cropBuffers.croppedReadbackBufferAlt : cropBuffers.croppedReadbackBuffer;
+    const boundsReadbackBuf = useAlt ? cropBuffers.boundsOutputReadbackAlt : cropBuffers.boundsOutputReadback;
 
     // Copy results for readback
     // Cropped RGBA size: 4x larger for 16-bit (Float32 output)
     const croppedRgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
     encoder.copyBufferToBuffer(cropBuffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroupsCrop * 8);
     encoder.copyBufferToBuffer(cropBuffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * croppedRgbaBytesPerPixel);
+    encoder.copyBufferToBuffer(cropBuffers.boundsOutputBuffer, 0, boundsReadbackBuf, 0, batchSize * 16);
     queue.submit([encoder.finish()]);
     const tAfterSubmit = performance.now();
     dcaPrepTime += (tAfterSubmit - t0);
@@ -3184,10 +3298,11 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Rotate buffers for next batch
     rotateCropBuffers();
 
-    // ===== STEP 6: Read back results =====
+    // ===== STEP 6: Read back results (including bounds from GPU centroid shader) =====
     await Promise.all([
         safeMapAsync(readbackBuf, GPUMapMode.READ),
-        safeMapAsync(croppedReadbackBuf, GPUMapMode.READ)
+        safeMapAsync(croppedReadbackBuf, GPUMapMode.READ),
+        safeMapAsync(boundsReadbackBuf, GPUMapMode.READ)
     ]);
     const tAfterMapAsync = performance.now();
     dcaMapAsyncTime += (tAfterMapAsync - tAfterSubmit);
@@ -3198,8 +3313,41 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
     const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
     const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
+    // Read bounds computed by GPU centroid shader
+    const boundsData = new Uint32Array(boundsReadbackBuf.getMappedRange().slice(0));
     readbackBuf.unmap();
     croppedReadbackBuf.unmap();
+    boundsReadbackBuf.unmap();
+    releaseBatchSlot();  // Allow next batch to proceed
+
+    // Build bounds and centers arrays from GPU output
+    const bounds = [];
+    const centers = [];
+    for (let i = 0; i < batchSize; i++) {
+        const minX = boundsData[i * 4];
+        const minY = boundsData[i * 4 + 1];
+        const maxX = boundsData[i * 4 + 2];
+        const maxY = boundsData[i * 4 + 3];
+
+        if (maxX > minX && maxY > minY) {
+            const centroidX = (minX + maxX) / 2;
+            const centroidY = (minY + maxY) / 2;
+            const bboxWidth = maxX - minX;
+            const bboxHeight = maxY - minY;
+            const circularity = Math.min(bboxWidth, bboxHeight) / Math.max(bboxWidth, bboxHeight);
+            centers.push({ x: centroidX, y: centroidY });
+            bounds.push({
+                x: minX, y: minY,
+                width: bboxWidth, height: bboxHeight,
+                centroidX, centroidY,
+                size: Math.max(bboxWidth, bboxHeight),
+                circularity
+            });
+        } else {
+            centers.push(null);
+            bounds.push(null);
+        }
+    }
 
     // Build results
     const results = [];
@@ -3575,6 +3723,9 @@ self.addEventListener('message', async (e) => {
             cachedCropBuffers = null;
             cachedCropConfig = null;
         }
+        // Reset batch concurrency state
+        activeBatchCount = 0;
+        batchWaiters = [];
         self.postMessage({ type: 'cleanup-done' });
         return;
     }

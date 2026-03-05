@@ -1918,14 +1918,23 @@ export function useAviReader() {
             const batchEnd = Math.min(batchStart + BATCH_SIZE, sampleIndices.length);
             const batch = [];
 
-            // Decode JPEG frames for this batch
+            // Decode JPEG frames for this batch (parallel file reads)
+            const batchIndices = [];
             for (let i = batchStart; i < batchEnd; i++) {
-                const frameIdx = sampleIndices[i];
-                const frame = frameIndex[frameIdx];
-
+                batchIndices.push(i);
+            }
+            const jpegBuffers = await Promise.all(
+                batchIndices.map(i => {
+                    const frameIdx = sampleIndices[i];
+                    const frame = frameIndex[frameIdx];
+                    return file.slice(frame.offset, frame.offset + frame.size).arrayBuffer();
+                })
+            );
+            // Decode JPEGs (these are CPU-bound, could also parallelize but may not help much)
+            for (let j = 0; j < jpegBuffers.length; j++) {
+                const frameIdx = sampleIndices[batchIndices[j]];
                 try {
-                    const jpegData = await file.slice(frame.offset, frame.offset + frame.size).arrayBuffer();
-                    const rgba = await decodeJpegToRgba(new Uint8Array(jpegData), width, height);
+                    const rgba = await decodeJpegToRgba(new Uint8Array(jpegBuffers[j]), width, height);
                     batch.push({ data: rgba.data, index: frameIdx });
                 } catch (e) {
                     console.warn(`Failed to decode MJPEG frame ${frameIdx}:`, e);
@@ -2164,19 +2173,25 @@ export function useAviReader() {
             const progress = Math.round((batchStart / frameCount) * 50);
             emit('update-loading', { progress, current: batchStart, total: frameCount });
 
-            // Load batch of raw frames (store offsets for later use in stacking)
-            const batchFrames = [];
-            const batchOffsets = []; // Store offsets so stacking doesn't need frameIndex
+            // Load batch of raw frames in parallel (store offsets for later use in stacking)
             const needsFlip = aviHeader.needsVerticalFlip;
+            const batchIndices = [];
             for (let i = batchStart; i < batchEnd; i++) {
-                const frameInfo = frameIndex[i];
-                const rawBuffer = await file.slice(frameInfo.offset, frameInfo.offset + frameDataSize).arrayBuffer();
+                batchIndices.push(i);
+            }
+            const rawBuffers = await Promise.all(
+                batchIndices.map(i => {
+                    const frameInfo = frameIndex[i];
+                    return file.slice(frameInfo.offset, frameInfo.offset + frameDataSize).arrayBuffer();
+                })
+            );
+            const batchFrames = rawBuffers.map((rawBuffer, idx) => {
                 const frameData = needsFlip
                     ? flipFrameVertically(rawBuffer, width, height, 1)
                     : new Uint8Array(rawBuffer);
-                batchFrames.push({ index: i, data: frameData });
-                batchOffsets.push(frameInfo.offset);
-            }
+                return { index: batchIndices[idx], data: frameData };
+            });
+            const batchOffsets = batchIndices.map(i => frameIndex[i].offset);
 
             // Analyze batch with GPU
             const batchResults = await analyzeBayerBatchGpu(batchFrames, width, height, bayerChoice, cropRegion);
@@ -2292,8 +2307,10 @@ export function useAviReader() {
 
                 return {
                     frameBuffer,
+                    // Centers were computed during analysis on already-flipped data,
+                    // so they're already in the correct coordinate system - no transformation needed
                     centerX: frame.centerX,
-                    centerY: this.needsVerticalFlip ? (this.header.height - frame.centerY) : frame.centerY
+                    centerY: frame.centerY
                 };
             },
 
@@ -2395,12 +2412,17 @@ export function useAviReader() {
         const detectedCenters = [];
         const detectedSizes = [];
 
-        for (const idx of sampleIndices) {
-            const frameInfo = frameIndex[idx];
-            const rawBuffer = await file.slice(frameInfo.offset, frameInfo.offset + frameDataSize).arrayBuffer();
-
-            // Simple object detection on demosaiced frame
-            const result = await detectObjectInBayerFrame(rawBuffer, width, height, bayerChoice);
+        // Load and analyze sample frames in parallel
+        const rawBuffers = await Promise.all(
+            sampleIndices.map(idx => {
+                const frameInfo = frameIndex[idx];
+                return file.slice(frameInfo.offset, frameInfo.offset + frameDataSize).arrayBuffer();
+            })
+        );
+        const results = await Promise.all(
+            rawBuffers.map(rawBuffer => detectObjectInBayerFrame(rawBuffer, width, height, bayerChoice))
+        );
+        for (const result of results) {
             if (result) {
                 detectedCenters.push({ x: result.centerX, y: result.centerY });
                 detectedSizes.push(result.size);
