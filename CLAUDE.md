@@ -72,6 +72,11 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 - AVI: Direct parsing with FourCC detection
 - Images: PNG, JPG, WebP, AVIF (direct), others (FFmpeg converted)
 
+**QualitySelector Preview Differences (TODO: unify later)**:
+- **SER path**: Stores `uint8Buffer` with each frame during analysis for instant preview in QualitySelector
+- **AVI raw Bayer path**: Uses on-demand loading via `frameReReader.getPreviewBlob()` - reads frame from disk and demosaics when user selects it in QualitySelector
+- The on-demand approach is more memory-efficient but slightly slower. Consider unifying both paths to use the same approach.
+
 **Event Bus Pattern**: Cross-component communication via `composables/eventBus.js`. Key events: `set-caption`, `update-loading`, `stop-loading`, `upload-error`, `postProcessing`, `stacking-started`, `stacked-image-ready`.
 
 **Shared Processing State**: `composables/useProcessingState.js` stores shared state accessible from any composable without passing through function parameters. Used for:

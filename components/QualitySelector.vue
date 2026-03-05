@@ -66,6 +66,10 @@ const props = defineProps({
 	frames: {
 		type: Array,
 		required: true
+	},
+	frameReReader: {
+		type: Object,
+		default: null
 	}
 });
 
@@ -252,6 +256,28 @@ async function drawPreview() {
 			const imageData = new ImageData(uint8Data, frame.width, frame.height);
 			tempCtx.putImageData(imageData, 0, 0);
 			img = tempCanvas;
+		} else if (props.frameReReader?.getPreviewBlob && frame.index !== undefined) {
+			// Load preview on-demand from disk via frameReReader
+			const blob = await props.frameReReader.getPreviewBlob(frame.index);
+			if (blob) {
+				img = new Image();
+				url = URL.createObjectURL(blob);
+				await new Promise((resolve, reject) => {
+					img.onload = resolve;
+					img.onerror = () => reject(new Error('Failed to load on-demand preview'));
+					img.src = url;
+				});
+			} else {
+				// Failed to load from disk
+				canvas.width = 200;
+				canvas.height = 50;
+				ctx.fillStyle = '#333';
+				ctx.fillRect(0, 0, 200, 50);
+				ctx.fillStyle = '#999';
+				ctx.font = '12px sans-serif';
+				ctx.fillText('Preview load failed', 20, 30);
+				return;
+			}
 		} else {
 			// No preview data available
 			canvas.width = 200;

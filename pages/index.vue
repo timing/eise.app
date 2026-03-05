@@ -6,7 +6,7 @@
 
 		<FileUploader v-show="!isProcessing && !isSelectingQuality" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
 		<ColorProfileSelector v-show="isSelectingColorProfile" />
-		<QualitySelector v-show="isSelectingQuality" :frames="qualityFrames" @threshold-selected="handleThresholdSelected" />
+		<QualitySelector v-show="isSelectingQuality" :frames="qualityFrames" :frameReReader="qualityFrameReReader" @threshold-selected="handleThresholdSelected" />
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="isProcessing && !isSelectingColorProfile && !isSelectingQuality"
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
 
@@ -44,6 +44,7 @@ const isProcessing = inject('isProcessing');
 const isSelectingColorProfile = inject('isSelectingColorProfile');
 const isSelectingQuality = inject('isSelectingQuality');
 const qualityFrames = inject('qualityFrames');
+const qualityFrameReReader = inject('qualityFrameReReader');
 const showWebGPUChoice = inject('showWebGPUChoice');
 
 const handlePostProcessing = inject('handlePostProcessing');

@@ -2000,7 +2000,13 @@ export function useAviReader() {
 
             for (const result of batchResults) {
                 if (result.sharpness > 0) {
-                    allAnalyzedFrames.push({ index: result.index, sharpness: result.sharpness, centerX: result.centerX, centerY: result.centerY });
+                    allAnalyzedFrames.push({
+                        index: result.index,
+                        sharpness: result.sharpness,
+                        centerX: result.centerX,
+                        centerY: result.centerY,
+                        circularity: result.circularity || 0
+                    });
                     frameCenters.set(result.index, { x: result.centerX, y: result.centerY });
                     if (!bestFrameSoFar || result.sharpness > bestFrameSoFar.sharpness) {
                         bestFrameSoFar = { index: result.index, sharpness: result.sharpness, centerX: result.centerX, centerY: result.centerY };
@@ -2103,6 +2109,23 @@ export function useAviReader() {
                     frameIndices.map(idx => this.getFrame(idx))
                 );
                 return results.filter(r => r !== null);
+            },
+
+            // Generate preview blob on-demand (for QualitySelector)
+            async getPreviewBlob(frameIdx) {
+                const frameData = await this.getFrame(frameIdx);
+                if (!frameData) return null;
+
+                const blob = await createBayerPreviewBlob(
+                    frameData.frameBuffer,
+                    this.header.width,
+                    this.header.height,
+                    this.bayerChoice,
+                    this.cropRegion,
+                    frameData.centerX,
+                    frameData.centerY
+                );
+                return blob;
             }
         };
 
@@ -2270,7 +2293,8 @@ export function useAviReader() {
                     index: frame.index,
                     sharpness: result.sharpness || 0,
                     centerX: result.centerX ?? width / 2,
-                    centerY: result.centerY ?? height / 2
+                    centerY: result.centerY ?? height / 2,
+                    circularity: result.circularity || 0
                 };
             });
         } catch (err) {

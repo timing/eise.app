@@ -69,6 +69,7 @@ provide('isProcessing', isProcessing);
 provide('isSelectingColorProfile', isSelectingColorProfile);
 provide('isSelectingQuality', isSelectingQuality);
 provide('qualityFrames', qualityFrames);
+provide('qualityFrameReReader', qualityFrameReReader);
 provide('showWebGPUChoice', showWebGPUChoice);
 provide('croppedSerData', croppedSerData);
 
