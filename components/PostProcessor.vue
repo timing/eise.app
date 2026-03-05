@@ -93,7 +93,7 @@
 					</div>
 					<div>
 						<label>Amount:</label>
-						<input type="range" min="0" max="10" step="0.1" v-model="usmAmount" @input="applyProcessing"/>
+						<input type="range" min="0" max="20" step="0.1" v-model="usmAmount" @input="applyProcessing"/>
 						<span>{{ usmAmount }}</span>
 					</div>
 					<div>
@@ -111,7 +111,7 @@
 					</div>
 					<div>
 						<label>Amount:</label>
-						<input type="range" min="0" max="100" step="0.1" v-model="waveletsAmount" @input="applyProcessing"/>
+						<input type="range" min="0" max="50" step="0.1" v-model="waveletsAmount" @input="applyProcessing"/>
 						<span>{{ waveletsAmount }}</span>
 					</div>
 					<div>
