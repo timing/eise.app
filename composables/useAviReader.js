@@ -7,121 +7,19 @@ import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { useLiteMemoryLimits } from '@/composables/useLiteMemoryLimits';
 
-/**
- * Determines if an AVI FourCC represents an "easy" (uncompressed/raw) format.
- * @param {string} fourCC The FourCC code.
- * @returns {boolean} True if easy, false otherwise.
- */
-function isEasyAviFourCC(fourCC) {
-    if (!fourCC) return false;
-    // Null fourCC (\0\0\0\0) is used by FFmpeg rawvideo for uncompressed BGR - treat as DIB
-    if (fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00') return true;
-    const easyFourCCs = ['DIB ', 'Y800', 'YUY2', 'UYVY', 'RGB ', 'RAW ']; // 'RGB ' and 'RAW ' are sometimes used
-    return easyFourCCs.includes(fourCC.toUpperCase());
-}
-
-/**
- * Check if FourCC is MJPEG (Motion JPEG)
- */
-function isMjpegFourCC(fourCC) {
-    if (!fourCC) return false;
-    return fourCC.toUpperCase() === 'MJPG';
-}
-
-/**
- * Flip a raw frame buffer vertically (for DIB bottom-up storage)
- * @param {ArrayBuffer|Uint8Array} buffer - Raw frame data
- * @param {number} width - Frame width in pixels
- * @param {number} height - Frame height in pixels
- * @param {number} bytesPerPixel - Bytes per pixel (1 for 8-bit, 2 for 16-bit)
- * @returns {Uint8Array} - Flipped frame data
- */
-function flipFrameVertically(buffer, width, height, bytesPerPixel = 1) {
-    const src = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-    const dst = new Uint8Array(src.length);
-    const rowBytes = width * bytesPerPixel;
-
-    for (let y = 0; y < height; y++) {
-        const srcOffset = y * rowBytes;
-        const dstOffset = (height - 1 - y) * rowBytes;
-        dst.set(src.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
-    }
-
-    return dst;
-}
-
-/**
- * Parse AVI frame index from movi list - builds array of {offset, size} for each video frame
- * Scans chunk headers to find actual video frames, skipping audio and other chunks.
- * Works for all AVI formats (MJPEG, DIB, Y800, etc.) - not just variable-size formats.
- */
-async function parseAviFrameIndex(file, moviListOffset, moviListSize, maxFrames = -1) {
-    const frameIndex = [];
-    const chunkHeaderSize = 8; // 4 bytes FourCC + 4 bytes size
-    const fileSize = file.size;
-
-    // For large AVI files with AVIX extension, scan entire file instead of just first movi chunk
-    // This handles OpenDML/AVI 2.0 files that split data across multiple RIFF chunks
-    const scanWholeFile = fileSize > moviListOffset + moviListSize + 1024;
-
-    let position = moviListOffset;
-    const scanEnd = scanWholeFile ? fileSize : moviListOffset + moviListSize;
-
-    // Log scan range for debugging large file issues
-    if (scanWholeFile) {
-        console.log(`Frame scanner: scanning entire file (${(fileSize / 1024 / 1024).toFixed(0)}MB)`);
-    }
-
-    while (position < scanEnd - chunkHeaderSize) {
-        if (maxFrames > 0 && frameIndex.length >= maxFrames) break;
-
-        // Read chunk header
-        const headerSlice = await file.slice(position, position + chunkHeaderSize).arrayBuffer();
-        const headerView = new DataView(headerSlice);
-
-        const chunkId = String.fromCharCode(
-            headerView.getUint8(0),
-            headerView.getUint8(1),
-            headerView.getUint8(2),
-            headerView.getUint8(3)
-        );
-        const chunkSize = headerView.getUint32(4, true);
-
-        // Sanity check chunk size
-        if (chunkSize > fileSize - position || chunkSize > 100 * 1024 * 1024) {
-            // Invalid chunk size - might be RIFF/LIST header, skip 4 bytes and retry
-            if (chunkId === 'RIFF' || chunkId === 'LIST') {
-                // Skip RIFF/LIST type field (4 bytes after size)
-                position += 12;
-                continue;
-            }
-            // Unknown large chunk, skip to next position
-            position += 4;
-            continue;
-        }
-
-        // Video chunks are typically '00dc', '01dc', etc. (d=compressed video)
-        // or '00db', '01db' (d=uncompressed video)
-        if (chunkId.match(/^\d\ddc$/i) || chunkId.match(/^\d\ddb$/i)) {
-            frameIndex.push({
-                offset: position + chunkHeaderSize,
-                size: chunkSize
-            });
-        }
-
-        // Move to next chunk (size is padded to word boundary)
-        const paddedSize = (chunkSize + 1) & ~1;
-        position += chunkHeaderSize + paddedSize;
-
-        // Log progress every 5000 frames
-        if (frameIndex.length % 5000 === 0 && frameIndex.length > 0) {
-            console.log(`Frame scanner: ${frameIndex.length} frames found...`);
-        }
-    }
-
-    return frameIndex;
-}
-
+// Import from new parser module
+import {
+    isEasyAviFourCC,
+    isMjpegFourCC,
+    isUncompressedBGR,
+    is8bitRawFormat,
+    flipFrameVertically,
+    parseAviFrameIndex,
+    parseAviHeader,
+    detectBayerFromStrd,
+    calculateFrameDataSize,
+    opencvToGpuPattern,
+} from '@/composables/useAviParser';
 
 // Convert raw AVI frame data to RGBA for canvas display - no OpenCV needed
 // Supports DIB (BGR24), Y800 (grayscale/Bayer), YUY2/UYVY
@@ -130,11 +28,9 @@ async function renderAviFrameToBlob(canvas, frameDataBuffer, aviHeader, fourCC, 
     const src = new Uint8Array(frameDataBuffer);
     const rgba = new Uint8ClampedArray(width * height * 4);
 
-    // Null fourCC from FFmpeg rawvideo is also uncompressed BGR
-    const isUncompressedBGR = fourCC === 'DIB ' || fourCC === 'RGB ' || fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00' || !fourCC;
-
-    // Check for 8-bit DIB (raw Bayer or grayscale) - same handling as Y800
-    const is8bitRaw = (fourCC === 'Y800') || (isUncompressedBGR && bpp === 8);
+    // Use imported helper functions from useAviParser
+    const isBGR = isUncompressedBGR(fourCC);
+    const is8bitRaw = is8bitRawFormat(fourCC, bpp);
 
     if (is8bitRaw) {
         if (bayerChoice && bayerChoice !== "MONO") {
@@ -147,7 +43,7 @@ async function renderAviFrameToBlob(canvas, frameDataBuffer, aviHeader, fourCC, 
                 rgba[j + 3] = 255;
             }
         }
-    } else if (isUncompressedBGR) {
+    } else if (isBGR) {
         // BGR24 → RGBA (swap B and R)
         for (let i = 0, j = 0; i < src.length; i += 3, j += 4) {
             rgba[j] = src[i + 2];     // R ← B
@@ -850,19 +746,10 @@ export function useAviReader() {
             }
 
             addLog("Header parsed successfully. Calculating frame data size...");
-            let frameDataSize = 0;
-            // Null fourCC from FFmpeg rawvideo is uncompressed BGR like DIB
-            const isUncompressedBGR = fourCC === 'DIB ' || fourCC === 'RGB ' || fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00';
-            if (isUncompressedBGR) {
-                frameDataSize = width * height * (bpp / 8);
-            } else if (fourCC === 'Y800') {
-                frameDataSize = width * height;
-            } else if (fourCC === 'YUY2' || fourCC === 'UYVY') {
-                frameDataSize = width * height * 2;
-            } else {
-                // Unsupported FourCC - return header anyway so caller can decide to fallback
+            // Use imported helper for frame size calculation
+            let frameDataSize = calculateFrameDataSize(fourCC, width, height, bpp);
+            if (frameDataSize === -1) {
                 addLog(`FourCC '${fourCC}' is compressed/unsupported for direct rendering.`);
-                frameDataSize = -1; // Signal that frame size is unknown
             }
             if (frameDataSize > 0) {
                 addLog(`Calculated frameDataSize: ${frameDataSize}`);
@@ -917,7 +804,7 @@ export function useAviReader() {
             }
 
             // If no Bayer pattern found in strd, default for raw 8-bit formats
-            const is8bitRaw = (fourCC === 'Y800') || (isUncompressedBGR && bpp === 8);
+            const is8bitRaw = is8bitRawFormat(fourCC, bpp);
             if (bayerChoice === "MONO" && is8bitRaw && (width % 2 === 0 && height % 2 === 0)) {
                 // Default to RGGB = BG (OpenCV's inverted naming) - common for planetary cameras
                 bayerChoice = 'COLOR_BayerBG2RGB';
@@ -973,10 +860,9 @@ export function useAviReader() {
             return await readMjpegAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode);
         }
 
-        // Check for 8-bit raw Bayer data (Y800 or 8-bit DIB)
+        // Check for 8-bit raw Bayer data (Y800 or 8-bit DIB) using imported helper
         const fourCC = aviHeader.fourCC;
-        const isUncompressedBGR = fourCC === 'DIB ' || fourCC === 'RGB ' || fourCC === '\u0000\u0000\u0000\u0000' || fourCC === '\x00\x00\x00\x00';
-        const is8bitRaw = (fourCC === 'Y800') || (isUncompressedBGR && aviHeader.bpp === 8);
+        const is8bitRaw = is8bitRawFormat(fourCC, aviHeader.bpp);
 
         if (is8bitRaw) {
             // 8-bit raw Bayer uses SER-like two-pass flow with color selector + VNG demosaic

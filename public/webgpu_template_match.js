@@ -891,7 +891,7 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
 
 /**
  * Get or create cached buffers for batch matching
- * Note: framesBuffer uses packed u8 format (4 pixels per u32) for 4x memory savings
+ * Note: framesBuffer uses packed u8 grayscale (4 pixels per u32) for 4x memory savings
  */
 function getBatchBuffers(numFrames, numAPs, templateSize, frameSize) {
     const align4 = (size) => Math.ceil(size / 4) * 4;
@@ -1004,7 +1004,7 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
     }
 
     // Pack all frame grayscale data as u8 into u32 (4 pixels per u32)
-    // This gives 4x memory savings compared to f32 - see shader comment for why 8-bit is sufficient
+    // Grayscale is pre-computed by GPU demosaic shader for efficiency
     const packedSize = Math.ceil(numFrames * frameSize / 4);
     const allFrameGraysPacked = new Uint32Array(packedSize);
     for (let f = 0; f < numFrames; f++) {

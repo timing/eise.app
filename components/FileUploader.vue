@@ -693,11 +693,29 @@ async function processFiles(files) {
 			}
 		}
 
-		// Handle SER files with direct reader (not in lite mode - lite mode uses FFmpeg)
+		// Handle SER files with unified debayer reader (not in lite mode - lite mode uses FFmpeg)
 		if (fileToProcess.name.endsWith('.ser') && !liteMode.value) {
 			emit('processing-started');
-			const { readSerFile } = useSerReader();
-			await readSerFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value, useVngDemosaic.value);
+
+			// Use new unified debayer reader
+			const { useSerParser } = await import('@/composables/useSerParser');
+			const { useDebayerReader } = await import('@/composables/useDebayerReader');
+
+			const parser = useSerParser();
+			await parser.init(fileToProcess);
+
+			const reader = useDebayerReader();
+			await reader.init(fileToProcess, parser);
+			await reader.processFile({
+				maxFrames: effectiveMaxFrames.value,
+				manualThreshold: effectiveQualityMode.value === 'manual',
+				cropMarginPercent: effectiveCropMargin.value,
+				stackPercentage: effectiveStackPercentage.value,
+				drizzleScale: effectiveDrizzleScale.value,
+				noiseRobustAlignment: effectiveNoiseRobust.value,
+				surfaceMode: surfaceMode.value,
+				useVngDemosaic: useVngDemosaic.value,
+			});
 			return;
 		}
 
@@ -716,8 +734,37 @@ async function processFiles(files) {
 			const formatInfo = await checkAviFormat(headerBuffer, fileToProcess.size);
 
 			if (formatInfo.isSupported) {
-				// Can process directly - readAviFile handles both uncompressed and MJPEG
-				// Pass pre-parsed header to avoid parsing twice
+				// Check if it's 8-bit raw Bayer that needs the unified debayer reader
+				const { is8bitRawFormat } = await import('@/composables/useAviParser');
+				const is8bitRaw = is8bitRawFormat(formatInfo.aviHeader.fourCC, formatInfo.aviHeader.bpp);
+
+				if (is8bitRaw) {
+					// Route 8-bit raw Bayer AVI through unified debayer reader
+					emit('processing-started');
+					addLog('8-bit raw Bayer AVI detected. Using unified debayer reader.');
+
+					const { useAviParser } = await import('@/composables/useAviParser');
+					const { useDebayerReader } = await import('@/composables/useDebayerReader');
+
+					const parser = useAviParser();
+					await parser.init(fileToProcess);
+
+					const reader = useDebayerReader();
+					await reader.init(fileToProcess, parser);
+					await reader.processFile({
+						maxFrames: effectiveMaxFrames.value,
+						manualThreshold: effectiveQualityMode.value === 'manual',
+						cropMarginPercent: effectiveCropMargin.value,
+						stackPercentage: effectiveStackPercentage.value,
+						drizzleScale: effectiveDrizzleScale.value,
+						noiseRobustAlignment: effectiveNoiseRobust.value,
+						surfaceMode: surfaceMode.value,
+						useVngDemosaic: useVngDemosaic.value,
+					});
+					return;
+				}
+
+				// Non-Bayer AVI: use old reader for uncompressed BGR or MJPEG
 				emit('processing-started');
 				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, useVngDemosaic.value, formatInfo.aviHeader);
 				return;

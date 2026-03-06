@@ -1,5 +1,5 @@
 // WebGPU Batched Frame Analysis Worker
-// Handles: Demosaic, Sharpness (Laplacian), Circularity (Moments)
+// Handles: Demosaic, Sharpness (Tenengrad), Circularity (Moments)
 console.log('webgpu_analyze_worker.js loaded (v1)');
 
 let device = null;
@@ -98,6 +98,69 @@ function waitForAllBatchesComplete() {
     });
 }
 
+// ===== GPU TIMING INSTRUMENTATION =====
+// Tracks time between GPU submissions to identify CPU bottlenecks
+let gpuTimingEnabled = true;  // Set to false to disable logging
+let lastGpuSubmit = 0;
+let lastGpuPhase = '';
+let gpuTimingStats = {
+    submits: [],
+    phases: {}
+};
+
+function logGpuSubmit(label) {
+    if (!gpuTimingEnabled) return;
+    const now = performance.now();
+    if (lastGpuSubmit > 0) {
+        const gap = now - lastGpuSubmit;
+        console.log(`[GPU] ${label}: ${gap.toFixed(1)}ms since "${lastGpuPhase}"`);
+        gpuTimingStats.submits.push({ from: lastGpuPhase, to: label, gap });
+    }
+    lastGpuSubmit = now;
+    lastGpuPhase = label;
+}
+
+function logGpuPhase(phase, duration) {
+    if (!gpuTimingEnabled) return;
+    if (!gpuTimingStats.phases[phase]) {
+        gpuTimingStats.phases[phase] = { count: 0, total: 0, max: 0 };
+    }
+    const stats = gpuTimingStats.phases[phase];
+    stats.count++;
+    stats.total += duration;
+    stats.max = Math.max(stats.max, duration);
+}
+
+function printGpuTimingSummary() {
+    if (!gpuTimingEnabled) return;
+    console.log('\n===== GPU TIMING SUMMARY =====');
+
+    // Analyze gaps (CPU bottlenecks)
+    if (gpuTimingStats.submits.length > 0) {
+        const gaps = gpuTimingStats.submits.map(s => s.gap);
+        const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+        const maxGap = Math.max(...gaps);
+        console.log(`Submit gaps: avg=${avgGap.toFixed(1)}ms, max=${maxGap.toFixed(1)}ms, count=${gaps.length}`);
+
+        // Show worst offenders
+        const sorted = [...gpuTimingStats.submits].sort((a, b) => b.gap - a.gap).slice(0, 3);
+        console.log('Longest gaps:');
+        sorted.forEach(s => console.log(`  ${s.gap.toFixed(1)}ms: ${s.from} → ${s.to}`));
+    }
+
+    // Show phase durations
+    console.log('\nPhase durations:');
+    for (const [phase, stats] of Object.entries(gpuTimingStats.phases)) {
+        console.log(`  ${phase}: avg=${(stats.total/stats.count).toFixed(1)}ms, max=${stats.max.toFixed(1)}ms, count=${stats.count}`);
+    }
+    console.log('==============================\n');
+
+    // Reset for next run
+    gpuTimingStats = { submits: [], phases: {} };
+    lastGpuSubmit = 0;
+    lastGpuPhase = '';
+}
+
 // Helper to detect bit depth from frame data (fast check, no processing)
 function detectBitDepth(frames) {
     return frames[0]?.data instanceof Uint16Array ? 16 : 8;
@@ -182,9 +245,11 @@ function prepareBayerData(frames, pixelCount, skipStretch = false) {
 let demosaicPipeline = null;
 let demosaicCropPipeline = null;
 let demosaicGrayPipeline = null;  // Fused demosaic + grayscale
+let demosaicGrayOnlyPipeline = null;  // Grayscale-only demosaic (fast, for analysis)
 let rgbaCropPipeline = null;
 let grayscalePipeline = null;
-let laplacianPipeline = null;
+let tenengradPipeline = null;
+let offsetTenengradPipeline = null;  // Reads from full-frame with per-frame offsets (no crop needed)
 let reductionPipeline = null;
 let momentsPipeline = null;
 let momentsReductionPipeline = null;
@@ -195,6 +260,15 @@ let centroidPipeline = null;
 // Cached buffers for reuse across batches
 let cachedAnalyzeBuffers = null;
 let cachedAnalyzeConfig = null;
+
+// Pipelined upload state - allows uploading next batch while GPU processes current
+let pipelinedUpload = {
+    ready: false,           // True if data is pre-uploaded in alternate buffer
+    useAltBuffer: false,    // Which buffer has the pre-uploaded data
+    bayerData: null,        // The prepared Bayer data (already packed)
+    scale: 1.0,             // Scale factor for the pre-uploaded data
+    batchSize: 0,           // Batch size of pre-uploaded data
+};
 
 // ============================================================
 // WGSL SHADERS
@@ -613,6 +687,7 @@ struct CropCenter {
 @group(0) @binding(1) var<storage, read> input: array<u32>;      // Raw Bayer data
 @group(0) @binding(2) var<storage, read> centers: array<CropCenter>;  // Per-frame centers
 @group(0) @binding(3) var<storage, read_write> output: array<u32>;    // Cropped RGBA output
+@group(0) @binding(4) var<storage, read_write> grayOutput: array<atomic<u32>>;  // Packed grayscale (4 pixels per u32)
 
 fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
     let pixelIdx = frameIdx * params.srcWidth * params.srcHeight + y * params.srcWidth + x;
@@ -959,6 +1034,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
 
+    // Compute grayscale (Rec. 601 luma) - used for template matching
+    let gray = u32(clamp((0.299 * rgb.x + 0.587 * rgb.y + 0.114 * rgb.z) * 255.0, 0.0, 255.0));
+
+    // Pack grayscale: 4 pixels per u32, use atomic OR since threads write to same u32
+    let grayPackedIdx = outIdx >> 2u;           // outIdx / 4
+    let grayByteOffset = (outIdx & 3u) << 3u;   // (outIdx % 4) * 8
+    atomicOr(&grayOutput[grayPackedIdx], gray << grayByteOffset);
+
     if (params.bitDepth == 16u) {
         // 16-bit: output Float32 RGBA (4 u32s per pixel via bitcast)
         let baseIdx = outIdx * 4u;
@@ -999,6 +1082,7 @@ struct CropCenter {
 @group(0) @binding(1) var<storage, read> input: array<u32>;       // Source RGBA
 @group(0) @binding(2) var<storage, read> centers: array<CropCenter>;
 @group(0) @binding(3) var<storage, read_write> output: array<u32>; // Cropped RGBA
+@group(0) @binding(4) var<storage, read_write> grayOutput: array<atomic<u32>>;  // Packed grayscale (4 pixels per u32)
 
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -1021,7 +1105,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let srcIdx = frameIdx * params.srcWidth * params.srcHeight + srcY * params.srcWidth + srcX;
     let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
 
-    output[outIdx] = input[srcIdx];
+    let rgba = input[srcIdx];
+    output[outIdx] = rgba;
+
+    // Compute grayscale and pack (4 pixels per u32, use atomic OR)
+    let r = f32(rgba & 0xFFu);
+    let g = f32((rgba >> 8u) & 0xFFu);
+    let b = f32((rgba >> 16u) & 0xFFu);
+    let gray = u32(clamp(0.299 * r + 0.587 * g + 0.114 * b, 0.0, 255.0));
+
+    let grayPackedIdx = outIdx >> 2u;
+    let grayByteOffset = (outIdx & 3u) << 3u;
+    atomicOr(&grayOutput[grayPackedIdx], gray << grayByteOffset);
 }
 `;
 
@@ -1435,8 +1530,69 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-// Tenengrad shader - Sobel gradient magnitude squared (matches CPU sharpness metric)
-const laplacianShader = `
+// Grayscale-only demosaic shader - fast analysis without color output
+// Averages 2x2 Bayer blocks to get luminance - no pattern knowledge needed
+const demosaicGrayOnlyShader = `
+struct Params {
+    width: u32,
+    height: u32,
+    batchSize: u32,
+    bayerPattern: u32,
+    _pad0: u32,
+    bitDepth: u32,
+    scale: f32,
+    _pad3: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> input: array<u32>;
+@group(0) @binding(2) var<storage, read_write> grayOutput: array<f32>;
+
+fn sampleRaw(frameIdx: u32, x: u32, y: u32) -> f32 {
+    let cx = min(x, params.width - 1u);
+    let cy = min(y, params.height - 1u);
+    let pixelIdx = frameIdx * params.width * params.height + cy * params.width + cx;
+
+    if (params.bitDepth == 8u) {
+        let u32Idx = pixelIdx / 4u;
+        let bytePos = pixelIdx % 4u;
+        let packed = input[u32Idx];
+        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
+        return f32(rawValue) / 255.0;
+    } else {
+        let u32Idx = pixelIdx / 2u;
+        let halfPos = pixelIdx % 2u;
+        let packed = input[u32Idx];
+        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
+        return min(1.0, f32(rawValue) * params.scale / 65535.0);
+    }
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    let frameIdx = gid.z;
+
+    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
+        return;
+    }
+
+    // Average local 2x2 neighborhood: always contains 1R + 2G + 1B = approximate luminance
+    // Each pixel gets its own average (not block-aligned) to preserve detail
+    let gray = (sampleRaw(frameIdx, x, y) + sampleRaw(frameIdx, x+1u, y) +
+                sampleRaw(frameIdx, x, y+1u) + sampleRaw(frameIdx, x+1u, y+1u)) * 0.25;
+
+    let outIdx = frameIdx * params.width * params.height + y * params.width + x;
+    grayOutput[outIdx] = gray;
+}
+`;
+
+// Combined sharpness shader - computes both Tenengrad and Laplacian
+// Tenengrad: Sobel Gx² + Gy² (first derivative, good for edges)
+// Laplacian: Second derivative (good for fine texture/detail)
+// Combined via geometric mean for robust sharpness ranking
+const tenengradShader = `
 struct Params {
     width: u32,
     height: u32,
@@ -1446,8 +1602,8 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> input: array<f32>;  // Grayscale
-@group(0) @binding(2) var<storage, read_write> laplacian: array<f32>;  // Gradient magnitude squared
-@group(0) @binding(3) var<storage, read_write> laplacianSq: array<f32>;  // Not used but kept for compatibility
+@group(0) @binding(2) var<storage, read_write> tenengrad: array<f32>;  // Sobel gradient magnitude squared
+@group(0) @binding(3) var<storage, read_write> laplacian: array<f32>;  // Laplacian response
 
 fn sampleGray(frameIdx: u32, x: i32, y: i32) -> f32 {
     let cx = clamp(x, 0, i32(params.width) - 1);
@@ -1479,15 +1635,86 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
            +  1.0 * sampleGray(frameIdx, ix-1, iy+1) + 2.0 * sampleGray(frameIdx, ix, iy+1) + 1.0 * sampleGray(frameIdx, ix+1, iy+1);
 
     // Tenengrad = Gx² + Gy² (gradient magnitude squared)
-    let tenengrad = gx * gx + gy * gy;
+    let tenengradVal = gx * gx + gy * gy;
+
+    // Laplacian kernel: [0,1,0], [1,-4,1], [0,1,0]
+    let lap = sampleGray(frameIdx, ix, iy-1)
+            + sampleGray(frameIdx, ix-1, iy) - 4.0 * sampleGray(frameIdx, ix, iy) + sampleGray(frameIdx, ix+1, iy)
+            + sampleGray(frameIdx, ix, iy+1);
 
     let idx = frameIdx * params.width * params.height + y * params.width + x;
-    laplacian[idx] = tenengrad;
-    laplacianSq[idx] = 0.0;  // Not needed for Tenengrad
+    tenengrad[idx] = tenengradVal;
+    laplacian[idx] = lap * lap;  // Square for variance calculation (always positive)
 }
 `;
 
-// Reduction shader - sums values across frame for variance calculation
+// Offset sharpness shader - reads from full-frame buffer with per-frame center offsets
+// Computes both Tenengrad and Laplacian, eliminates need for separate crop pass
+const offsetTenengradShader = `
+struct Params {
+    srcWidth: u32,      // Full frame width
+    srcHeight: u32,     // Full frame height
+    cropSize: u32,      // Output crop size
+    batchSize: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> input: array<f32>;      // Full-frame grayscale
+@group(0) @binding(2) var<storage, read> centers: array<f32>;    // Per-frame centers [x0,y0,x1,y1,...]
+@group(0) @binding(3) var<storage, read_write> tenengrad: array<f32>;
+@group(0) @binding(4) var<storage, read_write> laplacian: array<f32>;
+
+fn sampleGray(frameIdx: u32, x: i32, y: i32) -> f32 {
+    let cx = clamp(x, 0, i32(params.srcWidth) - 1);
+    let cy = clamp(y, 0, i32(params.srcHeight) - 1);
+    let idx = frameIdx * params.srcWidth * params.srcHeight + u32(cy) * params.srcWidth + u32(cx);
+    return input[idx];
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let localX = gid.x;
+    let localY = gid.y;
+    let frameIdx = gid.z;
+
+    if (localX >= params.cropSize || localY >= params.cropSize || frameIdx >= params.batchSize) {
+        return;
+    }
+
+    // Get per-frame center
+    let centerX = i32(centers[frameIdx * 2u]);
+    let centerY = i32(centers[frameIdx * 2u + 1u]);
+    let halfCrop = i32(params.cropSize / 2u);
+
+    // Compute source coordinates in full-frame buffer
+    let srcX = centerX - halfCrop + i32(localX);
+    let srcY = centerY - halfCrop + i32(localY);
+
+    // Sobel X: [-1,0,1], [-2,0,2], [-1,0,1]
+    let gx = -1.0 * sampleGray(frameIdx, srcX-1, srcY-1) + 1.0 * sampleGray(frameIdx, srcX+1, srcY-1)
+           + -2.0 * sampleGray(frameIdx, srcX-1, srcY)   + 2.0 * sampleGray(frameIdx, srcX+1, srcY)
+           + -1.0 * sampleGray(frameIdx, srcX-1, srcY+1) + 1.0 * sampleGray(frameIdx, srcX+1, srcY+1);
+
+    // Sobel Y: [-1,-2,-1], [0,0,0], [1,2,1]
+    let gy = -1.0 * sampleGray(frameIdx, srcX-1, srcY-1) - 2.0 * sampleGray(frameIdx, srcX, srcY-1) - 1.0 * sampleGray(frameIdx, srcX+1, srcY-1)
+           +  1.0 * sampleGray(frameIdx, srcX-1, srcY+1) + 2.0 * sampleGray(frameIdx, srcX, srcY+1) + 1.0 * sampleGray(frameIdx, srcX+1, srcY+1);
+
+    // Tenengrad = Gx² + Gy² (gradient magnitude squared)
+    let tenengradVal = gx * gx + gy * gy;
+
+    // Laplacian kernel: [0,1,0], [1,-4,1], [0,1,0]
+    let lap = sampleGray(frameIdx, srcX, srcY-1)
+            + sampleGray(frameIdx, srcX-1, srcY) - 4.0 * sampleGray(frameIdx, srcX, srcY) + sampleGray(frameIdx, srcX+1, srcY)
+            + sampleGray(frameIdx, srcX, srcY+1);
+
+    // Output to crop-sized buffer (contiguous for reduction)
+    let outIdx = frameIdx * params.cropSize * params.cropSize + localY * params.cropSize + localX;
+    tenengrad[outIdx] = tenengradVal;
+    laplacian[outIdx] = lap * lap;  // Square for variance calculation
+}
+`;
+
+// Reduction shader - sums Tenengrad and Laplacian values across frame
 const reductionShader = `
 struct Params {
     width: u32,
@@ -1497,12 +1724,12 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> laplacian: array<f32>;
-@group(0) @binding(2) var<storage, read> laplacianSq: array<f32>;
-@group(0) @binding(3) var<storage, read_write> results: array<f32>;  // [sum, sumSq] per frame
+@group(0) @binding(1) var<storage, read> tenengrad: array<f32>;
+@group(0) @binding(2) var<storage, read> laplacian: array<f32>;
+@group(0) @binding(3) var<storage, read_write> results: array<f32>;  // [tenengradSum, laplacianSum] per frame
 
-var<workgroup> sharedSum: array<f32, 256>;
-var<workgroup> sharedSumSq: array<f32, 256>;
+var<workgroup> sharedTenengrad: array<f32, 256>;
+var<workgroup> sharedLaplacian: array<f32, 256>;
 
 @compute @workgroup_size(256, 1, 1)
 fn main(
@@ -1519,25 +1746,25 @@ fn main(
         return;
     }
 
-    // Load values
-    var sum: f32 = 0.0;
-    var sumSq: f32 = 0.0;
+    // Load values from both sharpness metrics
+    var tenVal: f32 = 0.0;
+    var lapVal: f32 = 0.0;
 
     if (startPixel < params.inputSize) {
         let idx = frameIdx * params.inputSize + startPixel;
-        sum = laplacian[idx];
-        sumSq = laplacianSq[idx];
+        tenVal = tenengrad[idx];
+        lapVal = laplacian[idx];
     }
 
-    sharedSum[localIdx] = sum;
-    sharedSumSq[localIdx] = sumSq;
+    sharedTenengrad[localIdx] = tenVal;
+    sharedLaplacian[localIdx] = lapVal;
     workgroupBarrier();
 
     // Parallel reduction
     for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
         if (localIdx < stride) {
-            sharedSum[localIdx] += sharedSum[localIdx + stride];
-            sharedSumSq[localIdx] += sharedSumSq[localIdx + stride];
+            sharedTenengrad[localIdx] += sharedTenengrad[localIdx + stride];
+            sharedLaplacian[localIdx] += sharedLaplacian[localIdx + stride];
         }
         workgroupBarrier();
     }
@@ -1547,8 +1774,8 @@ fn main(
         // Calculate actual number of workgroups based on input size
         let numWorkgroups = (params.inputSize + 255u) / 256u;
         let resultIdx = frameIdx * numWorkgroups + wid.x;
-        results[resultIdx * 2u] = sharedSum[0];
-        results[resultIdx * 2u + 1u] = sharedSumSq[0];
+        results[resultIdx * 2u] = sharedTenengrad[0];
+        results[resultIdx * 2u + 1u] = sharedLaplacian[0];
     }
 }
 `;
@@ -1924,6 +2151,12 @@ async function init() {
         compute: { module: demosaicGrayModule, entryPoint: 'main' }
     });
 
+    const demosaicGrayOnlyModule = await createShader(demosaicGrayOnlyShader, 'demosaicGrayOnly');
+    demosaicGrayOnlyPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: demosaicGrayOnlyModule, entryPoint: 'main' }
+    });
+
     const rgbaCropModule = await createShader(rgbaCropShader, 'rgbaCrop');
     rgbaCropPipeline = device.createComputePipeline({
         layout: 'auto',
@@ -1936,10 +2169,16 @@ async function init() {
         compute: { module: grayscaleModule, entryPoint: 'main' }
     });
 
-    const laplacianModule = await createShader(laplacianShader, 'laplacian');
-    laplacianPipeline = device.createComputePipeline({
+    const tenengradModule = await createShader(tenengradShader, 'tenengrad');
+    tenengradPipeline = device.createComputePipeline({
         layout: 'auto',
-        compute: { module: laplacianModule, entryPoint: 'main' }
+        compute: { module: tenengradModule, entryPoint: 'main' }
+    });
+
+    const offsetTenengradModule = await createShader(offsetTenengradShader, 'offsetTenengrad');
+    offsetTenengradPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: offsetTenengradModule, entryPoint: 'main' }
     });
 
     const reductionModule = await createShader(reductionShader, 'reduction');
@@ -2092,6 +2331,10 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
             size: pixelBufferSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         }),
+        inputBufferAlt: device.createBuffer({
+            size: pixelBufferSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        }),
         // RGBA buffer: 4x larger for 16-bit to hold Float32 output (preserves precision for stacking)
         rgbaBuffer: device.createBuffer({
             size: rgbaBufferSize,
@@ -2099,13 +2342,17 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         }),
         grayBuffer: device.createBuffer({
             size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         }),
-        laplacianBuffer: device.createBuffer({
+        grayReadback: device.createBuffer({
+            size: pixelBufferSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        tenengradBuffer: device.createBuffer({
             size: pixelBufferSize,
             usage: GPUBufferUsage.STORAGE
         }),
-        laplacianSqBuffer: device.createBuffer({
+        laplacianBuffer: device.createBuffer({
             size: pixelBufferSize,
             usage: GPUBufferUsage.STORAGE
         }),
@@ -2190,7 +2437,7 @@ function cleanupAnalyzeBuffers() {
     }
 }
 
-async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false, useVng = true) {
+async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false, useVng = true, grayOnly = false) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -2233,24 +2480,46 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         new Float32Array(paramsData)[6] = scale;
         queue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
 
-        // Run fused demosaic + grayscale (outputs both RGBA and grayscale in one pass)
-        const demosaicGrayBindGroup = device.createBindGroup({
-            layout: demosaicGrayPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: buffers.inputBuffer } },
-                { binding: 2, resource: { buffer: buffers.rgbaBuffer } },
-                { binding: 3, resource: { buffer: buffers.grayBuffer } }
-            ]
-        });
+        if (grayOnly) {
+            // Grayscale-only demosaic (fast, no RGBA output)
+            const demosaicGrayOnlyBindGroup = device.createBindGroup({
+                layout: demosaicGrayOnlyPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: buffers.paramsBuffer } },
+                    { binding: 1, resource: { buffer: buffers.inputBuffer } },
+                    { binding: 2, resource: { buffer: buffers.grayBuffer } }
+                ]
+            });
 
-        const encoder = device.createCommandEncoder();
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(demosaicGrayPipeline);
-        pass.setBindGroup(0, demosaicGrayBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
-        pass.end();
-        queue.submit([encoder.finish()]);
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginComputePass();
+            pass.setPipeline(demosaicGrayOnlyPipeline);
+            pass.setBindGroup(0, demosaicGrayOnlyBindGroup);
+            pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
+            pass.end();
+            logGpuSubmit('analyzeBatch:demosaic-grayOnly');
+            queue.submit([encoder.finish()]);
+        } else {
+            // Run fused demosaic + grayscale (outputs both RGBA and grayscale in one pass)
+            const demosaicGrayBindGroup = device.createBindGroup({
+                layout: demosaicGrayPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: buffers.paramsBuffer } },
+                    { binding: 1, resource: { buffer: buffers.inputBuffer } },
+                    { binding: 2, resource: { buffer: buffers.rgbaBuffer } },
+                    { binding: 3, resource: { buffer: buffers.grayBuffer } }
+                ]
+            });
+
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginComputePass();
+            pass.setPipeline(demosaicGrayPipeline);
+            pass.setBindGroup(0, demosaicGrayBindGroup);
+            pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
+            pass.end();
+            logGpuSubmit('analyzeBatch:demosaic+gray');
+            queue.submit([encoder.finish()]);
+        }
         grayAlreadyComputed = true;
     } else {
         // Input is already RGBA - write each frame directly to GPU buffer (no staging buffer)
@@ -2281,7 +2550,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         }
     }
 
-    // Update params for grayscale/laplacian
+    // Update params for grayscale/tenengrad
     queue.writeBuffer(buffers.paramsBuffer, 0, new Uint32Array([width, height, batchSize, 0]));
 
     // Update reduction params
@@ -2304,12 +2573,12 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     });
 
     const lapBindGroup = device.createBindGroup({
-        layout: laplacianPipeline.getBindGroupLayout(0),
+        layout: tenengradPipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: { buffer: buffers.paramsBuffer } },
             { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 3, resource: { buffer: buffers.laplacianSqBuffer } }
+            { binding: 2, resource: { buffer: buffers.tenengradBuffer } },
+            { binding: 3, resource: { buffer: buffers.laplacianBuffer } }
         ]
     });
 
@@ -2317,8 +2586,8 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         layout: reductionPipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianSqBuffer } },
+            { binding: 1, resource: { buffer: buffers.tenengradBuffer } },
+            { binding: 2, resource: { buffer: buffers.laplacianBuffer } },
             { binding: 3, resource: { buffer: buffers.reductionBuffer } }
         ]
     });
@@ -2378,9 +2647,9 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         pass.end();
     }
 
-    // Combined pass: Laplacian + Moments + Bounds (all read from grayBuffer, independent outputs)
+    // Combined pass: Tenengrad + Moments + Bounds (all read from grayBuffer, independent outputs)
     pass = encoder.beginComputePass();
-    pass.setPipeline(laplacianPipeline);
+    pass.setPipeline(tenengradPipeline);
     pass.setBindGroup(0, lapBindGroup);
     pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
     pass.setPipeline(momentsPipeline);
@@ -2415,43 +2684,70 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, buffers.reductionReadback, 0, reductionCopySize);
     encoder.copyBufferToBuffer(buffers.momentsReductionBuffer, 0, buffers.momentsReadback, 0, momentsCopySize);
     encoder.copyBufferToBuffer(buffers.boundsReductionBuffer, 0, buffers.boundsReadback, 0, boundsCopySize);
-    encoder.copyBufferToBuffer(buffers.rgbaBuffer, 0, buffers.rgbaReadback, 0, rgbaCopySize);
+    // Skip RGBA and grayscale readback in grayOnly mode (saves significant bandwidth)
+    // Grayscale buffer is always float32 (4 bytes per pixel)
+    const grayCopySize = batchSize * pixelCount * 4;
+    if (!grayOnly) {
+        encoder.copyBufferToBuffer(buffers.rgbaBuffer, 0, buffers.rgbaReadback, 0, rgbaCopySize);
+        encoder.copyBufferToBuffer(buffers.grayBuffer, 0, buffers.grayReadback, 0, grayCopySize);
+    }
 
+    logGpuSubmit(grayOnly ? 'analyzeBatch:analysis+readback(grayOnly)' : 'analyzeBatch:analysis+readback');
     queue.submit([encoder.finish()]);
 
     // Read back results
     await safeMapAsync(buffers.reductionReadback, GPUMapMode.READ);
     await safeMapAsync(buffers.momentsReadback, GPUMapMode.READ);
     await safeMapAsync(buffers.boundsReadback, GPUMapMode.READ);
-    await safeMapAsync(buffers.rgbaReadback, GPUMapMode.READ);
 
     const reductionData = new Float32Array(buffers.reductionReadback.getMappedRange().slice(0, reductionCopySize));
     const momentsData = new Float32Array(buffers.momentsReadback.getMappedRange().slice(0, momentsCopySize));
     const boundsData = new Uint32Array(buffers.boundsReadback.getMappedRange().slice(0, boundsCopySize));
-    // RGBA data type depends on bit depth:
-    // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
-    // - 16-bit: Float32Array (4 floats/pixel, values in 0-1 range)
-    const rgbaRawBuffer = buffers.rgbaReadback.getMappedRange().slice(0, rgbaCopySize);
-    const rgbaData = bitDepth === 16 ? new Float32Array(rgbaRawBuffer) : new Uint8Array(rgbaRawBuffer);
+
+    // RGBA and grayscale readback only when not in grayOnly mode
+    let rgbaData = null;
+    let grayData = null;
+    if (!grayOnly) {
+        await safeMapAsync(buffers.rgbaReadback, GPUMapMode.READ);
+        await safeMapAsync(buffers.grayReadback, GPUMapMode.READ);
+        // RGBA data type depends on bit depth:
+        // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
+        // - 16-bit: Float32Array (4 floats/pixel, values in 0-1 range)
+        const rgbaRawBuffer = buffers.rgbaReadback.getMappedRange().slice(0, rgbaCopySize);
+        rgbaData = bitDepth === 16 ? new Float32Array(rgbaRawBuffer) : new Uint8Array(rgbaRawBuffer);
+        // Grayscale is always Float32 (sharpness values in 0-1 range)
+        const grayRawBuffer = buffers.grayReadback.getMappedRange().slice(0, grayCopySize);
+        grayData = new Float32Array(grayRawBuffer);
+    }
 
     buffers.reductionReadback.unmap();
     buffers.momentsReadback.unmap();
     buffers.boundsReadback.unmap();
-    buffers.rgbaReadback.unmap();
+    if (!grayOnly) {
+        buffers.rgbaReadback.unmap();
+        buffers.grayReadback.unmap();
+    }
 
     // Process results for each frame
     const results = [];
 
     for (let i = 0; i < batchSize; i++) {
-        // Sum up partial reductions for Tenengrad sharpness
+        // Sum up partial reductions for both Tenengrad and Laplacian
         let tenengradSum = 0;
+        let laplacianSum = 0;
         for (let w = 0; w < numWorkgroups; w++) {
-            tenengradSum += reductionData[(i * numWorkgroups + w) * 2];
+            const idx = (i * numWorkgroups + w) * 2;
+            tenengradSum += reductionData[idx];
+            laplacianSum += reductionData[idx + 1];
         }
 
-        // Tenengrad sharpness = mean of gradient magnitude squared
         // Scale by 255² = 65025 to match CPU which uses 0-255 grayscale (we use 0-1)
-        const sharpness = (tenengradSum / pixelCount) * 65025;
+        const tenengradMean = (tenengradSum / pixelCount) * 65025;
+        const laplacianMean = (laplacianSum / pixelCount) * 65025;
+
+        // Combined sharpness = geometric mean of Tenengrad and Laplacian
+        // Geometric mean naturally balances metrics regardless of their absolute scales
+        const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
         // Sum up moments
         let m00 = 0, m10 = 0, m01 = 0, m20 = 0, m11 = 0, m02 = 0;
@@ -2523,28 +2819,40 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
             };
         }
 
-        // Extract RGBA for this frame
-        // Size depends on bit depth: 4 bytes/pixel (8-bit) or 16 bytes/pixel (16-bit Float32)
-        const elementsPerPixel = bitDepth === 16 ? 4 : 4;  // 4 floats or 4 bytes
-        const frameRgba = rgbaData.slice(i * pixelCount * elementsPerPixel, (i + 1) * pixelCount * elementsPerPixel);
-
-        // Return buffer in appropriate format for stacking
-        // - 8-bit: uint8Buffer (packed RGBA) - GPU stacker converts to float32 on GPU
-        // - 16-bit: float32Buffer (4 floats/pixel, 0-1 range) - preserves full precision for stacking
+        // Build result object
         const result = {
             sharpness,
+            tenengrad: tenengradMean,
+            laplacian: laplacianMean,
             circularity,
             bounds,
             width,
-            height
+            height,
+            index: frames[i].index
         };
 
-        if (bitDepth === 16) {
-            // 16-bit: return Float32 buffer (preserves precision through stacking)
-            result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
-        } else {
-            // 8-bit: return Uint8 buffer (GPU stacker converts to float32 on GPU)
-            result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+        // Extract RGBA and grayscale for this frame (skip in grayOnly mode)
+        if (!grayOnly && rgbaData) {
+            // Size depends on bit depth: 4 bytes/pixel (8-bit) or 16 bytes/pixel (16-bit Float32)
+            const elementsPerPixel = bitDepth === 16 ? 4 : 4;  // 4 floats or 4 bytes
+            const frameRgba = rgbaData.slice(i * pixelCount * elementsPerPixel, (i + 1) * pixelCount * elementsPerPixel);
+
+            // Return buffer in appropriate format for stacking
+            // - 8-bit: uint8Buffer (packed RGBA) - GPU stacker converts to float32 on GPU
+            // - 16-bit: float32Buffer (4 floats/pixel, 0-1 range) - preserves full precision for stacking
+            if (bitDepth === 16) {
+                // 16-bit: return Float32 buffer (preserves precision through stacking)
+                result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+            } else {
+                // 8-bit: return Uint8 buffer (GPU stacker converts to float32 on GPU)
+                result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+            }
+
+            // Also extract grayscale for side-by-side preview
+            if (grayData) {
+                const frameGray = grayData.slice(i * pixelCount, (i + 1) * pixelCount);
+                result.grayBuffer = frameGray.buffer.slice(frameGray.byteOffset, frameGray.byteOffset + frameGray.byteLength);
+            }
         }
 
         results.push(result);
@@ -2574,14 +2882,18 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
     // Cropped RGBA size: 4x larger for 16-bit (Float32 output)
     const croppedRgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
 
+    // Packed grayscale for template matching: 4 pixels per u32
+    const packedGraySize = Math.ceil(batchSize * cropPixelCount / 4) * 4;
+
     const requiredSizes = {
         inputSize: batchSize * srcPixelCount * 4,       // Raw Bayer (u32 per pixel)
         centersSize: batchSize * 8,                     // 2 floats per frame (x, y)
         boundsOutputSize: batchSize * 16,               // 4 u32 per frame (minX, minY, maxX, maxY)
         croppedRgbaSize: batchSize * cropPixelCount * croppedRgbaBytesPerPixel, // Cropped RGBA output (16-bit = 4x)
+        packedGraySize: packedGraySize,                 // Packed u8 grayscale for template matching (4 pixels per u32)
         graySize: batchSize * cropPixelCount * 4,       // Grayscale float (always f32)
+        tenengradSize: batchSize * cropPixelCount * 4,
         laplacianSize: batchSize * cropPixelCount * 4,
-        laplacianSqSize: batchSize * cropPixelCount * 4,
         reductionSize: batchSize * numWorkgroups * 8,
         momentsSize: batchSize * cropPixelCount * 6 * 4,      // 6 floats per pixel
         momentsReductionSize: batchSize * numWorkgroups * 6 * 4,  // 6 floats per workgroup
@@ -2592,6 +2904,7 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
     if (cachedCropBuffers && cachedCropConfig &&
         cachedCropConfig.inputSize >= requiredSizes.inputSize &&
         cachedCropConfig.croppedRgbaSize >= requiredSizes.croppedRgbaSize &&
+        cachedCropConfig.packedGraySize >= requiredSizes.packedGraySize &&
         cachedCropConfig.momentsSize >= requiredSizes.momentsSize &&
         cachedCropConfig.reductionSize >= requiredSizes.reductionSize &&
         cachedCropConfig.momentsReductionSize >= requiredSizes.momentsReductionSize &&
@@ -2653,16 +2966,38 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
             size: requiredSizes.croppedRgbaSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         }),
+        // Packed grayscale for template matching (output by demosaic shader)
+        packedGrayBuffer: device.createBuffer({
+            size: requiredSizes.packedGraySize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+        }),
+        packedGrayReadback: device.createBuffer({
+            size: requiredSizes.packedGraySize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        packedGrayReadbackAlt: device.createBuffer({
+            size: requiredSizes.packedGraySize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
         grayBuffer: device.createBuffer({
             size: requiredSizes.graySize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         }),
-        laplacianBuffer: device.createBuffer({
-            size: requiredSizes.laplacianSize,
+        // Grayscale readback for side-by-side preview (double-buffered)
+        grayReadback: device.createBuffer({
+            size: requiredSizes.graySize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        grayReadbackAlt: device.createBuffer({
+            size: requiredSizes.graySize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        tenengradBuffer: device.createBuffer({
+            size: requiredSizes.tenengradSize,
             usage: GPUBufferUsage.STORAGE
         }),
-        laplacianSqBuffer: device.createBuffer({
-            size: requiredSizes.laplacianSqSize,
+        laplacianBuffer: device.createBuffer({
+            size: requiredSizes.laplacianSize,
             usage: GPUBufferUsage.STORAGE
         }),
         reductionBuffer: device.createBuffer({
@@ -2801,12 +3136,12 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     });
 
     const lapBindGroup = device.createBindGroup({
-        layout: laplacianPipeline.getBindGroupLayout(0),
+        layout: tenengradPipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: { buffer: buffers.grayParamsBuffer } },
             { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 3, resource: { buffer: buffers.laplacianSqBuffer } }
+            { binding: 2, resource: { buffer: buffers.tenengradBuffer } },
+            { binding: 3, resource: { buffer: buffers.laplacianBuffer } }
         ]
     });
 
@@ -2814,8 +3149,8 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         layout: reductionPipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianSqBuffer } },
+            { binding: 1, resource: { buffer: buffers.tenengradBuffer } },
+            { binding: 2, resource: { buffer: buffers.laplacianBuffer } },
             { binding: 3, resource: { buffer: buffers.reductionBuffer } }
         ]
     });
@@ -2841,6 +3176,10 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     // Execute all passes in a single command encoder
     const encoder = device.createCommandEncoder();
 
+    // Clear packed gray buffer before demosaic (atomicOr needs zeros)
+    const packedGraySize = Math.ceil(batchSize * cropPixelCount / 4) * 4;
+    encoder.clearBuffer(buffers.packedGrayBuffer, 0, packedGraySize);
+
     if (needsDemosaic) {
         // Upload Bayer data (already prepared above)
         queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
@@ -2851,11 +3190,12 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
                 { binding: 0, resource: { buffer: buffers.paramsBuffer } },
                 { binding: 1, resource: { buffer: buffers.inputBuffer } },
                 { binding: 2, resource: { buffer: buffers.centersBuffer } },
-                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } }
+                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } },
+                { binding: 4, resource: { buffer: buffers.packedGrayBuffer } }
             ]
         });
 
-        // Demosaic + crop pass
+        // Demosaic + crop pass (also outputs packed grayscale)
         let pass = encoder.beginComputePass();
         pass.setPipeline(demosaicCropPipeline);
         pass.setBindGroup(0, demosaicCropBindGroup);
@@ -2887,11 +3227,12 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
                 { binding: 0, resource: { buffer: buffers.paramsBuffer } },
                 { binding: 1, resource: { buffer: buffers.inputBuffer } },
                 { binding: 2, resource: { buffer: buffers.centersBuffer } },
-                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } }
+                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } },
+                { binding: 4, resource: { buffer: buffers.packedGrayBuffer } }
             ]
         });
 
-        // RGBA crop pass
+        // RGBA crop pass (also outputs packed grayscale)
         let pass = encoder.beginComputePass();
         pass.setPipeline(rgbaCropPipeline);
         pass.setBindGroup(0, rgbaCropBindGroup);
@@ -2906,9 +3247,9 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
     pass.end();
 
-    // Combined pass: Laplacian + Moments (both read from grayBuffer, independent outputs)
+    // Combined pass: Tenengrad + Moments (both read from grayBuffer, independent outputs)
     pass = encoder.beginComputePass();
-    pass.setPipeline(laplacianPipeline);
+    pass.setPipeline(tenengradPipeline);
     pass.setBindGroup(0, lapBindGroup);
     pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
     pass.setPipeline(momentsPipeline);
@@ -2931,13 +3272,16 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const readbackBuf = useAlt ? buffers.readbackBufferAlt : buffers.readbackBuffer;
     const momentsReadbackBuf = useAlt ? buffers.momentsReadbackBufferAlt : buffers.momentsReadbackBuffer;
     const croppedReadbackBuf = useAlt ? buffers.croppedReadbackBufferAlt : buffers.croppedReadbackBuffer;
+    const packedGrayReadbackBuf = useAlt ? buffers.packedGrayReadbackAlt : buffers.packedGrayReadback;
 
     // Copy results to readback buffers
     encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroups * 8);
     encoder.copyBufferToBuffer(buffers.momentsReductionBuffer, 0, momentsReadbackBuf, 0, batchSize * numWorkgroups * 6 * 4);
     encoder.copyBufferToBuffer(buffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * 4);
+    encoder.copyBufferToBuffer(buffers.packedGrayBuffer, 0, packedGrayReadbackBuf, 0, packedGraySize);
 
     // Single submit for all passes
+    logGpuSubmit('cropAnalyzeBatch:all+readback');
     queue.submit([encoder.finish()]);
 
     // Rotate buffers for next batch (so next batch uses alternate set)
@@ -2947,7 +3291,8 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     await Promise.all([
         safeMapAsync(readbackBuf, GPUMapMode.READ),
         safeMapAsync(momentsReadbackBuf, GPUMapMode.READ),
-        safeMapAsync(croppedReadbackBuf, GPUMapMode.READ)
+        safeMapAsync(croppedReadbackBuf, GPUMapMode.READ),
+        safeMapAsync(packedGrayReadbackBuf, GPUMapMode.READ)
     ]);
 
     // Read data from mapped buffers
@@ -2963,21 +3308,28 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
     const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
     croppedReadbackBuf.unmap();
+
+    // Packed grayscale for template matching and preview (8-bit, 1 byte per pixel)
+    const packedGrayData = new Uint8Array(packedGrayReadbackBuf.getMappedRange().slice(0));
+    packedGrayReadbackBuf.unmap();
+
     releaseBatchSlot();  // Allow next batch to proceed
 
     // Process results
     const results = [];
     for (let i = 0; i < batchSize; i++) {
-        // Sum sharpness from workgroups
-        let sumLap = 0, sumLapSq = 0;
+        // Sum both Tenengrad and Laplacian from workgroups
+        let tenengradSum = 0, laplacianSum = 0;
         for (let w = 0; w < numWorkgroups; w++) {
             const idx = (i * numWorkgroups + w) * 2;
-            sumLap += reductionData[idx];
-            sumLapSq += reductionData[idx + 1];
+            tenengradSum += reductionData[idx];
+            laplacianSum += reductionData[idx + 1];
         }
-        // Tenengrad sharpness = mean of gradient magnitude squared
         // Scale by 255² = 65025 to match CPU which uses 0-255 grayscale (GPU uses 0-1)
-        const sharpness = (sumLap / cropPixelCount) * 65025;
+        const tenengradMean = (tenengradSum / cropPixelCount) * 65025;
+        const laplacianMean = (laplacianSum / cropPixelCount) * 65025;
+        // Combined sharpness = geometric mean of both metrics
+        const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
         // Sum moments for circularity (6 values per workgroup: m00, m10, m01, m20, m11, m02)
         let m00 = 0, m10 = 0, m01 = 0, m20 = 0, m11 = 0, m02 = 0;
@@ -3020,12 +3372,20 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         const elementsPerPixel = bitDepth === 16 ? 4 : 4;  // 4 floats or 4 bytes
         const frameRgba = croppedData.slice(i * cropPixelCount * elementsPerPixel, (i + 1) * cropPixelCount * elementsPerPixel);
 
+        // Extract packed grayscale for this frame (8-bit, 1 byte per pixel)
+        const grayBytesPerFrame = cropPixelCount;
+        const framePackedGray = packedGrayData.slice(i * grayBytesPerFrame, (i + 1) * grayBytesPerFrame);
+
         const result = {
             sharpness,
+            tenengrad: tenengradMean,
+            laplacian: laplacianMean,
             circularity,
             index: frames[i].index,
             width: cropSize,
-            height: cropSize
+            height: cropSize,
+            // 8-bit grayscale for template matching and preview
+            packedGrayBuffer: framePackedGray.buffer.slice(framePackedGray.byteOffset, framePackedGray.byteOffset + framePackedGray.byteLength)
         };
 
         if (bitDepth === 16) {
@@ -3058,8 +3418,14 @@ let dcaPrepTime = 0;
 let dcaGpuSubmitTime = 0;
 let dcaMapAsyncTime = 0;
 let dcaResultBuildTime = 0;
+// Detailed per-step timing
+let dcaUploadTime = 0;      // prepareBayerData + writeBuffer
+let dcaDemosaicTime = 0;    // demosaic shader submit
+let dcaBoundsTime = 0;      // bounds detection + centroid submit
+let dcaCropTime = 0;        // crop submit (non-grayOnly)
+let dcaSharpnessTime = 0;   // sharpness + reduction submit
 
-async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false, useVng = true) {
+async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false, useVng = true, grayOnly = false, nextBatchFrames = null) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -3085,48 +3451,95 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Get buffers for cropped analysis (reuses some, creates others)
     const cropBuffers = await getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
 
-    // ===== STEP 1: Upload raw data and demosaic to full RGBA =====
+    // ===== STEP 1: Upload raw data and demosaic =====
+    // When grayOnly: demosaic directly to grayscale (fast path)
+    // When !grayOnly: demosaic to RGBA (need color for stacking)
+    const tUploadStart = performance.now();
+
+    // Check if we have pre-uploaded data from previous batch's pipeline
+    const usePipelinedData = pipelinedUpload.ready && pipelinedUpload.batchSize === batchSize && needsDemosaic;
+    const currentInputBuffer = usePipelinedData && pipelinedUpload.useAltBuffer
+        ? analyzeBuffers.inputBufferAlt
+        : analyzeBuffers.inputBuffer;
+
     if (needsDemosaic) {
-        // Upload Bayer data (auto-stretch for 16-bit to handle very dark data)
-        // Note: bitDepth already determined above via detectBitDepth()
-        const { data: bayerData, scale } = prepareBayerData(frames, srcPixelCount, false);
-        queue.writeBuffer(analyzeBuffers.inputBuffer, 0, bayerData);
-        // Demosaic params (mixed u32/f32 for scale)
+        let scale;
+        if (usePipelinedData) {
+            // Data already uploaded to alternate buffer - just use it
+            scale = pipelinedUpload.scale;
+            pipelinedUpload.ready = false;  // Consume the pre-uploaded data
+        } else {
+            // Normal path: prepare and upload data
+            const prepared = prepareBayerData(frames, srcPixelCount, false);
+            scale = prepared.scale;
+            queue.writeBuffer(currentInputBuffer, 0, prepared.data);
+        }
+
         const paramsData = new ArrayBuffer(32);
         new Uint32Array(paramsData).set([srcWidth, srcHeight, batchSize, bayerPattern, useVng ? 1 : 0, bitDepth, 0, 0]);
         new Float32Array(paramsData)[6] = scale;
         queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, paramsData);
+        dcaUploadTime += (performance.now() - tUploadStart);
 
-        const demosaicBindGroup = device.createBindGroup({
-            layout: demosaicPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: analyzeBuffers.inputBuffer } },
-                { binding: 2, resource: { buffer: analyzeBuffers.rgbaBuffer } }
-            ]
-        });
+        const tDemosaicStart = performance.now();
+        if (grayOnly) {
+            // Fast path: demosaic directly to grayscale (no RGBA)
+            const demosaicGrayOnlyBindGroup = device.createBindGroup({
+                layout: demosaicGrayOnlyPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
+                    { binding: 1, resource: { buffer: currentInputBuffer } },
+                    { binding: 2, resource: { buffer: analyzeBuffers.grayBuffer } }
+                ]
+            });
 
-        const encoder = device.createCommandEncoder();
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(demosaicPipeline);
-        pass.setBindGroup(0, demosaicBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-        pass.end();
-        queue.submit([encoder.finish()]);
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginComputePass();
+            pass.setPipeline(demosaicGrayOnlyPipeline);
+            pass.setBindGroup(0, demosaicGrayOnlyBindGroup);
+            pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
+            pass.end();
+            logGpuSubmit('detectCropAnalyze:demosaic-grayOnly');
+            queue.submit([encoder.finish()]);
+            dcaDemosaicTime += (performance.now() - tDemosaicStart);
+        } else {
+            // Full path: demosaic to RGBA (for cropping and stacking)
+            const demosaicBindGroup = device.createBindGroup({
+                layout: demosaicPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
+                    { binding: 1, resource: { buffer: currentInputBuffer } },
+                    { binding: 2, resource: { buffer: analyzeBuffers.rgbaBuffer } }
+                ]
+            });
+
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginComputePass();
+            pass.setPipeline(demosaicPipeline);
+            pass.setBindGroup(0, demosaicBindGroup);
+            pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
+            pass.end();
+            logGpuSubmit('detectCropAnalyze:demosaic');
+            queue.submit([encoder.finish()]);
+            dcaDemosaicTime += (performance.now() - tDemosaicStart);
+        }
     } else {
-        // RGBA input - write each frame directly to GPU buffer at offset (no staging buffer)
+        // RGBA input - write each frame directly to GPU buffer at offset
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
-            const byteOffset = i * srcPixelCount * 4;  // 4 bytes per RGBA pixel
+            const byteOffset = i * srcPixelCount * 4;
             let src = frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray
                 ? frame.data
                 : new Uint8Array(frame.data.buffer || frame.data);
-            // Write directly to GPU buffer at offset
             queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, src);
         }
+        dcaUploadTime += (performance.now() - tUploadStart);
     }
 
-    // ===== STEP 2: Grayscale + bounds detection on full frame =====
+    // ===== STEP 2: Bounds detection on full frame =====
+    const tBoundsStart = performance.now();
+    // When grayOnly: grayscale already computed by demosaic, skip grayscale pass
+    // When !grayOnly: need to compute grayscale from RGBA
     queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, 0]));
     queue.writeBuffer(analyzeBuffers.reductionParamsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, srcPixelCount]));
 
@@ -3134,15 +3547,6 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     new Uint32Array(boundsParamsData, 0, 3).set([srcWidth, srcHeight, batchSize]);
     new Float32Array(boundsParamsData, 12, 1).set([threshold]);
     queue.writeBuffer(analyzeBuffers.boundsParamsBuffer, 0, boundsParamsData);
-
-    const grayBindGroup = device.createBindGroup({
-        layout: grayscalePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },
-            { binding: 2, resource: { buffer: analyzeBuffers.grayBuffer } }
-        ]
-    });
 
     const boundsBindGroup = device.createBindGroup({
         layout: boundsPipeline.getBindGroupLayout(0),
@@ -3163,13 +3567,25 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     });
 
     let encoder = device.createCommandEncoder();
-    let pass = encoder.beginComputePass();
-    pass.setPipeline(grayscalePipeline);
-    pass.setBindGroup(0, grayBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-    pass.end();
 
-    pass = encoder.beginComputePass();
+    // Only run grayscale pass if we have RGBA (not grayOnly)
+    if (!grayOnly) {
+        const grayBindGroup = device.createBindGroup({
+            layout: grayscalePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
+                { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },
+                { binding: 2, resource: { buffer: analyzeBuffers.grayBuffer } }
+            ]
+        });
+        let pass = encoder.beginComputePass();
+        pass.setPipeline(grayscalePipeline);
+        pass.setBindGroup(0, grayBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
+        pass.end();
+    }
+
+    let pass = encoder.beginComputePass();
     pass.setPipeline(boundsPipeline);
     pass.setBindGroup(0, boundsBindGroup);
     pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
@@ -3200,77 +3616,118 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
     pass.end();
 
+    logGpuSubmit('detectCropAnalyze:centroid');
     queue.submit([encoder.finish()]);
+    dcaBoundsTime += (performance.now() - tBoundsStart);
 
     // ===== STEP 4: Crop from demosaiced RGBA using GPU-computed centers =====
-    const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, 0, batchSize, 0, 0, 0]);
-    queue.writeBuffer(cropBuffers.paramsBuffer, 0, cropParams);
+    const tCropStart = performance.now();
+    // Skip crop when grayOnly - offset Tenengrad reads directly from full-frame grayscale
+    if (!grayOnly) {
+        const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, 0, batchSize, 0, 0, 0]);
+        queue.writeBuffer(cropBuffers.paramsBuffer, 0, cropParams);
 
-    // Crop from the already-demosaiced rgbaBuffer
-    const rgbaCropBindGroup = device.createBindGroup({
-        layout: rgbaCropPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },  // Source: full demosaiced
-            { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },
-            { binding: 3, resource: { buffer: cropBuffers.croppedRgbaBuffer } }  // Dest: cropped
-        ]
-    });
+        // Clear packed gray buffer before crop (atomicOr requires zeroed memory)
+        const packedGraySize = Math.ceil(batchSize * cropPixelCount / 4) * 4;
+        encoder = device.createCommandEncoder();
+        encoder.clearBuffer(cropBuffers.packedGrayBuffer, 0, packedGraySize);
 
-    encoder = device.createCommandEncoder();
-    pass = encoder.beginComputePass();
-    pass.setPipeline(rgbaCropPipeline);
-    pass.setBindGroup(0, rgbaCropBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-    pass.end();
-    queue.submit([encoder.finish()]);
+        // Crop from the already-demosaiced rgbaBuffer
+        const rgbaCropBindGroup = device.createBindGroup({
+            layout: rgbaCropPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: cropBuffers.paramsBuffer } },
+                { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },  // Source: full demosaiced
+                { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },
+                { binding: 3, resource: { buffer: cropBuffers.croppedRgbaBuffer } },  // Dest: cropped
+                { binding: 4, resource: { buffer: cropBuffers.packedGrayBuffer } }  // Grayscale output (unused in detection)
+            ]
+        });
+        pass = encoder.beginComputePass();
+        pass.setPipeline(rgbaCropPipeline);
+        pass.setBindGroup(0, rgbaCropBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.end();
+        logGpuSubmit('detectCropAnalyze:crop');
+        queue.submit([encoder.finish()]);
+        dcaCropTime += (performance.now() - tCropStart);
+    }
 
-    // ===== STEP 5: Sharpness calculation on cropped =====
-    queue.writeBuffer(cropBuffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
+    // ===== STEP 5: Sharpness calculation =====
+    const tSharpnessStart = performance.now();
+    // grayOnly: offset Tenengrad reads directly from full-frame grayscale with per-frame centers
+    // !grayOnly: grayscale from cropped RGBA + tenengrad on cropped
     queue.writeBuffer(cropBuffers.reductionParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, cropPixelCount]));
 
-    const cropGrayBindGroup = device.createBindGroup({
-        layout: grayscalePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
-            { binding: 1, resource: { buffer: cropBuffers.croppedRgbaBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.grayBuffer } }
-        ]
-    });
+    encoder = device.createCommandEncoder();
 
-    const lapBindGroup = device.createBindGroup({
-        layout: laplacianPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
-            { binding: 1, resource: { buffer: cropBuffers.grayBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.laplacianBuffer } },
-            { binding: 3, resource: { buffer: cropBuffers.laplacianSqBuffer } }
-        ]
-    });
+    if (grayOnly) {
+        // Offset Tenengrad: reads from full-frame grayscale with per-frame center offsets
+        // Params: srcWidth, srcHeight, cropSize, batchSize
+        queue.writeBuffer(cropBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, cropSize, batchSize]));
 
+        const offsetLapBindGroup = device.createBindGroup({
+            layout: offsetTenengradPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: cropBuffers.paramsBuffer } },
+                { binding: 1, resource: { buffer: analyzeBuffers.grayBuffer } },  // Full-frame grayscale
+                { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },  // Per-frame centers
+                { binding: 3, resource: { buffer: cropBuffers.tenengradBuffer } },
+                { binding: 4, resource: { buffer: cropBuffers.laplacianBuffer } }
+            ]
+        });
+
+        pass = encoder.beginComputePass();
+        pass.setPipeline(offsetTenengradPipeline);
+        pass.setBindGroup(0, offsetLapBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.end();
+    } else {
+        // Standard path: grayscale from cropped RGBA + tenengrad on cropped
+        queue.writeBuffer(cropBuffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
+
+        const cropGrayBindGroup = device.createBindGroup({
+            layout: grayscalePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
+                { binding: 1, resource: { buffer: cropBuffers.croppedRgbaBuffer } },
+                { binding: 2, resource: { buffer: cropBuffers.grayBuffer } }
+            ]
+        });
+
+        const lapBindGroup = device.createBindGroup({
+            layout: tenengradPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
+                { binding: 1, resource: { buffer: cropBuffers.grayBuffer } },
+                { binding: 2, resource: { buffer: cropBuffers.tenengradBuffer } },
+                { binding: 3, resource: { buffer: cropBuffers.laplacianBuffer } }
+            ]
+        });
+
+        pass = encoder.beginComputePass();
+        pass.setPipeline(grayscalePipeline);
+        pass.setBindGroup(0, cropGrayBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.end();
+
+        pass = encoder.beginComputePass();
+        pass.setPipeline(tenengradPipeline);
+        pass.setBindGroup(0, lapBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.end();
+    }
+
+    // Reduction is the same for both paths (reads from tenengradBuffer)
     const reductionBindGroup = device.createBindGroup({
         layout: reductionPipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: { buffer: cropBuffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: cropBuffers.laplacianBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.laplacianSqBuffer } },
+            { binding: 1, resource: { buffer: cropBuffers.tenengradBuffer } },
+            { binding: 2, resource: { buffer: cropBuffers.laplacianBuffer } },
             { binding: 3, resource: { buffer: cropBuffers.reductionBuffer } }
         ]
     });
-
-    encoder = device.createCommandEncoder();
-
-    pass = encoder.beginComputePass();
-    pass.setPipeline(grayscalePipeline);
-    pass.setBindGroup(0, cropGrayBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-    pass.end();
-
-    pass = encoder.beginComputePass();
-    pass.setPipeline(laplacianPipeline);
-    pass.setBindGroup(0, lapBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-    pass.end();
 
     pass = encoder.beginComputePass();
     pass.setPipeline(reductionPipeline);
@@ -3284,14 +3741,21 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     const readbackBuf = useAlt ? cropBuffers.readbackBufferAlt : cropBuffers.readbackBuffer;
     const croppedReadbackBuf = useAlt ? cropBuffers.croppedReadbackBufferAlt : cropBuffers.croppedReadbackBuffer;
     const boundsReadbackBuf = useAlt ? cropBuffers.boundsOutputReadbackAlt : cropBuffers.boundsOutputReadback;
+    const grayReadbackBuf = useAlt ? cropBuffers.grayReadbackAlt : cropBuffers.grayReadback;
 
     // Copy results for readback
-    // Cropped RGBA size: 4x larger for 16-bit (Float32 output)
-    const croppedRgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
     encoder.copyBufferToBuffer(cropBuffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroupsCrop * 8);
-    encoder.copyBufferToBuffer(cropBuffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * croppedRgbaBytesPerPixel);
     encoder.copyBufferToBuffer(cropBuffers.boundsOutputBuffer, 0, boundsReadbackBuf, 0, batchSize * 16);
+    // Copy cropped RGBA and grayscale only when not in grayOnly mode (saves significant bandwidth)
+    if (!grayOnly) {
+        const croppedRgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
+        const grayCopySize = batchSize * cropPixelCount * 4;  // Float32 grayscale
+        encoder.copyBufferToBuffer(cropBuffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * croppedRgbaBytesPerPixel);
+        encoder.copyBufferToBuffer(cropBuffers.grayBuffer, 0, grayReadbackBuf, 0, grayCopySize);
+    }
+    logGpuSubmit('detectCropAnalyze:sharpness+readback');
     queue.submit([encoder.finish()]);
+    dcaSharpnessTime += (performance.now() - tSharpnessStart);
     const tAfterSubmit = performance.now();
     dcaPrepTime += (tAfterSubmit - t0);
 
@@ -3299,25 +3763,63 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     rotateCropBuffers();
 
     // ===== STEP 6: Read back results (including bounds from GPU centroid shader) =====
-    await Promise.all([
+    // Skip cropped RGBA and grayscale readback in grayOnly mode (saves significant bandwidth)
+    const mapPromises = [
         safeMapAsync(readbackBuf, GPUMapMode.READ),
-        safeMapAsync(croppedReadbackBuf, GPUMapMode.READ),
         safeMapAsync(boundsReadbackBuf, GPUMapMode.READ)
-    ]);
+    ];
+    if (!grayOnly) {
+        mapPromises.push(safeMapAsync(croppedReadbackBuf, GPUMapMode.READ));
+        mapPromises.push(safeMapAsync(grayReadbackBuf, GPUMapMode.READ));
+    }
+
+    // ===== PIPELINING: Prepare next batch while waiting for GPU =====
+    // While GPU processes current batch, prepare and upload next batch to alternate buffer
+    if (nextBatchFrames && nextBatchFrames.length > 0 && needsDemosaic) {
+        const nextSrcPixelCount = srcWidth * srcHeight;  // Same dimensions
+        const nextPrepared = prepareBayerData(nextBatchFrames, nextSrcPixelCount, false);
+
+        // Upload to the buffer we're NOT currently using
+        const nextInputBuffer = usePipelinedData && pipelinedUpload.useAltBuffer
+            ? analyzeBuffers.inputBuffer      // Current used alt, so next uses primary
+            : analyzeBuffers.inputBufferAlt;  // Current used primary, so next uses alt
+
+        queue.writeBuffer(nextInputBuffer, 0, nextPrepared.data);
+
+        // Mark as ready for next batch
+        pipelinedUpload.ready = true;
+        pipelinedUpload.useAltBuffer = !pipelinedUpload.useAltBuffer;  // Toggle
+        pipelinedUpload.scale = nextPrepared.scale;
+        pipelinedUpload.batchSize = nextBatchFrames.length;
+    }
+
+    await Promise.all(mapPromises);
     const tAfterMapAsync = performance.now();
     dcaMapAsyncTime += (tAfterMapAsync - tAfterSubmit);
 
     const reductionData = new Float32Array(readbackBuf.getMappedRange().slice(0));
-    // Cropped RGBA type depends on bit depth:
-    // - 8-bit: Uint8Array (packed RGBA)
-    // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
-    const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
-    const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
     // Read bounds computed by GPU centroid shader
     const boundsData = new Uint32Array(boundsReadbackBuf.getMappedRange().slice(0));
+
+    // Cropped RGBA and grayscale readback only when not in grayOnly mode
+    let croppedData = null;
+    let grayData = null;
+    if (!grayOnly) {
+        // Cropped RGBA type depends on bit depth:
+        // - 8-bit: Uint8Array (packed RGBA)
+        // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
+        const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
+        croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
+        // Grayscale is always Float32
+        grayData = new Float32Array(grayReadbackBuf.getMappedRange().slice(0));
+    }
+
     readbackBuf.unmap();
-    croppedReadbackBuf.unmap();
     boundsReadbackBuf.unmap();
+    if (!grayOnly) {
+        croppedReadbackBuf.unmap();
+        grayReadbackBuf.unmap();
+    }
     releaseBatchSlot();  // Allow next batch to proceed
 
     // Build bounds and centers arrays from GPU output
@@ -3352,20 +3854,23 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Build results
     const results = [];
     for (let i = 0; i < batchSize; i++) {
-        let tenengradSum = 0;
+        // Sum both Tenengrad and Laplacian from workgroups
+        let tenengradSum = 0, laplacianSum = 0;
         for (let w = 0; w < numWorkgroupsCrop; w++) {
-            tenengradSum += reductionData[(i * numWorkgroupsCrop + w) * 2];
+            const idx = (i * numWorkgroupsCrop + w) * 2;
+            tenengradSum += reductionData[idx];
+            laplacianSum += reductionData[idx + 1];
         }
-        const sharpness = (tenengradSum / cropPixelCount) * 65025;
-
-        // Return buffer in appropriate format for stacking
-        // - 8-bit: uint8Buffer (packed RGBA) - stacker converts to Float32 on GPU
-        // - 16-bit: float32Buffer (4 floats/pixel) - preserves precision
-        const elementsPerPixel = 4;  // 4 floats or 4 bytes
-        const frameRgba = croppedData.slice(i * cropPixelCount * elementsPerPixel, (i + 1) * cropPixelCount * elementsPerPixel);
+        // Scale by 255² = 65025 to match CPU which uses 0-255 grayscale (GPU uses 0-1)
+        const tenengradMean = (tenengradSum / cropPixelCount) * 65025;
+        const laplacianMean = (laplacianSum / cropPixelCount) * 65025;
+        // Combined sharpness = geometric mean of both metrics
+        const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
         const result = {
             sharpness,
+            tenengrad: tenengradMean,
+            laplacian: laplacianMean,
             circularity: bounds[i]?.circularity || 0,
             index: frames[i].index,
             bounds: bounds[i],
@@ -3375,10 +3880,25 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
             height: cropSize
         };
 
-        if (bitDepth === 16) {
-            result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
-        } else {
-            result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+        // Extract cropped RGBA and grayscale only when not in grayOnly mode
+        if (!grayOnly && croppedData) {
+            // Return buffer in appropriate format for stacking
+            // - 8-bit: uint8Buffer (packed RGBA) - stacker converts to Float32 on GPU
+            // - 16-bit: float32Buffer (4 floats/pixel) - preserves precision
+            const elementsPerPixel = 4;  // 4 floats or 4 bytes
+            const frameRgba = croppedData.slice(i * cropPixelCount * elementsPerPixel, (i + 1) * cropPixelCount * elementsPerPixel);
+
+            if (bitDepth === 16) {
+                result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+            } else {
+                result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+            }
+
+            // Also extract grayscale for side-by-side preview
+            if (grayData) {
+                const frameGray = grayData.slice(i * cropPixelCount, (i + 1) * cropPixelCount);
+                result.grayBuffer = frameGray.buffer.slice(frameGray.byteOffset, frameGray.byteOffset + frameGray.byteLength);
+            }
         }
 
         results.push(result);
@@ -3391,7 +3911,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
 
     // Log every 10 batches
     if (dcaBatchCount % 10 === 0) {
-        console.log(`[GPU Timing] ${dcaBatchCount} batches: prep=${(dcaPrepTime/dcaBatchCount).toFixed(1)}ms, mapAsync=${(dcaMapAsyncTime/dcaBatchCount).toFixed(1)}ms, resultBuild=${(dcaResultBuildTime/dcaBatchCount).toFixed(1)}ms`);
+        console.log(`[GPU Timing] ${dcaBatchCount} batches: upload=${(dcaUploadTime/dcaBatchCount).toFixed(1)}ms, demosaic=${(dcaDemosaicTime/dcaBatchCount).toFixed(1)}ms, bounds=${(dcaBoundsTime/dcaBatchCount).toFixed(1)}ms, crop=${(dcaCropTime/dcaBatchCount).toFixed(1)}ms, sharpness=${(dcaSharpnessTime/dcaBatchCount).toFixed(1)}ms, mapAsync=${(dcaMapAsyncTime/dcaBatchCount).toFixed(1)}ms`);
     }
 
     return results;
@@ -3503,6 +4023,7 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), 1);
             pass.end();
             encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, pixelCount * outputBytesPerPixel);
+            logGpuSubmit('singleFrame:demosaic');
             queue.submit([encoder.finish()]);
 
             await safeMapAsync(readbackBuffer, GPUMapMode.READ);
@@ -3617,17 +4138,29 @@ self.addEventListener('message', async (e) => {
         return;
     }
 
+    if (type === 'print-gpu-timing') {
+        printGpuTimingSummary();
+        self.postMessage({ type: 'gpu-timing-printed' });
+        return;
+    }
+
+    if (type === 'set-gpu-timing') {
+        gpuTimingEnabled = e.data.enabled;
+        console.log(`[GPU] Timing ${gpuTimingEnabled ? 'enabled' : 'disabled'}`);
+        return;
+    }
+
     if (type === 'analyze-batch') {
         if (!isReady) {
             self.postMessage({ type: 'analyze-error', error: 'Not initialized' });
             return;
         }
 
-        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, useVng = false } = e.data;
+        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, useVng = false, grayOnly = false } = e.data;
 
         try {
-            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, useVng);
-            // Transfer uint8Buffer or float32Buffer depending on mode
+            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, useVng, grayOnly);
+            // Transfer uint8Buffer or float32Buffer depending on mode (none in grayOnly mode)
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'analyze-result', requestId, results }, transferables);
         } catch (err) {
@@ -3663,11 +4196,11 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly, useVng = false } = e.data;
+        const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly, useVng = false, grayOnly = false, nextBatchFrames = null } = e.data;
 
         try {
-            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly, useVng);
-            // Transfer uint8Buffer or float32Buffer depending on mode
+            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly, useVng, grayOnly, nextBatchFrames);
+            // Transfer uint8Buffer or float32Buffer depending on mode (none in grayOnly mode)
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'detect-crop-analyze-result', requestId, results }, transferables);
         } catch (err) {

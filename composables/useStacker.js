@@ -377,8 +377,8 @@ export function useStacker() {
                 const centers = [];
 
                 if (isSerFile) {
-                    // Handle multi-file SER (uses getFrame method)
-                    if (frameReReader.fileType === 'ser-multi') {
+                    // Prefer getFrame() when available (works for unified debayer reader, multi-file, etc.)
+                    if (frameReReader.getFrame) {
                         // Parallel reads via getFrame
                         const results = await Promise.all(
                             batchFrames.map(frame => frameReReader.getFrame(frame))
@@ -394,7 +394,7 @@ export function useStacker() {
                             }
                         }
                     } else {
-                        // Single-file SER - parallel file reads
+                        // Legacy path: direct file reads for old SER reader
                         const { file, frameSize, header } = frameReReader;
                         const frameBuffers = await Promise.all(
                             batchFrames.map(frame => {
@@ -649,11 +649,9 @@ export function useStacker() {
                 }
 
                 // Calculate shifts for batch via GPU template matching
+                // Use pre-computed packed grayscale from GPU demosaic shader (8-bit, faster)
                 const t0Gray = performance.now();
-                const frameGrayDatas = gpuResults.map(r => {
-                    const buffer = is16bit ? r.float32Buffer : r.uint8Buffer;
-                    return rgbaToGrayscale(buffer, cropSize, cropSize, is16bit);
-                });
+                const frameGrayDatas = gpuResults.map(r => new Uint8Array(r.packedGrayBuffer || r.grayBuffer));
                 stackingStats.grayscaleMs.push(performance.now() - t0Gray);
 
                 // For surface mode, pass searchOffset to shift search region without affecting template extraction
@@ -761,6 +759,8 @@ export function useStacker() {
 
             // Cleanup
             gpuStackWorker.postMessage({ type: 'cleanup' });
+            // Print GPU timing summary before terminating
+            gpuAnalyzeWorker.postMessage({ type: 'print-gpu-timing' });
             gpuAnalyzeWorker.terminate();
             gpuStackWorker.terminate();
 
@@ -1027,7 +1027,7 @@ export function useStacker() {
                 const batchEnd = Math.min(batchStart + batchSize, framesToProcess.length);
                 const batchIndices = framesToProcess.slice(batchStart, batchEnd);
 
-                // Convert batch frames to grayscale (handle Uint8 and Float32)
+                // Convert RGBA to grayscale for template matching
                 const t0Gray = performance.now();
                 const frameGrayDatas = batchIndices.map(f => {
                     const frame = frameData[f];
