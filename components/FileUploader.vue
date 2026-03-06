@@ -19,6 +19,11 @@
 			<button class="cancel-button" @click="cancelProcessing">Cancel</button>
 		</div>
 
+		<!-- Error message - always visible when set, regardless of processing state -->
+		<div v-if="errorMessage" class="error-message">
+			<p>{{ errorMessage }}</p>
+		</div>
+
 		<!-- Initial state: file selection and settings (hidden during processing) -->
 		<template v-if="!isProcessing">
 			<h3>Select file(s) for stacking and/or post processing</h3>
@@ -56,10 +61,6 @@
 					<button class="start-button" @click="startProcessing">{{ startButtonText }}</button>
 					<button class="clear-button" @click="clearSelection">Clear</button>
 				</div>
-			</div>
-
-			<div v-if="errorMessage" class="error-message">
-				<p>{{ errorMessage }}</p>
 			</div>
 
 			<div class="separator"></div>
@@ -595,8 +596,10 @@ async function startProcessing() {
 			logs: logs.value
 		});
 		track('stack_failed');
-		errorMessage.value = error.message || 'An error occurred during processing';
+		const errorMsg = error.message || 'An error occurred during processing';
+		// Set error and stop processing - FileUploader will show with error visible
 		isProcessing.value = false;
+		errorMessage.value = errorMsg;
 		eventBusEmit('show-error');
 	}
 }
