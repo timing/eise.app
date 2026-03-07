@@ -13,10 +13,38 @@ export class WebGPUUnavailableError extends Error {
 }
 
 export function useStacker() {
-    const { addLog, emit } = useEventBus();
+    const { addLog, emit, on } = useEventBus();
     const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
     const { getMinApQuality, getApPatchSize } = useProcessingState();
+
+    // Track active workers for cancellation
+    let cancelled = false;
+    const activeWorkers = new Set();
+
+    // Cancel processing and terminate all workers
+    function cancelProcessing() {
+        cancelled = true;
+        addLog(`Cancelling stacker workers (${activeWorkers.size} active)...`);
+        for (const worker of activeWorkers) {
+            try { worker.terminate(); } catch (e) { /* ignore */ }
+        }
+        activeWorkers.clear();
+        addLog('Stacker workers terminated');
+    }
+
+    // Listen for cancel event from UI
+    on('cancel-processing', cancelProcessing);
+
+    // Helper to track workers
+    function trackWorker(worker) {
+        activeWorkers.add(worker);
+        return worker;
+    }
+
+    function untrackWorker(worker) {
+        activeWorkers.delete(worker);
+    }
 
     // Timing stats collector for performance analysis
     let stackingStats = null;
@@ -344,10 +372,11 @@ export function useStacker() {
 
         addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}${is16bit ? ' (16-bit)' : ''}${noiseRobustAlignment ? ' (two-phase)' : ''}`);
         emit('set-caption', 'Initializing GPU workers...');
+        cancelled = false; // Reset cancellation flag
 
         // Initialize GPU workers (no OpenCV worker needed - alignment prep is pure JS)
-        const gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
-        const gpuStackWorker = new Worker(workerUrl('/webgpu_worker.js'));
+        const gpuAnalyzeWorker = trackWorker(new Worker(workerUrl('/webgpu_analyze_worker.js')));
+        const gpuStackWorker = trackWorker(new Worker(workerUrl('/webgpu_worker.js')));
 
         try {
             // Init GPU workers in parallel
@@ -769,6 +798,8 @@ export function useStacker() {
 
             // Cleanup
             gpuStackWorker.postMessage({ type: 'cleanup' });
+            untrackWorker(gpuAnalyzeWorker);
+            untrackWorker(gpuStackWorker);
             gpuAnalyzeWorker.terminate();
             gpuStackWorker.terminate();
 
@@ -789,6 +820,8 @@ export function useStacker() {
             };
 
         } catch (error) {
+            untrackWorker(gpuAnalyzeWorker);
+            untrackWorker(gpuStackWorker);
             gpuAnalyzeWorker.terminate();
             gpuStackWorker.terminate();
 
@@ -945,8 +978,9 @@ export function useStacker() {
         // Step 1: Initialize GPU worker
         addLog('Initializing GPU worker...');
         emit('set-caption', 'Initializing GPU worker...');
+        cancelled = false; // Reset cancellation flag
 
-        const gpuWorker = new Worker(workerUrl('/webgpu_worker.js'));
+        const gpuWorker = trackWorker(new Worker(workerUrl('/webgpu_worker.js')));
 
         try {
             // Init WebGPU worker
@@ -1223,6 +1257,7 @@ export function useStacker() {
 
             // Cleanup and terminate
             gpuWorker.postMessage({ type: 'cleanup' });
+            untrackWorker(gpuWorker);
             gpuWorker.terminate();
 
             // Log performance summary
@@ -1247,6 +1282,7 @@ export function useStacker() {
             };
 
         } catch (error) {
+            untrackWorker(gpuWorker);
             gpuWorker.terminate();
 
             // Check if this is a GPU unavailable error - throw specific error for user choice
@@ -1267,9 +1303,10 @@ export function useStacker() {
      * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
      */
     async function stackWithCPU(frameData, drizzleScale, noiseRobustAlignment, addLog, emit, surfaceMode = false) {
+        cancelled = false; // Reset cancellation flag
         return new Promise((resolve, reject) => {
             addLog('Creating fresh worker for stacking...');
-            const worker = new Worker(workerUrl('/unified_analyze_worker.js'));
+            const worker = trackWorker(new Worker(workerUrl('/unified_analyze_worker.js')));
 
             const initHandler = (e) => {
                 if (e.data.type === 'ready') {
@@ -1317,6 +1354,7 @@ export function useStacker() {
                         const float32Data = float32Buffer ? new Float32Array(float32Buffer) : null;
 
                         worker.removeEventListener('message', messageHandler);
+                        untrackWorker(worker);
                         worker.terminate();
                         // Return object with blob and float32Data for 16-bit post-processing
                         resolve({ blob, float32Data, width, height });
@@ -1326,6 +1364,7 @@ export function useStacker() {
                         addLog(`Stacking error: ${e.data.error}`);
                         emit('set-caption', 'Stacking failed');
                         worker.removeEventListener('message', messageHandler);
+                        untrackWorker(worker);
                         worker.terminate();
                         reject(new Error(e.data.error));
                     }
@@ -1349,5 +1388,5 @@ export function useStacker() {
         });
     }
 
-    return { stackFramesLocally };
+    return { stackFramesLocally, cancelProcessing };
 }

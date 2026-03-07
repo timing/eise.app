@@ -319,6 +319,7 @@ function handleWebGPUCancel() {
 	webGPUChoiceData.value = null;
 
 	addLog('Stacking cancelled by user');
+	eventBusEmit('cancel-processing');
 
 	if (data?.hasValidWorkers) {
 		qualityWorkers.value?.forEach(worker => worker.terminate());

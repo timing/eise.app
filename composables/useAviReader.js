@@ -331,7 +331,7 @@ function autoStretchRgba(rgba) {
 }
 
 export function useAviReader() {
-    const { addLog, emit } = useEventBus();
+    const { addLog, emit, on } = useEventBus();
     const { stackFramesLocally } = useStacker();
     const { capturePreCropFrame, capturePostCropFrame, resetCaptures } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
@@ -343,6 +343,44 @@ export function useAviReader() {
     const unifiedAnalyzeWorkers = [];
     let workersReady = false;
     const recyclingWorkers = new Set(); // Track which workers are currently being recycled
+    let cancelled = false;
+    let activeLiteWorkers = []; // Track lite workers for cancellation
+
+    // GPU worker state (declared here so cancelProcessing can access them)
+    let gpuWorker = null;
+    let gpuReady = false;
+
+    // Cancel processing and terminate all workers immediately
+    function cancelProcessing() {
+        cancelled = true;
+        addLog('Cancelling processing...');
+
+        // Terminate all CPU workers
+        unifiedAnalyzeWorkers.forEach(worker => {
+            try { worker.terminate(); } catch (e) { /* ignore */ }
+        });
+        unifiedAnalyzeWorkers.length = 0;
+
+        // Terminate lite workers (used in processBatchedVideoFrames)
+        activeLiteWorkers.forEach(worker => {
+            try { worker.terminate(); } catch (e) { /* ignore */ }
+        });
+        activeLiteWorkers = [];
+
+        // Terminate GPU worker if exists
+        if (gpuWorker) {
+            try { gpuWorker.terminate(); } catch (e) { /* ignore */ }
+            gpuWorker = null;
+            gpuReady = false;
+        }
+
+        workersReady = false;
+        recyclingWorkers.clear();
+        addLog('Processing cancelled, workers terminated');
+    }
+
+    // Listen for cancel event from UI
+    on('cancel-processing', cancelProcessing);
 
     // Initializes workers and ensures OpenCV is ready before processing
     async function initializeWorkers() {
@@ -940,6 +978,7 @@ export function useAviReader() {
     async function readAviFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null, surfaceMode = false, useVngDemosaic = true, preParsedHeader = null) {
         // Reset comparison export captures for new processing
         resetCaptures();
+        cancelled = false; // Reset cancellation flag for new processing
 
         emit('start-loading', 'Parsing AVI header...');
         emit('update-loading', 0);
@@ -1296,6 +1335,7 @@ export function useAviReader() {
     async function processFFmpegFrames(ffmpeg, pngFilenames, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         // Reset comparison export captures for new processing
         resetCaptures();
+        cancelled = false; // Reset cancellation flag for new processing
 
         await initializeWorkers();
 
@@ -1689,9 +1729,6 @@ export function useAviReader() {
     }
 
     // GPU worker for MJPEG processing
-    let gpuWorker = null;
-    let gpuReady = false;
-
     async function initializeGpuWorker() {
         if (gpuReady) return true;
 
@@ -3013,10 +3050,12 @@ export function useAviReader() {
 
         // Reset comparison export captures
         resetCaptures();
+        cancelled = false; // Reset cancellation flag for new processing
 
         // Lite mode: use only 2 workers to reduce memory pressure
         const LITE_WORKER_COUNT = 2;
         const liteWorkers = [];
+        activeLiteWorkers = liteWorkers; // Store reference for cancellation
 
         addLog(`Initializing ${LITE_WORKER_COUNT} analysis workers (Lite mode)...`);
         for (let i = 0; i < LITE_WORKER_COUNT; i++) {
@@ -3039,6 +3078,7 @@ export function useAviReader() {
         } catch (err) {
             addLog(`Worker init failed: ${err.message}`);
             liteWorkers.forEach(w => w.terminate());
+            activeLiteWorkers = [];
             emit('stop-loading');
             return;
         }
@@ -3305,6 +3345,7 @@ export function useAviReader() {
         const stackResult = await stackFramesLocally(bestFramesForStacking, liteWorkers[0], drizzleScale, noiseRobustAlignment, false, null, surfaceMode);
 
         liteWorkers.forEach(w => w.terminate());
+        activeLiteWorkers = [];
 
         if (stackResult) {
             emit('postProcessing', stackResult.blob, stackResult.float32Data, stackResult.width, stackResult.height);
@@ -3403,5 +3444,5 @@ export function useAviReader() {
         };
     }
 
-    return { readAviFile, processFFmpegFrames, processBatchedVideoFrames, checkAviFormat };
+    return { readAviFile, processFFmpegFrames, processBatchedVideoFrames, checkAviFormat, cancelProcessing };
 }

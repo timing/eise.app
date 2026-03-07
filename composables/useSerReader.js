@@ -137,7 +137,7 @@ async function renderFrameToBlob(canvas, buffer, header, bayerChoice) {
 }
 
 export function useSerReader() {
-    const { addLog, emit } = useEventBus();
+    const { addLog, emit, on } = useEventBus();
     const { stackFramesLocally } = useStacker();
     const { capturePreCropFrame, capturePostCropFrame, resetCaptures } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
@@ -147,6 +147,46 @@ export function useSerReader() {
     const numWorkers = Math.min(navigator.hardwareConcurrency || 4, 4);
     const unifiedAnalyzeWorkers = [];
     let workersReady = false;
+    let cancelled = false;
+
+    // GPU worker state (declared here so cancelProcessing can access them)
+    let gpuAnalyzeWorker = null;
+    let gpuWorkerReady = false;
+    let gpuInitFailed = false;
+
+    // Cancel processing and terminate all workers immediately
+    function cancelProcessing() {
+        cancelled = true;
+        addLog('Cancelling processing...');
+
+        // Terminate all CPU workers
+        unifiedAnalyzeWorkers.forEach(worker => {
+            try { worker.terminate(); } catch (e) { /* ignore */ }
+        });
+        unifiedAnalyzeWorkers.length = 0;
+
+        // Clear pending frame resolvers (reject them)
+        for (const [workerIndex, workerPending] of pendingFrames) {
+            for (const [frameIndex, pending] of workerPending) {
+                clearTimeout(pending.timeout);
+                pending.reject(new Error('Processing cancelled'));
+            }
+        }
+        pendingFrames.clear();
+
+        // Terminate GPU worker if exists
+        if (gpuAnalyzeWorker) {
+            try { gpuAnalyzeWorker.terminate(); } catch (e) { /* ignore */ }
+            gpuAnalyzeWorker = null;
+            gpuWorkerReady = false;
+        }
+
+        workersReady = false;
+        addLog('Processing cancelled, workers terminated');
+    }
+
+    // Listen for cancel event from UI
+    on('cancel-processing', cancelProcessing);
 
     // Initializes workers and ensures OpenCV is ready before processing
     async function initializeWorkers() {
@@ -574,10 +614,6 @@ export function useSerReader() {
     }
 
     // GPU batch analysis helper
-    let gpuAnalyzeWorker = null;
-    let gpuWorkerReady = false;
-    let gpuInitFailed = false; // Track if GPU init already failed to avoid repeated attempts
-
     async function initGpuAnalyzeWorker() {
         if (gpuAnalyzeWorker && gpuWorkerReady) return true;
         if (gpuInitFailed) return false; // Don't retry if GPU already known to be unavailable
@@ -802,6 +838,7 @@ export function useSerReader() {
     async function readSerFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false, useVngDemosaic = true) {
         // Reset comparison export captures for new processing
         resetCaptures();
+        cancelled = false; // Reset cancellation flag for new processing
 
         emit('start-loading', 'Reading file header');
         emit('update-loading', 0); // Initial progress
@@ -2327,6 +2364,7 @@ export function useSerReader() {
     async function readSerFiles(files, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, surfaceMode = false, useVngDemosaic = true) {
         // Reset comparison export captures for new processing
         resetCaptures();
+        cancelled = false; // Reset cancellation flag for new processing
 
         // CPU workers (with OpenCV) are initialized lazily only if GPU fallback is needed
 
@@ -3291,5 +3329,5 @@ export function useSerReader() {
         workersReady = false;
     }
 
-    return { readSerFile, readSerFiles };
+    return { readSerFile, readSerFiles, cancelProcessing };
 }

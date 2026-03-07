@@ -241,6 +241,7 @@ onMounted(async () => {
 function cancelProcessing() {
 	track('stack_cancelled');
 	emit('stop-loading');
+	emit('cancel-processing');
 	showCancelledMessage.value = true;
 }
 
