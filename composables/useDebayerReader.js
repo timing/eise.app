@@ -115,6 +115,41 @@ function autoStretchRgba(rgba) {
 }
 
 /**
+ * Compute a pre-crop region from detected bounds with generous margin
+ * Margin ensures planet won't be cut off by GPU detection
+ * @param {Array} bounds - Array of detected bounds from GPU
+ * @param {number} srcWidth - Original frame width
+ * @param {number} srcHeight - Original frame height
+ * @param {number} marginFactor - Margin multiplier (e.g., 2.0 = 2x planet size)
+ * @returns {Object|null} - {x, y, width, height} or null if no valid bounds
+ */
+function computePreCropRegion(bounds, srcWidth, srcHeight, marginFactor = 1.5) {
+    // Filter valid bounds (not cut-off, has size)
+    const validBounds = bounds.filter(b => b && !b.cutOff && b.width > 0);
+    if (validBounds.length === 0) return null;
+
+    // Find the bounding box of all detected objects
+    let minX = srcWidth, minY = srcHeight, maxX = 0, maxY = 0;
+    let maxSize = 0;
+    for (const b of validBounds) {
+        minX = Math.min(minX, b.x);
+        minY = Math.min(minY, b.y);
+        maxX = Math.max(maxX, b.x + b.width);
+        maxY = Math.max(maxY, b.y + b.height);
+        maxSize = Math.max(maxSize, b.size || Math.max(b.width, b.height));
+    }
+
+    // Add margin based on detected object size
+    const margin = Math.ceil(maxSize * marginFactor);
+    const x = Math.max(0, minX - margin);
+    const y = Math.max(0, minY - margin);
+    const width = Math.min(srcWidth - x, maxX - minX + margin * 2);
+    const height = Math.min(srcHeight - y, maxY - minY + margin * 2);
+
+    return { x, y, width, height };
+}
+
+/**
  * Create a debayer reader instance for processing demosaic formats
  */
 export function useDebayerReader() {
@@ -131,6 +166,10 @@ export function useDebayerReader() {
     let gpuWorker = null;
     let gpuWorkerReady = false;
     let gpuInitFailed = false;
+
+    // Pre-crop worker (runs in parallel with GPU on separate CPU core)
+    let preCropWorker = null;
+    let preCropRequestId = 0;
 
     // Processing state
     let bayerChoice = 'MONO';
@@ -496,11 +535,16 @@ export function useDebayerReader() {
      * Combined detect + crop + analyze in one GPU pass
      * @param {boolean} grayOnly - If true, skip RGBA output (faster for analysis phase)
      * @param {Array} nextBatchFrames - Optional frames for next batch (pipelined upload)
+     * @param {Object} preCropOffset - Optional {x, y, width, height} if frames were pre-cropped
      */
-    async function detectCropAnalyzeGpu(frames, cropSize, threshold = 0.1, metadataOnly = false, grayOnly = false, nextBatchFrames = null) {
+    async function detectCropAnalyzeGpu(frames, cropSize, threshold = 0.1, metadataOnly = false, grayOnly = false, nextBatchFrames = null, preCropOffset = null) {
         if (!gpuWorker || !gpuWorkerReady) {
             throw new Error('GPU worker not initialized');
         }
+
+        // If frames are pre-cropped, use the pre-cropped dimensions
+        const srcWidth = preCropOffset ? preCropOffset.width : metadata.width;
+        const srcHeight = preCropOffset ? preCropOffset.height : metadata.height;
 
         const requestId = Date.now() + Math.random();
 
@@ -510,7 +554,21 @@ export function useDebayerReader() {
                 gpuWorker.removeEventListener('message', handler);
 
                 if (e.data.type === 'detect-crop-analyze-result') {
-                    resolve(e.data.results);
+                    let results = e.data.results;
+                    // Adjust coordinates back to original frame space if pre-cropped
+                    if (preCropOffset) {
+                        for (const r of results) {
+                            if (r.bounds) {
+                                r.bounds.x = (r.bounds.x || 0) + preCropOffset.x;
+                                r.bounds.y = (r.bounds.y || 0) + preCropOffset.y;
+                                r.bounds.centroidX = (r.bounds.centroidX || 0) + preCropOffset.x;
+                                r.bounds.centroidY = (r.bounds.centroidY || 0) + preCropOffset.y;
+                            }
+                            r.centerX = (r.centerX || 0) + preCropOffset.x;
+                            r.centerY = (r.centerY || 0) + preCropOffset.y;
+                        }
+                    }
+                    resolve(results);
                 } else if (e.data.type === 'detect-crop-analyze-error') {
                     reject(new Error(e.data.error));
                 }
@@ -520,8 +578,8 @@ export function useDebayerReader() {
             gpuWorker.postMessage({
                 type: 'detect-crop-analyze-batch',
                 frames,
-                srcWidth: metadata.width,
-                srcHeight: metadata.height,
+                srcWidth,
+                srcHeight,
                 cropSize,
                 bayerPattern,
                 threshold,
@@ -751,6 +809,11 @@ export function useDebayerReader() {
         const bestFramesForStacking = [];
         const allAnalyzedFrames = [];
         let bestFrameSoFar = null;
+        let cutOffFrameCount = 0;  // Track frames skipped due to object touching edge
+
+        // CPU pre-crop region - updated after each batch based on detected bounds
+        // This reduces GPU upload size significantly after the first batch
+        let preCropRegion = null;  // {x, y, width, height} or null for full frames
 
         // Timing stats for analysis phase
         const analysisStats = {
@@ -781,6 +844,38 @@ export function useDebayerReader() {
             return frameDataArray.map((data, idx) => ({ data, index: indices[idx] }));
         }
 
+        // Async pre-crop using worker (runs in parallel with GPU on separate CPU core)
+        function preCropAsync(frames, region) {
+            if (!region || !frames || frames.length === 0) {
+                return Promise.resolve({ frames, offset: null });
+            }
+
+            // Initialize worker on first use
+            if (!preCropWorker) {
+                preCropWorker = new Worker(workerUrl('/precrop_worker.js'));
+            }
+
+            const requestId = ++preCropRequestId;
+            return new Promise((resolve) => {
+                const handler = (e) => {
+                    if (e.data.requestId !== requestId) return;
+                    preCropWorker.removeEventListener('message', handler);
+                    resolve({ frames: e.data.frames, offset: e.data.offset });
+                };
+                preCropWorker.addEventListener('message', handler);
+
+                // Transfer frame buffers to worker for zero-copy
+                const transferList = frames.map(f => f.data.buffer);
+                preCropWorker.postMessage({
+                    frames,
+                    srcWidth: metadata.width,
+                    srcHeight: metadata.height,
+                    region,
+                    requestId
+                }, transferList);
+            });
+        }
+
         // Pipeline: load first batch
         let nextBatchPromise = loadBatch(0, BATCH_SIZE);
 
@@ -789,9 +884,12 @@ export function useDebayerReader() {
         let currentFrames = await nextBatchPromise;
         let nextFramesPromise = frameCount > BATCH_SIZE ? loadBatch(BATCH_SIZE, BATCH_SIZE * 2) : null;
 
+        // Pre-crop state for async parallel processing
+        let pendingPreCrop = null;  // Promise for pre-crop started in previous iteration
+
         for (let batchStart = 0; batchStart < frameCount; batchStart += BATCH_SIZE) {
             const t0Load = performance.now();
-            const frames = currentFrames;
+            let frames = currentFrames;
             analysisStats.frameLoadMs.push(performance.now() - t0Load);
 
             if (!frames || frames.length === 0) break;
@@ -817,18 +915,33 @@ export function useDebayerReader() {
                 }
             }
 
+            // Apply pre-crop if we have a pending result from previous iteration
+            // Pre-crop runs in separate worker, parallel with GPU
+            let preCropOffset = null;
+            if (pendingPreCrop) {
+                const preCropped = await pendingPreCrop;
+                frames = preCropped.frames;
+                preCropOffset = preCropped.offset;
+                pendingPreCrop = null;
+            }
+
+            // Start pre-cropping next batch async (runs on separate CPU core while GPU works)
+            // Skip in surface mode (whole frame is target)
+            if (preCropRegion && cropRegion && !surfaceMode && nextBatchFrames) {
+                pendingPreCrop = preCropAsync(nextBatchFrames, preCropRegion);
+            }
+
             // Analyze batch using GRAYSCALE-ONLY demosaic (fast, no color output)
-            // Pass nextBatchFrames for GPU upload pipelining
             const t0Demosaic = performance.now();
             let results;
             if (cropRegion) {
-                results = await detectCropAnalyzeGpu(frames, cropRegion.size, 0.1, !manualThreshold, true, nextBatchFrames);
+                results = await detectCropAnalyzeGpu(frames, cropRegion.size, 0.1, !manualThreshold, true, null, preCropOffset);
             } else {
                 results = await analyzeFrameBatchGpu(frames, 0.1, !manualThreshold, true);
             }
             analysisStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
 
-            // Move next batch to current for next iteration
+            // Move next batch to current for next iteration (original frames, will be pre-cropped next iteration)
             currentFrames = nextBatchFrames;
             completedFrames += results.length;
 
@@ -841,6 +954,12 @@ export function useDebayerReader() {
             }
 
             for (const result of results) {
+                // Skip cut-off frames (object touching edge of frame)
+                if (result.cutOff) {
+                    cutOffFrameCount++;
+                    continue;
+                }
+
                 const frameWidth = result.width || cropRegion?.size || metadata.width;
                 const frameHeight = result.height || cropRegion?.size || metadata.height;
 
@@ -878,8 +997,18 @@ export function useDebayerReader() {
                     bestFrameSoFar = frame;
 
                     // Do separate color demosaic for preview (async, non-blocking)
-                    const frameData = frames.find(f => f.index === result.index)?.data;
-                    if (frameData) {
+                    // When pre-crop is active, frames have smaller data or detached buffers, so re-read from disk
+                    // This is rare (only for best frame updates) so disk read is acceptable
+                    let frameDataPromise;
+                    if (preCropOffset) {
+                        frameDataPromise = readFrame(result.index);
+                    } else {
+                        const existingData = frames.find(f => f.index === result.index)?.data;
+                        frameDataPromise = existingData ? Promise.resolve(existingData) : readFrame(result.index);
+                    }
+
+                    frameDataPromise.then(frameData => {
+                        if (!frameData) return;
                         // Use crop info if available (centered on detected planet)
                         const cropInfo = cropRegion ? {
                             size: cropRegion.size,
@@ -895,6 +1024,26 @@ export function useDebayerReader() {
                                 emit('best-frame-updated', bestFrameSoFar);
                             }
                         });
+                    });
+                }
+            }
+
+            // Update CPU pre-crop region based on detected bounds from this batch
+            // This tracks the planet as it drifts across frames
+            // Skip in surface mode (whole frame is target, pre-crop makes no sense)
+            if (cropRegion && !surfaceMode && results.length > 0) {
+                const batchBounds = results.map(r => r.bounds).filter(b => b && !b.cutOff);
+                const newRegion = computePreCropRegion(batchBounds, metadata.width, metadata.height, 1.5);
+                if (newRegion) {
+                    // Only update if region changed significantly (avoid jitter)
+                    if (!preCropRegion ||
+                        Math.abs(newRegion.x - preCropRegion.x) > 10 ||
+                        Math.abs(newRegion.y - preCropRegion.y) > 10) {
+                        preCropRegion = newRegion;
+                        if (batchStart === 0) {
+                            const reduction = ((metadata.width * metadata.height) - (newRegion.width * newRegion.height)) / (metadata.width * metadata.height) * 100;
+                            addLog(`[DebayerReader] CPU pre-crop enabled: ${newRegion.width}x${newRegion.height} (${reduction.toFixed(0)}% upload reduction)`);
+                        }
                     }
                 }
             }
@@ -919,10 +1068,13 @@ export function useDebayerReader() {
         addLog(`─── Analysis Performance Summary ───`);
         addLog(`Total time: ${(analysisElapsed / 1000).toFixed(1)}s for ${completedFrames} frames`);
         addLog(`Frame loading (disk): ${avgLoad}ms avg, ${(totalLoad / 1000).toFixed(1)}s total (${pctLoad}%)`);
-        addLog(`GPU demosaic (8-bit): ${avgDemosaic}ms avg, ${(totalDemosaic / 1000).toFixed(1)}s total (${pctDemosaic}%)`);
+        addLog(`GPU analysis: ${avgDemosaic}ms avg, ${(totalDemosaic / 1000).toFixed(1)}s total (${pctDemosaic}%)`);
         addLog(`────────────────────────────────────`);
 
         addLog(`[DebayerReader] Analysis complete. Best ${bestFramesForStacking.length} frames selected.`);
+        if (cutOffFrameCount > 0) {
+            addLog(`[DebayerReader] ${cutOffFrameCount} frames skipped (object cut off at edge)`);
+        }
 
         // DEBUG: Check for duplicate sharpness values
         if (manualThreshold && allAnalyzedFrames.length > 0) {

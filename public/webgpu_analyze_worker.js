@@ -15,6 +15,33 @@ const MAX_CONCURRENT_BATCHES = 2;
 let activeBatchCount = 0;
 let batchWaiters = [];
 
+// Calculate circularity from image moments using eigenvalue ratio
+// Returns value 0-1 where 1 = perfect circle
+function calculateCircularityFromMoments(m00, m10, m01, m20, m11, m02) {
+    if (m00 <= 0) return 0;
+
+    const cx = m10 / m00;
+    const cy = m01 / m00;
+
+    // Central moments
+    const mu20 = m20 / m00 - cx * cx;
+    const mu02 = m02 / m00 - cy * cy;
+    const mu11 = m11 / m00 - cx * cy;
+
+    // Eigenvalues of covariance matrix
+    const trace = mu20 + mu02;
+    const det = mu20 * mu02 - mu11 * mu11;
+    const discriminant = Math.sqrt(Math.max(0, trace * trace - 4 * det));
+    const lambda1 = (trace + discriminant) / 2;
+    const lambda2 = (trace - discriminant) / 2;
+
+    // Circularity = ratio of eigenvalues (1 = perfect circle)
+    if (lambda1 > 0) {
+        return Math.min(lambda2, lambda1) / Math.max(lambda2, lambda1);
+    }
+    return 0;
+}
+
 // Forward declaration - will be set after init() is defined
 let reinitializeGpu = null;
 
@@ -253,9 +280,12 @@ let offsetTenengradPipeline = null;  // Reads from full-frame with per-frame off
 let reductionPipeline = null;
 let momentsPipeline = null;
 let momentsReductionPipeline = null;
+let circularityFinalPipeline = null;
 let boundsPipeline = null;
 let boundsReductionPipeline = null;
 let centroidPipeline = null;
+let blurPipeline = null;  // Gaussian blur for noise reduction before bounds detection
+let sharpnessFinalPipeline = null;  // Final reduction: workgroup sums → 2 floats per frame
 
 // Cached buffers for reuse across batches
 let cachedAnalyzeBuffers = null;
@@ -1780,6 +1810,49 @@ fn main(
 }
 `;
 
+// Final sharpness reduction - sums workgroup partial results into 2 floats per frame
+// Reduces readback from ~1.1MB to 800 bytes per batch
+const sharpnessFinalShader = `
+struct Params {
+    numWorkgroups: u32,  // Number of workgroups from first reduction
+    batchSize: u32,
+    pixelCount: u32,     // For computing mean
+    _pad: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> partialSums: array<f32>;  // 2 floats per workgroup per frame
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // 2 floats per frame: [tenengrad, laplacian]
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let frameIdx = gid.x;
+    if (frameIdx >= params.batchSize) {
+        return;
+    }
+
+    // Sum all workgroup results for this frame
+    var tenengradSum: f32 = 0.0;
+    var laplacianSum: f32 = 0.0;
+
+    for (var w = 0u; w < params.numWorkgroups; w++) {
+        let idx = (frameIdx * params.numWorkgroups + w) * 2u;
+        tenengradSum += partialSums[idx];
+        laplacianSum += partialSums[idx + 1u];
+    }
+
+    // Scale and compute mean (matching CPU: scale by 65025, divide by pixelCount)
+    let scale: f32 = 65025.0 / f32(params.pixelCount);
+    let tenengradMean = tenengradSum * scale;
+    let laplacianMean = laplacianSum * scale;
+
+    // Output final values
+    let outIdx = frameIdx * 2u;
+    output[outIdx] = tenengradMean;
+    output[outIdx + 1u] = laplacianMean;
+}
+`;
+
 // Moments shader - calculates image moments for circularity
 const momentsShader = `
 struct Params {
@@ -1880,6 +1953,127 @@ fn main(
             results[resultIdx + m] = sharedData[m];
         }
     }
+}
+`;
+
+// Final moments shader - sums partial moments and computes circularity + centroid on GPU
+// Outputs 3 floats per frame: [circularity, centroidX, centroidY]
+// This eliminates the need to read back 6 floats × numWorkgroups and compute in JS
+const circularityFinalShader = `
+struct Params {
+    numWorkgroups: u32,  // Number of workgroups from moments reduction
+    batchSize: u32,
+    defaultCenterX: f32,  // Fallback center if no bright pixels
+    defaultCenterY: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> partialMoments: array<f32>;  // 6 floats per workgroup per frame
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // 3 floats per frame: [circ, cx, cy]
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let frameIdx = gid.x;
+    if (frameIdx >= params.batchSize) {
+        return;
+    }
+
+    // Sum moments across all workgroups for this frame
+    var m00: f32 = 0.0;
+    var m10: f32 = 0.0;
+    var m01: f32 = 0.0;
+    var m20: f32 = 0.0;
+    var m11: f32 = 0.0;
+    var m02: f32 = 0.0;
+
+    for (var w = 0u; w < params.numWorkgroups; w++) {
+        let idx = (frameIdx * params.numWorkgroups + w) * 6u;
+        m00 += partialMoments[idx];
+        m10 += partialMoments[idx + 1u];
+        m01 += partialMoments[idx + 2u];
+        m20 += partialMoments[idx + 3u];
+        m11 += partialMoments[idx + 4u];
+        m02 += partialMoments[idx + 5u];
+    }
+
+    // Compute circularity and centroid from moments
+    var circ: f32 = 0.0;
+    var centroidX: f32 = params.defaultCenterX;
+    var centroidY: f32 = params.defaultCenterY;
+
+    if (m00 > 0.0) {
+        centroidX = m10 / m00;
+        centroidY = m01 / m00;
+
+        // Central moments
+        let mu20 = m20 / m00 - centroidX * centroidX;
+        let mu02 = m02 / m00 - centroidY * centroidY;
+        let mu11 = m11 / m00 - centroidX * centroidY;
+
+        // Eigenvalues of covariance matrix
+        let trace = mu20 + mu02;
+        let det = mu20 * mu02 - mu11 * mu11;
+        let discriminant = sqrt(max(0.0, trace * trace - 4.0 * det));
+        let lambda1 = (trace + discriminant) / 2.0;
+        let lambda2 = (trace - discriminant) / 2.0;
+
+        // Circularity = ratio of eigenvalues (1 = perfect circle)
+        if (lambda1 > 0.0) {
+            circ = min(lambda2, lambda1) / max(lambda2, lambda1);
+        }
+    }
+
+    let outIdx = frameIdx * 3u;
+    output[outIdx] = circ;
+    output[outIdx + 1u] = centroidX;
+    output[outIdx + 2u] = centroidY;
+}
+`;
+
+// 5x5 Gaussian blur shader - reduces noise before bounds detection (matches CPU GaussianBlur)
+const blurShader = `
+struct Params {
+    width: u32,
+    height: u32,
+    batchSize: u32,
+    _pad: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> input: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = i32(gid.x);
+    let y = i32(gid.y);
+    let frameIdx = gid.z;
+    let w = i32(params.width);
+    let h = i32(params.height);
+
+    if (gid.x >= params.width || gid.y >= params.height || frameIdx >= params.batchSize) {
+        return;
+    }
+
+    // 5x5 Gaussian kernel weights (sigma ≈ 1.0), same as CPU cv.GaussianBlur
+    // Separable: [1, 4, 6, 4, 1] / 16 for each dimension
+    var weights = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
+
+    var sum: f32 = 0.0;
+    let frameOffset = i32(frameIdx) * w * h;
+
+    for (var dy: i32 = -2; dy <= 2; dy++) {
+        for (var dx: i32 = -2; dx <= 2; dx++) {
+            let sx = clamp(x + dx, 0, w - 1);
+            let sy = clamp(y + dy, 0, h - 1);
+            let idx = frameOffset + sy * w + sx;
+            let weight = weights[dx + 2] * weights[dy + 2];
+            sum += input[idx] * weight;
+        }
+    }
+
+    let outIdx = frameOffset + y * w + x;
+    output[outIdx] = sum;
 }
 `;
 
@@ -2199,6 +2393,12 @@ async function init() {
         compute: { module: momentsReductionModule, entryPoint: 'main' }
     });
 
+    const circularityFinalModule = await createShader(circularityFinalShader, 'circularityFinal');
+    circularityFinalPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: circularityFinalModule, entryPoint: 'main' }
+    });
+
     const boundsModule = await createShader(boundsShader, 'bounds');
     boundsPipeline = device.createComputePipeline({
         layout: 'auto',
@@ -2215,6 +2415,18 @@ async function init() {
     centroidPipeline = device.createComputePipeline({
         layout: 'auto',
         compute: { module: centroidModule, entryPoint: 'main' }
+    });
+
+    const blurModule = await createShader(blurShader, 'blur');
+    blurPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: blurModule, entryPoint: 'main' }
+    });
+
+    const sharpnessFinalModule = await createShader(sharpnessFinalShader, 'sharpnessFinal');
+    sharpnessFinalPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: sharpnessFinalModule, entryPoint: 'main' }
     });
 
     isReady = true;
@@ -2348,6 +2560,11 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
             size: pixelBufferSize,
             usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
         }),
+        // Blurred grayscale for noise reduction before bounds detection
+        blurredGrayBuffer: device.createBuffer({
+            size: pixelBufferSize,
+            usage: GPUBufferUsage.STORAGE
+        }),
         tenengradBuffer: device.createBuffer({
             size: pixelBufferSize,
             usage: GPUBufferUsage.STORAGE
@@ -2382,6 +2599,19 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         }),
         momentsReadback: device.createBuffer({
             size: momentsReductionSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        // Circularity + centroid: computed on GPU from moments (3 floats per frame: circ, cx, cy)
+        circularityBuffer: device.createBuffer({
+            size: batchSize * 3 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+        }),
+        circularityParamsBuffer: device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        }),
+        circularityReadback: device.createBuffer({
+            size: batchSize * 3 * 4,
             usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
         }),
         // RGBA readback: matches rgbaBuffer size for 16-bit Float32 support
@@ -2610,6 +2840,21 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         ]
     });
 
+    // Circularity final pass: compute circularity from summed moments on GPU
+    // Circularity params: numWorkgroups, batchSize, defaultCenterX, defaultCenterY
+    const circularityParamsData = new ArrayBuffer(16);
+    new Uint32Array(circularityParamsData, 0, 2).set([numWorkgroups, batchSize]);
+    new Float32Array(circularityParamsData, 8, 2).set([width / 2, height / 2]);
+    queue.writeBuffer(buffers.circularityParamsBuffer, 0, circularityParamsData);
+    const circularityBindGroup = device.createBindGroup({
+        layout: circularityFinalPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: buffers.circularityParamsBuffer } },
+            { binding: 1, resource: { buffer: buffers.momentsReductionBuffer } },
+            { binding: 2, resource: { buffer: buffers.circularityBuffer } }
+        ]
+    });
+
     // Update bounds params (same threshold as moments)
     const boundsParamsData = new ArrayBuffer(16);
     new Uint32Array(boundsParamsData, 0, 3).set([width, height, batchSize]);
@@ -2673,16 +2918,23 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
     pass.end();
 
+    // Circularity final pass: must run after moments reduction completes
+    pass = encoder.beginComputePass();
+    pass.setPipeline(circularityFinalPipeline);
+    pass.setBindGroup(0, circularityBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
+    pass.end();
+
     // Copy results for readback
     const reductionCopySize = batchSize * numWorkgroups * 2 * 4;
-    const momentsCopySize = batchSize * numWorkgroups * 6 * 4;
+    const circularityCopySize = batchSize * 3 * 4;  // 3 floats per frame: circ, cx, cy (computed on GPU)
     const boundsCopySize = batchSize * numWorkgroups * 4 * 4;
     // RGBA copy size: 4x larger for 16-bit (Float32 output vs packed Uint8)
     const rgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
     const rgbaCopySize = batchSize * pixelCount * rgbaBytesPerPixel;
 
     encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, buffers.reductionReadback, 0, reductionCopySize);
-    encoder.copyBufferToBuffer(buffers.momentsReductionBuffer, 0, buffers.momentsReadback, 0, momentsCopySize);
+    encoder.copyBufferToBuffer(buffers.circularityBuffer, 0, buffers.circularityReadback, 0, circularityCopySize);
     encoder.copyBufferToBuffer(buffers.boundsReductionBuffer, 0, buffers.boundsReadback, 0, boundsCopySize);
     // Skip RGBA and grayscale readback in grayOnly mode (saves significant bandwidth)
     // Grayscale buffer is always float32 (4 bytes per pixel)
@@ -2697,11 +2949,11 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
 
     // Read back results
     await safeMapAsync(buffers.reductionReadback, GPUMapMode.READ);
-    await safeMapAsync(buffers.momentsReadback, GPUMapMode.READ);
+    await safeMapAsync(buffers.circularityReadback, GPUMapMode.READ);
     await safeMapAsync(buffers.boundsReadback, GPUMapMode.READ);
 
     const reductionData = new Float32Array(buffers.reductionReadback.getMappedRange().slice(0, reductionCopySize));
-    const momentsData = new Float32Array(buffers.momentsReadback.getMappedRange().slice(0, momentsCopySize));
+    const circularityData = new Float32Array(buffers.circularityReadback.getMappedRange().slice(0, circularityCopySize));
     const boundsData = new Uint32Array(buffers.boundsReadback.getMappedRange().slice(0, boundsCopySize));
 
     // RGBA and grayscale readback only when not in grayOnly mode
@@ -2721,7 +2973,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     }
 
     buffers.reductionReadback.unmap();
-    buffers.momentsReadback.unmap();
+    buffers.circularityReadback.unmap();
     buffers.boundsReadback.unmap();
     if (!grayOnly) {
         buffers.rgbaReadback.unmap();
@@ -2749,41 +3001,11 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         // Geometric mean naturally balances metrics regardless of their absolute scales
         const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
-        // Sum up moments
-        let m00 = 0, m10 = 0, m01 = 0, m20 = 0, m11 = 0, m02 = 0;
-        for (let w = 0; w < numWorkgroups; w++) {
-            const idx = (i * numWorkgroups + w) * 6;
-            m00 += momentsData[idx];
-            m10 += momentsData[idx + 1];
-            m01 += momentsData[idx + 2];
-            m20 += momentsData[idx + 3];
-            m11 += momentsData[idx + 4];
-            m02 += momentsData[idx + 5];
-        }
-
-        // Calculate circularity from moments
-        let circularity = 0;
-        if (m00 > 0) {
-            const cx = m10 / m00;
-            const cy = m01 / m00;
-
-            // Central moments
-            const mu20 = m20 / m00 - cx * cx;
-            const mu02 = m02 / m00 - cy * cy;
-            const mu11 = m11 / m00 - cx * cy;
-
-            // Eigenvalues of covariance matrix
-            const trace = mu20 + mu02;
-            const det = mu20 * mu02 - mu11 * mu11;
-            const discriminant = Math.sqrt(Math.max(0, trace * trace - 4 * det));
-            const lambda1 = (trace + discriminant) / 2;
-            const lambda2 = (trace - discriminant) / 2;
-
-            // Circularity = ratio of eigenvalues (1 = perfect circle)
-            if (lambda1 > 0) {
-                circularity = Math.min(lambda2, lambda1) / Math.max(lambda2, lambda1);
-            }
-        }
+        // Get circularity and centroid from GPU (computed in circularityFinalShader)
+        const circIdx = i * 3;
+        const circularity = circularityData[circIdx];
+        const centroidX = circularityData[circIdx + 1];
+        const centroidY = circularityData[circIdx + 2];
 
         // Calculate bounds from partial reductions
         let minX = width, minY = height, maxX = 0, maxY = 0;
@@ -2797,13 +3019,6 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
             if (wMinY < minY) minY = wMinY;
             if (wMaxX > maxX) maxX = wMaxX;
             if (wMaxY > maxY) maxY = wMaxY;
-        }
-
-        // Calculate centroid from moments (more accurate than bbox center)
-        let centroidX = width / 2, centroidY = height / 2;
-        if (m00 > 0) {
-            centroidX = m10 / m00;
-            centroidY = m01 / m00;
         }
 
         // Build bounds object (null if no bright pixels detected)
@@ -2897,7 +3112,9 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
         reductionSize: batchSize * numWorkgroups * 8,
         momentsSize: batchSize * cropPixelCount * 6 * 4,      // 6 floats per pixel
         momentsReductionSize: batchSize * numWorkgroups * 6 * 4,  // 6 floats per workgroup
-        bitDepth
+        sharpnessFinalSize: batchSize * 2 * 4,          // 2 floats per frame (tenengrad, laplacian)
+        bitDepth,
+        numWorkgroups  // Store for use in shader params
     };
 
     // Validate cache - check sizes that determine buffer requirements
@@ -3045,6 +3262,23 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         }),
         momentsParamsBuffer: device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        }),
+        // Final sharpness reduction: 2 floats per frame (tenengrad, laplacian)
+        sharpnessFinalBuffer: device.createBuffer({
+            size: requiredSizes.sharpnessFinalSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+        }),
+        sharpnessFinalReadback: device.createBuffer({
+            size: requiredSizes.sharpnessFinalSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        sharpnessFinalReadbackAlt: device.createBuffer({
+            size: requiredSizes.sharpnessFinalSize,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+        }),
+        sharpnessFinalParamsBuffer: device.createBuffer({
             size: 16,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         })
@@ -3421,6 +3655,7 @@ let dcaResultBuildTime = 0;
 // Detailed per-step timing
 let dcaUploadTime = 0;      // prepareBayerData + writeBuffer
 let dcaDemosaicTime = 0;    // demosaic shader submit
+let dcaBlurTime = 0;        // Gaussian blur for noise reduction
 let dcaBoundsTime = 0;      // bounds detection + centroid submit
 let dcaCropTime = 0;        // crop submit (non-grayOnly)
 let dcaSharpnessTime = 0;   // sharpness + reduction submit
@@ -3536,35 +3771,12 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         dcaUploadTime += (performance.now() - tUploadStart);
     }
 
-    // ===== STEP 2: Bounds detection on full frame =====
+    // ===== STEP 2a: Grayscale conversion (if not grayOnly) =====
     const tBoundsStart = performance.now();
     // When grayOnly: grayscale already computed by demosaic, skip grayscale pass
     // When !grayOnly: need to compute grayscale from RGBA
     queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, 0]));
     queue.writeBuffer(analyzeBuffers.reductionParamsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, srcPixelCount]));
-
-    const boundsParamsData = new ArrayBuffer(16);
-    new Uint32Array(boundsParamsData, 0, 3).set([srcWidth, srcHeight, batchSize]);
-    new Float32Array(boundsParamsData, 12, 1).set([threshold]);
-    queue.writeBuffer(analyzeBuffers.boundsParamsBuffer, 0, boundsParamsData);
-
-    const boundsBindGroup = device.createBindGroup({
-        layout: boundsPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: analyzeBuffers.boundsParamsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.grayBuffer } },
-            { binding: 2, resource: { buffer: analyzeBuffers.boundsBuffer } }
-        ]
-    });
-
-    const boundsReductionBindGroup = device.createBindGroup({
-        layout: boundsReductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: analyzeBuffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.boundsBuffer } },
-            { binding: 2, resource: { buffer: analyzeBuffers.boundsReductionBuffer } }
-        ]
-    });
 
     let encoder = device.createCommandEncoder();
 
@@ -3585,7 +3797,48 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         pass.end();
     }
 
+    // ===== STEP 2b: Gaussian blur for noise reduction (matches CPU GaussianBlur) =====
+    const tBlurStart = performance.now();
+    const blurBindGroup = device.createBindGroup({
+        layout: blurPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
+            { binding: 1, resource: { buffer: analyzeBuffers.grayBuffer } },
+            { binding: 2, resource: { buffer: analyzeBuffers.blurredGrayBuffer } }
+        ]
+    });
     let pass = encoder.beginComputePass();
+    pass.setPipeline(blurPipeline);
+    pass.setBindGroup(0, blurBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
+    pass.end();
+    dcaBlurTime += (performance.now() - tBlurStart);
+
+    // ===== STEP 2c: Bounds detection on blurred grayscale =====
+    const boundsParamsData = new ArrayBuffer(16);
+    new Uint32Array(boundsParamsData, 0, 3).set([srcWidth, srcHeight, batchSize]);
+    new Float32Array(boundsParamsData, 12, 1).set([threshold]);
+    queue.writeBuffer(analyzeBuffers.boundsParamsBuffer, 0, boundsParamsData);
+
+    const boundsBindGroup = device.createBindGroup({
+        layout: boundsPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: analyzeBuffers.boundsParamsBuffer } },
+            { binding: 1, resource: { buffer: analyzeBuffers.blurredGrayBuffer } },  // Use blurred grayscale
+            { binding: 2, resource: { buffer: analyzeBuffers.boundsBuffer } }
+        ]
+    });
+
+    const boundsReductionBindGroup = device.createBindGroup({
+        layout: boundsReductionPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: analyzeBuffers.reductionParamsBuffer } },
+            { binding: 1, resource: { buffer: analyzeBuffers.boundsBuffer } },
+            { binding: 2, resource: { buffer: analyzeBuffers.boundsReductionBuffer } }
+        ]
+    });
+
+    pass = encoder.beginComputePass();
     pass.setPipeline(boundsPipeline);
     pass.setBindGroup(0, boundsBindGroup);
     pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
@@ -3735,16 +3988,34 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     pass.dispatchWorkgroups(numWorkgroupsCrop, batchSize, 1);
     pass.end();
 
+    // Final sharpness reduction: sum all workgroup partials into 2 floats per frame
+    // This reduces readback from ~1.1MB to 800 bytes per batch
+    queue.writeBuffer(cropBuffers.sharpnessFinalParamsBuffer, 0, new Uint32Array([numWorkgroupsCrop, batchSize, cropPixelCount, 0]));
+    const sharpnessFinalBindGroup = device.createBindGroup({
+        layout: sharpnessFinalPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: cropBuffers.sharpnessFinalParamsBuffer } },
+            { binding: 1, resource: { buffer: cropBuffers.reductionBuffer } },
+            { binding: 2, resource: { buffer: cropBuffers.sharpnessFinalBuffer } }
+        ]
+    });
+
+    pass = encoder.beginComputePass();
+    pass.setPipeline(sharpnessFinalPipeline);
+    pass.setBindGroup(0, sharpnessFinalBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
+    pass.end();
+
     // Select readback buffers based on generation (double-buffering)
     const bufferGen = cachedCropConfig?.bufferGen || 0;
     const useAlt = bufferGen % 2 === 1;
-    const readbackBuf = useAlt ? cropBuffers.readbackBufferAlt : cropBuffers.readbackBuffer;
+    const sharpnessReadbackBuf = useAlt ? cropBuffers.sharpnessFinalReadbackAlt : cropBuffers.sharpnessFinalReadback;
     const croppedReadbackBuf = useAlt ? cropBuffers.croppedReadbackBufferAlt : cropBuffers.croppedReadbackBuffer;
     const boundsReadbackBuf = useAlt ? cropBuffers.boundsOutputReadbackAlt : cropBuffers.boundsOutputReadback;
     const grayReadbackBuf = useAlt ? cropBuffers.grayReadbackAlt : cropBuffers.grayReadback;
 
-    // Copy results for readback
-    encoder.copyBufferToBuffer(cropBuffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroupsCrop * 8);
+    // Copy results for readback (sharpnessFinal is only 800 bytes vs 1.1MB for partial sums)
+    encoder.copyBufferToBuffer(cropBuffers.sharpnessFinalBuffer, 0, sharpnessReadbackBuf, 0, batchSize * 2 * 4);
     encoder.copyBufferToBuffer(cropBuffers.boundsOutputBuffer, 0, boundsReadbackBuf, 0, batchSize * 16);
     // Copy cropped RGBA and grayscale only when not in grayOnly mode (saves significant bandwidth)
     if (!grayOnly) {
@@ -3765,7 +4036,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // ===== STEP 6: Read back results (including bounds from GPU centroid shader) =====
     // Skip cropped RGBA and grayscale readback in grayOnly mode (saves significant bandwidth)
     const mapPromises = [
-        safeMapAsync(readbackBuf, GPUMapMode.READ),
+        safeMapAsync(sharpnessReadbackBuf, GPUMapMode.READ),
         safeMapAsync(boundsReadbackBuf, GPUMapMode.READ)
     ];
     if (!grayOnly) {
@@ -3797,7 +4068,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     const tAfterMapAsync = performance.now();
     dcaMapAsyncTime += (tAfterMapAsync - tAfterSubmit);
 
-    const reductionData = new Float32Array(readbackBuf.getMappedRange().slice(0));
+    // Read final sharpness values (2 floats per frame: tenengrad, laplacian)
+    const sharpnessData = new Float32Array(sharpnessReadbackBuf.getMappedRange().slice(0));
     // Read bounds computed by GPU centroid shader
     const boundsData = new Uint32Array(boundsReadbackBuf.getMappedRange().slice(0));
 
@@ -3814,7 +4086,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         grayData = new Float32Array(grayReadbackBuf.getMappedRange().slice(0));
     }
 
-    readbackBuf.unmap();
+    sharpnessReadbackBuf.unmap();
     boundsReadbackBuf.unmap();
     if (!grayOnly) {
         croppedReadbackBuf.unmap();
@@ -3823,6 +4095,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     releaseBatchSlot();  // Allow next batch to proceed
 
     // Build bounds and centers arrays from GPU output
+    // Check for cut-off frames (object touching edge) - matches CPU behavior
+    const edgeMargin = Math.max(srcWidth, srcHeight) * 0.01;
     const bounds = [];
     const centers = [];
     for (let i = 0; i < batchSize; i++) {
@@ -3832,19 +4106,29 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         const maxY = boundsData[i * 4 + 3];
 
         if (maxX > minX && maxY > minY) {
-            const centroidX = (minX + maxX) / 2;
-            const centroidY = (minY + maxY) / 2;
-            const bboxWidth = maxX - minX;
-            const bboxHeight = maxY - minY;
-            const circularity = Math.min(bboxWidth, bboxHeight) / Math.max(bboxWidth, bboxHeight);
-            centers.push({ x: centroidX, y: centroidY });
-            bounds.push({
-                x: minX, y: minY,
-                width: bboxWidth, height: bboxHeight,
-                centroidX, centroidY,
-                size: Math.max(bboxWidth, bboxHeight),
-                circularity
-            });
+            // Check if object is cut off at the edges (1% margin like CPU)
+            const isCutOff = minX < edgeMargin || minY < edgeMargin ||
+                             maxX > srcWidth - edgeMargin || maxY > srcHeight - edgeMargin;
+
+            if (isCutOff) {
+                // Object is cut off - mark as invalid, use frame center as fallback
+                centers.push(null);
+                bounds.push({ cutOff: true });
+            } else {
+                const centroidX = (minX + maxX) / 2;
+                const centroidY = (minY + maxY) / 2;
+                const bboxWidth = maxX - minX;
+                const bboxHeight = maxY - minY;
+                const circularity = Math.min(bboxWidth, bboxHeight) / Math.max(bboxWidth, bboxHeight);
+                centers.push({ x: centroidX, y: centroidY });
+                bounds.push({
+                    x: minX, y: minY,
+                    width: bboxWidth, height: bboxHeight,
+                    centroidX, centroidY,
+                    size: Math.max(bboxWidth, bboxHeight),
+                    circularity
+                });
+            }
         } else {
             centers.push(null);
             bounds.push(null);
@@ -3854,16 +4138,9 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Build results
     const results = [];
     for (let i = 0; i < batchSize; i++) {
-        // Sum both Tenengrad and Laplacian from workgroups
-        let tenengradSum = 0, laplacianSum = 0;
-        for (let w = 0; w < numWorkgroupsCrop; w++) {
-            const idx = (i * numWorkgroupsCrop + w) * 2;
-            tenengradSum += reductionData[idx];
-            laplacianSum += reductionData[idx + 1];
-        }
-        // Scale by 255² = 65025 to match CPU which uses 0-255 grayscale (GPU uses 0-1)
-        const tenengradMean = (tenengradSum / cropPixelCount) * 65025;
-        const laplacianMean = (laplacianSum / cropPixelCount) * 65025;
+        // Read final sharpness values from GPU (already scaled and averaged by sharpnessFinalShader)
+        const tenengradMean = sharpnessData[i * 2];
+        const laplacianMean = sharpnessData[i * 2 + 1];
         // Combined sharpness = geometric mean of both metrics
         const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
@@ -3877,7 +4154,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
             centerX: centers[i]?.x,
             centerY: centers[i]?.y,
             width: cropSize,
-            height: cropSize
+            height: cropSize,
+            cutOff: bounds[i]?.cutOff || false
         };
 
         // Extract cropped RGBA and grayscale only when not in grayOnly mode
@@ -3911,7 +4189,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
 
     // Log every 10 batches
     if (dcaBatchCount % 10 === 0) {
-        console.log(`[GPU Timing] ${dcaBatchCount} batches: upload=${(dcaUploadTime/dcaBatchCount).toFixed(1)}ms, demosaic=${(dcaDemosaicTime/dcaBatchCount).toFixed(1)}ms, bounds=${(dcaBoundsTime/dcaBatchCount).toFixed(1)}ms, crop=${(dcaCropTime/dcaBatchCount).toFixed(1)}ms, sharpness=${(dcaSharpnessTime/dcaBatchCount).toFixed(1)}ms, mapAsync=${(dcaMapAsyncTime/dcaBatchCount).toFixed(1)}ms`);
+        console.log(`[GPU Timing] ${dcaBatchCount} batches: upload=${(dcaUploadTime/dcaBatchCount).toFixed(1)}ms, demosaic=${(dcaDemosaicTime/dcaBatchCount).toFixed(1)}ms, blur=${(dcaBlurTime/dcaBatchCount).toFixed(1)}ms, bounds=${(dcaBoundsTime/dcaBatchCount).toFixed(1)}ms, crop=${(dcaCropTime/dcaBatchCount).toFixed(1)}ms, sharpness=${(dcaSharpnessTime/dcaBatchCount).toFixed(1)}ms, mapAsync=${(dcaMapAsyncTime/dcaBatchCount).toFixed(1)}ms`);
     }
 
     return results;
