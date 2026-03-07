@@ -650,6 +650,24 @@ The new modules can be integrated incrementally:
 
 ---
 
+## Known Issues / TODO
+
+### Preview Updates During Analysis
+
+**Problem:** The "sharpest frame" preview doesn't update when a new best frame is found during analysis. The preview demosaic request gets queued behind analysis batches on the same GPU worker, so it only renders after analysis completes (or nearly completes).
+
+**Root cause:** `demosaicFrameForPreview()` uses the same `gpuWorker` as analysis batches. Preview requests get stuck in the queue behind all the analysis work.
+
+**Potential solutions:**
+1. **Separate preview worker** - Spawn a dedicated GPU worker for preview generation that doesn't compete with analysis
+2. **Priority queue in GPU worker** - Process preview requests between analysis batches
+3. **CPU fallback for previews** - Use OpenCV in a regular worker (slower but doesn't block GPU)
+4. **Await preview between batches** - After processing results, wait for pending preview before continuing (adds latency)
+
+**Current workaround:** The first preview shows relatively quickly due to pipelining, but subsequent "new best frame" updates are delayed.
+
+---
+
 ## Changelog
 
 - 2024-XX-XX: Initial architecture document
@@ -657,3 +675,5 @@ The new modules can be integrated incrementally:
 - Documented AVI edge cases (flip, headerless, strd pattern detection)
 - Created useSerParser.js, useAviParser.js, useDebayerReader.js
 - Phase A complete - new modules ready for testing
+- Added GPU batch pipelining (2-way concurrent, ~1.8x speedup)
+- Refactored readback buffers to dynamic arrays for configurable concurrency
