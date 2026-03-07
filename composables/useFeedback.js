@@ -19,7 +19,7 @@ export function useFeedback() {
         const feedback = Sentry.getFeedback();
         if (!feedback) {
             console.warn('Sentry feedback not available');
-            return;
+            return false;
         }
 
         // Attach session logs and filename as context before opening feedback
@@ -42,8 +42,10 @@ export function useFeedback() {
             });
             form.appendToDom();
             form.open();
+            return true;
         } catch (e) {
             console.warn('Failed to open feedback form:', e);
+            return false;
         }
     }
 

@@ -488,9 +488,17 @@ export function useStacker() {
             const { frames: refFrames, centers: refCenters } = await loadRawBatch([refFrameMeta]);
             const refResults = await processGpuBatch(refFrames, refCenters);
 
+            // Validate reference frame was processed successfully
+            if (!refResults || refResults.length === 0 || !refResults[0]) {
+                throw new Error('Failed to process reference frame - GPU returned no results');
+            }
+
             // Use appropriate buffer type based on bit depth
             // 16-bit: float32Buffer (0.0-1.0), 8-bit: uint8Buffer (0-255)
             const refBuffer = is16bit ? refResults[0].float32Buffer : refResults[0].uint8Buffer;
+            if (!refBuffer) {
+                throw new Error(`Failed to process reference frame - no ${is16bit ? 'float32' : 'uint8'} buffer returned`);
+            }
             const refBlob = is16bit
                 ? await float32ToBlob(refBuffer, cropSize, cropSize)
                 : await uint8ToBlob(refBuffer, cropSize, cropSize);
