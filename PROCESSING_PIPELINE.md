@@ -541,6 +541,7 @@ For now: Keep using old reader for multi-file (can migrate later).
 6. **Raw AVI - 8-bit DIB**: Load 8-bit DIB AVI, verify demosaic
 7. **Raw AVI - flipped**: Verify vertical flip is applied for bottom-up DIB
 8. **Raw AVI - headerless**: Verify frame index scanning works
+9. **Surface & Planet stacking**
 
 ### Phase D: Cleanup (after testing)
 
