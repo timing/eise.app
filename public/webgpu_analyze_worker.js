@@ -107,6 +107,29 @@ function releaseBatchSlot() {
     }
 }
 
+// Separate semaphore for analyzeBatch (only allows 1 at a time since buffers aren't double-buffered)
+let analyzeInProgress = false;
+let analyzeWaiters = [];
+
+async function acquireAnalyzeSlot() {
+    if (!analyzeInProgress) {
+        analyzeInProgress = true;
+        return;
+    }
+    return new Promise(resolve => {
+        analyzeWaiters.push(resolve);
+    });
+}
+
+function releaseAnalyzeSlot() {
+    if (analyzeWaiters.length > 0) {
+        const resolve = analyzeWaiters.shift();
+        resolve();
+    } else {
+        analyzeInProgress = false;
+    }
+}
+
 // Wait for all batches to complete (for cleanup)
 function waitForAllBatchesComplete() {
     if (activeBatchCount === 0) {
@@ -2553,7 +2576,7 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         }),
         grayBuffer: device.createBuffer({
             size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
         }),
         grayReadback: device.createBuffer({
             size: pixelBufferSize,
@@ -2674,10 +2697,23 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     const pixelCount = width * height;
     const numWorkgroups = Math.ceil(pixelCount / 256);
 
+    // Determine if we need demosaic (bayerPattern >= 0 means Bayer data)
+    const needsDemosaic = bayerPattern >= 0;
+
     // Memory safeguard: prevent allocations that would likely fail
+    // Mono input (bayerPattern < 0): much lower memory - just grayBuffer + optional RGBA
+    // Bayer/demosaic: needs input buffers + RGBA output
     // metadataOnly: Uint8 RGBA only (4 bytes/px)
-    // full mode: Float32 RGBA (16 bytes/px) + Uint8 RGBA copy (4 bytes/px) = 20 bytes/px
-    const bytesPerPixel = metadataOnly ? 4 : 20;
+    // full mode with demosaic: Float32 RGBA (16 bytes/px) + Uint8 RGBA copy (4 bytes/px) = 20 bytes/px
+    // mono grayOnly: just 1 byte/px for grayscale
+    // mono non-grayOnly: 1 + 4 = 5 bytes/px (gray + RGBA)
+    let bytesPerPixel;
+    if (!needsDemosaic) {
+        // Mono/RGBA input - much lower memory requirements
+        bytesPerPixel = grayOnly ? 1 : 5;
+    } else {
+        bytesPerPixel = metadataOnly ? 4 : 20;
+    }
     const estimatedMemory = batchSize * pixelCount * bytesPerPixel;
     const maxMemory = 512 * 1024 * 1024; // 512MB hard limit (allow some headroom over 256MB target)
     if (estimatedMemory > maxMemory) {
@@ -2686,12 +2722,12 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         throw new Error(`Memory limit: ${batchSize} frames of ${width}x${height} needs ${neededMB}MB (limit: 512MB). Try processing fewer frames or use smaller resolution. Max batch: ${maxFrames} frames.`);
     }
 
-    // Determine if we need demosaic (bayerPattern >= 0 means Bayer data)
-    const needsDemosaic = bayerPattern >= 0;
-
     // Detect bit depth early so we allocate correct buffer sizes
     // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+
+    // Wait for analyze slot BEFORE getting buffers (only 1 analyzeBatch at a time since buffers aren't double-buffered)
+    await acquireAnalyzeSlot();
 
     // Get cached buffers (creates if needed, reuses if possible)
     const buffers = getAnalyzeBuffers(batchSize, width, height, bitDepth);
@@ -2751,31 +2787,77 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         }
         grayAlreadyComputed = true;
     } else {
-        // Input is already RGBA - write each frame directly to GPU buffer (no staging buffer)
-        for (let i = 0; i < batchSize; i++) {
-            const frame = frames[i];
-            const byteOffset = i * pixelCount * 4;  // 4 bytes per RGBA pixel
-            // Handle both Uint8Array and ArrayBuffer inputs
-            let src;
-            if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
-                src = frame.data;
-            } else if (frame.data instanceof ArrayBuffer) {
-                src = new Uint8Array(frame.data);
-            } else if (frame.data.buffer instanceof ArrayBuffer) {
-                // TypedArray - create Uint8Array view at correct offset
-                src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
-            } else {
-                console.error('Unknown frame data type:', typeof frame.data, frame.data);
-                continue;
-            }
+        // Input is either RGBA (4 bytes/pixel) or mono grayscale (1 byte/pixel)
+        // Check first frame to determine input format
+        const firstFrame = frames[0];
+        let firstSrc;
+        if (firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray) {
+            firstSrc = firstFrame.data;
+        } else if (firstFrame.data instanceof ArrayBuffer) {
+            firstSrc = new Uint8Array(firstFrame.data);
+        } else if (firstFrame.data.buffer instanceof ArrayBuffer) {
+            firstSrc = new Uint8Array(firstFrame.data.buffer, firstFrame.data.byteOffset, firstFrame.data.byteLength);
+        }
 
-            if (src.length !== pixelCount * 4) {
-                console.error(`Frame ${i}: RGBA data size mismatch. Expected ${pixelCount * 4}, got ${src.length}`);
-                continue;
-            }
+        const isMonoInput = firstSrc && firstSrc.length === pixelCount;
 
-            // Write directly to GPU buffer at offset
-            queue.writeBuffer(buffers.rgbaBuffer, byteOffset, src);
+        if (isMonoInput) {
+            // Mono grayscale input - expand to RGBA so grayscale shader can process it
+            // (grayBuffer is float32, so we can't upload uint8 mono data directly)
+            for (let i = 0; i < batchSize; i++) {
+                const frame = frames[i];
+                let src;
+                if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
+                    src = frame.data;
+                } else if (frame.data instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data);
+                } else if (frame.data.buffer instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
+                } else {
+                    console.error('Unknown frame data type:', typeof frame.data, frame.data);
+                    continue;
+                }
+                // Expand mono to RGBA
+                const rgba = new Uint8Array(pixelCount * 4);
+                for (let j = 0; j < pixelCount; j++) {
+                    const v = src[j];
+                    rgba[j * 4] = v;
+                    rgba[j * 4 + 1] = v;
+                    rgba[j * 4 + 2] = v;
+                    rgba[j * 4 + 3] = 255;
+                }
+                const byteOffset = i * pixelCount * 4;
+                queue.writeBuffer(buffers.rgbaBuffer, byteOffset, rgba);
+            }
+            // Let grayscale shader convert RGBA to float32 grayscale
+            // (don't set grayAlreadyComputed - we need the shader to run)
+        } else {
+            // Input is already RGBA - write each frame directly to GPU buffer (no staging buffer)
+            for (let i = 0; i < batchSize; i++) {
+                const frame = frames[i];
+                const byteOffset = i * pixelCount * 4;  // 4 bytes per RGBA pixel
+                // Handle both Uint8Array and ArrayBuffer inputs
+                let src;
+                if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
+                    src = frame.data;
+                } else if (frame.data instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data);
+                } else if (frame.data.buffer instanceof ArrayBuffer) {
+                    // TypedArray - create Uint8Array view at correct offset
+                    src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
+                } else {
+                    console.error('Unknown frame data type:', typeof frame.data, frame.data);
+                    continue;
+                }
+
+                if (src.length !== pixelCount * 4) {
+                    console.error(`Frame ${i}: RGBA data size mismatch. Expected ${pixelCount * 4}, got ${src.length}`);
+                    continue;
+                }
+
+                // Write directly to GPU buffer at offset
+                queue.writeBuffer(buffers.rgbaBuffer, byteOffset, src);
+            }
         }
     }
 
@@ -3071,6 +3153,9 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
 
         results.push(result);
     }
+
+    // Release analyze slot to allow next analyzeBatch to proceed
+    releaseAnalyzeSlot();
 
     // Buffers are cached and reused - no cleanup here
     return results;
@@ -3384,7 +3469,21 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
         pass.end();
     } else {
-        // RGBA input - write each frame directly to GPU buffer at offset (no staging buffer)
+        // Input is either RGBA (4 bytes/pixel) or mono grayscale (1 byte/pixel)
+        // Check first frame to determine input format
+        const firstFrame = frames[0];
+        let firstSrc;
+        if (firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray) {
+            firstSrc = firstFrame.data;
+        } else if (firstFrame.data instanceof ArrayBuffer) {
+            firstSrc = new Uint8Array(firstFrame.data);
+        } else if (firstFrame.data.buffer instanceof ArrayBuffer) {
+            firstSrc = new Uint8Array(firstFrame.data.buffer, firstFrame.data.byteOffset, firstFrame.data.byteLength);
+        }
+
+        const isMonoInput = firstSrc && firstSrc.length === srcPixelCount;
+
+        // Write each frame to GPU buffer (expand mono to RGBA if needed)
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
             const byteOffset = i * srcPixelCount * 4;  // 4 bytes per RGBA pixel
@@ -3399,8 +3498,22 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
                 console.error('Unknown frame data type:', typeof frame.data);
                 continue;
             }
-            // Write directly to GPU buffer at offset
-            queue.writeBuffer(buffers.inputBuffers[0], byteOffset, src);
+
+            if (isMonoInput) {
+                // Expand mono to RGBA
+                const rgba = new Uint8Array(srcPixelCount * 4);
+                for (let j = 0; j < srcPixelCount; j++) {
+                    const v = src[j];
+                    rgba[j * 4] = v;
+                    rgba[j * 4 + 1] = v;
+                    rgba[j * 4 + 2] = v;
+                    rgba[j * 4 + 3] = 255;
+                }
+                queue.writeBuffer(buffers.inputBuffers[0], byteOffset, rgba);
+            } else {
+                // Write directly to GPU buffer at offset
+                queue.writeBuffer(buffers.inputBuffers[0], byteOffset, src);
+            }
         }
 
         const rgbaCropBindGroup = device.createBindGroup({
@@ -3707,29 +3820,51 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
             dcaDemosaicTime += (performance.now() - tDemosaicStart);
         }
     } else {
-        // RGBA input - write each frame directly to GPU buffer at offset
+        // Input is either RGBA (4 bytes/pixel) or mono grayscale (1 byte/pixel)
+        // Check first frame to determine input format
+        const firstFrame = frames[0];
+        let firstSrc = firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray
+            ? firstFrame.data
+            : new Uint8Array(firstFrame.data.buffer || firstFrame.data);
+        const isMonoInput = firstSrc.length === srcPixelCount;
+
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
             const byteOffset = i * srcPixelCount * 4;
             let src = frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray
                 ? frame.data
                 : new Uint8Array(frame.data.buffer || frame.data);
-            queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, src);
+
+            if (isMonoInput) {
+                // Expand mono to RGBA
+                const rgba = new Uint8Array(srcPixelCount * 4);
+                for (let j = 0; j < srcPixelCount; j++) {
+                    const v = src[j];
+                    rgba[j * 4] = v;
+                    rgba[j * 4 + 1] = v;
+                    rgba[j * 4 + 2] = v;
+                    rgba[j * 4 + 3] = 255;
+                }
+                queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, rgba);
+            } else {
+                queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, src);
+            }
         }
         dcaUploadTime += (performance.now() - tUploadStart);
     }
 
-    // ===== STEP 2a: Grayscale conversion (if not grayOnly) =====
+    // ===== STEP 2a: Grayscale conversion =====
     const tBoundsStart = performance.now();
-    // When grayOnly: grayscale already computed by demosaic, skip grayscale pass
-    // When !grayOnly: need to compute grayscale from RGBA
+    // When grayOnly AND needsDemosaic: grayscale already computed by demosaic shader
+    // Otherwise: need to compute grayscale from RGBA (includes mono input expanded to RGBA)
     queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, 0]));
     queue.writeBuffer(analyzeBuffers.reductionParamsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, srcPixelCount]));
 
     let encoder = device.createCommandEncoder();
 
-    // Only run grayscale pass if we have RGBA (not grayOnly)
-    if (!grayOnly) {
+    // Run grayscale pass unless demosaic shader already computed it (grayOnly + needsDemosaic)
+    const needsGrayscalePass = !grayOnly || !needsDemosaic;
+    if (needsGrayscalePass) {
         const grayBindGroup = device.createBindGroup({
             layout: grayscalePipeline.getBindGroupLayout(0),
             entries: [

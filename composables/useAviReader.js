@@ -2350,9 +2350,10 @@ export function useAviReader() {
         // Map bayerChoice to GPU pattern
         const bayerMap = {
             'COLOR_BayerBG2RGB': 0, 'COLOR_BayerRG2RGB': 1,
-            'COLOR_BayerGB2RGB': 2, 'COLOR_BayerGR2RGB': 3
+            'COLOR_BayerGB2RGB': 2, 'COLOR_BayerGR2RGB': 3,
+            'MONO': -1  // No demosaic needed for mono
         };
-        const bayerPattern = bayerMap[bayerChoice] ?? 0;
+        const bayerPattern = bayerMap[bayerChoice] ?? -1;
 
         // Prepare frames array for batch processing - worker expects { data, index }
         const framesData = batchFrames.map(f => ({ data: f.data, index: f.index }));
@@ -2415,9 +2416,10 @@ export function useAviReader() {
     async function detectObjectInBayerFrame(rawBuffer, width, height, bayerChoice) {
         const bayerMap = {
             'COLOR_BayerBG2RGB': 0, 'COLOR_BayerRG2RGB': 1,
-            'COLOR_BayerGB2RGB': 2, 'COLOR_BayerGR2RGB': 3
+            'COLOR_BayerGB2RGB': 2, 'COLOR_BayerGR2RGB': 3,
+            'MONO': -1  // No demosaic needed for mono
         };
-        const bayerPattern = bayerMap[bayerChoice] ?? 0;
+        const bayerPattern = bayerMap[bayerChoice] ?? -1;
         const cropSize = Math.min(width, height);
 
         try {

@@ -906,7 +906,8 @@ export function useDebayerReader() {
 
             for (const result of results) {
                 // Skip cut-off frames (object touching edge of frame)
-                if (result.cutOff) {
+                // But NOT in surface mode - lunar/solar surfaces are intentionally zoomed in
+                if (result.cutOff && !surfaceMode) {
                     cutOffFrameCount++;
                     continue;
                 }

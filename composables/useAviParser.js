@@ -460,8 +460,16 @@ export function useAviParser() {
         }
 
         // Build frame index if needed (for variable frame sizes or header issues)
-        if (header.frameCount === 0 || header.frameDataSize === -1 || header.isMjpeg) {
+        // Also build for raw formats to detect truncation (more reliable frame count)
+        const needsFrameIndex = header.frameCount === 0 ||
+                                header.frameDataSize === -1 ||
+                                header.isMjpeg ||
+                                header.isEasyFormat;  // Raw formats like Y800 - verify count for truncated files
+        if (needsFrameIndex) {
             frameIndex = await parseAviFrameIndex(file, header.moviListOffset, header.moviListSize);
+            if (frameIndex.length !== header.frameCount) {
+                console.warn(`[AVI] Frame count mismatch: header=${header.frameCount}, actual=${frameIndex.length}`);
+            }
             header.frameCount = frameIndex.length;
         }
 
@@ -502,6 +510,11 @@ export function useAviParser() {
 
         if (!frameIndex) {
             frameIndex = await parseAviFrameIndex(file, header.moviListOffset, header.moviListSize);
+            // Update header.frameCount to match actual frames (handles truncated files)
+            if (frameIndex.length !== header.frameCount) {
+                console.warn(`[AVI] Frame count mismatch: header says ${header.frameCount}, found ${frameIndex.length} frames`);
+                header.frameCount = frameIndex.length;
+            }
         }
         return frameIndex;
     }
@@ -522,6 +535,9 @@ export function useAviParser() {
         if (frameIndex) {
             // Use frame index for variable-size frames
             const frame = frameIndex[frameIdx];
+            if (!frame) {
+                throw new Error(`Frame ${frameIdx} not found in index (only ${frameIndex.length} frames available)`);
+            }
             offset = frame.offset;
             size = frame.size;
         } else {
@@ -529,6 +545,9 @@ export function useAviParser() {
             // For easy formats, we can still use frame index scanning
             const idx = await getFrameIndex();
             const frame = idx[frameIdx];
+            if (!frame) {
+                throw new Error(`Frame ${frameIdx} not found in index (only ${idx.length} frames available)`);
+            }
             offset = frame.offset;
             size = frame.size;
         }
