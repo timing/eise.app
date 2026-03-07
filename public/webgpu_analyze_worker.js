@@ -293,8 +293,8 @@ let cachedAnalyzeConfig = null;
 
 // Pipelined upload state - allows uploading next batch while GPU processes current
 let pipelinedUpload = {
-    ready: false,           // True if data is pre-uploaded in alternate buffer
-    useAltBuffer: false,    // Which buffer has the pre-uploaded data
+    ready: false,           // True if data is pre-uploaded in buffer
+    bufferIndex: 0,         // Which buffer index has the pre-uploaded data (cycles 0 to N-1)
     bayerData: null,        // The prepared Bayer data (already packed)
     scale: 1.0,             // Scale factor for the pre-uploaded data
     batchSize: 0,           // Batch size of pre-uploaded data
@@ -2517,7 +2517,7 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
 
     // Destroy old buffers if they exist
     if (cachedAnalyzeBuffers) {
-        Object.values(cachedAnalyzeBuffers).forEach(buf => {
+        Object.values(cachedAnalyzeBuffers).flat().forEach(buf => {
             if (buf && buf.destroy) buf.destroy();
         });
     }
@@ -2534,19 +2534,18 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const momentsReductionSize = align4(Math.ceil(requiredSizes.momentsReductionSize * headroom));
     const boundsReductionSize = align4(Math.ceil(requiredSizes.boundsReductionSize * headroom));
 
+    // Helper to create array of N identical buffers for concurrent batch support
+    const createBufferArray = (size, usage) =>
+        Array.from({ length: MAX_CONCURRENT_BATCHES }, () =>
+            device.createBuffer({ size, usage })
+        );
+
     cachedAnalyzeBuffers = {
         paramsBuffer: device.createBuffer({
             size: 32,  // 8 u32 values for demosaic params including useVng
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         }),
-        inputBuffer: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
-        inputBufferAlt: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
+        inputBuffers: createBufferArray(pixelBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
         // RGBA buffer: 4x larger for 16-bit to hold Float32 output (preserves precision for stacking)
         rgbaBuffer: device.createBuffer({
             size: rgbaBufferSize,
@@ -2701,7 +2700,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     if (needsDemosaic) {
         // Upload Bayer data to input buffer (auto-stretch for 16-bit to handle dark data)
         const { data: bayerData, scale } = prepareBayerData(frames, pixelCount, false);
-        queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
+        queue.writeBuffer(buffers.inputBuffers[0], 0, bayerData);
 
         // Demosaic params (mixed u32/f32 for scale)
         // Note: bitDepth already determined above via detectBitDepth()
@@ -2716,7 +2715,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
                 layout: demosaicGrayOnlyPipeline.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                    { binding: 1, resource: { buffer: buffers.inputBuffer } },
+                    { binding: 1, resource: { buffer: buffers.inputBuffers[0] } },
                     { binding: 2, resource: { buffer: buffers.grayBuffer } }
                 ]
             });
@@ -2735,7 +2734,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
                 layout: demosaicGrayPipeline.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                    { binding: 1, resource: { buffer: buffers.inputBuffer } },
+                    { binding: 1, resource: { buffer: buffers.inputBuffers[0] } },
                     { binding: 2, resource: { buffer: buffers.rgbaBuffer } },
                     { binding: 3, resource: { buffer: buffers.grayBuffer } }
                 ]
@@ -3138,26 +3137,25 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
 
     // Cleanup old buffers (safe now - only current batch is active)
     if (cachedCropBuffers) {
-        Object.values(cachedCropBuffers).forEach(buf => {
+        Object.values(cachedCropBuffers).flat().forEach(buf => {
             if (buf && buf.destroy) buf.destroy();
         });
         // Keep activeBatchCount at 1 (current batch still has its slot)
         batchWaiters = [];
     }
 
+    // Helper to create array of N identical buffers for concurrent batch support
+    const createBufferArray = (size, usage) =>
+        Array.from({ length: MAX_CONCURRENT_BATCHES }, () =>
+            device.createBuffer({ size, usage })
+        );
+
     cachedCropBuffers = {
         paramsBuffer: device.createBuffer({
             size: 32, // 8 u32s for params
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         }),
-        inputBuffer: device.createBuffer({
-            size: requiredSizes.inputSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
-        inputBufferAlt: device.createBuffer({
-            size: requiredSizes.inputSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
+        inputBuffers: createBufferArray(requiredSizes.inputSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
         centersBuffer: device.createBuffer({
             size: requiredSizes.centersSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
@@ -3166,15 +3164,8 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
             size: requiredSizes.boundsOutputSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         }),
-        // Double-buffering for bounds readback (matches concurrency limit)
-        boundsOutputReadback: device.createBuffer({
-            size: requiredSizes.boundsOutputSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        boundsOutputReadbackAlt: device.createBuffer({
-            size: requiredSizes.boundsOutputSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        // N-buffering for readback (matches MAX_CONCURRENT_BATCHES)
+        boundsOutputReadbacks: createBufferArray(requiredSizes.boundsOutputSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         centroidParamsBuffer: device.createBuffer({
             size: 16,  // 4 u32s: srcWidth, srcHeight, batchSize, numWorkgroups
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
@@ -3188,27 +3179,12 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
             size: requiredSizes.packedGraySize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
         }),
-        packedGrayReadback: device.createBuffer({
-            size: requiredSizes.packedGraySize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        packedGrayReadbackAlt: device.createBuffer({
-            size: requiredSizes.packedGraySize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        packedGrayReadbacks: createBufferArray(requiredSizes.packedGraySize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         grayBuffer: device.createBuffer({
             size: requiredSizes.graySize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         }),
-        // Grayscale readback for side-by-side preview (double-buffered)
-        grayReadback: device.createBuffer({
-            size: requiredSizes.graySize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        grayReadbackAlt: device.createBuffer({
-            size: requiredSizes.graySize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        grayReadbacks: createBufferArray(requiredSizes.graySize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         tenengradBuffer: device.createBuffer({
             size: requiredSizes.tenengradSize,
             usage: GPUBufferUsage.STORAGE
@@ -3221,14 +3197,7 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
             size: requiredSizes.reductionSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         }),
-        readbackBuffer: device.createBuffer({
-            size: requiredSizes.reductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        readbackBufferAlt: device.createBuffer({
-            size: requiredSizes.reductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        readbackBuffers: createBufferArray(requiredSizes.reductionSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         momentsBuffer: device.createBuffer({
             size: requiredSizes.momentsSize,
             usage: GPUBufferUsage.STORAGE
@@ -3237,22 +3206,8 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
             size: requiredSizes.momentsReductionSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         }),
-        momentsReadbackBuffer: device.createBuffer({
-            size: requiredSizes.momentsReductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        momentsReadbackBufferAlt: device.createBuffer({
-            size: requiredSizes.momentsReductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        croppedReadbackBuffer: device.createBuffer({
-            size: requiredSizes.croppedRgbaSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        croppedReadbackBufferAlt: device.createBuffer({
-            size: requiredSizes.croppedRgbaSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        momentsReadbackBuffers: createBufferArray(requiredSizes.momentsReductionSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+        croppedReadbackBuffers: createBufferArray(requiredSizes.croppedRgbaSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         grayParamsBuffer: device.createBuffer({
             size: 16,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
@@ -3270,14 +3225,7 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
             size: requiredSizes.sharpnessFinalSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         }),
-        sharpnessFinalReadback: device.createBuffer({
-            size: requiredSizes.sharpnessFinalSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        sharpnessFinalReadbackAlt: device.createBuffer({
-            size: requiredSizes.sharpnessFinalSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        sharpnessFinalReadbacks: createBufferArray(requiredSizes.sharpnessFinalSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         sharpnessFinalParamsBuffer: device.createBuffer({
             size: 16,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
@@ -3416,13 +3364,13 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
 
     if (needsDemosaic) {
         // Upload Bayer data (already prepared above)
-        queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
+        queue.writeBuffer(buffers.inputBuffers[0], 0, bayerData);
 
         const demosaicCropBindGroup = device.createBindGroup({
             layout: demosaicCropPipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: buffers.inputBuffer } },
+                { binding: 1, resource: { buffer: buffers.inputBuffers[0] } },
                 { binding: 2, resource: { buffer: buffers.centersBuffer } },
                 { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } },
                 { binding: 4, resource: { buffer: buffers.packedGrayBuffer } }
@@ -3452,14 +3400,14 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
                 continue;
             }
             // Write directly to GPU buffer at offset
-            queue.writeBuffer(buffers.inputBuffer, byteOffset, src);
+            queue.writeBuffer(buffers.inputBuffers[0], byteOffset, src);
         }
 
         const rgbaCropBindGroup = device.createBindGroup({
             layout: rgbaCropPipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: buffers.inputBuffer } },
+                { binding: 1, resource: { buffer: buffers.inputBuffers[0] } },
                 { binding: 2, resource: { buffer: buffers.centersBuffer } },
                 { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } },
                 { binding: 4, resource: { buffer: buffers.packedGrayBuffer } }
@@ -3501,12 +3449,12 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
     pass.end();
 
-    // Select readback buffers based on generation (double-buffering)
-    const useAlt = (cachedCropConfig?.bufferGen || 0) % 2 === 1;
-    const readbackBuf = useAlt ? buffers.readbackBufferAlt : buffers.readbackBuffer;
-    const momentsReadbackBuf = useAlt ? buffers.momentsReadbackBufferAlt : buffers.momentsReadbackBuffer;
-    const croppedReadbackBuf = useAlt ? buffers.croppedReadbackBufferAlt : buffers.croppedReadbackBuffer;
-    const packedGrayReadbackBuf = useAlt ? buffers.packedGrayReadbackAlt : buffers.packedGrayReadback;
+    // Select readback buffers based on generation (N-buffering for concurrent batches)
+    const bufferIdx = (cachedCropConfig?.bufferGen || 0) % MAX_CONCURRENT_BATCHES;
+    const readbackBuf = buffers.readbackBuffers[bufferIdx];
+    const momentsReadbackBuf = buffers.momentsReadbackBuffers[bufferIdx];
+    const croppedReadbackBuf = buffers.croppedReadbackBuffers[bufferIdx];
+    const packedGrayReadbackBuf = buffers.packedGrayReadbacks[bufferIdx];
 
     // Copy results to readback buffers
     encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroups * 8);
@@ -3693,9 +3641,9 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
 
     // Check if we have pre-uploaded data from previous batch's pipeline
     const usePipelinedData = pipelinedUpload.ready && pipelinedUpload.batchSize === batchSize && needsDemosaic;
-    const currentInputBuffer = usePipelinedData && pipelinedUpload.useAltBuffer
-        ? analyzeBuffers.inputBufferAlt
-        : analyzeBuffers.inputBuffer;
+    const currentInputBuffer = usePipelinedData
+        ? analyzeBuffers.inputBuffers[pipelinedUpload.bufferIndex]
+        : analyzeBuffers.inputBuffers[0];
 
     if (needsDemosaic) {
         let scale;
@@ -4006,13 +3954,13 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
     pass.end();
 
-    // Select readback buffers based on generation (double-buffering)
+    // Select readback buffers based on generation (N-buffering for concurrent batches)
     const bufferGen = cachedCropConfig?.bufferGen || 0;
-    const useAlt = bufferGen % 2 === 1;
-    const sharpnessReadbackBuf = useAlt ? cropBuffers.sharpnessFinalReadbackAlt : cropBuffers.sharpnessFinalReadback;
-    const croppedReadbackBuf = useAlt ? cropBuffers.croppedReadbackBufferAlt : cropBuffers.croppedReadbackBuffer;
-    const boundsReadbackBuf = useAlt ? cropBuffers.boundsOutputReadbackAlt : cropBuffers.boundsOutputReadback;
-    const grayReadbackBuf = useAlt ? cropBuffers.grayReadbackAlt : cropBuffers.grayReadback;
+    const bufferIdx = bufferGen % MAX_CONCURRENT_BATCHES;
+    const sharpnessReadbackBuf = cropBuffers.sharpnessFinalReadbacks[bufferIdx];
+    const croppedReadbackBuf = cropBuffers.croppedReadbackBuffers[bufferIdx];
+    const boundsReadbackBuf = cropBuffers.boundsOutputReadbacks[bufferIdx];
+    const grayReadbackBuf = cropBuffers.grayReadbacks[bufferIdx];
 
     // Copy results for readback (sharpnessFinal is only 800 bytes vs 1.1MB for partial sums)
     encoder.copyBufferToBuffer(cropBuffers.sharpnessFinalBuffer, 0, sharpnessReadbackBuf, 0, batchSize * 2 * 4);
@@ -4045,21 +3993,20 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     }
 
     // ===== PIPELINING: Prepare next batch while waiting for GPU =====
-    // While GPU processes current batch, prepare and upload next batch to alternate buffer
+    // While GPU processes current batch, prepare and upload next batch to next buffer
     if (nextBatchFrames && nextBatchFrames.length > 0 && needsDemosaic) {
         const nextSrcPixelCount = srcWidth * srcHeight;  // Same dimensions
         const nextPrepared = prepareBayerData(nextBatchFrames, nextSrcPixelCount, false);
 
-        // Upload to the buffer we're NOT currently using
-        const nextInputBuffer = usePipelinedData && pipelinedUpload.useAltBuffer
-            ? analyzeBuffers.inputBuffer      // Current used alt, so next uses primary
-            : analyzeBuffers.inputBufferAlt;  // Current used primary, so next uses alt
+        // Upload to the next buffer in rotation
+        const nextBufferIndex = (pipelinedUpload.bufferIndex + 1) % MAX_CONCURRENT_BATCHES;
+        const nextInputBuffer = analyzeBuffers.inputBuffers[nextBufferIndex];
 
         queue.writeBuffer(nextInputBuffer, 0, nextPrepared.data);
 
         // Mark as ready for next batch
         pipelinedUpload.ready = true;
-        pipelinedUpload.useAltBuffer = !pipelinedUpload.useAltBuffer;  // Toggle
+        pipelinedUpload.bufferIndex = nextBufferIndex;
         pipelinedUpload.scale = nextPrepared.scale;
         pipelinedUpload.batchSize = nextBatchFrames.length;
     }

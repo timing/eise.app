@@ -887,67 +887,18 @@ export function useDebayerReader() {
         // Pre-crop state for async parallel processing
         let pendingPreCrop = null;  // Promise for pre-crop started in previous iteration
 
-        for (let batchStart = 0; batchStart < frameCount; batchStart += BATCH_SIZE) {
-            const t0Load = performance.now();
-            let frames = currentFrames;
-            analysisStats.frameLoadMs.push(performance.now() - t0Load);
+        // GPU pipelining: keep track of in-flight GPU calls to overlap (up to 3 concurrent)
+        const MAX_GPU_CONCURRENT = 2;
+        const pendingGpuBatches = [];  // Array of { promise, info } for in-flight batches
 
-            if (!frames || frames.length === 0) break;
+        // Helper to process results from a completed GPU batch
+        function processGpuResults(results, info) {
+            const { batchStart: resultBatchStart, frames: resultFrames, preCropOffset: resultPreCropOffset } = info;
 
-            // Get next batch frames for GPU pipelining (already loading)
-            const nextStart = batchStart + BATCH_SIZE;
-            const hasNextBatch = nextStart < frameCount;
-            let nextBatchFrames = null;
-
-            if (hasNextBatch && nextFramesPromise) {
-                // Wait for next batch (should be ready or nearly ready)
-                // Include this in frame loading time since it's I/O
-                const t0NextLoad = performance.now();
-                nextBatchFrames = await nextFramesPromise;
-                analysisStats.frameLoadMs.push(performance.now() - t0NextLoad);
-
-                // Start loading the batch after that
-                const nextNextStart = nextStart + BATCH_SIZE;
-                if (nextNextStart < frameCount) {
-                    nextFramesPromise = loadBatch(nextNextStart, nextNextStart + BATCH_SIZE);
-                } else {
-                    nextFramesPromise = null;
-                }
-            }
-
-            // Apply pre-crop if we have a pending result from previous iteration
-            // Pre-crop runs in separate worker, parallel with GPU
-            let preCropOffset = null;
-            if (pendingPreCrop) {
-                const preCropped = await pendingPreCrop;
-                frames = preCropped.frames;
-                preCropOffset = preCropped.offset;
-                pendingPreCrop = null;
-            }
-
-            // Start pre-cropping next batch async (runs on separate CPU core while GPU works)
-            // Skip in surface mode (whole frame is target)
-            if (preCropRegion && cropRegion && !surfaceMode && nextBatchFrames) {
-                pendingPreCrop = preCropAsync(nextBatchFrames, preCropRegion);
-            }
-
-            // Analyze batch using GRAYSCALE-ONLY demosaic (fast, no color output)
-            const t0Demosaic = performance.now();
-            let results;
-            if (cropRegion) {
-                results = await detectCropAnalyzeGpu(frames, cropRegion.size, 0.1, !manualThreshold, true, null, preCropOffset);
-            } else {
-                results = await analyzeFrameBatchGpu(frames, 0.1, !manualThreshold, true);
-            }
-            analysisStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
-
-            // Move next batch to current for next iteration (original frames, will be pre-cropped next iteration)
-            currentFrames = nextBatchFrames;
             completedFrames += results.length;
 
-            // Process results (no RGBA data in grayOnly mode)
             // DEBUG: Log first few frames to check for duplicate sharpness values
-            if (batchStart === 0 && results.length > 0) {
+            if (resultBatchStart === 0 && results.length > 0) {
                 const debugSharpness = results.slice(0, Math.min(5, results.length))
                     .map(r => `#${r.index}:${r.sharpness.toFixed(2)}`).join(', ');
                 console.log(`[DebayerReader DEBUG] First batch sharpness: ${debugSharpness}`);
@@ -1000,10 +951,10 @@ export function useDebayerReader() {
                     // When pre-crop is active, frames have smaller data or detached buffers, so re-read from disk
                     // This is rare (only for best frame updates) so disk read is acceptable
                     let frameDataPromise;
-                    if (preCropOffset) {
+                    if (resultPreCropOffset) {
                         frameDataPromise = readFrame(result.index);
                     } else {
-                        const existingData = frames.find(f => f.index === result.index)?.data;
+                        const existingData = resultFrames.find(f => f.index === result.index)?.data;
                         frameDataPromise = existingData ? Promise.resolve(existingData) : readFrame(result.index);
                     }
 
@@ -1040,7 +991,7 @@ export function useDebayerReader() {
                         Math.abs(newRegion.x - preCropRegion.x) > 10 ||
                         Math.abs(newRegion.y - preCropRegion.y) > 10) {
                         preCropRegion = newRegion;
-                        if (batchStart === 0) {
+                        if (resultBatchStart === 0) {
                             const reduction = ((metadata.width * metadata.height) - (newRegion.width * newRegion.height)) / (metadata.width * metadata.height) * 100;
                             addLog(`[DebayerReader] CPU pre-crop enabled: ${newRegion.width}x${newRegion.height} (${reduction.toFixed(0)}% upload reduction)`);
                         }
@@ -1048,12 +999,89 @@ export function useDebayerReader() {
                 }
             }
 
-            const processedSoFar = batchStart + frames.length;
+            const processedSoFar = resultBatchStart + resultFrames.length;
             emit('update-loading', {
                 progress: (processedSoFar / frameCount) * 100,
                 current: processedSoFar,
                 total: frameCount
             });
+        }
+
+        for (let batchStart = 0; batchStart < frameCount; batchStart += BATCH_SIZE) {
+            const t0Load = performance.now();
+            let frames = currentFrames;
+            analysisStats.frameLoadMs.push(performance.now() - t0Load);
+
+            if (!frames || frames.length === 0) break;
+
+            // Get next batch frames for GPU pipelining (already loading)
+            const nextStart = batchStart + BATCH_SIZE;
+            const hasNextBatch = nextStart < frameCount;
+            let nextBatchFrames = null;
+
+            if (hasNextBatch && nextFramesPromise) {
+                // Wait for next batch (should be ready or nearly ready)
+                // Include this in frame loading time since it's I/O
+                const t0NextLoad = performance.now();
+                nextBatchFrames = await nextFramesPromise;
+                analysisStats.frameLoadMs.push(performance.now() - t0NextLoad);
+
+                // Start loading the batch after that
+                const nextNextStart = nextStart + BATCH_SIZE;
+                if (nextNextStart < frameCount) {
+                    nextFramesPromise = loadBatch(nextNextStart, nextNextStart + BATCH_SIZE);
+                } else {
+                    nextFramesPromise = null;
+                }
+            }
+
+            // Apply pre-crop if we have a pending result from previous iteration
+            // Pre-crop runs in separate worker, parallel with GPU
+            let preCropOffset = null;
+            if (pendingPreCrop) {
+                const preCropped = await pendingPreCrop;
+                frames = preCropped.frames;
+                preCropOffset = preCropped.offset;
+                pendingPreCrop = null;
+            }
+
+            // Start pre-cropping next batch async (runs on separate CPU core while GPU works)
+            // Skip in surface mode (whole frame is target)
+            if (preCropRegion && cropRegion && !surfaceMode && nextBatchFrames) {
+                pendingPreCrop = preCropAsync(nextBatchFrames, preCropRegion);
+            }
+
+            // Fire GPU call for current batch (don't await yet - overlap with other batches)
+            const t0Demosaic = performance.now();
+            let gpuPromise;
+            if (cropRegion) {
+                gpuPromise = detectCropAnalyzeGpu(frames, cropRegion.size, 0.1, !manualThreshold, true, null, preCropOffset);
+            } else {
+                gpuPromise = analyzeFrameBatchGpu(frames, 0.1, !manualThreshold, true);
+            }
+            const gpuInfo = { batchStart, frames, preCropOffset, t0Demosaic };
+
+            // Add current batch to pending queue
+            pendingGpuBatches.push({ promise: gpuPromise, info: gpuInfo });
+
+            // If we have MAX_GPU_CONCURRENT batches in flight, wait for the oldest to complete
+            // This keeps (MAX_GPU_CONCURRENT - 1) batches in the queue after processing
+            if (pendingGpuBatches.length >= MAX_GPU_CONCURRENT) {
+                const oldest = pendingGpuBatches.shift();
+                const prevResults = await oldest.promise;
+                analysisStats.gpuDemosaicMs.push(performance.now() - oldest.info.t0Demosaic);
+                processGpuResults(prevResults, oldest.info);
+            }
+
+            // Move next batch to current for next iteration (original frames, will be pre-cropped next iteration)
+            currentFrames = nextBatchFrames;
+        }
+
+        // Drain remaining pending batches (no more batches to overlap with)
+        for (const pending of pendingGpuBatches) {
+            const results = await pending.promise;
+            analysisStats.gpuDemosaicMs.push(performance.now() - pending.info.t0Demosaic);
+            processGpuResults(results, pending.info);
         }
 
         // Log analysis phase performance summary
