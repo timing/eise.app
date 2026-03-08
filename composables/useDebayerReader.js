@@ -1038,14 +1038,15 @@ export function useDebayerReader() {
                 const batchBounds = results.map(r => r.bounds).filter(b => b && !b.cutOff);
                 const newRegion = computePreCropRegion(batchBounds, metadata.width, metadata.height, 1.5);
                 if (newRegion) {
-                    // Only update if region changed significantly (avoid jitter)
-                    if (!preCropRegion ||
-                        Math.abs(newRegion.x - preCropRegion.x) > 10 ||
-                        Math.abs(newRegion.y - preCropRegion.y) > 10) {
-                        preCropRegion = newRegion;
-                        if (resultBatchStart === 0) {
-                            const reduction = ((metadata.width * metadata.height) - (newRegion.width * newRegion.height)) / (metadata.width * metadata.height) * 100;
-                            if (reduction > 5) {
+                    // Only enable pre-crop if it provides meaningful reduction (>10%)
+                    const reduction = ((metadata.width * metadata.height) - (newRegion.width * newRegion.height)) / (metadata.width * metadata.height) * 100;
+                    if (reduction > 10) {
+                        // Only update if region changed significantly (avoid jitter)
+                        if (!preCropRegion ||
+                            Math.abs(newRegion.x - preCropRegion.x) > 10 ||
+                            Math.abs(newRegion.y - preCropRegion.y) > 10) {
+                            preCropRegion = newRegion;
+                            if (resultBatchStart === 0) {
                                 addLog(`[DebayerReader] CPU pre-crop enabled: ${newRegion.width}x${newRegion.height} (${reduction.toFixed(0)}% upload reduction)`);
                             }
                         }
