@@ -165,7 +165,7 @@ self.addEventListener('message', async (e) => {
         }
     }
 
-    // Step 2: Stack a batch of frames
+    // Step 2: Stack a batch of frames (uses batched GPU dispatch for better throughput)
     if (type === 'stack-frame-batch') {
         const { frames, shifts, frameWeights } = e.data;
         const ctx = self.stackingContext;
@@ -176,28 +176,28 @@ self.addEventListener('message', async (e) => {
         }
 
         try {
-            for (let i = 0; i < frames.length; i++) {
-                const frame = frames[i];
-
-                // Calculate brightness normalization
+            // Prepare all frames with their brightness normalization
+            const preparedFrames = frames.map((frame, i) => {
                 const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, ctx.width, ctx.height);
                 const brightnessScale = ctx.refBrightness / frameBrightness;
-
-                // Warp and accumulate this frame
-                await warpAndAccumulateFrame(
-                    frame.rgbaBuffer,
-                    ctx.width, ctx.height,
-                    ctx.outWidth, ctx.outHeight,
-                    ctx.alignmentPoints,
-                    shifts[i],
-                    ctx.patchSize,
-                    ctx.drizzleScale,
-                    frameWeights[i],
+                return {
+                    rgbaBuffer: frame.rgbaBuffer,
                     brightnessScale,
-                    0, 0,  // globalOffset disabled
-                    ctx.minApQuality
-                );
-            }
+                    frameWeight: frameWeights[i]
+                };
+            });
+
+            // Use batched GPU dispatch (multiple frames per submit)
+            await warpAndAccumulateBatch(
+                preparedFrames,
+                shifts,
+                ctx.width, ctx.height,
+                ctx.outWidth, ctx.outHeight,
+                ctx.alignmentPoints,
+                ctx.patchSize,
+                ctx.drizzleScale,
+                ctx.minApQuality
+            );
 
             self.postMessage({ type: 'stack-batch-done', count: frames.length });
 

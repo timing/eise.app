@@ -236,7 +236,7 @@
 
 <script setup>
 import { ref, computed, onUnmounted, onMounted } from 'vue';
-import { parseSerHeader } from '@/composables/useSerReader';
+import { parseSerHeader, SER_HEADER_SIZE } from '@/composables/useSerParser';
 import { useFeedback } from '@/composables/useFeedback';
 
 const { openFeedback } = useFeedback();
@@ -288,8 +288,6 @@ const startFrame = ref(1);
 const endFrame = ref(1);
 const isProcessing = ref(false);
 const progress = ref(0);
-
-const SER_HEADER_SIZE = 178;
 
 const outputFrameCount = computed(() => {
     if (!serHeader.value) return 0;

@@ -55,6 +55,11 @@ async function safeStackMapAsync(buffer, mode) {
 let cachedStackBuffers = null;
 let cachedStackConfig = null;
 
+// Number of frame buffers for batched processing
+// Allows N frames to be uploaded and dispatched in a single submit
+// Keep at 2 to match analysis phase tuning (3+ caused slowdown due to memory pressure)
+const NUM_FRAME_BUFFERS = 2;
+
 // Warp + accumulate shader - computes displacement and accumulates in one pass
 const warpAccumulateShader = `
 struct Params {
@@ -350,19 +355,34 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
     const apSizeAligned = align4(Math.ceil(requiredSizes.apSize * headroom));
     const accumSizeAligned = align4(Math.ceil(requiredSizes.accumSize * headroom));
 
-    cachedStackBuffers = {
-        paramsBuffer: stackDevice.createBuffer({
-            size: 56,  // 14 u32/f32: width, height, outWidth, outHeight, numAPs, patchSize, drizzleScale, frameWeight, brightnessScale, globalOffsetX, globalOffsetY, minQuality, inputFormat, pad
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        frameBuffer: stackDevice.createBuffer({
+    // Create buffer pools for batched processing
+    const frameBuffers = [];
+    const apBuffers = [];
+    const paramsBuffers = [];
+    for (let i = 0; i < NUM_FRAME_BUFFERS; i++) {
+        frameBuffers.push(stackDevice.createBuffer({
             size: frameSizeAligned,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
-        apBuffer: stackDevice.createBuffer({
+        }));
+        apBuffers.push(stackDevice.createBuffer({
             size: apSizeAligned,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
+        }));
+        paramsBuffers.push(stackDevice.createBuffer({
+            size: 56,  // 14 u32/f32
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        }));
+    }
+
+    cachedStackBuffers = {
+        // Legacy single-buffer references (point to first buffer for compatibility)
+        paramsBuffer: paramsBuffers[0],
+        frameBuffer: frameBuffers[0],
+        apBuffer: apBuffers[0],
+        // Buffer pools for batched processing
+        frameBuffers,
+        apBuffers,
+        paramsBuffers,
         accumR: stackDevice.createBuffer({
             size: accumSizeAligned,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
@@ -515,6 +535,127 @@ async function warpAndAccumulateFrame(frameData, width, height, outWidth, outHei
 }
 
 /**
+ * Process multiple frames in a single GPU submission (pipelined batching)
+ * Uploads all frames, creates all bind groups, dispatches all warps, single submit.
+ * This reduces per-frame overhead from encoder creation and submit calls.
+ *
+ * @param {Array<{rgbaBuffer: Float32Array|Uint8Array, brightnessScale: number, frameWeight: number}>} frames
+ * @param {Array<Array<{dx, dy, quality}>>} allShifts - shifts[frameIdx][apIdx]
+ * @param {number} width - Input frame width
+ * @param {number} height - Input frame height
+ * @param {number} outWidth - Output width (with drizzle)
+ * @param {number} outHeight - Output height (with drizzle)
+ * @param {Array<{x, y}>} alignmentPoints
+ * @param {number} patchSize
+ * @param {number} drizzleScale
+ * @param {number} minApQuality
+ */
+async function warpAndAccumulateBatch(frames, allShifts, width, height, outWidth, outHeight,
+    alignmentPoints, patchSize, drizzleScale, minApQuality = 0.3) {
+
+    if (!isStackingReady) {
+        const initialized = await initStackingGPU();
+        if (!initialized) {
+            throw new Error('WebGPU stacking not available');
+        }
+    }
+
+    if (frames.length === 0) return;
+
+    const buffers = getStackingBuffers(width, height, outWidth, outHeight, alignmentPoints.length);
+    const numAPs = alignmentPoints.length;
+    const workgroupsX = Math.ceil(outWidth / 16);
+    const workgroupsY = Math.ceil(outHeight / 16);
+
+    // Process frames in chunks of NUM_FRAME_BUFFERS
+    for (let chunkStart = 0; chunkStart < frames.length; chunkStart += NUM_FRAME_BUFFERS) {
+        const chunkEnd = Math.min(chunkStart + NUM_FRAME_BUFFERS, frames.length);
+        const chunkSize = chunkEnd - chunkStart;
+
+        // Upload all frames in this chunk to their respective buffers
+        const bindGroups = [];
+
+        for (let i = 0; i < chunkSize; i++) {
+            const frameIdx = chunkStart + i;
+            const frame = frames[frameIdx];
+            const shifts = allShifts[frameIdx];
+            const bufferIdx = i;  // Use buffer pool index
+
+            const frameData = frame.rgbaBuffer;
+            const isUint8 = frameData instanceof Uint8Array || frameData instanceof Uint8ClampedArray;
+            const inputFormat = isUint8 ? 1 : 0;
+
+            // Upload frame data
+            if (isUint8) {
+                stackQueue.writeBuffer(buffers.frameBuffers[bufferIdx], 0, frameData);
+            } else {
+                const float32Data = frameData instanceof Float32Array ? frameData : new Float32Array(frameData);
+                stackQueue.writeBuffer(buffers.frameBuffers[bufferIdx], 0, float32Data);
+            }
+
+            // Pack and upload AP data
+            const apData = new Float32Array(numAPs * 6);
+            for (let a = 0; a < numAPs; a++) {
+                apData[a * 6] = alignmentPoints[a].x;
+                apData[a * 6 + 1] = alignmentPoints[a].y;
+                apData[a * 6 + 2] = shifts[a].dx;
+                apData[a * 6 + 3] = shifts[a].dy;
+                apData[a * 6 + 4] = shifts[a].quality;
+                apData[a * 6 + 5] = 0;
+            }
+            stackQueue.writeBuffer(buffers.apBuffers[bufferIdx], 0, apData);
+
+            // Pack and upload params
+            const paramsData = new ArrayBuffer(56);
+            const paramsU32 = new Uint32Array(paramsData);
+            const paramsF32 = new Float32Array(paramsData);
+            paramsU32[0] = width;
+            paramsU32[1] = height;
+            paramsU32[2] = outWidth;
+            paramsU32[3] = outHeight;
+            paramsU32[4] = numAPs;
+            paramsU32[5] = patchSize;
+            paramsF32[6] = drizzleScale;
+            paramsF32[7] = frame.frameWeight;
+            paramsF32[8] = frame.brightnessScale;
+            paramsF32[9] = 0;  // globalOffsetX
+            paramsF32[10] = 0; // globalOffsetY
+            paramsF32[11] = minApQuality;
+            paramsU32[12] = inputFormat;
+            paramsU32[13] = 0;
+            stackQueue.writeBuffer(buffers.paramsBuffers[bufferIdx], 0, paramsData);
+
+            // Create bind group for this frame
+            bindGroups.push(stackDevice.createBindGroup({
+                layout: warpPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: buffers.paramsBuffers[bufferIdx] } },
+                    { binding: 1, resource: { buffer: buffers.frameBuffers[bufferIdx] } },
+                    { binding: 2, resource: { buffer: buffers.apBuffers[bufferIdx] } },
+                    { binding: 3, resource: { buffer: buffers.accumR } },
+                    { binding: 4, resource: { buffer: buffers.accumG } },
+                    { binding: 5, resource: { buffer: buffers.accumB } },
+                    { binding: 6, resource: { buffer: buffers.accumW } }
+                ]
+            }));
+        }
+
+        // Create single encoder with all dispatches for this chunk
+        const encoder = stackDevice.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(warpPipeline);
+
+        for (let i = 0; i < chunkSize; i++) {
+            pass.setBindGroup(0, bindGroups[i]);
+            pass.dispatchWorkgroups(workgroupsX, workgroupsY, 1);
+        }
+
+        pass.end();
+        stackQueue.submit([encoder.finish()]);
+    }
+}
+
+/**
  * Clear accumulation buffers
  */
 async function clearAccumulators(outWidth, outHeight) {
@@ -595,6 +736,7 @@ if (typeof self !== 'undefined') {
     self.initStackingGPU = initStackingGPU;
     self.getStackingBuffers = getStackingBuffers;
     self.warpAndAccumulateFrame = warpAndAccumulateFrame;
+    self.warpAndAccumulateBatch = warpAndAccumulateBatch;
     self.clearAccumulators = clearAccumulators;
     self.readAccumulators = readAccumulators;
     self.cleanupStackingBuffers = cleanupStackingBuffers;

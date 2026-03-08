@@ -347,7 +347,7 @@ export function useStacker() {
 
         // Initialize GPU workers (no OpenCV worker needed - alignment prep is pure JS)
         const gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
-        const gpuStackWorker = new Worker(workerUrl('/webgpu_worker.js'));
+        const gpuStackWorker = new Worker(workerUrl('/webgpu_stacking_worker.js'));
 
         try {
             // Init GPU workers in parallel
@@ -573,19 +573,23 @@ export function useStacker() {
             // Cumulative drift tracking for surface mode
             let cumulativeDrift = { dx: 0, dy: 0 };
 
-            // Pre-load first batch
+            // Pipelining state:
+            // - nextRawPromise: prefetch raw bytes from disk (I/O)
+            // - nextDemosaicPromise: prefetch demosaic results (GPU worker A)
+            // This allows demosaic(N+1) to run in parallel with match+accumulate(N) on GPU worker B
             let batchStart = 0;
-            let nextBatchPromise = null;
+            let nextRawPromise = null;
+            let nextDemosaicPromise = null;
 
             while (batchStart < frameCount) {
                 const batchEnd = Math.min(batchStart + effectiveBatchSize, frameCount);
                 let batchFrames = framesToProcess.slice(batchStart, batchEnd);
 
-                // Get current batch (pre-loaded or load now)
+                // Get current batch's raw data (pre-loaded or load now)
                 let rawBatch;
                 const t0Load = performance.now();
-                if (nextBatchPromise) {
-                    rawBatch = await nextBatchPromise;
+                if (nextRawPromise) {
+                    rawBatch = await nextRawPromise;
                     // Trim if batch size was reduced
                     if (rawBatch.frames.length > effectiveBatchSize) {
                         rawBatch.frames = rawBatch.frames.slice(0, effectiveBatchSize);
@@ -597,42 +601,69 @@ export function useStacker() {
                 }
                 stackingStats.frameLoadMs.push(performance.now() - t0Load);
 
-                // Start loading next batch while processing current
-                const nextStart = batchStart + rawBatch.frames.length;
-                if (nextStart < frameCount) {
-                    const nextEnd = Math.min(nextStart + effectiveBatchSize, frameCount);
-                    const nextFrames = framesToProcess.slice(nextStart, nextEnd);
-                    nextBatchPromise = loadRawBatch(nextFrames);
-                } else {
-                    nextBatchPromise = null;
-                }
-
-                // Process current batch via GPU (demosaic + crop) with OOM handling
+                // Get current batch's demosaic results (pre-computed or compute now)
                 const t0Demosaic = performance.now();
                 let gpuResults = null;
                 let retryFrames = rawBatch.frames;
                 let retryCenters = rawBatch.centers;
-                while (!gpuResults && retryFrames.length > 0) {
-                    try {
-                        gpuResults = await processGpuBatch(retryFrames, retryCenters);
-                    } catch (err) {
-                        if (isOOMError(err) && retryFrames.length > 1) {
-                            const newSize = Math.max(1, Math.floor(retryFrames.length / 2));
-                            addLog(`GPU memory error, reducing batch from ${retryFrames.length} to ${newSize}`);
-                            retryFrames = retryFrames.slice(0, newSize);
-                            retryCenters = retryCenters.slice(0, newSize);
-                            batchFrames = batchFrames.slice(0, newSize);
-                            effectiveBatchSize = newSize;
-                            nextBatchPromise = null; // Cancel pre-fetch
-                        } else {
-                            throw err;
+
+                if (nextDemosaicPromise) {
+                    // Use prefetched demosaic results (was computed in parallel with previous batch's match+accumulate)
+                    const prefetched = await nextDemosaicPromise;
+                    gpuResults = prefetched.gpuResults;
+                    retryFrames = prefetched.frames;
+                    retryCenters = prefetched.centers;
+                    batchFrames = prefetched.batchFrames;
+                    rawBatch = { frames: retryFrames, centers: retryCenters };
+                    nextDemosaicPromise = null;
+                } else {
+                    // Compute demosaic now (first batch or after OOM)
+                    while (!gpuResults && retryFrames.length > 0) {
+                        try {
+                            gpuResults = await processGpuBatch(retryFrames, retryCenters);
+                        } catch (err) {
+                            if (isOOMError(err) && retryFrames.length > 1) {
+                                const newSize = Math.max(1, Math.floor(retryFrames.length / 2));
+                                addLog(`GPU memory error, reducing batch from ${retryFrames.length} to ${newSize}`);
+                                retryFrames = retryFrames.slice(0, newSize);
+                                retryCenters = retryCenters.slice(0, newSize);
+                                batchFrames = batchFrames.slice(0, newSize);
+                                effectiveBatchSize = newSize;
+                            } else {
+                                throw err;
+                            }
                         }
                     }
                 }
                 stackingStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
+
                 if (!gpuResults) break;
                 rawBatch.frames = retryFrames;
                 rawBatch.centers = retryCenters;
+
+                // Start prefetching next batch (raw + demosaic) to overlap with match+accumulate
+                // Demosaic runs on gpuAnalyzeWorker (separate GPU device from gpuStackWorker)
+                const nextStart = batchStart + retryFrames.length;
+                if (nextStart < frameCount) {
+                    const nextEnd = Math.min(nextStart + effectiveBatchSize, frameCount);
+                    const nextFramesSlice = framesToProcess.slice(nextStart, nextEnd);
+
+                    // Chain: load raw → demosaic (both prefetched in parallel with current match+accumulate)
+                    nextRawPromise = loadRawBatch(nextFramesSlice);
+                    nextDemosaicPromise = nextRawPromise.then(async (nextRaw) => {
+                        const results = await processGpuBatch(nextRaw.frames, nextRaw.centers);
+                        // Store metadata alongside results for next iteration
+                        return {
+                            gpuResults: results,
+                            frames: nextRaw.frames,
+                            centers: nextRaw.centers,
+                            batchFrames: nextFramesSlice
+                        };
+                    });
+                } else {
+                    nextRawPromise = null;
+                    nextDemosaicPromise = null;
+                }
 
                 // Capture frames for comparison video (both raw pre-crop and processed post-crop)
                 for (let i = 0; i < gpuResults.length; i++) {
@@ -938,7 +969,7 @@ export function useStacker() {
         addLog('Initializing GPU worker...');
         emit('set-caption', 'Initializing GPU worker...');
 
-        const gpuWorker = new Worker(workerUrl('/webgpu_worker.js'));
+        const gpuWorker = new Worker(workerUrl('/webgpu_stacking_worker.js'));
 
         try {
             // Init WebGPU worker

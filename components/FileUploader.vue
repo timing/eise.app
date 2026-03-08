@@ -187,8 +187,9 @@
 import { fetchFile } from '@ffmpeg/ffmpeg';
 import { computed, defineEmits, ref, onMounted, watch, inject } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
-import { useSerReader } from '@/composables/useSerReader';
+// useSerReader removed - now using useSerParser + useDebayerReader
 import { useAviReader } from '@/composables/useAviReader';
+import { useFFmpegReader } from '@/composables/useFFmpegReader';
 import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
@@ -667,17 +668,29 @@ async function processFiles(files) {
 		return;
 	}
 
-	// Handle multiple SER files (combined stacking) - not available in lite mode
-	if (serFiles.length > 1 && !liteMode.value) {
+	// Handle multiple SER files (combined stacking)
+	if (serFiles.length > 1) {
 		emit('processing-started');
-		const { readSerFiles } = useSerReader();
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		await readSerFiles(serFiles, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value, useVngDemosaic.value);
-		return;
-	} else if (serFiles.length > 1 && liteMode.value) {
-		alert('Multiple SER files are not supported in Lite Mode. Please select a single file.');
-		isProcessing.value = false;
-		eventBusEmit('stop-loading');
+
+		const { useMultiSerParser } = await import('@/composables/useSerParser');
+		const { useDebayerReader } = await import('@/composables/useDebayerReader');
+
+		const parser = useMultiSerParser();
+		await parser.init(serFiles);
+
+		const reader = useDebayerReader();
+		await reader.init(serFiles[0], parser);  // First file for reference, parser handles all
+		await reader.processFile({
+			maxFrames: effectiveMaxFrames.value,
+			manualThreshold: effectiveQualityMode.value === 'manual',
+			cropMarginPercent: effectiveCropMargin.value,
+			stackPercentage: effectiveStackPercentage.value,
+			drizzleScale: effectiveDrizzleScale.value,
+			noiseRobustAlignment: effectiveNoiseRobust.value,
+			surfaceMode: surfaceMode.value,
+			useVngDemosaic: useVngDemosaic.value,
+		});
 		return;
 	}
 
@@ -693,8 +706,8 @@ async function processFiles(files) {
 			}
 		}
 
-		// Handle SER files with unified debayer reader (not in lite mode - lite mode uses FFmpeg)
-		if (fileToProcess.name.endsWith('.ser') && !liteMode.value) {
+		// Handle SER files with unified debayer reader
+		if (fileToProcess.name.endsWith('.ser')) {
 			emit('processing-started');
 
 			// Use new unified debayer reader
@@ -914,7 +927,7 @@ async function processFiles(files) {
 			}
 			addLog(`Video duration: ${videoDuration.toFixed(1)}s`);
 
-			const { processBatchedVideoFrames } = useAviReader();
+			const { processBatchedVideoFrames } = useFFmpegReader();
 			const totalFrames = effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : 100;
 
 			await processBatchedVideoFrames($ffmpeg, fileToProcess.name, totalFrames, videoDuration, {
@@ -975,9 +988,8 @@ async function processFiles(files) {
 				return;
 			}
 
-			// Route PNG frames through AVI reader - it will read and delete files from $ffmpeg
-			const { processFFmpegFrames } = useAviReader();
-			const skipAutoCrop = preCropRegion !== null;
+			// Route PNG frames through FFmpeg reader
+			const { processFFmpegFrames } = useFFmpegReader();
 
 			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
 		}

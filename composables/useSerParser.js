@@ -393,4 +393,91 @@ export function useSerParser() {
     };
 }
 
+/**
+ * Create a multi-file SER parser that combines multiple files.
+ * Wraps multiple useSerParser instances into a single parser interface.
+ */
+export function useMultiSerParser() {
+    let parsers = [];
+    let files = [];
+    let combinedMetadata = null;
+    let frameOffsets = []; // [0, file1FrameCount, file1+file2FrameCount, ...]
+
+    async function init(inputFiles) {
+        files = inputFiles;
+        parsers = [];
+        frameOffsets = [0];
+
+        for (const file of inputFiles) {
+            const parser = useSerParser();
+            await parser.init(file);
+            parsers.push(parser);
+
+            const meta = parser.getMetadata();
+            frameOffsets.push(frameOffsets[frameOffsets.length - 1] + meta.frameCount);
+        }
+
+        // Validate all files have matching dimensions and colorID
+        const firstMeta = parsers[0].getMetadata();
+        for (let i = 1; i < parsers.length; i++) {
+            const meta = parsers[i].getMetadata();
+            if (meta.width !== firstMeta.width || meta.height !== firstMeta.height) {
+                throw new Error(`File ${files[i].name} has different dimensions (${meta.width}x${meta.height}) than first file (${firstMeta.width}x${firstMeta.height})`);
+            }
+            if (meta.colorID !== firstMeta.colorID) {
+                throw new Error(`File ${files[i].name} has different color format (colorID ${meta.colorID}) than first file (colorID ${firstMeta.colorID})`);
+            }
+            if (meta.pixelDepth !== firstMeta.pixelDepth) {
+                throw new Error(`File ${files[i].name} has different bit depth (${meta.pixelDepth}) than first file (${firstMeta.pixelDepth})`);
+            }
+        }
+
+        const totalFrames = frameOffsets[frameOffsets.length - 1];
+        combinedMetadata = {
+            ...firstMeta,
+            frameCount: totalFrames,
+            fileCount: inputFiles.length,
+            fileNames: inputFiles.map(f => f.name),
+        };
+
+        return combinedMetadata;
+    }
+
+    function getMetadata() {
+        return combinedMetadata;
+    }
+
+    function mapFrameIndex(globalIndex) {
+        for (let i = 0; i < parsers.length; i++) {
+            if (globalIndex < frameOffsets[i + 1]) {
+                return { parserIndex: i, localIndex: globalIndex - frameOffsets[i] };
+            }
+        }
+        throw new Error(`Frame index ${globalIndex} out of range`);
+    }
+
+    async function readFrame(globalIndex) {
+        const { parserIndex, localIndex } = mapFrameIndex(globalIndex);
+        return parsers[parserIndex].readFrame(localIndex);
+    }
+
+    async function readFrameTyped(globalIndex) {
+        const { parserIndex, localIndex } = mapFrameIndex(globalIndex);
+        return parsers[parserIndex].readFrameTyped(localIndex);
+    }
+
+    async function readFrameScaled(globalIndex) {
+        const { parserIndex, localIndex } = mapFrameIndex(globalIndex);
+        return parsers[parserIndex].readFrameScaled(localIndex);
+    }
+
+    return {
+        init,
+        getMetadata,
+        readFrame,
+        readFrameTyped,
+        readFrameScaled,
+    };
+}
+
 export default useSerParser;
