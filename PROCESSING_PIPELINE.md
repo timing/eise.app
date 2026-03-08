@@ -416,29 +416,32 @@ G B G B        G R G R        B G B G        R G R G
 
 ---
 
-## File Structure
+## File Structure (Current - March 2026)
 
 ```
 composables/
-├── useDebayerReader.js    # Unified demosaic processing
-├── useSerParser.js        # SER format parsing only
-├── useAviParser.js        # AVI format parsing only
-├── useDirectReader.js     # RGB frames (no demosaic)
-├── useFfmpegReader.js     # FFmpeg decode path
-├── useStacker.js          # Stacking algorithms
-├── useProcessingState.js  # Shared state
-└── eventBus.js            # Event communication
+├── useSerParser.js           # SER format parsing (16KB)
+├── useAviParser.js           # AVI format parsing (22KB)
+├── useDebayerReader.js       # Unified raw Bayer processing (53KB)
+├── useFFmpegReader.js        # FFmpeg video decode path (43KB)
+├── useAviReader.js           # AVI MJPEG/BGR processing (68KB) - for non-Bayer AVI
+├── useImageReader.js         # Image sequences (29KB)
+├── useWebGpuAnalyzeWorker.js # Shared GPU worker wrapper for RGBA frames (7KB)
+├── useStacker.js             # Stacking orchestration (68KB)
+├── useProcessingState.js     # Shared state
+└── eventBus.js               # Event communication
 
 public/
-├── webgpu_analyze_worker.js    # GPU demosaic & analysis
-├── webgpu_stacking.js          # GPU frame accumulation
-├── webgpu_template_match.js    # GPU alignment
-└── unified_analyze_worker.js   # CPU fallback
+├── webgpu_analyze_worker.js  # GPU demosaic & analysis (102KB)
+├── webgpu_stacking.js        # GPU frame warping & accumulation (27KB)
+├── webgpu_template_match.js  # GPU alignment (61KB)
+├── unified_analyze_worker.js # CPU fallback (128KB)
+└── gpu/
+    ├── shaders.js            # All WGSL compute shaders (79KB)
+    └── helpers.js            # Buffer/pipeline creation helpers (5KB)
 
-(Legacy - to be removed after migration)
-├── useSerReader.js        # Old SER reader (3300 lines)
-├── useAviReader.js        # Old AVI reader (3400 lines)
-└── useImageReader.js      # Old image reader (700 lines)
+(Archived)
+└── useSerReader.js.old       # Old SER reader - archived, not used
 ```
 
 ---
@@ -450,6 +453,13 @@ public/
 2. ✅ `useAviParser.js` - RIFF parsing, frame index scanning, vertical flip, strd Bayer detection
 3. ✅ `useDebayerReader.js` - Full unified pipeline with GPU analysis and stacking
 4. ✅ Wired parser imports into old readers (backwards compatible)
+
+### Phase A2: FFmpeg GPU Path ✅ COMPLETE (March 2026)
+1. ✅ `useFFmpegReader.js` - Separated FFmpeg processing from useAviReader
+2. ✅ `useWebGpuAnalyzeWorker.js` - Shared GPU worker wrapper for RGBA frames
+3. ✅ GPU-based crop detection for FFmpeg frames
+4. ✅ GPU batch analysis with pipelining
+5. ✅ `useSerReader.js` archived to `.old`
 
 ### Phase B: Wire FileUploader.vue
 

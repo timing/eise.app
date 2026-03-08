@@ -15,16 +15,20 @@ Analysis of uncompressed AVI and SER processing pipelines for potential speedups
 
 ---
 
-## Bottlenecks Summary
+## Bottlenecks Summary (Updated March 2026)
 
 | Issue | Location | Potential Speedup | Effort | Status |
 |-------|----------|-------------------|--------|--------|
-| Sequential file I/O | useStacker.js, useSerReader.js | **3-4x** for I/O | Low | **DONE** |
+| Sequential file I/O | useStacker.js, useDebayerReader.js | **3-4x** for I/O | Low | **DONE** |
 | GPU centroid sync | webgpu_analyze_worker.js | **~50ms/batch** | Medium | **DONE** |
-| VNG demosaic overhead | webgpu_analyze_worker.js | **40-60%** | High | TODO |
+| VNG demosaic overhead | gpu/shaders.js | stacking only | High | **LOW PRIORITY** |
 | Template matching workgroups | webgpu_template_match.js | **20-30%** | Medium | TODO |
 | Packed grayscale unpacking | webgpu_template_match.js | **15-20%** | High | TODO |
-| CPU grayscale conversion | useStacker.js:114-136 | **10-15%** | Medium | TODO |
+| CPU grayscale conversion | useStacker.js | **10-15%** | Medium | TODO |
+
+**Note:** VNG demosaic was marked HIGH PRIORITY but analysis phase already uses `grayOnly` fast path (4 fetches vs 33). VNG only runs during stacking, which is already fast.
+
+**Note:** Line numbers may be outdated due to code refactoring. Use function names to locate code.
 
 ---
 
@@ -34,14 +38,13 @@ Analysis of uncompressed AVI and SER processing pipelines for potential speedups
 
 **Status:** Implemented
 
-**Files changed:**
-- `useSerReader.js` lines 362-398 - Crop detection sample loading (now parallel)
-- `useSerReader.js` lines 490-504 - GPU batch analysis loading (now parallel)
-- `useSerReader.js` lines 1257-1274 - `loadBatch()` helper function (now parallel)
-- `useStacker.js` lines 375-422 - `loadRawBatch()` function (now parallel)
-- `useAviReader.js` lines 2167-2179 - Raw Bayer batch loading (now parallel)
-- `useAviReader.js` lines 2404-2414 - Crop detection for Bayer AVI (now parallel)
-- `useAviReader.js` lines 1922-1933 - MJPEG crop detection batch (now parallel)
+**Files changed (note: useSerReader.js is now archived as .old):**
+- `useDebayerReader.js` - Parallel batch loading for raw Bayer
+- `useStacker.js` - `loadRawBatch()` function (now parallel)
+- `useAviReader.js` - Raw Bayer batch loading (now parallel)
+- `useAviReader.js` - Crop detection for Bayer AVI (now parallel)
+- `useAviReader.js` - MJPEG crop detection batch (now parallel)
+- `useFFmpegReader.js` - GPU batch processing with pipelining
 
 **Pattern applied:**
 ```javascript
@@ -105,43 +108,34 @@ boundsReduction → centroidCompute → crop → ... → mapAsync(bounds) in par
 
 ---
 
-### 2. VNG Demosaic Overhead (HIGH PRIORITY, HIGH EFFORT)
+### 2. VNG Demosaic Overhead (LOW PRIORITY - Analysis already optimized)
 
-**Status:** TODO
+**Status:** Lower priority than originally thought
 
-**Implementation location:** `public/webgpu_analyze_worker.js`
+**Finding (March 2026):** The analysis phase (the slow part) already uses `grayOnly` mode which bypasses VNG entirely. The `demosaicGrayOnlyShader` averages a 2x2 neighborhood (4 texture fetches) instead of full VNG (~33 fetches).
 
-**Specific code to modify:**
-- Lines 156-545: VNG demosaic shader
-- Function: `createDemosaicPipeline()`
-- Shader function: `demosaicVNG()`
+**VNG is only used during stacking phase** - which is already fast.
 
-**Problem:**
+**Implementation location:** `public/gpu/shaders.js` - `vngInterpolate()` function
+
+**Problem (stacking only):**
 - VNG shader has 8 gradient computations per pixel
-- Total: **28 texture fetches per pixel**
-- Compare to bilinear: only 8 fetches
+- Total: **~33 texture fetches per pixel**
+- Compare to grayOnly: only 4 fetches
 
-**Optimization options:**
+**If stacking becomes a bottleneck:**
 
-**Option A: Two-pass VNG approximation**
-- Implementation: Add new compute shader pass
-- Pass 1: Compute gradients only at alignment point locations (sparse)
-- Pass 2: Interpolate gradient estimates across frame
-- Modify `detectCropAnalyzeBayer()` to use two-pass pipeline
-- Estimated speedup: 40-60%
+**Option A: Selective VNG** (Low effort)
+- Use bilinear for dark background, VNG for bright regions
+- Estimated speedup: 25-35% on stacking phase
 
-**Option B: Selective VNG**
-- Implementation: Add luminance threshold check in shader
-- Location: Inside `demosaicVNG()` function
-- Use bilinear for pixels where `luminance < threshold` (background)
-- Full VNG only for bright regions (planet)
-- Estimated speedup: 25-35%
+**Option B: 4-direction VNG** (Medium effort)
+- Skip diagonal gradients, slight quality reduction
+- Cuts gradient computation in half
 
-**Option C: Pre-filtered VNG**
-- Implementation: Add blur pass before demosaic
-- Add new `blurRawBayer()` compute shader
-- Chain: blur -> demosaic with relaxed thresholds
-- Estimated speedup: 15-20%
+**Option C: Shared memory tiling** (High effort)
+- Load tile to workgroup shared memory
+- Estimated speedup: 40-50%, complex implementation
 
 ---
 
@@ -339,14 +333,16 @@ const batchForStacker = gpuResults.map((r, i) => ({
 
 ### 8. Crop Detection Redundancy (LOW PRIORITY)
 
-**Status:** TODO
+**Status:** TODO - Architecture changed
 
-**Implementation location:** `useSerReader.js` lines 440-570
+**Note:** `useSerReader.js` is now archived. The new architecture uses:
+- `useDebayerReader.js` for raw Bayer files
+- `useFFmpegReader.js` for video files
 
-**Changes needed:**
-1. In `detectCropRegionGpu()` (lines 440-570): Store full analysis results, not just bounds
-2. In main analysis loop: Check if frame was already analyzed in crop detection
-3. Skip re-analysis for pre-analyzed frames
+**Potential optimization:**
+- Crop detection phase samples frames to determine crop SIZE
+- Analysis phase detects bounds AGAIN for per-frame CENTER
+- Could potentially cache detection results from crop detection phase
 
 **Expected speedup:** 5-10%
 

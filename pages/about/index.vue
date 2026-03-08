@@ -15,7 +15,8 @@
 				The stacking pipeline includes automatic frame ranking, per-frame cropping and centering, local alignment with de-warping,
 				drizzle upscaling, and quality-weighted frame accumulation. The integrated post-processor offers wavelet sharpening,
 				RGB alignment, and color correction.
-				<NuxtLink to="/about/help/">Learn how eise.app works</NuxtLink> or
+				<NuxtLink to="/about/help/">Learn how eise.app works</NuxtLink>,
+				<NuxtLink to="/about/architecture/">explore the technical architecture</NuxtLink>, or
 				<NuxtLink to="/about/planetary-stacking-software-comparison/">compare it to other stacking software</NuxtLink>.
 			</p>
 			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image - just open a PNG or TIFF for wavelet sharpening, RGB alignment, and other adjustments without stacking.</p>

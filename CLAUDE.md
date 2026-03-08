@@ -22,32 +22,58 @@ npm run generate     # Generate static files (for Cloudflare deployment)
 
 ```
 Browser (Nuxt.js + Vue.js) - All processing is client-side
-├── FileUploader: Video/SER/AVI input
-├── Frame Readers: useSerReader.js, useAviReader.js, useImageReader.js
-├── unified_analyze_worker.js: WebWorker pool for:
-│   ├── Frame extraction (FFmpeg.js for video)
-│   ├── Sharpness analysis (Tenengrad/Sobel-based)
-│   ├── Bayer demosaicing (OpenCV-WASM)
-│   ├── Auto-crop detection (contour-based planet centering)
-│   └── Frame stacking with local alignment (alignment points + de-warping)
-├── useStacker.js: Orchestrates client-side stacking
-└── PostProcessor: Wavelet sharpening, noise reduction, chromatic aberration correction
+├── FileUploader.vue: File input, format detection, processing orchestration
+│
+├── Format Parsers (header parsing only):
+│   ├── useSerParser.js      - SER header parsing, frame reading
+│   └── useAviParser.js      - AVI/RIFF parsing, frame index
+│
+├── Frame Readers (processing pipelines):
+│   ├── useDebayerReader.js  - Raw Bayer (SER, raw AVI) → GPU demosaic → analyze → stack
+│   ├── useFFmpegReader.js   - Video (MP4, MOV, etc.) → FFmpeg decode → GPU analyze
+│   ├── useAviReader.js      - AVI MJPEG/BGR (already RGB) → GPU analyze
+│   └── useImageReader.js    - Image sequences → GPU analyze
+│
+├── GPU Workers (WebGPU compute):
+│   ├── webgpu_analyze_worker.js  - Demosaic, sharpness, crop detection
+│   ├── webgpu_template_match.js  - Alignment point template matching
+│   └── webgpu_stacking.js        - Frame warping and accumulation
+│
+├── Shared Composables:
+│   ├── useWebGpuAnalyzeWorker.js - Shared GPU worker wrapper for RGBA frames
+│   ├── useStacker.js             - Orchestrates stacking (GPU primary, CPU fallback)
+│   └── useProcessingState.js     - Shared state (AP settings, filenames)
+│
+├── CPU Fallback:
+│   └── unified_analyze_worker.js - OpenCV-WASM for non-WebGPU browsers
+│
+└── PostProcessor.vue: Wavelet sharpening, deconvolution, RGB alignment
 ```
 
 ### Stacking Pipeline (all in browser)
-1. **Frame Analysis**: Raw SER/AVI frames → sharpness scoring → keep best 30%
-2. **Demosaicing**: Raw Bayer data → RGB using OpenCV `cv.demosaicing()` (VNG - Variable Number of Gradients)
-3. **Stacking**: Alignment points grid → local shift detection via template matching → weighted de-warping → accumulation
-4. **Post-processing**: Wavelet sharpening, color correction
+1. **Format Detection**: FileUploader routes to appropriate reader based on file type
+2. **Crop Detection**: Sample frames → detect planet bounds → determine crop size
+3. **Frame Analysis**: Per-frame GPU analysis → sharpness scoring → crop with per-frame centering
+4. **Frame Selection**: Keep best N% by sharpness (default 30%)
+5. **Demosaicing**: Raw Bayer → RGB via GPU VNG demosaic (or bilinear for speed)
+6. **Stacking**: Alignment points grid → GPU template matching → de-warping → weighted accumulation
+7. **Post-processing**: Wavelet sharpening, color correction
 
 ## Key Technical Details
 
-**IMPORTANT: WebGPU Path is Primary**: When making changes to stacking/alignment code, always prioritize the WebGPU path first. It's the most commonly used path and provides the best performance. The CPU path (OpenCV in worker) is a fallback. Key WebGPU files:
+**IMPORTANT: WebGPU Path is Primary**: When making changes to analysis/stacking code, always prioritize the WebGPU path. Key files:
+- `public/webgpu_analyze_worker.js` - GPU demosaic, sharpness, crop detection
 - `public/webgpu_template_match.js` - GPU template matching for alignment
-- `public/webgpu_stacking.js` - GPU frame accumulation
-- `composables/useStacker.js` - `stackWithWebGPU()` and `stackWithGpuPipelined()` orchestrate the GPU path
+- `public/webgpu_stacking.js` - GPU frame warping and accumulation
+- `public/gpu/shaders.js` - All WGSL compute shaders
+- `public/gpu/helpers.js` - Buffer/pipeline creation helpers
+- `composables/useStacker.js` - `stackWithGpuPipelined()` orchestrates the GPU path
 
-**WebWorker Frame Analysis**: Workers use Tenengrad (Sobel-based) sharpness calculation. Pool size based on `navigator.hardwareConcurrency` (max 4 to prevent memory issues). Workers handle both FFmpeg-extracted PNG frames and raw SER/AVI frames.
+**File Processing Paths**:
+- **Raw Bayer (SER, raw AVI)**: `useSerParser`/`useAviParser` → `useDebayerReader` → GPU demosaic + analyze
+- **Video (MP4, MOV, etc.)**: `useFFmpegReader` → FFmpeg decode → `useWebGpuAnalyzeWorker` → GPU analyze
+- **AVI MJPEG/BGR**: `useAviReader` → decode → GPU analyze (already RGB, no demosaic)
+- **Images**: `useImageReader` → GPU analyze
 
 **Client-Side Stacking** has two paths:
 1. **WebGPU Path** (primary): `useStacker.js` → `webgpu_template_match.js` for alignment → `webgpu_stacking.js` for accumulation
@@ -60,9 +86,9 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 - De-warping via `cv.remap()` (CPU) or GPU shader (WebGPU)
 - Sharpness-weighted frame accumulation
 
-**Bayer Demosaicing**: Raw Bayer frames are demosaiced using OpenCV's `cv.demosaicing()` with VNG (Variable Number of Gradients) interpolation for better quality on fine detail. The demosaicing happens BEFORE stacking (frames are stacked as RGB, not raw Bayer).
+**Bayer Demosaicing**: Raw Bayer frames are demosaiced on GPU using VNG (Variable Number of Gradients) interpolation for quality, or bilinear for speed. The demosaicing happens BEFORE stacking (frames are stacked as RGB, not raw Bayer). GPU demosaic is in `webgpu_analyze_worker.js`.
 
-**Per-Frame Planet Centering (CRITICAL)**: Each frame MUST be cropped with per-frame center detection so the planet is always centered in the cropped output. The planet moves across frames due to atmospheric refraction and mount drift. Skipping per-frame detection and using a fixed reference center will cause the planet to drift across frames, ruining the stack. The `detectObjectBounds()` function in unified_analyze_worker.js finds the bright object's centroid for each frame. NEVER skip this step or use a fixed center for all frames.
+**Per-Frame Planet Centering (CRITICAL)**: Each frame MUST be cropped with per-frame center detection so the planet is always centered in the cropped output. The planet moves across frames due to atmospheric refraction and mount drift. Skipping per-frame detection and using a fixed reference center will cause the planet to drift across frames, ruining the stack. GPU path uses `detectCropAnalyzeBatch()` in `webgpu_analyze_worker.js`. NEVER skip this step or use a fixed center for all frames.
 
 **OpenCV-WASM Limitation**: The `opencv-bindings` build does NOT include `cv.imencode`/`cv.imdecode`. PNG encoding uses `OffscreenCanvas.convertToBlob()` instead.
 
@@ -72,10 +98,10 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 - AVI: Direct parsing with FourCC detection
 - Images: PNG, JPG, WebP, AVIF (direct), others (FFmpeg converted)
 
-**QualitySelector Preview Differences (TODO: unify later)**:
-- **SER path**: Stores `uint8Buffer` with each frame during analysis for instant preview in QualitySelector
-- **AVI raw Bayer path**: Uses on-demand loading via `frameReReader.getPreviewBlob()` - reads frame from disk and demosaics when user selects it in QualitySelector
-- The on-demand approach is more memory-efficient but slightly slower. Consider unifying both paths to use the same approach.
+**QualitySelector Preview**:
+- Frames analyzed via GPU store `uint8Buffer` for instant preview
+- On-demand loading available via `frameReReader.getPreviewBlob()` for memory efficiency
+- `useDebayerReader` uses on-demand approach for raw Bayer files
 
 **Event Bus Pattern**: Cross-component communication via `composables/eventBus.js`. Key events: `set-caption`, `update-loading`, `stop-loading`, `upload-error`, `postProcessing`, `stacking-started`, `stacked-image-ready`.
 

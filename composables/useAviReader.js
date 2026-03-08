@@ -1411,9 +1411,7 @@ export function useAviReader() {
         const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, frameReReader, surfaceMode);
 
         // Cleanup
-        gpuWorker.terminate();
-        gpuWorker = null;
-        gpuReady = false;
+        terminateGpuWorker();
 
         if (stackResult && stackResult.blob) {
             addLog('MJPEG GPU stacking complete');
