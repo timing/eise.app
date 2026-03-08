@@ -23,6 +23,15 @@ Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate
 
 /deconv_channel_worker.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
+/wavelet_sharpen_worker.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
+/wavelet_sharpen_worker.wasm.js
+Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate
 
 /wavelet_sharpen_worker.wasm

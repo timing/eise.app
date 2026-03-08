@@ -118,40 +118,65 @@ fn readPixel(pixelIdx: u32) -> vec4<f32> {
     }
 }
 
+// Cubic interpolation weight (Catmull-Rom spline, a = -0.5)
+fn cubicWeight(t: f32) -> f32 {
+    let at = abs(t);
+    if (at <= 1.0) {
+        return (1.5 * at - 2.5) * at * at + 1.0;
+    } else if (at < 2.0) {
+        return ((-0.5 * at + 2.5) * at - 4.0) * at + 2.0;
+    }
+    return 0.0;
+}
+
 fn sampleFrame(x: f32, y: f32) -> vec4<f32> {
-    // Bilinear interpolation
+    // Bicubic interpolation (16 samples, Catmull-Rom)
     let x0 = i32(floor(x));
     let y0 = i32(floor(y));
-    let x1 = x0 + 1;
-    let y1 = y0 + 1;
-
     let fx = x - f32(x0);
     let fy = y - f32(y0);
 
     let w = i32(params.inWidth);
     let h = i32(params.inHeight);
 
-    // Clamp coordinates
-    let cx0 = clamp(x0, 0, w - 1);
-    let cy0 = clamp(y0, 0, h - 1);
-    let cx1 = clamp(x1, 0, w - 1);
-    let cy1 = clamp(y1, 0, h - 1);
+    // Compute cubic weights for x and y
+    let wx0 = cubicWeight(fx + 1.0);
+    let wx1 = cubicWeight(fx);
+    let wx2 = cubicWeight(fx - 1.0);
+    let wx3 = cubicWeight(fx - 2.0);
 
-    // Sample 4 corners using readPixel helper
-    let i00 = u32(cy0 * w + cx0);
-    let i10 = u32(cy0 * w + cx1);
-    let i01 = u32(cy1 * w + cx0);
-    let i11 = u32(cy1 * w + cx1);
+    let wy0 = cubicWeight(fy + 1.0);
+    let wy1 = cubicWeight(fy);
+    let wy2 = cubicWeight(fy - 1.0);
+    let wy3 = cubicWeight(fy - 2.0);
 
-    let c00 = readPixel(i00);
-    let c10 = readPixel(i10);
-    let c01 = readPixel(i01);
-    let c11 = readPixel(i11);
+    var result = vec4<f32>(0.0);
+    var totalWeight: f32 = 0.0;
 
-    // Bilinear blend
-    let c0 = mix(c00, c10, fx);
-    let c1 = mix(c01, c11, fx);
-    return mix(c0, c1, fy);
+    // Sample 4x4 grid
+    for (var j: i32 = -1; j <= 2; j++) {
+        let cy = clamp(y0 + j, 0, h - 1);
+        let wy = select(select(select(wy3, wy2, j == 1), wy1, j == 0), wy0, j == -1);
+
+        for (var i: i32 = -1; i <= 2; i++) {
+            let cx = clamp(x0 + i, 0, w - 1);
+            let wx = select(select(select(wx3, wx2, i == 1), wx1, i == 0), wx0, i == -1);
+
+            let idx = u32(cy * w + cx);
+            let pixel = readPixel(idx);
+            let weight = wx * wy;
+
+            result += pixel * weight;
+            totalWeight += weight;
+        }
+    }
+
+    // Normalize (weights should sum to 1, but clamp can affect this at edges)
+    if (totalWeight > 0.0) {
+        result = result / totalWeight;
+    }
+
+    return result;
 }
 
 @compute @workgroup_size(16, 16, 1)
