@@ -88,6 +88,48 @@ UI settings in FileUploader.vue sync to this shared state via watchers, and useS
 
 **SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`.
 
+## WebGPU Helper Functions (MUST USE)
+
+When writing WebGPU code, **always use the helpers in `public/gpu/helpers.js`**. Do NOT write verbose boilerplate manually.
+
+**Buffer Creation** - use these instead of `device.createBuffer({...})`:
+```javascript
+import { storageBuffer, uniformBuffer, readbackBuffer } from './gpu/helpers.js';
+
+// Storage buffers (GPU compute data)
+storageBuffer(device, size)                              // STORAGE only
+storageBuffer(device, size, { copySrc: true })           // STORAGE | COPY_SRC
+storageBuffer(device, size, { copyDst: true })           // STORAGE | COPY_DST
+storageBuffer(device, size, { copySrc: true, copyDst: true })  // all three
+
+// Uniform buffers (shader parameters)
+uniformBuffer(device, size)  // UNIFORM | COPY_DST
+
+// Readback buffers (GPU → CPU)
+readbackBuffer(device, size)  // MAP_READ | COPY_DST
+```
+
+**Pipeline Creation** - use instead of manual shader module + pipeline creation:
+```javascript
+import { createPipeline } from './gpu/helpers.js';
+
+// Instead of createShaderModule + createComputePipeline:
+const pipeline = await createPipeline(device, shaderCode, 'pipelineName');
+```
+
+**Bind Groups & Compute Passes**:
+```javascript
+import { createBindGroup, addComputePass, imageWorkgroups } from './gpu/helpers.js';
+
+// Bind group from sequential buffers
+const bindGroup = createBindGroup(device, pipeline, [buf0, buf1, buf2]);
+
+// Add compute pass to encoder
+addComputePass(encoder, pipeline, bindGroup, imageWorkgroups(width, height, batchSize));
+```
+
+**Shaders** - all WGSL shaders are in `public/gpu/shaders.js`. Import from there, don't inline.
+
 ## Technical Reference
 
 **OpenCV Bayer Naming Convention (INVERTED from industry standard)**:

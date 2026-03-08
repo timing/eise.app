@@ -27,10 +27,13 @@ import {
     addComputePass,
     imageWorkgroups,
     reductionWorkgroups,
-    createPipeline
+    createPipeline,
+    storageBuffer,
+    uniformBuffer,
+    readbackBuffer
 } from './gpu/helpers.js';
 
-console.log('webgpu_analyze_worker.js loaded (v3)');
+console.log('webgpu_analyze_worker.js loaded (v4)');
 
 let device = null;
 let queue = null;
@@ -542,99 +545,33 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         );
 
     cachedAnalyzeBuffers = {
-        paramsBuffer: device.createBuffer({
-            size: 32,  // 8 u32 values for demosaic params including useVng
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
+        paramsBuffer: uniformBuffer(device, 32),  // 8 u32 values for demosaic params including useVng
         inputBuffers: createBufferArray(pixelBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
         // RGBA buffer: 4x larger for 16-bit to hold Float32 output (preserves precision for stacking)
-        rgbaBuffer: device.createBuffer({
-            size: rgbaBufferSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-        }),
-        grayBuffer: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-        }),
-        grayReadback: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        rgbaBuffer: storageBuffer(device, rgbaBufferSize, { copySrc: true, copyDst: true }),
+        grayBuffer: storageBuffer(device, pixelBufferSize, { copySrc: true, copyDst: true }),
+        grayReadback: readbackBuffer(device, pixelBufferSize),
         // Blurred grayscale for noise reduction before bounds detection
-        blurredGrayBuffer: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        tenengradBuffer: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        laplacianBuffer: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        reductionBuffer: device.createBuffer({
-            size: reductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        momentsBuffer: device.createBuffer({
-            size: momentsPixelSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        momentsReductionBuffer: device.createBuffer({
-            size: momentsReductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        reductionParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        momentsParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        reductionReadback: device.createBuffer({
-            size: reductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        momentsReadback: device.createBuffer({
-            size: momentsReductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        blurredGrayBuffer: storageBuffer(device, pixelBufferSize),
+        tenengradBuffer: storageBuffer(device, pixelBufferSize),
+        laplacianBuffer: storageBuffer(device, pixelBufferSize),
+        reductionBuffer: storageBuffer(device, reductionSize, { copySrc: true }),
+        momentsBuffer: storageBuffer(device, momentsPixelSize),
+        momentsReductionBuffer: storageBuffer(device, momentsReductionSize, { copySrc: true }),
+        reductionParamsBuffer: uniformBuffer(device, 16),
+        momentsParamsBuffer: uniformBuffer(device, 16),
+        reductionReadback: readbackBuffer(device, reductionSize),
+        momentsReadback: readbackBuffer(device, momentsReductionSize),
         // Circularity + centroid: computed on GPU from moments (3 floats per frame: circ, cx, cy)
-        circularityBuffer: device.createBuffer({
-            size: batchSize * 3 * 4,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        circularityParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        circularityReadback: device.createBuffer({
-            size: batchSize * 3 * 4,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        circularityBuffer: storageBuffer(device, batchSize * 3 * 4, { copySrc: true }),
+        circularityParamsBuffer: uniformBuffer(device, 16),
+        circularityReadback: readbackBuffer(device, batchSize * 3 * 4),
         // RGBA readback: matches rgbaBuffer size for 16-bit Float32 support
-        rgbaReadback: device.createBuffer({
-            size: rgbaBufferSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        boundsBuffer: device.createBuffer({
-            size: boundsPixelSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        boundsReductionBuffer: device.createBuffer({
-            size: boundsReductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        boundsParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        boundsReadback: device.createBuffer({
-            size: boundsReductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        })
+        rgbaReadback: readbackBuffer(device, rgbaBufferSize),
+        boundsBuffer: storageBuffer(device, boundsPixelSize),
+        boundsReductionBuffer: storageBuffer(device, boundsReductionSize, { copySrc: true }),
+        boundsParamsBuffer: uniformBuffer(device, 16),
+        boundsReadback: readbackBuffer(device, boundsReductionSize)
     };
 
     cachedAnalyzeConfig = {
@@ -1146,85 +1083,34 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
         );
 
     cachedCropBuffers = {
-        paramsBuffer: device.createBuffer({
-            size: 32, // 8 u32s for params
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
+        paramsBuffer: uniformBuffer(device, 32),  // 8 u32s for params
         inputBuffers: createBufferArray(requiredSizes.inputSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
-        centersBuffer: device.createBuffer({
-            size: requiredSizes.centersSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
-        boundsOutputBuffer: device.createBuffer({
-            size: requiredSizes.boundsOutputSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
+        centersBuffer: storageBuffer(device, requiredSizes.centersSize, { copyDst: true }),
+        boundsOutputBuffer: storageBuffer(device, requiredSizes.boundsOutputSize, { copySrc: true }),
         // N-buffering for readback (matches MAX_CONCURRENT_BATCHES)
         boundsOutputReadbacks: createBufferArray(requiredSizes.boundsOutputSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
-        centroidParamsBuffer: device.createBuffer({
-            size: 16,  // 4 u32s: srcWidth, srcHeight, batchSize, numWorkgroups
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        croppedRgbaBuffer: device.createBuffer({
-            size: requiredSizes.croppedRgbaSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
+        centroidParamsBuffer: uniformBuffer(device, 16),  // 4 u32s: srcWidth, srcHeight, batchSize, numWorkgroups
+        croppedRgbaBuffer: storageBuffer(device, requiredSizes.croppedRgbaSize, { copySrc: true }),
         // Packed grayscale for template matching (output by demosaic shader)
-        packedGrayBuffer: device.createBuffer({
-            size: requiredSizes.packedGraySize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-        }),
+        packedGrayBuffer: storageBuffer(device, requiredSizes.packedGraySize, { copySrc: true, copyDst: true }),
         packedGrayReadbacks: createBufferArray(requiredSizes.packedGraySize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
-        grayBuffer: device.createBuffer({
-            size: requiredSizes.graySize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
+        grayBuffer: storageBuffer(device, requiredSizes.graySize, { copySrc: true }),
         grayReadbacks: createBufferArray(requiredSizes.graySize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
-        tenengradBuffer: device.createBuffer({
-            size: requiredSizes.tenengradSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        laplacianBuffer: device.createBuffer({
-            size: requiredSizes.laplacianSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        reductionBuffer: device.createBuffer({
-            size: requiredSizes.reductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
+        tenengradBuffer: storageBuffer(device, requiredSizes.tenengradSize),
+        laplacianBuffer: storageBuffer(device, requiredSizes.laplacianSize),
+        reductionBuffer: storageBuffer(device, requiredSizes.reductionSize, { copySrc: true }),
         readbackBuffers: createBufferArray(requiredSizes.reductionSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
-        momentsBuffer: device.createBuffer({
-            size: requiredSizes.momentsSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        momentsReductionBuffer: device.createBuffer({
-            size: requiredSizes.momentsReductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
+        momentsBuffer: storageBuffer(device, requiredSizes.momentsSize),
+        momentsReductionBuffer: storageBuffer(device, requiredSizes.momentsReductionSize, { copySrc: true }),
         momentsReadbackBuffers: createBufferArray(requiredSizes.momentsReductionSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         croppedReadbackBuffers: createBufferArray(requiredSizes.croppedRgbaSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
-        grayParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        reductionParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        momentsParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
+        grayParamsBuffer: uniformBuffer(device, 16),
+        reductionParamsBuffer: uniformBuffer(device, 16),
+        momentsParamsBuffer: uniformBuffer(device, 16),
         // Final sharpness reduction: 2 floats per frame (tenengrad, laplacian)
-        sharpnessFinalBuffer: device.createBuffer({
-            size: requiredSizes.sharpnessFinalSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
+        sharpnessFinalBuffer: storageBuffer(device, requiredSizes.sharpnessFinalSize, { copySrc: true }),
         sharpnessFinalReadbacks: createBufferArray(requiredSizes.sharpnessFinalSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
-        sharpnessFinalParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        })
+        sharpnessFinalParamsBuffer: uniformBuffer(device, 16)
     };
 
     cachedCropConfig = { ...requiredSizes, bufferGen: 0 };
@@ -2053,26 +1939,12 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
     // We use bitDepth=16 for input reading, so output is Float32
     const outputBytesPerPixel = 16;  // Float32 RGBA
 
-    const inputBuffer = device.createBuffer({
-        size: u32Count * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    });
+    const inputBuffer = storageBuffer(device, u32Count * 4, { copyDst: true });
     queue.writeBuffer(inputBuffer, 0, inputData);
 
-    const outputBuffer = device.createBuffer({
-        size: pixelCount * outputBytesPerPixel,  // Float32 RGBA output
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-    });
-
-    const readbackBuffer = device.createBuffer({
-        size: pixelCount * outputBytesPerPixel,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
-
-    const paramsBuffer = device.createBuffer({
-        size: 32,  // 8 u32 values for demosaic params
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
+    const outputBuffer = storageBuffer(device, pixelCount * outputBytesPerPixel, { copySrc: true });  // Float32 RGBA output
+    const readbackBuf = readbackBuffer(device, pixelCount * outputBytesPerPixel);
+    const paramsBuffer = uniformBuffer(device, 32);  // 8 u32 values for demosaic params
 
     const results = [];
 
@@ -2102,15 +1974,15 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             const bindGroup = createBindGroup(device, demosaicPipeline, [paramsBuffer, inputBuffer, outputBuffer]);
             const encoder = device.createCommandEncoder();
             addComputePass(encoder, demosaicPipeline, bindGroup, imageWorkgroups(srcWidth, srcHeight, 1));
-            encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, pixelCount * outputBytesPerPixel);
+            encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuf, 0, pixelCount * outputBytesPerPixel);
             logGpuSubmit('singleFrame:demosaic');
             queue.submit([encoder.finish()]);
 
-            await safeMapAsync(readbackBuffer, GPUMapMode.READ);
+            await safeMapAsync(readbackBuf, GPUMapMode.READ);
             // Demosaic outputs Float32 RGBA (4 floats per pixel, values 0-1)
             // Convert to Uint8 for thumbnail display
-            const float32Data = new Float32Array(readbackBuffer.getMappedRange().slice(0));
-            readbackBuffer.unmap();
+            const float32Data = new Float32Array(readbackBuf.getMappedRange().slice(0));
+            readbackBuf.unmap();
 
             fullRgba = new Uint8ClampedArray(pixelCount * 4);
             for (let i = 0; i < pixelCount; i++) {
@@ -2177,7 +2049,7 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
     // Cleanup
     inputBuffer.destroy();
     outputBuffer.destroy();
-    readbackBuffer.destroy();
+    readbackBuf.destroy();
     paramsBuffer.destroy();
 
     return results;

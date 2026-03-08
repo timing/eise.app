@@ -102,3 +102,52 @@ export async function createPipeline(device, shaderCode, name) {
         compute: { module, entryPoint: 'main' }
     });
 }
+
+// ============================================================
+// Buffer Creation Helpers
+// ============================================================
+
+/**
+ * Create a storage buffer with optional copy flags.
+ *
+ * @param {GPUDevice} device - The GPU device
+ * @param {number} size - Buffer size in bytes
+ * @param {Object} options - Copy flag options
+ * @param {boolean} options.copySrc - Add COPY_SRC flag (for copying from this buffer)
+ * @param {boolean} options.copyDst - Add COPY_DST flag (for copying to this buffer)
+ * @returns {GPUBuffer}
+ */
+export function storageBuffer(device, size, { copySrc = false, copyDst = false } = {}) {
+    let usage = GPUBufferUsage.STORAGE;
+    if (copySrc) usage |= GPUBufferUsage.COPY_SRC;
+    if (copyDst) usage |= GPUBufferUsage.COPY_DST;
+    return device.createBuffer({ size, usage });
+}
+
+/**
+ * Create a uniform buffer (always includes COPY_DST for uploading params).
+ *
+ * @param {GPUDevice} device - The GPU device
+ * @param {number} size - Buffer size in bytes
+ * @returns {GPUBuffer}
+ */
+export function uniformBuffer(device, size) {
+    return device.createBuffer({
+        size,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+}
+
+/**
+ * Create a readback buffer for mapping results to CPU.
+ *
+ * @param {GPUDevice} device - The GPU device
+ * @param {number} size - Buffer size in bytes
+ * @returns {GPUBuffer}
+ */
+export function readbackBuffer(device, size) {
+    return device.createBuffer({
+        size,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+}
