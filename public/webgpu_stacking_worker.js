@@ -176,10 +176,38 @@ self.addEventListener('message', async (e) => {
         }
 
         try {
+            // DEBUG: Log first frame's data with statistics
+            if (frames.length > 0 && frames[0].rgbaBuffer) {
+                const buf = frames[0].rgbaBuffer;
+                const isFloat32 = buf instanceof Float32Array;
+                const numPixels = buf.length / 4;
+                const centerIdx = Math.floor(numPixels / 2) * 4;
+
+                // Calculate statistics
+                let maxR = 0, maxG = 0, maxB = 0, sumR = 0, count = 0;
+                for (let i = 0; i < buf.length; i += 4) {
+                    if (buf[i] > 0.01 || buf[i+1] > 0.01 || buf[i+2] > 0.01) {
+                        sumR += buf[i];
+                        count++;
+                    }
+                    if (buf[i] > maxR) maxR = buf[i];
+                    if (buf[i+1] > maxG) maxG = buf[i+1];
+                    if (buf[i+2] > maxB) maxB = buf[i+2];
+                }
+                const avgR = count > 0 ? sumR / count : 0;
+
+                console.log(`[StackWorker] Frame stats: maxR=${maxR.toFixed(4)}, maxG=${maxG.toFixed(4)}, maxB=${maxB.toFixed(4)}, avgR=${avgR.toFixed(4)}`);
+                console.log(`[StackWorker] Center pixel (idx ${centerIdx/4}): R=${buf[centerIdx].toFixed(4)}, G=${buf[centerIdx+1].toFixed(4)}, B=${buf[centerIdx+2].toFixed(4)}`);
+            }
+
             // Prepare all frames with their brightness normalization
             const preparedFrames = frames.map((frame, i) => {
                 const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, ctx.width, ctx.height);
                 const brightnessScale = ctx.refBrightness / frameBrightness;
+                // DEBUG: Log brightness calculation for first frame
+                if (i === 0) {
+                    console.log(`[StackWorker] Brightness: frame=${frameBrightness.toFixed(4)}, ref=${ctx.refBrightness.toFixed(4)}, scale=${brightnessScale.toFixed(4)}`);
+                }
                 return {
                     rgbaBuffer: frame.rgbaBuffer,
                     brightnessScale,
@@ -219,16 +247,29 @@ self.addEventListener('message', async (e) => {
             // Read back accumulated results
             const { accumR, accumG, accumB, accumW } = await readAccumulators(ctx.outWidth, ctx.outHeight);
 
-            // DEBUG: Check accumulator values from CENTER of image (not black corners)
+            // DEBUG: Full accumulator statistics
             const centerY = Math.floor(ctx.outHeight / 2);
             const centerX = Math.floor(ctx.outWidth / 2);
             const centerIdx = centerY * ctx.outWidth + centerX;
-            console.log(`accumR center sample (${centerX},${centerY}):`, Array.from(accumR.slice(centerIdx, centerIdx + 8)));
-            console.log(`accumW center sample:`, Array.from(accumW.slice(centerIdx, centerIdx + 8)));
-            // Also show the normalized values
-            const sampleR = accumR[centerIdx];
-            const sampleW = accumW[centerIdx];
-            console.log(`Center pixel: accumR=${sampleR}, accumW=${sampleW}, normalized=${sampleR / sampleW / 255}`);
+
+            // Find max values in accumulators
+            let maxAccumR = 0, maxAccumW = 0, maxNormalized = 0;
+            let sumW = 0, countW = 0;
+            for (let i = 0; i < accumR.length; i++) {
+                if (accumR[i] > maxAccumR) maxAccumR = accumR[i];
+                if (accumW[i] > maxAccumW) maxAccumW = accumW[i];
+                if (accumW[i] > 0) {
+                    const norm = accumR[i] / accumW[i] / 255;
+                    if (norm > maxNormalized) maxNormalized = norm;
+                    sumW += accumW[i];
+                    countW++;
+                }
+            }
+
+            console.log(`[Finalize] Accumulator stats:`);
+            console.log(`  - maxAccumR=${maxAccumR.toFixed(2)}, maxAccumW=${maxAccumW.toFixed(2)}, maxNormalized=${maxNormalized.toFixed(4)}`);
+            console.log(`  - avgWeight=${(sumW/countW).toFixed(4)}, pixelsWithData=${countW}/${accumR.length}`);
+            console.log(`  - Center (${centerX},${centerY}): accumR=${accumR[centerIdx].toFixed(2)}, accumW=${accumW[centerIdx].toFixed(4)}, normalized=${(accumR[centerIdx] / accumW[centerIdx] / 255).toFixed(4)}`);
 
             // Create final image
             const result = new Uint8ClampedArray(ctx.outWidth * ctx.outHeight * 4);

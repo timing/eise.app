@@ -194,6 +194,31 @@ export function useDebayerReader() {
         addLog(`[DebayerReader] Initialized: ${metadata.width}x${metadata.height}, ${metadata.frameCount} frames`);
         addLog(`[DebayerReader] Bayer pattern: ${bayerChoice} (GPU index: ${bayerPattern})`);
 
+        // Log detailed SER header info
+        const colorNames = {
+            0: 'MONO',
+            8: 'RGGB',
+            9: 'GRBG',
+            10: 'GBRG',
+            11: 'BGGR',
+            100: 'RGB',
+            101: 'BGR'
+        };
+        const colorName = colorNames[metadata.colorID] || `Unknown (${metadata.colorID})`;
+        addLog(`─── SER File Details ───`);
+        addLog(`Resolution: ${metadata.width} x ${metadata.height}`);
+        addLog(`Frames: ${metadata.frameCount}`);
+        addLog(`Bit depth: ${metadata.pixelDepth}-bit (${metadata.bytesPerPixel} bytes/pixel)`);
+        addLog(`Color format: ${colorName} (colorID: ${metadata.colorID})`);
+        addLog(`Endianness: ${metadata.littleEndian ? 'Little-endian' : 'Big-endian'}`);
+        if (metadata.scaleFactor && metadata.scaleFactor > 1) {
+            addLog(`16-bit scale factor: ${metadata.scaleFactor}x`);
+        }
+        if (metadata.observer) addLog(`Observer: ${metadata.observer}`);
+        if (metadata.instrument) addLog(`Instrument: ${metadata.instrument}`);
+        if (metadata.telescope) addLog(`Telescope: ${metadata.telescope}`);
+        addLog(`────────────────────────`);
+
         return metadata;
     }
 
@@ -338,7 +363,28 @@ export function useDebayerReader() {
                     if (!frameData) return null;
 
                     const { width, height } = metadata;
-                    const src = new Uint8Array(frameData.frameBuffer);
+                    const is16bit = header.pixelDepth > 8;
+
+                    // Handle 16-bit data: read as Uint16Array and scale to 8-bit for CPU demosaic
+                    let src;
+                    if (is16bit) {
+                        const src16 = new Uint16Array(frameData.frameBuffer);
+                        src = new Uint8Array(src16.length);
+                        // Find max value for scaling (sample for speed)
+                        let maxVal = 0;
+                        const step = Math.max(1, Math.floor(src16.length / 5000));
+                        for (let i = 0; i < src16.length; i += step) {
+                            if (src16[i] > maxVal) maxVal = src16[i];
+                        }
+                        // Scale 16-bit to 8-bit with auto-stretch
+                        const scale = maxVal > 0 ? 255 / maxVal : 1;
+                        for (let i = 0; i < src16.length; i++) {
+                            src[i] = Math.min(255, Math.round(src16[i] * scale));
+                        }
+                    } else {
+                        src = new Uint8Array(frameData.frameBuffer);
+                    }
+
                     const rgba = new Uint8ClampedArray(width * height * 4);
 
                     // Demosaic to color
@@ -841,6 +887,11 @@ export function useDebayerReader() {
                 indices.push(i);
             }
             const frameDataArray = await Promise.all(indices.map(i => readFrame(i)));
+            // Debug: log first frame data type for 16-bit detection
+            if (start === 0 && frameDataArray.length > 0) {
+                const first = frameDataArray[0];
+                console.log(`[DebayerReader] loadBatch first frame: type=${first.constructor?.name}, length=${first.length}, is16bit=${first instanceof Uint16Array}, metadata.pixelDepth=${metadata.pixelDepth}`);
+            }
             return frameDataArray.map((data, idx) => ({ data, index: indices[idx] }));
         }
 
@@ -994,7 +1045,9 @@ export function useDebayerReader() {
                         preCropRegion = newRegion;
                         if (resultBatchStart === 0) {
                             const reduction = ((metadata.width * metadata.height) - (newRegion.width * newRegion.height)) / (metadata.width * metadata.height) * 100;
-                            addLog(`[DebayerReader] CPU pre-crop enabled: ${newRegion.width}x${newRegion.height} (${reduction.toFixed(0)}% upload reduction)`);
+                            if (reduction > 5) {
+                                addLog(`[DebayerReader] CPU pre-crop enabled: ${newRegion.width}x${newRegion.height} (${reduction.toFixed(0)}% upload reduction)`);
+                            }
                         }
                     }
                 }
@@ -1054,11 +1107,13 @@ export function useDebayerReader() {
 
             // Fire GPU call for current batch (don't await yet - overlap with other batches)
             const t0Demosaic = performance.now();
+            // Use higher threshold for 16-bit data (stretched background can hit 0.1)
+            const boundsThreshold = metadata.pixelDepth > 8 ? 0.15 : 0.1;
             let gpuPromise;
             if (cropRegion) {
-                gpuPromise = detectCropAnalyzeGpu(frames, cropRegion.size, 0.1, !manualThreshold, true, null, preCropOffset);
+                gpuPromise = detectCropAnalyzeGpu(frames, cropRegion.size, boundsThreshold, !manualThreshold, true, null, preCropOffset);
             } else {
-                gpuPromise = analyzeFrameBatchGpu(frames, 0.1, !manualThreshold, true);
+                gpuPromise = analyzeFrameBatchGpu(frames, boundsThreshold, !manualThreshold, true);
             }
             const gpuInfo = { batchStart, frames, preCropOffset, t0Demosaic };
 

@@ -138,6 +138,7 @@ export function useStacker() {
     /**
      * Calculate mean brightness of non-black pixels (for normalization)
      * Supports both Float32 (0.0-1.0) and Uint8 (0-255) input
+     * Always returns brightness in 0-255 scale for consistency with stacking worker
      */
     function calcMeanBrightness(buffer, width, height, isFloat32 = false) {
         let sum = 0;
@@ -171,7 +172,9 @@ export function useStacker() {
                 }
             }
         }
-        return count > 0 ? sum / count : (isFloat32 ? 1.0/255 : 1);
+        // Always return in 0-255 scale (matches stacking worker's calcMeanBrightness)
+        const avg = count > 0 ? sum / count : 1;
+        return isFloat32 ? avg * 255 : avg;
     }
 
     /**
@@ -412,9 +415,9 @@ export function useStacker() {
                     }
                 } else if (isImageFile) {
                     if (frameReReader.getFrame) {
-                        // Parallel reads via getFrame (for MJPEG)
+                        // Parallel reads via getFrame (for images/MJPEG)
                         const results = await Promise.all(
-                            batchFrames.map(frame => frameReReader.getFrame(frame))
+                            batchFrames.map(frame => frameReReader.getFrame(frame.index))
                         );
                         for (let i = 0; i < results.length; i++) {
                             const rgba = results[i];
@@ -735,13 +738,42 @@ export function useStacker() {
                 // Send batch to GPU stacker
                 // 16-bit: Float32Array (0.0-1.0) with inputFormat=0
                 // 8-bit: Uint8Array (0-255) with inputFormat=1 (GPU converts to float)
-                const batchForStacker = gpuResults.map((r, i) => ({
-                    rgbaBuffer: is16bit
-                        ? new Float32Array(r.float32Buffer)
-                        : new Uint8Array(r.uint8Buffer),
-                    sharpness: batchFrames[i].sharpness
-                }));
+                // For 16-bit: analysis uses 0.5 stretch, boost to 0.9 for stacking (factor = 0.9/0.5)
+                const stackingBoost = 0.9 / 0.5;
+                const batchForStacker = gpuResults.map((r, i) => {
+                    if (is16bit) {
+                        const src = new Float32Array(r.float32Buffer);
+                        const boosted = new Float32Array(src.length);
+                        for (let j = 0; j < src.length; j += 4) {
+                            boosted[j] = Math.min(1.0, src[j] * stackingBoost);
+                            boosted[j + 1] = Math.min(1.0, src[j + 1] * stackingBoost);
+                            boosted[j + 2] = Math.min(1.0, src[j + 2] * stackingBoost);
+                            boosted[j + 3] = src[j + 3]; // alpha unchanged
+                        }
+                        return { rgbaBuffer: boosted, sharpness: batchFrames[i].sharpness };
+                    } else {
+                        return { rgbaBuffer: new Uint8Array(r.uint8Buffer), sharpness: batchFrames[i].sharpness };
+                    }
+                });
                 const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
+
+                // DEBUG: Check values being sent to stacking worker
+                if (is16bit && batchForStacker.length > 0 && processedCount === 0) {
+                    const buf = batchForStacker[0].rgbaBuffer;
+                    const centerIdx = Math.floor(buf.length / 8) * 4; // center of image
+                    console.log(`[Stacker DEBUG] First batch to stacker:`);
+                    console.log(`  - float32Buffer byteLength: ${gpuResults[0].float32Buffer?.byteLength}`);
+                    console.log(`  - rgbaBuffer type: ${buf.constructor.name}, length: ${buf.length}`);
+                    console.log(`  - First pixel: R=${buf[0]}, G=${buf[1]}, B=${buf[2]}, A=${buf[3]}`);
+                    console.log(`  - Center pixel: R=${buf[centerIdx]}, G=${buf[centerIdx+1]}, B=${buf[centerIdx+2]}, A=${buf[centerIdx+3]}`);
+                    // Check for reasonable values
+                    let nonZero = 0, max = 0;
+                    for (let j = 0; j < Math.min(1000, buf.length); j++) {
+                        if (buf[j] > 0) nonZero++;
+                        if (buf[j] > max) max = buf[j];
+                    }
+                    console.log(`  - First 1000 values: ${nonZero} non-zero, max=${max}`);
+                }
 
                 const t0Accum = performance.now();
                 await new Promise((resolve, reject) => {

@@ -429,6 +429,43 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+// Grayscale conversion shader for 16-bit Float32 RGBA input
+export const grayscaleFloat32Shader = `
+struct Params {
+    width: u32,
+    height: u32,
+    batchSize: u32,
+    _pad: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> input: array<u32>;  // Float32 RGBA (4 u32 per pixel, bitcast to f32)
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // Grayscale float
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    let frameIdx = gid.z;
+
+    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
+        return;
+    }
+
+    let idx = frameIdx * params.width * params.height + y * params.width + x;
+    let baseIdx = idx * 4u;
+
+    // Read Float32 RGBA (stored as bitcast u32)
+    let r = bitcast<f32>(input[baseIdx]);
+    let g = bitcast<f32>(input[baseIdx + 1u]);
+    let b = bitcast<f32>(input[baseIdx + 2u]);
+
+    // Standard grayscale weights
+    let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+    output[idx] = gray;
+}
+`;
+
 // Combined sharpness shader - computes both Tenengrad and Laplacian
 export const tenengradShader = `
 struct Params {

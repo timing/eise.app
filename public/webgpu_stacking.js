@@ -585,6 +585,14 @@ async function warpAndAccumulateBatch(frames, allShifts, width, height, outWidth
             const isUint8 = frameData instanceof Uint8Array || frameData instanceof Uint8ClampedArray;
             const inputFormat = isUint8 ? 1 : 0;
 
+            // Debug: log input format for first frame
+            if (frameIdx === 0) {
+                console.log(`[Stacker] First frame: inputFormat=${inputFormat}, isUint8=${isUint8}, dataType=${frameData?.constructor?.name}, length=${frameData?.length}`);
+                if (frameData && frameData.length > 0) {
+                    console.log(`[Stacker] First pixel values: R=${frameData[0]}, G=${frameData[1]}, B=${frameData[2]}, A=${frameData[3]}`);
+                }
+            }
+
             // Upload frame data
             if (isUint8) {
                 stackQueue.writeBuffer(buffers.frameBuffers[bufferIdx], 0, frameData);

@@ -5,6 +5,7 @@
 import {
     demosaicShader,
     grayscaleShader,
+    grayscaleFloat32Shader,
     tenengradShader,
     reductionShader,
     sharpnessFinalShader,
@@ -246,7 +247,13 @@ function printGpuTimingSummary() {
 
 // Helper to detect bit depth from frame data (fast check, no processing)
 function detectBitDepth(frames) {
-    return frames[0]?.data instanceof Uint16Array ? 16 : 8;
+    const data = frames[0]?.data;
+    const is16bit = data instanceof Uint16Array;
+    // Debug logging for 16-bit detection issues
+    if (data && !is16bit) {
+        console.log(`[GPU] detectBitDepth: data type=${data.constructor?.name}, length=${data.length || data.byteLength}, instanceof Uint16Array=${is16bit}`);
+    }
+    return is16bit ? 16 : 8;
 }
 
 // Helper function to prepare Bayer data for GPU upload with auto-stretch for 16-bit
@@ -266,7 +273,8 @@ function prepareBayerData(frames, pixelCount, skipStretch = false) {
         const u32Count = Math.ceil(totalPixels / 2);
         bayerData = new Uint32Array(u32Count);
 
-        // Calculate stretch scale (GPU will apply it)
+        // Calculate stretch scale (GPU will apply it during demosaic)
+        // Conservative: only stretch if data is in lower half of 16-bit range
         let scale16bit = 1.0;
         if (!skipStretch) {
             const sampleSize = Math.min(10000, frames[0].data.length);
@@ -280,8 +288,14 @@ function prepareBayerData(frames, pixelCount, skipStretch = false) {
             }
             sample.sort((a, b) => a - b);
             const p99 = sample[Math.floor(sample.length * 0.99)];
+            // Conservative stretch: only if data is in lower half of 16-bit range, cap at 2x
             if (p99 > 0 && p99 < 32768) {
                 scale16bit = Math.min(32768 / p99, 2.0);
+            }
+            // Debug: log stretch for first batch
+            if (batchSize > 0) {
+                const effectiveBits = p99 > 0 ? Math.ceil(Math.log2(p99 + 1)) : 0;
+                console.log(`[GPU] 16-bit analyze stretch: p99=${p99}, effectiveBits=${effectiveBits}, scale=${scale16bit.toFixed(2)}`);
             }
         }
 
@@ -331,6 +345,7 @@ let demosaicGrayPipeline = null;  // Fused demosaic + grayscale
 let demosaicGrayOnlyPipeline = null;  // Grayscale-only demosaic (fast, for analysis)
 let rgbaCropPipeline = null;
 let grayscalePipeline = null;
+let grayscaleFloat32Pipeline = null;  // Grayscale for 16-bit Float32 RGBA input
 let tenengradPipeline = null;
 let offsetTenengradPipeline = null;  // Reads from full-frame with per-frame offsets (no crop needed)
 let reductionPipeline = null;
@@ -421,6 +436,7 @@ async function init() {
     demosaicGrayOnlyPipeline = await createPipeline(device, demosaicGrayOnlyShader, 'demosaicGrayOnly');
     rgbaCropPipeline = await createPipeline(device, rgbaCropShader, 'rgbaCrop');
     grayscalePipeline = await createPipeline(device, grayscaleShader, 'grayscale');
+    grayscaleFloat32Pipeline = await createPipeline(device, grayscaleFloat32Shader, 'grayscaleFloat32');
     tenengradPipeline = await createPipeline(device, tenengradShader, 'tenengrad');
     offsetTenengradPipeline = await createPipeline(device, offsetTenengradShader, 'offsetTenengrad');
     reductionPipeline = await createPipeline(device, reductionShader, 'reduction');
@@ -640,6 +656,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     // Detect bit depth early so we allocate correct buffer sizes
     // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+    console.log(`[GPU] analyzeBatch: bitDepth=${bitDepth}, batchSize=${batchSize}, needsDemosaic=${needsDemosaic}`);
 
     // Wait for analyze slot BEFORE getting buffers (only 1 analyzeBatch at a time since buffers aren't double-buffered)
     await acquireAnalyzeSlot();
@@ -768,7 +785,9 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     queue.writeBuffer(buffers.momentsParamsBuffer, 0, momentsParamsData);
 
     // Create bind groups (must recreate each time)
-    const grayBindGroup = createBindGroup(device, grayscalePipeline, [
+    // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
+    const grayPipeline = bitDepth === 16 ? grayscaleFloat32Pipeline : grayscalePipeline;
+    const grayBindGroup = createBindGroup(device, grayPipeline, [
         buffers.paramsBuffer, buffers.rgbaBuffer, buffers.grayBuffer
     ]);
     const lapBindGroup = createBindGroup(device, tenengradPipeline, [
@@ -814,7 +833,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     let pass;
     if (!grayAlreadyComputed) {
         pass = encoder.beginComputePass();
-        pass.setPipeline(grayscalePipeline);
+        pass.setPipeline(grayPipeline);
         pass.setBindGroup(0, grayBindGroup);
         pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
         pass.end();
@@ -1150,6 +1169,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     // Detect bitDepth FIRST so we allocate correct buffer sizes
     // 16-bit SER needs 4x larger RGBA buffers for Float32 output
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+    console.log(`[GPU] cropAndAnalyzeBatch: bitDepth=${bitDepth}, batchSize=${batchSize}, needsDemosaic=${needsDemosaic}`);
 
     // Wait for a batch slot BEFORE getting buffers (prevents buffer destruction while in use)
     await acquireBatchSlot();
@@ -1168,6 +1188,12 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     let bayerData = null;
     let scale = 1.0;
     if (needsDemosaic) {
+        // DEBUG: Check raw input values
+        if (frames[0]?.data) {
+            const rawData = frames[0].data;
+            const midIdx = Math.floor(rawData.length / 2);
+            console.log(`[GPU] cropAndAnalyzeBatch raw input: type=${rawData.constructor?.name}, midValue=${rawData[midIdx]}, sample=[${rawData[midIdx]}, ${rawData[midIdx+1]}, ${rawData[midIdx+2]}]`);
+        }
         const prepared = prepareBayerData(frames, srcPixelCount, false);
         bayerData = prepared.data;
         scale = prepared.scale;
@@ -1179,6 +1205,9 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     new Float32Array(cropParams)[7] = scale;
     queue.writeBuffer(buffers.paramsBuffer, 0, cropParams);
 
+    // DEBUG: Log shader params
+    console.log(`[GPU] cropAndAnalyzeBatch shader params: srcWidth=${srcWidth}, srcHeight=${srcHeight}, cropSize=${cropSize}, bayerPattern=${bayerPattern}, batchSize=${batchSize}, useVng=${useVng}, bitDepth=${bitDepth}, scale=${scale}`);
+
     // Prepare all bind groups and parameters upfront
     queue.writeBuffer(buffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
     queue.writeBuffer(buffers.reductionParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, cropPixelCount]));
@@ -1189,7 +1218,9 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     queue.writeBuffer(buffers.momentsParamsBuffer, 0, momentsParamsData);
 
     // Create bind groups for analysis passes
-    const grayBindGroup = createBindGroup(device, grayscalePipeline, [
+    // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
+    const grayPipeline = bitDepth === 16 ? grayscaleFloat32Pipeline : grayscalePipeline;
+    const grayBindGroup = createBindGroup(device, grayPipeline, [
         buffers.grayParamsBuffer, buffers.croppedRgbaBuffer, buffers.grayBuffer
     ]);
     const lapBindGroup = createBindGroup(device, tenengradPipeline, [
@@ -1290,7 +1321,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
 
     // Grayscale pass
     let pass = encoder.beginComputePass();
-    pass.setPipeline(grayscalePipeline);
+    pass.setPipeline(grayPipeline);
     pass.setBindGroup(0, grayBindGroup);
     pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
     pass.end();
@@ -1323,9 +1354,11 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const packedGrayReadbackBuf = buffers.packedGrayReadbacks[bufferIdx];
 
     // Copy results to readback buffers
+    // 16-bit needs 4x more bytes per pixel (4 floats vs 1 packed u32)
+    const croppedRgbaCopySize = batchSize * cropPixelCount * (bitDepth === 16 ? 16 : 4);
     encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroups * 8);
     encoder.copyBufferToBuffer(buffers.momentsReductionBuffer, 0, momentsReadbackBuf, 0, batchSize * numWorkgroups * 6 * 4);
-    encoder.copyBufferToBuffer(buffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * 4);
+    encoder.copyBufferToBuffer(buffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, croppedRgbaCopySize);
     encoder.copyBufferToBuffer(buffers.packedGrayBuffer, 0, packedGrayReadbackBuf, 0, packedGraySize);
 
     // Single submit for all passes
@@ -1356,6 +1389,28 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
     const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
     croppedReadbackBuf.unmap();
+
+    // DEBUG: Sample cropped data with full statistics
+    if (bitDepth === 16 && batchSize > 0) {
+        const framePixels = cropPixelCount;
+        const centerIdx = Math.floor(framePixels / 2) * 4;
+
+        // Calculate statistics for first frame
+        let maxR = 0, maxG = 0, maxB = 0, sumR = 0, count = 0;
+        for (let i = 0; i < framePixels * 4; i += 4) {
+            if (croppedData[i] > 0.01 || croppedData[i+1] > 0.01 || croppedData[i+2] > 0.01) {
+                sumR += croppedData[i];
+                count++;
+            }
+            if (croppedData[i] > maxR) maxR = croppedData[i];
+            if (croppedData[i+1] > maxG) maxG = croppedData[i+1];
+            if (croppedData[i+2] > maxB) maxB = croppedData[i+2];
+        }
+        const avgR = count > 0 ? sumR / count : 0;
+
+        console.log(`[GPU] Demosaic output stats: maxR=${maxR.toFixed(4)}, maxG=${maxG.toFixed(4)}, maxB=${maxB.toFixed(4)}, avgR=${avgR.toFixed(4)}`);
+        console.log(`[GPU] Center pixel: R=${croppedData[centerIdx].toFixed(4)}, G=${croppedData[centerIdx+1].toFixed(4)}, B=${croppedData[centerIdx+2].toFixed(4)}`);
+    }
 
     // Packed grayscale for template matching and preview (8-bit, 1 byte per pixel)
     const packedGrayData = new Uint8Array(packedGrayReadbackBuf.getMappedRange().slice(0));
@@ -1490,6 +1545,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Detect bit depth early for correct buffer allocation
     // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+    console.log(`[GPU] detectCropAnalyzeBatch: bitDepth=${bitDepth}, batchSize=${batchSize}, needsDemosaic=${needsDemosaic}, grayOnly=${grayOnly}, threshold=${threshold}`);
 
     // Wait for a batch slot BEFORE getting buffers (prevents buffer destruction while in use)
     await acquireBatchSlot();
@@ -1598,10 +1654,12 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Run grayscale pass unless demosaic shader already computed it (grayOnly + needsDemosaic)
     const needsGrayscalePass = !grayOnly || !needsDemosaic;
     if (needsGrayscalePass) {
-        const grayBindGroup = createBindGroup(device, grayscalePipeline, [
+        // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
+        const grayPipeline = bitDepth === 16 ? grayscaleFloat32Pipeline : grayscalePipeline;
+        const grayBindGroup = createBindGroup(device, grayPipeline, [
             analyzeBuffers.paramsBuffer, analyzeBuffers.rgbaBuffer, analyzeBuffers.grayBuffer
         ]);
-        addComputePass(encoder, grayscalePipeline, grayBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
+        addComputePass(encoder, grayPipeline, grayBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
     }
 
     // ===== STEP 2b: Gaussian blur for noise reduction (matches CPU GaussianBlur) =====
@@ -1682,14 +1740,16 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         addComputePass(encoder, offsetTenengradPipeline, offsetLapBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
     } else {
         // Standard path: grayscale from cropped RGBA + tenengrad on cropped
+        // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
+        const cropGrayPipeline = bitDepth === 16 ? grayscaleFloat32Pipeline : grayscalePipeline;
         queue.writeBuffer(cropBuffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
-        const cropGrayBindGroup = createBindGroup(device, grayscalePipeline, [
+        const cropGrayBindGroup = createBindGroup(device, cropGrayPipeline, [
             cropBuffers.grayParamsBuffer, cropBuffers.croppedRgbaBuffer, cropBuffers.grayBuffer
         ]);
         const lapBindGroup = createBindGroup(device, tenengradPipeline, [
             cropBuffers.grayParamsBuffer, cropBuffers.grayBuffer, cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer
         ]);
-        addComputePass(encoder, grayscalePipeline, cropGrayBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
+        addComputePass(encoder, cropGrayPipeline, cropGrayBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
         addComputePass(encoder, tenengradPipeline, lapBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
     }
 
@@ -1805,13 +1865,21 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         const maxX = boundsData[i * 4 + 2];
         const maxY = boundsData[i * 4 + 3];
 
+        // DEBUG: Log bounds for first frame
+        if (i === 0) {
+            const centroidX = (minX + maxX) / 2;
+            const centroidY = (minY + maxY) / 2;
+            console.log(`[GPU] detectCropAnalyzeBatch bounds[0]: minX=${minX}, minY=${minY}, maxX=${maxX}, maxY=${maxY}, centroid=(${centroidX}, ${centroidY}), srcSize=${srcWidth}x${srcHeight}`);
+        }
+
         if (maxX > minX && maxY > minY) {
             // Check if object is cut off at the edges (1% margin like CPU)
             const isCutOff = minX < edgeMargin || minY < edgeMargin ||
                              maxX > srcWidth - edgeMargin || maxY > srcHeight - edgeMargin;
 
             if (isCutOff) {
-                // Object is cut off - mark as invalid, use frame center as fallback
+                // Object is cut off - mark as invalid
+                console.log(`[GPU] Frame ${i} CUT-OFF: bounds (${minX},${minY})-(${maxX},${maxY}), frame ${srcWidth}x${srcHeight}`);
                 centers.push(null);
                 bounds.push({ cutOff: true });
             } else {
@@ -1833,6 +1901,14 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
             centers.push(null);
             bounds.push(null);
         }
+    }
+
+    // Summary of bounds detection
+    const cutOffCount = bounds.filter(b => b?.cutOff).length;
+    const nullCount = bounds.filter(b => b === null).length;
+    const validCount = bounds.filter(b => b && !b.cutOff).length;
+    if (cutOffCount > 0 || nullCount > 0) {
+        console.log(`[GPU] Bounds summary: ${validCount} valid, ${cutOffCount} cut-off, ${nullCount} no-detection (out of ${batchSize})`);
     }
 
     // Build results

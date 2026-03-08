@@ -342,7 +342,7 @@ export function useFFmpegReader() {
      * Process FFmpeg-extracted PNG frames using GPU (normal mode)
      * Called after FFmpeg has extracted all frames to PNG files
      */
-    async function processFFmpegFrames(ffmpeg, pngFilenames, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
+    async function processFFmpegFrames(ffmpeg, pngFilenames, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         resetCaptures();
 
         // Initialize GPU worker
@@ -385,7 +385,7 @@ export function useFFmpegReader() {
 
         if (useGpu && width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${width}x${height} qualifies for auto-crop`);
-            cropRegion = await detectCropRegionFromPngs(ffmpeg, pngFilenames, header);
+            cropRegion = await detectCropRegionFromPngs(ffmpeg, pngFilenames, header, cropMarginPercent);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);

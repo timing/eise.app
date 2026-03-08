@@ -991,7 +991,7 @@ async function processFiles(files) {
 			// Route PNG frames through FFmpeg reader
 			const { processFFmpegFrames } = useFFmpegReader();
 
-			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
+			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
 		}
 	
 	} else if (imageFiles.length > 1) {
@@ -1007,7 +1007,7 @@ async function processFiles(files) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing
