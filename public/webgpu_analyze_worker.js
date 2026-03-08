@@ -1,6 +1,36 @@
 // WebGPU Batched Frame Analysis Worker
 // Handles: Demosaic, Sharpness (Tenengrad), Circularity (Moments)
-console.log('webgpu_analyze_worker.js loaded (v1)');
+
+// Import WGSL shaders from separate module
+import {
+    demosaicShader,
+    grayscaleShader,
+    tenengradShader,
+    reductionShader,
+    sharpnessFinalShader,
+    blurShader,
+    boundsShader,
+    boundsReductionShader,
+    centroidShader,
+    momentsShader,
+    momentsReductionShader,
+    circularityFinalShader,
+    demosaicGrayOnlyShader,
+    offsetTenengradShader,
+    rgbaCropShader,
+    demosaicCropShader,
+    demosaicGrayShader
+} from './gpu/shaders.js';
+
+import {
+    createBindGroup,
+    addComputePass,
+    imageWorkgroups,
+    reductionWorkgroups,
+    createPipeline
+} from './gpu/helpers.js';
+
+console.log('webgpu_analyze_worker.js loaded (v3)');
 
 let device = null;
 let queue = null;
@@ -324,1959 +354,6 @@ let pipelinedUpload = {
 };
 
 // ============================================================
-// WGSL SHADERS
-// ============================================================
-
-// Demosaic shader - converts Bayer pattern to RGB (supports bilinear and VNG)
-const demosaicShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
-    useVng: u32,        // 0=bilinear, 1=VNG
-    bitDepth: u32,      // 8 or 16
-    scale: f32,         // stretch scale for 16-bit (1.0 = no stretch)
-    _pad3: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;  // Raw Bayer data (packed: 4 pixels/u32 for 8-bit, 2 pixels/u32 for 16-bit)
-@group(0) @binding(2) var<storage, read_write> output: array<u32>;  // RGBA output
-
-fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let pixelIdx = frameIdx * params.width * params.height + y * params.width + x;
-    if (params.bitDepth == 8u) {
-        // 8-bit packed: 4 pixels per u32
-        let u32Idx = pixelIdx / 4u;
-        let bytePos = pixelIdx % 4u;
-        let packed = input[u32Idx];
-        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
-        return f32(rawValue) / 255.0;
-    } else {
-        // 16-bit packed: 2 pixels per u32, with GPU-side stretch
-        let u32Idx = pixelIdx / 2u;
-        let halfPos = pixelIdx % 2u;
-        let packed = input[u32Idx];
-        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
-        return min(1.0, f32(rawValue) * params.scale / 65535.0);
-    }
-}
-
-fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(params.width) - 1);
-    let cy = clamp(y, 0, i32(params.height) - 1);
-    return getBayerValue(frameIdx, u32(cx), u32(cy));
-}
-
-// VNG gradient computation - computes gradient in a given direction
-fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
-    // Gradient = sum of absolute differences along the direction
-    var grad: f32 = 0.0;
-    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
-    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
-    return grad;
-}
-
-// VNG interpolation for missing colors
-// Returns (r, g, b) using gradient-weighted interpolation
-fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    // Compute gradients in 8 directions: N, S, E, W, NE, NW, SE, SW
-    let gN = computeGradient(frameIdx, x, y, 0, -1);
-    let gS = computeGradient(frameIdx, x, y, 0, 1);
-    let gE = computeGradient(frameIdx, x, y, 1, 0);
-    let gW = computeGradient(frameIdx, x, y, -1, 0);
-    let gNE = computeGradient(frameIdx, x, y, 1, -1);
-    let gNW = computeGradient(frameIdx, x, y, -1, -1);
-    let gSE = computeGradient(frameIdx, x, y, 1, 1);
-    let gSW = computeGradient(frameIdx, x, y, -1, 1);
-
-    // Find minimum gradient and set threshold
-    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
-    let threshold = minGrad * 1.5 + 0.001;  // Small epsilon to avoid division issues
-
-    // Current pixel value
-    let center = sampleBayer(frameIdx, x, y);
-
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    // Determine what color the current pixel is and interpolate missing colors
-    // using gradient-weighted averaging
-
-    // Sample neighbors for interpolation
-    let n = sampleBayer(frameIdx, x, y - 1);
-    let s = sampleBayer(frameIdx, x, y + 1);
-    let e = sampleBayer(frameIdx, x + 1, y);
-    let w = sampleBayer(frameIdx, x - 1, y);
-    let ne = sampleBayer(frameIdx, x + 1, y - 1);
-    let nw = sampleBayer(frameIdx, x - 1, y - 1);
-    let se = sampleBayer(frameIdx, x + 1, y + 1);
-    let sw = sampleBayer(frameIdx, x - 1, y + 1);
-
-    // Gradient weights (inverse, so low gradient = high weight)
-    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
-    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
-    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
-    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
-    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
-    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
-    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
-    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
-
-    // Use pattern-specific VNG interpolation
-    // For each pixel type, we interpolate missing colors using gradient-weighted neighbors
-
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) { // R pixel
-            r = center;
-            // Green: use weighted average of NSEW green neighbors
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            // Blue: use weighted average of diagonal blue neighbors
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 1u) { // B pixel
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 0u) { // G pixel (R row)
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else { // G pixel (B row)
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) { // B pixel
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 1u) { // R pixel
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) { // G pixel (B row)
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else { // G pixel (R row)
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) { // R pixel
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 0u && by == 1u) { // B pixel
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) { // G pixel (R row)
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else { // G pixel (B row)
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else { // GBRG (pattern == 3)
-        if (bx == 0u && by == 1u) { // R pixel
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) { // B pixel
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) { // G pixel (B row)
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else { // G pixel (R row)
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    }
-
-    return vec3<f32>(r, g, b);
-}
-
-// Bilinear interpolation (original simple demosaic)
-fn bilinearInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) { // R pixel
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) { // B pixel
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) { // G pixel (R row)
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else { // G pixel (B row)
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) { // B pixel
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) { // R pixel
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) { // G pixel (B row)
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else { // G pixel (R row)
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) { // R pixel
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 1u) { // B pixel
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) { // G pixel (R row)
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else { // G pixel (B row)
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else { // GBRG (pattern == 3)
-        if (bx == 0u && by == 1u) { // R pixel
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) { // B pixel
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) { // G pixel (B row)
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else { // G pixel (R row)
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    }
-
-    return vec3<f32>(r, g, b);
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Determine pixel position in Bayer pattern
-    let bx = x % 2u;
-    let by = y % 2u;
-    let ix = i32(x);
-    let iy = i32(y);
-
-    let pattern = params.bayerPattern;
-
-    // Use VNG or bilinear interpolation based on params
-    var rgb: vec3<f32>;
-    if (params.useVng == 1u) {
-        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    } else {
-        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    }
-
-    let outIdx = frameIdx * params.width * params.height + y * params.width + x;
-
-    if (params.bitDepth == 16u) {
-        // 16-bit input: output Float32 RGBA to preserve precision through stacking
-        // Stacker receives Float32 directly (inputFormat=0)
-        let baseIdx = outIdx * 4u;
-        output[baseIdx] = bitcast<u32>(rgb.x);
-        output[baseIdx + 1u] = bitcast<u32>(rgb.y);
-        output[baseIdx + 2u] = bitcast<u32>(rgb.z);
-        output[baseIdx + 3u] = bitcast<u32>(1.0);
-    } else {
-        // 8-bit input: pack as Uint8 RGBA (saves memory, stacker converts to Float32 on GPU)
-        // Stacker receives Uint8 and converts via inputFormat=1
-        let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
-        let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
-        let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
-        let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-        output[outIdx] = rgba;
-    }
-}
-`;
-
-// Demosaic + Crop shader - crops around per-frame centers during demosaic (supports bilinear and VNG)
-const demosaicCropShader = `
-struct Params {
-    srcWidth: u32,      // Source frame width
-    srcHeight: u32,     // Source frame height
-    cropSize: u32,      // Output crop size (square)
-    bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
-    batchSize: u32,
-    useVng: u32,        // 0=bilinear, 1=VNG
-    bitDepth: u32,      // 8 or 16
-    scale: f32,         // stretch scale for 16-bit (1.0 = no stretch)
-}
-
-struct CropCenter {
-    x: f32,
-    y: f32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;      // Raw Bayer data
-@group(0) @binding(2) var<storage, read> centers: array<CropCenter>;  // Per-frame centers
-@group(0) @binding(3) var<storage, read_write> output: array<u32>;    // Cropped RGBA output
-@group(0) @binding(4) var<storage, read_write> grayOutput: array<atomic<u32>>;  // Packed grayscale (4 pixels per u32)
-
-fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let pixelIdx = frameIdx * params.srcWidth * params.srcHeight + y * params.srcWidth + x;
-    if (params.bitDepth == 8u) {
-        // 8-bit packed: 4 pixels per u32
-        let u32Idx = pixelIdx / 4u;
-        let bytePos = pixelIdx % 4u;
-        let packed = input[u32Idx];
-        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
-        return f32(rawValue) / 255.0;
-    } else {
-        // 16-bit packed: 2 pixels per u32, with GPU-side stretch
-        let u32Idx = pixelIdx / 2u;
-        let halfPos = pixelIdx % 2u;
-        let packed = input[u32Idx];
-        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
-        return min(1.0, f32(rawValue) * params.scale / 65535.0);
-    }
-}
-
-fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(params.srcWidth) - 1);
-    let cy = clamp(y, 0, i32(params.srcHeight) - 1);
-    return getBayerValue(frameIdx, u32(cx), u32(cy));
-}
-
-// VNG gradient computation
-fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
-    var grad: f32 = 0.0;
-    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
-    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
-    return grad;
-}
-
-// VNG interpolation
-fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    let gN = computeGradient(frameIdx, x, y, 0, -1);
-    let gS = computeGradient(frameIdx, x, y, 0, 1);
-    let gE = computeGradient(frameIdx, x, y, 1, 0);
-    let gW = computeGradient(frameIdx, x, y, -1, 0);
-    let gNE = computeGradient(frameIdx, x, y, 1, -1);
-    let gNW = computeGradient(frameIdx, x, y, -1, -1);
-    let gSE = computeGradient(frameIdx, x, y, 1, 1);
-    let gSW = computeGradient(frameIdx, x, y, -1, 1);
-
-    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
-    let threshold = minGrad * 1.5 + 0.001;
-
-    let center = sampleBayer(frameIdx, x, y);
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    let n = sampleBayer(frameIdx, x, y - 1);
-    let s = sampleBayer(frameIdx, x, y + 1);
-    let e = sampleBayer(frameIdx, x + 1, y);
-    let w = sampleBayer(frameIdx, x - 1, y);
-    let ne = sampleBayer(frameIdx, x + 1, y - 1);
-    let nw = sampleBayer(frameIdx, x - 1, y - 1);
-    let se = sampleBayer(frameIdx, x + 1, y + 1);
-    let sw = sampleBayer(frameIdx, x - 1, y + 1);
-
-    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
-    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
-    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
-    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
-    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
-    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
-    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
-    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
-
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 1u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 1u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 0u && by == 1u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else { // GBRG
-        if (bx == 0u && by == 1u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    }
-    return vec3<f32>(r, g, b);
-}
-
-// Bilinear interpolation
-fn bilinearInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 1u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else { // GBRG
-        if (bx == 0u && by == 1u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    }
-    return vec3<f32>(r, g, b);
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let outX = gid.x;
-    let outY = gid.y;
-    let frameIdx = gid.z;
-
-    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let center = centers[frameIdx];
-    let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize)) & ~1;
-    let cropStartY = i32(floor(center.y - halfSize)) & ~1;
-
-    let srcX = cropStartX + i32(outX);
-    let srcY = cropStartY + i32(outY);
-
-    let x = u32(clamp(srcX, 0, i32(params.srcWidth) - 1));
-    let y = u32(clamp(srcY, 0, i32(params.srcHeight) - 1));
-    let ix = i32(x);
-    let iy = i32(y);
-
-    let bx = x % 2u;
-    let by = y % 2u;
-    let pattern = params.bayerPattern;
-
-    // Use VNG or bilinear interpolation based on params
-    var rgb: vec3<f32>;
-    if (params.useVng == 1u) {
-        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    } else {
-        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    }
-
-    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
-
-    // Compute grayscale (Rec. 601 luma) - used for template matching
-    let gray = u32(clamp((0.299 * rgb.x + 0.587 * rgb.y + 0.114 * rgb.z) * 255.0, 0.0, 255.0));
-
-    // Pack grayscale: 4 pixels per u32, use atomic OR since threads write to same u32
-    let grayPackedIdx = outIdx >> 2u;           // outIdx / 4
-    let grayByteOffset = (outIdx & 3u) << 3u;   // (outIdx % 4) * 8
-    atomicOr(&grayOutput[grayPackedIdx], gray << grayByteOffset);
-
-    if (params.bitDepth == 16u) {
-        // 16-bit: output Float32 RGBA (4 u32s per pixel via bitcast)
-        let baseIdx = outIdx * 4u;
-        output[baseIdx] = bitcast<u32>(rgb.x);
-        output[baseIdx + 1u] = bitcast<u32>(rgb.y);
-        output[baseIdx + 2u] = bitcast<u32>(rgb.z);
-        output[baseIdx + 3u] = bitcast<u32>(1.0);
-    } else {
-        // 8-bit: pack as RGBA (1 u32 per pixel)
-        let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
-        let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
-        let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
-        let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-        output[outIdx] = rgba;
-    }
-}
-`;
-
-// RGBA Crop shader - crops RGBA images without demosaicing (for PNG/JPEG input)
-const rgbaCropShader = `
-struct Params {
-    srcWidth: u32,
-    srcHeight: u32,
-    cropSize: u32,
-    _pad1: u32,
-    batchSize: u32,
-    _pad2: u32,
-    _pad3: u32,
-    _pad4: u32,
-}
-
-struct CropCenter {
-    x: f32,
-    y: f32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;       // Source RGBA
-@group(0) @binding(2) var<storage, read> centers: array<CropCenter>;
-@group(0) @binding(3) var<storage, read_write> output: array<u32>; // Cropped RGBA
-@group(0) @binding(4) var<storage, read_write> grayOutput: array<atomic<u32>>;  // Packed grayscale (4 pixels per u32)
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let outX = gid.x;
-    let outY = gid.y;
-    let frameIdx = gid.z;
-
-    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let center = centers[frameIdx];
-    let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize));
-    let cropStartY = i32(floor(center.y - halfSize));
-
-    let srcX = u32(clamp(cropStartX + i32(outX), 0, i32(params.srcWidth) - 1));
-    let srcY = u32(clamp(cropStartY + i32(outY), 0, i32(params.srcHeight) - 1));
-
-    let srcIdx = frameIdx * params.srcWidth * params.srcHeight + srcY * params.srcWidth + srcX;
-    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
-
-    let rgba = input[srcIdx];
-    output[outIdx] = rgba;
-
-    // Compute grayscale and pack (4 pixels per u32, use atomic OR)
-    let r = f32(rgba & 0xFFu);
-    let g = f32((rgba >> 8u) & 0xFFu);
-    let b = f32((rgba >> 16u) & 0xFFu);
-    let gray = u32(clamp(0.299 * r + 0.587 * g + 0.114 * b, 0.0, 255.0));
-
-    let grayPackedIdx = outIdx >> 2u;
-    let grayByteOffset = (outIdx & 3u) << 3u;
-    atomicOr(&grayOutput[grayPackedIdx], gray << grayByteOffset);
-}
-`;
-
-// Grayscale conversion shader
-const grayscaleShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    _pad: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;  // RGBA
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // Grayscale float
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    let rgba = input[idx];
-
-    let r = f32(rgba & 0xFFu) / 255.0;
-    let g = f32((rgba >> 8u) & 0xFFu) / 255.0;
-    let b = f32((rgba >> 16u) & 0xFFu) / 255.0;
-
-    // Standard grayscale weights
-    let gray = 0.299 * r + 0.587 * g + 0.114 * b;
-    output[idx] = gray;
-}
-`;
-
-// Fused demosaic + grayscale shader - outputs both RGBA and grayscale in one pass (supports bilinear and VNG)
-const demosaicGrayShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    bayerPattern: u32,
-    useVng: u32,        // 0=bilinear, 1=VNG
-    bitDepth: u32,      // 8 or 16
-    scale: f32,         // stretch scale for 16-bit (1.0 = no stretch)
-    _pad3: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;
-@group(0) @binding(2) var<storage, read_write> rgbaOutput: array<u32>;
-@group(0) @binding(3) var<storage, read_write> grayOutput: array<f32>;
-
-fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let pixelIdx = frameIdx * params.width * params.height + y * params.width + x;
-    if (params.bitDepth == 8u) {
-        // 8-bit packed: 4 pixels per u32
-        let u32Idx = pixelIdx / 4u;
-        let bytePos = pixelIdx % 4u;
-        let packed = input[u32Idx];
-        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
-        return f32(rawValue) / 255.0;
-    } else {
-        // 16-bit packed: 2 pixels per u32, with GPU-side stretch
-        let u32Idx = pixelIdx / 2u;
-        let halfPos = pixelIdx % 2u;
-        let packed = input[u32Idx];
-        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
-        return min(1.0, f32(rawValue) * params.scale / 65535.0);
-    }
-}
-
-fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(params.width) - 1);
-    let cy = clamp(y, 0, i32(params.height) - 1);
-    return getBayerValue(frameIdx, u32(cx), u32(cy));
-}
-
-fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
-    var grad: f32 = 0.0;
-    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
-    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
-    return grad;
-}
-
-fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    let gN = computeGradient(frameIdx, x, y, 0, -1);
-    let gS = computeGradient(frameIdx, x, y, 0, 1);
-    let gE = computeGradient(frameIdx, x, y, 1, 0);
-    let gW = computeGradient(frameIdx, x, y, -1, 0);
-    let gNE = computeGradient(frameIdx, x, y, 1, -1);
-    let gNW = computeGradient(frameIdx, x, y, -1, -1);
-    let gSE = computeGradient(frameIdx, x, y, 1, 1);
-    let gSW = computeGradient(frameIdx, x, y, -1, 1);
-
-    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
-    let threshold = minGrad * 1.5 + 0.001;
-    let center = sampleBayer(frameIdx, x, y);
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    let n = sampleBayer(frameIdx, x, y - 1);
-    let s = sampleBayer(frameIdx, x, y + 1);
-    let e = sampleBayer(frameIdx, x + 1, y);
-    let w = sampleBayer(frameIdx, x - 1, y);
-    let ne = sampleBayer(frameIdx, x + 1, y - 1);
-    let nw = sampleBayer(frameIdx, x - 1, y - 1);
-    let se = sampleBayer(frameIdx, x + 1, y + 1);
-    let sw = sampleBayer(frameIdx, x - 1, y + 1);
-
-    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
-    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
-    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
-    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
-    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
-    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
-    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
-    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
-
-    if (pattern == 0u) {
-        if (bx == 0u && by == 0u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 1u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else if (pattern == 1u) {
-        if (bx == 0u && by == 0u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 1u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    } else if (pattern == 2u) {
-        if (bx == 1u && by == 0u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 0u && by == 1u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else {
-        if (bx == 0u && by == 1u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    }
-    return vec3<f32>(r, g, b);
-}
-
-fn bilinearInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    if (pattern == 0u) {
-        if (bx == 0u && by == 0u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 1u) {
-        if (bx == 0u && by == 0u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 2u) {
-        if (bx == 1u && by == 0u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 1u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else {
-        if (bx == 0u && by == 1u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    }
-    return vec3<f32>(r, g, b);
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let bx = x % 2u;
-    let by = y % 2u;
-    let ix = i32(x);
-    let iy = i32(y);
-    let pattern = params.bayerPattern;
-
-    var rgb: vec3<f32>;
-    if (params.useVng == 1u) {
-        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    } else {
-        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    }
-
-    let r = rgb.x;
-    let g = rgb.y;
-    let b = rgb.z;
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-
-    // Output RGBA - format depends on bit depth
-    if (params.bitDepth == 16u) {
-        // 16-bit: output Float32 RGBA (4 u32s per pixel via bitcast)
-        let baseIdx = idx * 4u;
-        rgbaOutput[baseIdx] = bitcast<u32>(r);
-        rgbaOutput[baseIdx + 1u] = bitcast<u32>(g);
-        rgbaOutput[baseIdx + 2u] = bitcast<u32>(b);
-        rgbaOutput[baseIdx + 3u] = bitcast<u32>(1.0);
-    } else {
-        // 8-bit: pack as RGBA (1 u32 per pixel)
-        let ri = u32(clamp(r * 255.0, 0.0, 255.0));
-        let gi = u32(clamp(g * 255.0, 0.0, 255.0));
-        let bi = u32(clamp(b * 255.0, 0.0, 255.0));
-        let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-        rgbaOutput[idx] = rgba;
-    }
-
-    // Output grayscale (fused - avoids separate pass)
-    let gray = 0.299 * r + 0.587 * g + 0.114 * b;
-    grayOutput[idx] = gray;
-}
-`;
-
-// Grayscale-only demosaic shader - fast analysis without color output
-// Averages 2x2 Bayer blocks to get luminance - no pattern knowledge needed
-const demosaicGrayOnlyShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    bayerPattern: u32,
-    _pad0: u32,
-    bitDepth: u32,
-    scale: f32,
-    _pad3: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;
-@group(0) @binding(2) var<storage, read_write> grayOutput: array<f32>;
-
-fn sampleRaw(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let cx = min(x, params.width - 1u);
-    let cy = min(y, params.height - 1u);
-    let pixelIdx = frameIdx * params.width * params.height + cy * params.width + cx;
-
-    if (params.bitDepth == 8u) {
-        let u32Idx = pixelIdx / 4u;
-        let bytePos = pixelIdx % 4u;
-        let packed = input[u32Idx];
-        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
-        return f32(rawValue) / 255.0;
-    } else {
-        let u32Idx = pixelIdx / 2u;
-        let halfPos = pixelIdx % 2u;
-        let packed = input[u32Idx];
-        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
-        return min(1.0, f32(rawValue) * params.scale / 65535.0);
-    }
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Average local 2x2 neighborhood: always contains 1R + 2G + 1B = approximate luminance
-    // Each pixel gets its own average (not block-aligned) to preserve detail
-    let gray = (sampleRaw(frameIdx, x, y) + sampleRaw(frameIdx, x+1u, y) +
-                sampleRaw(frameIdx, x, y+1u) + sampleRaw(frameIdx, x+1u, y+1u)) * 0.25;
-
-    let outIdx = frameIdx * params.width * params.height + y * params.width + x;
-    grayOutput[outIdx] = gray;
-}
-`;
-
-// Combined sharpness shader - computes both Tenengrad and Laplacian
-// Tenengrad: Sobel Gx² + Gy² (first derivative, good for edges)
-// Laplacian: Second derivative (good for fine texture/detail)
-// Combined via geometric mean for robust sharpness ranking
-const tenengradShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    _pad: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<f32>;  // Grayscale
-@group(0) @binding(2) var<storage, read_write> tenengrad: array<f32>;  // Sobel gradient magnitude squared
-@group(0) @binding(3) var<storage, read_write> laplacian: array<f32>;  // Laplacian response
-
-fn sampleGray(frameIdx: u32, x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(params.width) - 1);
-    let cy = clamp(y, 0, i32(params.height) - 1);
-    let idx = frameIdx * params.width * params.height + u32(cy) * params.width + u32(cx);
-    return input[idx];
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let ix = i32(x);
-    let iy = i32(y);
-
-    // Sobel X: [-1,0,1], [-2,0,2], [-1,0,1]
-    let gx = -1.0 * sampleGray(frameIdx, ix-1, iy-1) + 1.0 * sampleGray(frameIdx, ix+1, iy-1)
-           + -2.0 * sampleGray(frameIdx, ix-1, iy)   + 2.0 * sampleGray(frameIdx, ix+1, iy)
-           + -1.0 * sampleGray(frameIdx, ix-1, iy+1) + 1.0 * sampleGray(frameIdx, ix+1, iy+1);
-
-    // Sobel Y: [-1,-2,-1], [0,0,0], [1,2,1]
-    let gy = -1.0 * sampleGray(frameIdx, ix-1, iy-1) - 2.0 * sampleGray(frameIdx, ix, iy-1) - 1.0 * sampleGray(frameIdx, ix+1, iy-1)
-           +  1.0 * sampleGray(frameIdx, ix-1, iy+1) + 2.0 * sampleGray(frameIdx, ix, iy+1) + 1.0 * sampleGray(frameIdx, ix+1, iy+1);
-
-    // Tenengrad = Gx² + Gy² (gradient magnitude squared)
-    let tenengradVal = gx * gx + gy * gy;
-
-    // Laplacian kernel: [0,1,0], [1,-4,1], [0,1,0]
-    let lap = sampleGray(frameIdx, ix, iy-1)
-            + sampleGray(frameIdx, ix-1, iy) - 4.0 * sampleGray(frameIdx, ix, iy) + sampleGray(frameIdx, ix+1, iy)
-            + sampleGray(frameIdx, ix, iy+1);
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    tenengrad[idx] = tenengradVal;
-    laplacian[idx] = lap * lap;  // Square for variance calculation (always positive)
-}
-`;
-
-// Offset sharpness shader - reads from full-frame buffer with per-frame center offsets
-// Computes both Tenengrad and Laplacian, eliminates need for separate crop pass
-const offsetTenengradShader = `
-struct Params {
-    srcWidth: u32,      // Full frame width
-    srcHeight: u32,     // Full frame height
-    cropSize: u32,      // Output crop size
-    batchSize: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<f32>;      // Full-frame grayscale
-@group(0) @binding(2) var<storage, read> centers: array<f32>;    // Per-frame centers [x0,y0,x1,y1,...]
-@group(0) @binding(3) var<storage, read_write> tenengrad: array<f32>;
-@group(0) @binding(4) var<storage, read_write> laplacian: array<f32>;
-
-fn sampleGray(frameIdx: u32, x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(params.srcWidth) - 1);
-    let cy = clamp(y, 0, i32(params.srcHeight) - 1);
-    let idx = frameIdx * params.srcWidth * params.srcHeight + u32(cy) * params.srcWidth + u32(cx);
-    return input[idx];
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let localX = gid.x;
-    let localY = gid.y;
-    let frameIdx = gid.z;
-
-    if (localX >= params.cropSize || localY >= params.cropSize || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Get per-frame center
-    let centerX = i32(centers[frameIdx * 2u]);
-    let centerY = i32(centers[frameIdx * 2u + 1u]);
-    let halfCrop = i32(params.cropSize / 2u);
-
-    // Compute source coordinates in full-frame buffer
-    let srcX = centerX - halfCrop + i32(localX);
-    let srcY = centerY - halfCrop + i32(localY);
-
-    // Sobel X: [-1,0,1], [-2,0,2], [-1,0,1]
-    let gx = -1.0 * sampleGray(frameIdx, srcX-1, srcY-1) + 1.0 * sampleGray(frameIdx, srcX+1, srcY-1)
-           + -2.0 * sampleGray(frameIdx, srcX-1, srcY)   + 2.0 * sampleGray(frameIdx, srcX+1, srcY)
-           + -1.0 * sampleGray(frameIdx, srcX-1, srcY+1) + 1.0 * sampleGray(frameIdx, srcX+1, srcY+1);
-
-    // Sobel Y: [-1,-2,-1], [0,0,0], [1,2,1]
-    let gy = -1.0 * sampleGray(frameIdx, srcX-1, srcY-1) - 2.0 * sampleGray(frameIdx, srcX, srcY-1) - 1.0 * sampleGray(frameIdx, srcX+1, srcY-1)
-           +  1.0 * sampleGray(frameIdx, srcX-1, srcY+1) + 2.0 * sampleGray(frameIdx, srcX, srcY+1) + 1.0 * sampleGray(frameIdx, srcX+1, srcY+1);
-
-    // Tenengrad = Gx² + Gy² (gradient magnitude squared)
-    let tenengradVal = gx * gx + gy * gy;
-
-    // Laplacian kernel: [0,1,0], [1,-4,1], [0,1,0]
-    let lap = sampleGray(frameIdx, srcX, srcY-1)
-            + sampleGray(frameIdx, srcX-1, srcY) - 4.0 * sampleGray(frameIdx, srcX, srcY) + sampleGray(frameIdx, srcX+1, srcY)
-            + sampleGray(frameIdx, srcX, srcY+1);
-
-    // Output to crop-sized buffer (contiguous for reduction)
-    let outIdx = frameIdx * params.cropSize * params.cropSize + localY * params.cropSize + localX;
-    tenengrad[outIdx] = tenengradVal;
-    laplacian[outIdx] = lap * lap;  // Square for variance calculation
-}
-`;
-
-// Reduction shader - sums Tenengrad and Laplacian values across frame
-const reductionShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    inputSize: u32,  // Total pixels per frame
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> tenengrad: array<f32>;
-@group(0) @binding(2) var<storage, read> laplacian: array<f32>;
-@group(0) @binding(3) var<storage, read_write> results: array<f32>;  // [tenengradSum, laplacianSum] per frame
-
-var<workgroup> sharedTenengrad: array<f32, 256>;
-var<workgroup> sharedLaplacian: array<f32, 256>;
-
-@compute @workgroup_size(256, 1, 1)
-fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) wid: vec3<u32>
-) {
-    let frameIdx = wid.y;
-    let localIdx = lid.x;
-    let pixelsPerWorkgroup = 256u;
-    let startPixel = wid.x * pixelsPerWorkgroup + localIdx;
-
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Load values from both sharpness metrics
-    var tenVal: f32 = 0.0;
-    var lapVal: f32 = 0.0;
-
-    if (startPixel < params.inputSize) {
-        let idx = frameIdx * params.inputSize + startPixel;
-        tenVal = tenengrad[idx];
-        lapVal = laplacian[idx];
-    }
-
-    sharedTenengrad[localIdx] = tenVal;
-    sharedLaplacian[localIdx] = lapVal;
-    workgroupBarrier();
-
-    // Parallel reduction
-    for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
-        if (localIdx < stride) {
-            sharedTenengrad[localIdx] += sharedTenengrad[localIdx + stride];
-            sharedLaplacian[localIdx] += sharedLaplacian[localIdx + stride];
-        }
-        workgroupBarrier();
-    }
-
-    // Write partial result
-    if (localIdx == 0u) {
-        // Calculate actual number of workgroups based on input size
-        let numWorkgroups = (params.inputSize + 255u) / 256u;
-        let resultIdx = frameIdx * numWorkgroups + wid.x;
-        results[resultIdx * 2u] = sharedTenengrad[0];
-        results[resultIdx * 2u + 1u] = sharedLaplacian[0];
-    }
-}
-`;
-
-// Final sharpness reduction - sums workgroup partial results into 2 floats per frame
-// Reduces readback from ~1.1MB to 800 bytes per batch
-const sharpnessFinalShader = `
-struct Params {
-    numWorkgroups: u32,  // Number of workgroups from first reduction
-    batchSize: u32,
-    pixelCount: u32,     // For computing mean
-    _pad: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> partialSums: array<f32>;  // 2 floats per workgroup per frame
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // 2 floats per frame: [tenengrad, laplacian]
-
-@compute @workgroup_size(64, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let frameIdx = gid.x;
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Sum all workgroup results for this frame
-    var tenengradSum: f32 = 0.0;
-    var laplacianSum: f32 = 0.0;
-
-    for (var w = 0u; w < params.numWorkgroups; w++) {
-        let idx = (frameIdx * params.numWorkgroups + w) * 2u;
-        tenengradSum += partialSums[idx];
-        laplacianSum += partialSums[idx + 1u];
-    }
-
-    // Scale and compute mean (matching CPU: scale by 65025, divide by pixelCount)
-    let scale: f32 = 65025.0 / f32(params.pixelCount);
-    let tenengradMean = tenengradSum * scale;
-    let laplacianMean = laplacianSum * scale;
-
-    // Output final values
-    let outIdx = frameIdx * 2u;
-    output[outIdx] = tenengradMean;
-    output[outIdx + 1u] = laplacianMean;
-}
-`;
-
-// Moments shader - calculates image moments for circularity
-const momentsShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    threshold: f32,  // For binarization
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> grayscale: array<f32>;
-@group(0) @binding(2) var<storage, read_write> moments: array<f32>;  // Per-pixel contributions
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    let val = grayscale[idx];
-
-    // Binary threshold
-    let binary = select(0.0, 1.0, val > params.threshold);
-
-    let fx = f32(x);
-    let fy = f32(y);
-
-    // Store moments contributions: m00, m10, m01, m20, m11, m02
-    let momIdx = idx * 6u;
-    moments[momIdx + 0u] = binary;           // m00
-    moments[momIdx + 1u] = binary * fx;      // m10
-    moments[momIdx + 2u] = binary * fy;      // m01
-    moments[momIdx + 3u] = binary * fx * fx; // m20
-    moments[momIdx + 4u] = binary * fx * fy; // m11
-    moments[momIdx + 5u] = binary * fy * fy; // m02
-}
-`;
-
-// Moments reduction shader
-const momentsReductionShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    inputSize: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> moments: array<f32>;
-@group(0) @binding(2) var<storage, read_write> results: array<f32>;  // 6 moments per frame
-
-var<workgroup> sharedData: array<f32, 1536>;  // 256 * 6
-
-@compute @workgroup_size(256, 1, 1)
-fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) wid: vec3<u32>
-) {
-    let frameIdx = wid.y;
-    let localIdx = lid.x;
-    let startPixel = wid.x * 256u + localIdx;
-
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Load 6 moment values per thread
-    for (var m = 0u; m < 6u; m++) {
-        var val: f32 = 0.0;
-        if (startPixel < params.inputSize) {
-            val = moments[(frameIdx * params.inputSize + startPixel) * 6u + m];
-        }
-        sharedData[localIdx * 6u + m] = val;
-    }
-    workgroupBarrier();
-
-    // Parallel reduction for all 6 moments
-    for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
-        if (localIdx < stride) {
-            for (var m = 0u; m < 6u; m++) {
-                sharedData[localIdx * 6u + m] += sharedData[(localIdx + stride) * 6u + m];
-            }
-        }
-        workgroupBarrier();
-    }
-
-    // Write partial results
-    if (localIdx == 0u) {
-        let numWorkgroups = (params.inputSize + 255u) / 256u;
-        let resultIdx = (frameIdx * numWorkgroups + wid.x) * 6u;
-        for (var m = 0u; m < 6u; m++) {
-            results[resultIdx + m] = sharedData[m];
-        }
-    }
-}
-`;
-
-// Final moments shader - sums partial moments and computes circularity + centroid on GPU
-// Outputs 3 floats per frame: [circularity, centroidX, centroidY]
-// This eliminates the need to read back 6 floats × numWorkgroups and compute in JS
-const circularityFinalShader = `
-struct Params {
-    numWorkgroups: u32,  // Number of workgroups from moments reduction
-    batchSize: u32,
-    defaultCenterX: f32,  // Fallback center if no bright pixels
-    defaultCenterY: f32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> partialMoments: array<f32>;  // 6 floats per workgroup per frame
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // 3 floats per frame: [circ, cx, cy]
-
-@compute @workgroup_size(64, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let frameIdx = gid.x;
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Sum moments across all workgroups for this frame
-    var m00: f32 = 0.0;
-    var m10: f32 = 0.0;
-    var m01: f32 = 0.0;
-    var m20: f32 = 0.0;
-    var m11: f32 = 0.0;
-    var m02: f32 = 0.0;
-
-    for (var w = 0u; w < params.numWorkgroups; w++) {
-        let idx = (frameIdx * params.numWorkgroups + w) * 6u;
-        m00 += partialMoments[idx];
-        m10 += partialMoments[idx + 1u];
-        m01 += partialMoments[idx + 2u];
-        m20 += partialMoments[idx + 3u];
-        m11 += partialMoments[idx + 4u];
-        m02 += partialMoments[idx + 5u];
-    }
-
-    // Compute circularity and centroid from moments
-    var circ: f32 = 0.0;
-    var centroidX: f32 = params.defaultCenterX;
-    var centroidY: f32 = params.defaultCenterY;
-
-    if (m00 > 0.0) {
-        centroidX = m10 / m00;
-        centroidY = m01 / m00;
-
-        // Central moments
-        let mu20 = m20 / m00 - centroidX * centroidX;
-        let mu02 = m02 / m00 - centroidY * centroidY;
-        let mu11 = m11 / m00 - centroidX * centroidY;
-
-        // Eigenvalues of covariance matrix
-        let trace = mu20 + mu02;
-        let det = mu20 * mu02 - mu11 * mu11;
-        let discriminant = sqrt(max(0.0, trace * trace - 4.0 * det));
-        let lambda1 = (trace + discriminant) / 2.0;
-        let lambda2 = (trace - discriminant) / 2.0;
-
-        // Circularity = ratio of eigenvalues (1 = perfect circle)
-        if (lambda1 > 0.0) {
-            circ = min(lambda2, lambda1) / max(lambda2, lambda1);
-        }
-    }
-
-    let outIdx = frameIdx * 3u;
-    output[outIdx] = circ;
-    output[outIdx + 1u] = centroidX;
-    output[outIdx + 2u] = centroidY;
-}
-`;
-
-// 5x5 Gaussian blur shader - reduces noise before bounds detection (matches CPU GaussianBlur)
-const blurShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    _pad: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<f32>;
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = i32(gid.x);
-    let y = i32(gid.y);
-    let frameIdx = gid.z;
-    let w = i32(params.width);
-    let h = i32(params.height);
-
-    if (gid.x >= params.width || gid.y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // 5x5 Gaussian kernel weights (sigma ≈ 1.0), same as CPU cv.GaussianBlur
-    // Separable: [1, 4, 6, 4, 1] / 16 for each dimension
-    var weights = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
-
-    var sum: f32 = 0.0;
-    let frameOffset = i32(frameIdx) * w * h;
-
-    for (var dy: i32 = -2; dy <= 2; dy++) {
-        for (var dx: i32 = -2; dx <= 2; dx++) {
-            let sx = clamp(x + dx, 0, w - 1);
-            let sy = clamp(y + dy, 0, h - 1);
-            let idx = frameOffset + sy * w + sx;
-            let weight = weights[dx + 2] * weights[dy + 2];
-            sum += input[idx] * weight;
-        }
-    }
-
-    let outIdx = frameOffset + y * w + x;
-    output[outIdx] = sum;
-}
-`;
-
-// Bounding box shader - finds min/max x,y of bright pixels for planet detection
-const boundsShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    threshold: f32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> grayscale: array<f32>;
-@group(0) @binding(2) var<storage, read_write> bounds: array<u32>;  // Per-pixel: minX, minY, maxX, maxY
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    let val = grayscale[idx];
-
-    let boundsIdx = idx * 4u;
-
-    // If pixel is bright (above threshold), set bounds to this pixel's coords
-    // Otherwise set to invalid values that won't affect min/max
-    if (val > params.threshold) {
-        bounds[boundsIdx + 0u] = x;      // minX candidate
-        bounds[boundsIdx + 1u] = y;      // minY candidate
-        bounds[boundsIdx + 2u] = x;      // maxX candidate
-        bounds[boundsIdx + 3u] = y;      // maxY candidate
-    } else {
-        bounds[boundsIdx + 0u] = 0xFFFFFFFFu;  // Large value for min
-        bounds[boundsIdx + 1u] = 0xFFFFFFFFu;
-        bounds[boundsIdx + 2u] = 0u;           // Small value for max
-        bounds[boundsIdx + 3u] = 0u;
-    }
-}
-`;
-
-// Bounding box reduction shader - finds min/max across all pixels
-const boundsReductionShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    inputSize: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> bounds: array<u32>;
-@group(0) @binding(2) var<storage, read_write> results: array<u32>;  // 4 values per frame: minX, minY, maxX, maxY
-
-var<workgroup> sharedBounds: array<u32, 1024>;  // 256 * 4
-
-@compute @workgroup_size(256, 1, 1)
-fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) wid: vec3<u32>
-) {
-    let frameIdx = wid.y;
-    let localIdx = lid.x;
-    let startPixel = wid.x * 256u + localIdx;
-
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Load 4 bound values per thread (minX, minY, maxX, maxY)
-    if (startPixel < params.inputSize) {
-        let boundsIdx = (frameIdx * params.inputSize + startPixel) * 4u;
-        sharedBounds[localIdx * 4u + 0u] = bounds[boundsIdx + 0u];
-        sharedBounds[localIdx * 4u + 1u] = bounds[boundsIdx + 1u];
-        sharedBounds[localIdx * 4u + 2u] = bounds[boundsIdx + 2u];
-        sharedBounds[localIdx * 4u + 3u] = bounds[boundsIdx + 3u];
-    } else {
-        sharedBounds[localIdx * 4u + 0u] = 0xFFFFFFFFu;
-        sharedBounds[localIdx * 4u + 1u] = 0xFFFFFFFFu;
-        sharedBounds[localIdx * 4u + 2u] = 0u;
-        sharedBounds[localIdx * 4u + 3u] = 0u;
-    }
-    workgroupBarrier();
-
-    // Parallel reduction - min for indices 0,1 and max for indices 2,3
-    for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
-        if (localIdx < stride) {
-            let idx1 = localIdx * 4u;
-            let idx2 = (localIdx + stride) * 4u;
-            // Min for minX, minY
-            sharedBounds[idx1 + 0u] = min(sharedBounds[idx1 + 0u], sharedBounds[idx2 + 0u]);
-            sharedBounds[idx1 + 1u] = min(sharedBounds[idx1 + 1u], sharedBounds[idx2 + 1u]);
-            // Max for maxX, maxY
-            sharedBounds[idx1 + 2u] = max(sharedBounds[idx1 + 2u], sharedBounds[idx2 + 2u]);
-            sharedBounds[idx1 + 3u] = max(sharedBounds[idx1 + 3u], sharedBounds[idx2 + 3u]);
-        }
-        workgroupBarrier();
-    }
-
-    // Write partial results
-    if (localIdx == 0u) {
-        let numWorkgroups = (params.inputSize + 255u) / 256u;
-        let resultIdx = (frameIdx * numWorkgroups + wid.x) * 4u;
-        results[resultIdx + 0u] = sharedBounds[0u];
-        results[resultIdx + 1u] = sharedBounds[1u];
-        results[resultIdx + 2u] = sharedBounds[2u];
-        results[resultIdx + 3u] = sharedBounds[3u];
-    }
-}
-`;
-
-// Centroid computation shader - reduces partial bounds to final centroids
-// This eliminates the need to read back bounds to CPU before cropping
-const centroidShader = `
-struct Params {
-    srcWidth: u32,
-    srcHeight: u32,
-    batchSize: u32,
-    numWorkgroups: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> boundsPartial: array<u32>;  // 4 values per workgroup per frame
-@group(0) @binding(2) var<storage, read_write> centers: array<f32>;  // 2 floats per frame (x, y)
-@group(0) @binding(3) var<storage, read_write> boundsOutput: array<u32>;  // 4 u32 per frame: minX, minY, maxX, maxY
-
-@compute @workgroup_size(64, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let frameIdx = gid.x;
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Reduce all workgroup results for this frame
-    var minX: u32 = params.srcWidth;
-    var minY: u32 = params.srcHeight;
-    var maxX: u32 = 0u;
-    var maxY: u32 = 0u;
-
-    for (var w: u32 = 0u; w < params.numWorkgroups; w = w + 1u) {
-        let idx = (frameIdx * params.numWorkgroups + w) * 4u;
-        let wMinX = boundsPartial[idx + 0u];
-        let wMinY = boundsPartial[idx + 1u];
-        let wMaxX = boundsPartial[idx + 2u];
-        let wMaxY = boundsPartial[idx + 3u];
-
-        minX = min(minX, wMinX);
-        minY = min(minY, wMinY);
-        maxX = max(maxX, wMaxX);
-        maxY = max(maxY, wMaxY);
-    }
-
-    // Write final bounds for later CPU readback
-    let boundsIdx = frameIdx * 4u;
-    boundsOutput[boundsIdx + 0u] = minX;
-    boundsOutput[boundsIdx + 1u] = minY;
-    boundsOutput[boundsIdx + 2u] = maxX;
-    boundsOutput[boundsIdx + 3u] = maxY;
-
-    // Compute and write centroid
-    let centerIdx = frameIdx * 2u;
-    if (maxX > minX && maxY > minY) {
-        centers[centerIdx + 0u] = f32(minX + maxX) / 2.0;
-        centers[centerIdx + 1u] = f32(minY + maxY) / 2.0;
-    } else {
-        // No valid object found - use frame center
-        centers[centerIdx + 0u] = f32(params.srcWidth) / 2.0;
-        centers[centerIdx + 1u] = f32(params.srcHeight) / 2.0;
-    }
-}
-`;
-
-// ============================================================
 // INITIALIZATION
 // ============================================================
 
@@ -2334,123 +411,24 @@ async function init() {
         }
     });
 
-    // Helper to create shader module with error checking
-    async function createShader(code, name) {
-        const module = device.createShaderModule({ code });
-        const info = await module.getCompilationInfo();
-        for (const msg of info.messages) {
-            if (msg.type === 'error') {
-                throw new Error(`Shader ${name} error: ${msg.message} at line ${msg.lineNum}`);
-            }
-            if (msg.type === 'warning') {
-                console.warn(`Shader ${name} warning: ${msg.message}`);
-            }
-        }
-        return module;
-    }
-
-    // Create pipelines with error checking
-    const demosaicModule = await createShader(demosaicShader, 'demosaic');
-    demosaicPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: demosaicModule, entryPoint: 'main' }
-    });
-
-    const demosaicCropModule = await createShader(demosaicCropShader, 'demosaicCrop');
-    demosaicCropPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: demosaicCropModule, entryPoint: 'main' }
-    });
-
-    const demosaicGrayModule = await createShader(demosaicGrayShader, 'demosaicGray');
-    demosaicGrayPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: demosaicGrayModule, entryPoint: 'main' }
-    });
-
-    const demosaicGrayOnlyModule = await createShader(demosaicGrayOnlyShader, 'demosaicGrayOnly');
-    demosaicGrayOnlyPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: demosaicGrayOnlyModule, entryPoint: 'main' }
-    });
-
-    const rgbaCropModule = await createShader(rgbaCropShader, 'rgbaCrop');
-    rgbaCropPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: rgbaCropModule, entryPoint: 'main' }
-    });
-
-    const grayscaleModule = await createShader(grayscaleShader, 'grayscale');
-    grayscalePipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: grayscaleModule, entryPoint: 'main' }
-    });
-
-    const tenengradModule = await createShader(tenengradShader, 'tenengrad');
-    tenengradPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: tenengradModule, entryPoint: 'main' }
-    });
-
-    const offsetTenengradModule = await createShader(offsetTenengradShader, 'offsetTenengrad');
-    offsetTenengradPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: offsetTenengradModule, entryPoint: 'main' }
-    });
-
-    const reductionModule = await createShader(reductionShader, 'reduction');
-    reductionPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: reductionModule, entryPoint: 'main' }
-    });
-
-    const momentsModule = await createShader(momentsShader, 'moments');
-    momentsPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: momentsModule, entryPoint: 'main' }
-    });
-
-    const momentsReductionModule = await createShader(momentsReductionShader, 'momentsReduction');
-    momentsReductionPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: momentsReductionModule, entryPoint: 'main' }
-    });
-
-    const circularityFinalModule = await createShader(circularityFinalShader, 'circularityFinal');
-    circularityFinalPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: circularityFinalModule, entryPoint: 'main' }
-    });
-
-    const boundsModule = await createShader(boundsShader, 'bounds');
-    boundsPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: boundsModule, entryPoint: 'main' }
-    });
-
-    const boundsReductionModule = await createShader(boundsReductionShader, 'boundsReduction');
-    boundsReductionPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: boundsReductionModule, entryPoint: 'main' }
-    });
-
-    const centroidModule = await createShader(centroidShader, 'centroid');
-    centroidPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: centroidModule, entryPoint: 'main' }
-    });
-
-    const blurModule = await createShader(blurShader, 'blur');
-    blurPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: blurModule, entryPoint: 'main' }
-    });
-
-    const sharpnessFinalModule = await createShader(sharpnessFinalShader, 'sharpnessFinal');
-    sharpnessFinalPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: sharpnessFinalModule, entryPoint: 'main' }
-    });
+    // Create all compute pipelines
+    demosaicPipeline = await createPipeline(device, demosaicShader, 'demosaic');
+    demosaicCropPipeline = await createPipeline(device, demosaicCropShader, 'demosaicCrop');
+    demosaicGrayPipeline = await createPipeline(device, demosaicGrayShader, 'demosaicGray');
+    demosaicGrayOnlyPipeline = await createPipeline(device, demosaicGrayOnlyShader, 'demosaicGrayOnly');
+    rgbaCropPipeline = await createPipeline(device, rgbaCropShader, 'rgbaCrop');
+    grayscalePipeline = await createPipeline(device, grayscaleShader, 'grayscale');
+    tenengradPipeline = await createPipeline(device, tenengradShader, 'tenengrad');
+    offsetTenengradPipeline = await createPipeline(device, offsetTenengradShader, 'offsetTenengrad');
+    reductionPipeline = await createPipeline(device, reductionShader, 'reduction');
+    momentsPipeline = await createPipeline(device, momentsShader, 'moments');
+    momentsReductionPipeline = await createPipeline(device, momentsReductionShader, 'momentsReduction');
+    circularityFinalPipeline = await createPipeline(device, circularityFinalShader, 'circularityFinal');
+    boundsPipeline = await createPipeline(device, boundsShader, 'bounds');
+    boundsReductionPipeline = await createPipeline(device, boundsReductionShader, 'boundsReduction');
+    centroidPipeline = await createPipeline(device, centroidShader, 'centroid');
+    blurPipeline = await createPipeline(device, blurShader, 'blur');
+    sharpnessFinalPipeline = await createPipeline(device, sharpnessFinalShader, 'sharpnessFinal');
 
     isReady = true;
     deviceLost = false;
@@ -2747,41 +725,20 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
 
         if (grayOnly) {
             // Grayscale-only demosaic (fast, no RGBA output)
-            const demosaicGrayOnlyBindGroup = device.createBindGroup({
-                layout: demosaicGrayOnlyPipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                    { binding: 1, resource: { buffer: buffers.inputBuffers[0] } },
-                    { binding: 2, resource: { buffer: buffers.grayBuffer } }
-                ]
-            });
-
+            const demosaicGrayOnlyBindGroup = createBindGroup(device, demosaicGrayOnlyPipeline, [
+                buffers.paramsBuffer, buffers.inputBuffers[0], buffers.grayBuffer
+            ]);
             const encoder = device.createCommandEncoder();
-            const pass = encoder.beginComputePass();
-            pass.setPipeline(demosaicGrayOnlyPipeline);
-            pass.setBindGroup(0, demosaicGrayOnlyBindGroup);
-            pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
-            pass.end();
+            addComputePass(encoder, demosaicGrayOnlyPipeline, demosaicGrayOnlyBindGroup, imageWorkgroups(width, height, batchSize));
             logGpuSubmit('analyzeBatch:demosaic-grayOnly');
             queue.submit([encoder.finish()]);
         } else {
             // Run fused demosaic + grayscale (outputs both RGBA and grayscale in one pass)
-            const demosaicGrayBindGroup = device.createBindGroup({
-                layout: demosaicGrayPipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                    { binding: 1, resource: { buffer: buffers.inputBuffers[0] } },
-                    { binding: 2, resource: { buffer: buffers.rgbaBuffer } },
-                    { binding: 3, resource: { buffer: buffers.grayBuffer } }
-                ]
-            });
-
+            const demosaicGrayBindGroup = createBindGroup(device, demosaicGrayPipeline, [
+                buffers.paramsBuffer, buffers.inputBuffers[0], buffers.rgbaBuffer, buffers.grayBuffer
+            ]);
             const encoder = device.createCommandEncoder();
-            const pass = encoder.beginComputePass();
-            pass.setPipeline(demosaicGrayPipeline);
-            pass.setBindGroup(0, demosaicGrayBindGroup);
-            pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
-            pass.end();
+            addComputePass(encoder, demosaicGrayPipeline, demosaicGrayBindGroup, imageWorkgroups(width, height, batchSize));
             logGpuSubmit('analyzeBatch:demosaic+gray');
             queue.submit([encoder.finish()]);
         }
@@ -2874,52 +831,21 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     queue.writeBuffer(buffers.momentsParamsBuffer, 0, momentsParamsData);
 
     // Create bind groups (must recreate each time)
-    const grayBindGroup = device.createBindGroup({
-        layout: grayscalePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: buffers.rgbaBuffer } },
-            { binding: 2, resource: { buffer: buffers.grayBuffer } }
-        ]
-    });
-
-    const lapBindGroup = device.createBindGroup({
-        layout: tenengradPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.tenengradBuffer } },
-            { binding: 3, resource: { buffer: buffers.laplacianBuffer } }
-        ]
-    });
-
-    const reductionBindGroup = device.createBindGroup({
-        layout: reductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.tenengradBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 3, resource: { buffer: buffers.reductionBuffer } }
-        ]
-    });
-
-    const momentsBindGroup = device.createBindGroup({
-        layout: momentsPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.momentsParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.momentsBuffer } }
-        ]
-    });
-
-    const momentsReductionBindGroup = device.createBindGroup({
-        layout: momentsReductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.momentsBuffer } },
-            { binding: 2, resource: { buffer: buffers.momentsReductionBuffer } }
-        ]
-    });
+    const grayBindGroup = createBindGroup(device, grayscalePipeline, [
+        buffers.paramsBuffer, buffers.rgbaBuffer, buffers.grayBuffer
+    ]);
+    const lapBindGroup = createBindGroup(device, tenengradPipeline, [
+        buffers.paramsBuffer, buffers.grayBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer
+    ]);
+    const reductionBindGroup = createBindGroup(device, reductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer, buffers.reductionBuffer
+    ]);
+    const momentsBindGroup = createBindGroup(device, momentsPipeline, [
+        buffers.momentsParamsBuffer, buffers.grayBuffer, buffers.momentsBuffer
+    ]);
+    const momentsReductionBindGroup = createBindGroup(device, momentsReductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.momentsBuffer, buffers.momentsReductionBuffer
+    ]);
 
     // Circularity final pass: compute circularity from summed moments on GPU
     // Circularity params: numWorkgroups, batchSize, defaultCenterX, defaultCenterY
@@ -2927,14 +853,9 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     new Uint32Array(circularityParamsData, 0, 2).set([numWorkgroups, batchSize]);
     new Float32Array(circularityParamsData, 8, 2).set([width / 2, height / 2]);
     queue.writeBuffer(buffers.circularityParamsBuffer, 0, circularityParamsData);
-    const circularityBindGroup = device.createBindGroup({
-        layout: circularityFinalPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.circularityParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.momentsReductionBuffer } },
-            { binding: 2, resource: { buffer: buffers.circularityBuffer } }
-        ]
-    });
+    const circularityBindGroup = createBindGroup(device, circularityFinalPipeline, [
+        buffers.circularityParamsBuffer, buffers.momentsReductionBuffer, buffers.circularityBuffer
+    ]);
 
     // Update bounds params (same threshold as moments)
     const boundsParamsData = new ArrayBuffer(16);
@@ -2942,23 +863,12 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     new Float32Array(boundsParamsData, 12, 1).set([threshold]);
     queue.writeBuffer(buffers.boundsParamsBuffer, 0, boundsParamsData);
 
-    const boundsBindGroup = device.createBindGroup({
-        layout: boundsPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.boundsParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.boundsBuffer } }
-        ]
-    });
-
-    const boundsReductionBindGroup = device.createBindGroup({
-        layout: boundsReductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.boundsBuffer } },
-            { binding: 2, resource: { buffer: buffers.boundsReductionBuffer } }
-        ]
-    });
+    const boundsBindGroup = createBindGroup(device, boundsPipeline, [
+        buffers.boundsParamsBuffer, buffers.grayBuffer, buffers.boundsBuffer
+    ]);
+    const boundsReductionBindGroup = createBindGroup(device, boundsReductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.boundsBuffer, buffers.boundsReductionBuffer
+    ]);
 
     // Execute all passes in a single command encoder
     const encoder = device.createCommandEncoder();
@@ -3393,52 +1303,21 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     queue.writeBuffer(buffers.momentsParamsBuffer, 0, momentsParamsData);
 
     // Create bind groups for analysis passes
-    const grayBindGroup = device.createBindGroup({
-        layout: grayscalePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.grayParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.croppedRgbaBuffer } },
-            { binding: 2, resource: { buffer: buffers.grayBuffer } }
-        ]
-    });
-
-    const lapBindGroup = device.createBindGroup({
-        layout: tenengradPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.grayParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.tenengradBuffer } },
-            { binding: 3, resource: { buffer: buffers.laplacianBuffer } }
-        ]
-    });
-
-    const reduceBindGroup = device.createBindGroup({
-        layout: reductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.tenengradBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 3, resource: { buffer: buffers.reductionBuffer } }
-        ]
-    });
-
-    const momentsBindGroup = device.createBindGroup({
-        layout: momentsPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.momentsParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.momentsBuffer } }
-        ]
-    });
-
-    const momentsReduceBindGroup = device.createBindGroup({
-        layout: momentsReductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.momentsBuffer } },
-            { binding: 2, resource: { buffer: buffers.momentsReductionBuffer } }
-        ]
-    });
+    const grayBindGroup = createBindGroup(device, grayscalePipeline, [
+        buffers.grayParamsBuffer, buffers.croppedRgbaBuffer, buffers.grayBuffer
+    ]);
+    const lapBindGroup = createBindGroup(device, tenengradPipeline, [
+        buffers.grayParamsBuffer, buffers.grayBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer
+    ]);
+    const reduceBindGroup = createBindGroup(device, reductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer, buffers.reductionBuffer
+    ]);
+    const momentsBindGroup = createBindGroup(device, momentsPipeline, [
+        buffers.momentsParamsBuffer, buffers.grayBuffer, buffers.momentsBuffer
+    ]);
+    const momentsReduceBindGroup = createBindGroup(device, momentsReductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.momentsBuffer, buffers.momentsReductionBuffer
+    ]);
 
     // Execute all passes in a single command encoder
     const encoder = device.createCommandEncoder();
@@ -3451,16 +1330,10 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         // Upload Bayer data (already prepared above)
         queue.writeBuffer(buffers.inputBuffers[0], 0, bayerData);
 
-        const demosaicCropBindGroup = device.createBindGroup({
-            layout: demosaicCropPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: buffers.inputBuffers[0] } },
-                { binding: 2, resource: { buffer: buffers.centersBuffer } },
-                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } },
-                { binding: 4, resource: { buffer: buffers.packedGrayBuffer } }
-            ]
-        });
+        const demosaicCropBindGroup = createBindGroup(device, demosaicCropPipeline, [
+            buffers.paramsBuffer, buffers.inputBuffers[0], buffers.centersBuffer,
+            buffers.croppedRgbaBuffer, buffers.packedGrayBuffer
+        ]);
 
         // Demosaic + crop pass (also outputs packed grayscale)
         let pass = encoder.beginComputePass();
@@ -3516,16 +1389,10 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
             }
         }
 
-        const rgbaCropBindGroup = device.createBindGroup({
-            layout: rgbaCropPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: buffers.inputBuffers[0] } },
-                { binding: 2, resource: { buffer: buffers.centersBuffer } },
-                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } },
-                { binding: 4, resource: { buffer: buffers.packedGrayBuffer } }
-            ]
-        });
+        const rgbaCropBindGroup = createBindGroup(device, rgbaCropPipeline, [
+            buffers.paramsBuffer, buffers.inputBuffers[0], buffers.centersBuffer,
+            buffers.croppedRgbaBuffer, buffers.packedGrayBuffer
+        ]);
 
         // RGBA crop pass (also outputs packed grayscale)
         let pass = encoder.beginComputePass();
@@ -3780,41 +1647,21 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         const tDemosaicStart = performance.now();
         if (grayOnly) {
             // Fast path: demosaic directly to grayscale (no RGBA)
-            const demosaicGrayOnlyBindGroup = device.createBindGroup({
-                layout: demosaicGrayOnlyPipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
-                    { binding: 1, resource: { buffer: currentInputBuffer } },
-                    { binding: 2, resource: { buffer: analyzeBuffers.grayBuffer } }
-                ]
-            });
-
+            const demosaicGrayOnlyBindGroup = createBindGroup(device, demosaicGrayOnlyPipeline, [
+                analyzeBuffers.paramsBuffer, currentInputBuffer, analyzeBuffers.grayBuffer
+            ]);
             const encoder = device.createCommandEncoder();
-            const pass = encoder.beginComputePass();
-            pass.setPipeline(demosaicGrayOnlyPipeline);
-            pass.setBindGroup(0, demosaicGrayOnlyBindGroup);
-            pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-            pass.end();
+            addComputePass(encoder, demosaicGrayOnlyPipeline, demosaicGrayOnlyBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
             logGpuSubmit('detectCropAnalyze:demosaic-grayOnly');
             queue.submit([encoder.finish()]);
             dcaDemosaicTime += (performance.now() - tDemosaicStart);
         } else {
             // Full path: demosaic to RGBA (for cropping and stacking)
-            const demosaicBindGroup = device.createBindGroup({
-                layout: demosaicPipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
-                    { binding: 1, resource: { buffer: currentInputBuffer } },
-                    { binding: 2, resource: { buffer: analyzeBuffers.rgbaBuffer } }
-                ]
-            });
-
+            const demosaicBindGroup = createBindGroup(device, demosaicPipeline, [
+                analyzeBuffers.paramsBuffer, currentInputBuffer, analyzeBuffers.rgbaBuffer
+            ]);
             const encoder = device.createCommandEncoder();
-            const pass = encoder.beginComputePass();
-            pass.setPipeline(demosaicPipeline);
-            pass.setBindGroup(0, demosaicBindGroup);
-            pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-            pass.end();
+            addComputePass(encoder, demosaicPipeline, demosaicBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
             logGpuSubmit('detectCropAnalyze:demosaic');
             queue.submit([encoder.finish()]);
             dcaDemosaicTime += (performance.now() - tDemosaicStart);
@@ -3865,36 +1712,18 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Run grayscale pass unless demosaic shader already computed it (grayOnly + needsDemosaic)
     const needsGrayscalePass = !grayOnly || !needsDemosaic;
     if (needsGrayscalePass) {
-        const grayBindGroup = device.createBindGroup({
-            layout: grayscalePipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },
-                { binding: 2, resource: { buffer: analyzeBuffers.grayBuffer } }
-            ]
-        });
-        let pass = encoder.beginComputePass();
-        pass.setPipeline(grayscalePipeline);
-        pass.setBindGroup(0, grayBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-        pass.end();
+        const grayBindGroup = createBindGroup(device, grayscalePipeline, [
+            analyzeBuffers.paramsBuffer, analyzeBuffers.rgbaBuffer, analyzeBuffers.grayBuffer
+        ]);
+        addComputePass(encoder, grayscalePipeline, grayBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
     }
 
     // ===== STEP 2b: Gaussian blur for noise reduction (matches CPU GaussianBlur) =====
     const tBlurStart = performance.now();
-    const blurBindGroup = device.createBindGroup({
-        layout: blurPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.grayBuffer } },
-            { binding: 2, resource: { buffer: analyzeBuffers.blurredGrayBuffer } }
-        ]
-    });
-    let pass = encoder.beginComputePass();
-    pass.setPipeline(blurPipeline);
-    pass.setBindGroup(0, blurBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-    pass.end();
+    const blurBindGroup = createBindGroup(device, blurPipeline, [
+        analyzeBuffers.paramsBuffer, analyzeBuffers.grayBuffer, analyzeBuffers.blurredGrayBuffer
+    ]);
+    addComputePass(encoder, blurPipeline, blurBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
     dcaBlurTime += (performance.now() - tBlurStart);
 
     // ===== STEP 2c: Bounds detection on blurred grayscale =====
@@ -3903,54 +1732,24 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     new Float32Array(boundsParamsData, 12, 1).set([threshold]);
     queue.writeBuffer(analyzeBuffers.boundsParamsBuffer, 0, boundsParamsData);
 
-    const boundsBindGroup = device.createBindGroup({
-        layout: boundsPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: analyzeBuffers.boundsParamsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.blurredGrayBuffer } },  // Use blurred grayscale
-            { binding: 2, resource: { buffer: analyzeBuffers.boundsBuffer } }
-        ]
-    });
+    const boundsBindGroup = createBindGroup(device, boundsPipeline, [
+        analyzeBuffers.boundsParamsBuffer, analyzeBuffers.blurredGrayBuffer, analyzeBuffers.boundsBuffer
+    ]);
+    const boundsReductionBindGroup = createBindGroup(device, boundsReductionPipeline, [
+        analyzeBuffers.reductionParamsBuffer, analyzeBuffers.boundsBuffer, analyzeBuffers.boundsReductionBuffer
+    ]);
 
-    const boundsReductionBindGroup = device.createBindGroup({
-        layout: boundsReductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: analyzeBuffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.boundsBuffer } },
-            { binding: 2, resource: { buffer: analyzeBuffers.boundsReductionBuffer } }
-        ]
-    });
-
-    pass = encoder.beginComputePass();
-    pass.setPipeline(boundsPipeline);
-    pass.setBindGroup(0, boundsBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-    pass.end();
-
-    pass = encoder.beginComputePass();
-    pass.setPipeline(boundsReductionPipeline);
-    pass.setBindGroup(0, boundsReductionBindGroup);
-    pass.dispatchWorkgroups(numWorkgroupsFull, batchSize, 1);
-    pass.end();
+    addComputePass(encoder, boundsPipeline, boundsBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
+    addComputePass(encoder, boundsReductionPipeline, boundsReductionBindGroup, reductionWorkgroups(numWorkgroupsFull, batchSize));
 
     // ===== STEP 3: Compute centroids on GPU (no CPU sync) =====
     queue.writeBuffer(cropBuffers.centroidParamsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, numWorkgroupsFull]));
 
-    const centroidBindGroup = device.createBindGroup({
-        layout: centroidPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.centroidParamsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.boundsReductionBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },
-            { binding: 3, resource: { buffer: cropBuffers.boundsOutputBuffer } }
-        ]
-    });
-
-    pass = encoder.beginComputePass();
-    pass.setPipeline(centroidPipeline);
-    pass.setBindGroup(0, centroidBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
-    pass.end();
+    const centroidBindGroup = createBindGroup(device, centroidPipeline, [
+        cropBuffers.centroidParamsBuffer, analyzeBuffers.boundsReductionBuffer,
+        cropBuffers.centersBuffer, cropBuffers.boundsOutputBuffer
+    ]);
+    addComputePass(encoder, centroidPipeline, centroidBindGroup, [Math.ceil(batchSize / 64), 1, 1]);
 
     logGpuSubmit('detectCropAnalyze:centroid');
     queue.submit([encoder.finish()]);
@@ -3969,21 +1768,11 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         encoder.clearBuffer(cropBuffers.packedGrayBuffer, 0, packedGraySize);
 
         // Crop from the already-demosaiced rgbaBuffer
-        const rgbaCropBindGroup = device.createBindGroup({
-            layout: rgbaCropPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: cropBuffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },  // Source: full demosaiced
-                { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },
-                { binding: 3, resource: { buffer: cropBuffers.croppedRgbaBuffer } },  // Dest: cropped
-                { binding: 4, resource: { buffer: cropBuffers.packedGrayBuffer } }  // Grayscale output (unused in detection)
-            ]
-        });
-        pass = encoder.beginComputePass();
-        pass.setPipeline(rgbaCropPipeline);
-        pass.setBindGroup(0, rgbaCropBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-        pass.end();
+        const rgbaCropBindGroup = createBindGroup(device, rgbaCropPipeline, [
+            cropBuffers.paramsBuffer, analyzeBuffers.rgbaBuffer, cropBuffers.centersBuffer,
+            cropBuffers.croppedRgbaBuffer, cropBuffers.packedGrayBuffer
+        ]);
+        addComputePass(encoder, rgbaCropPipeline, rgbaCropBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
         logGpuSubmit('detectCropAnalyze:crop');
         queue.submit([encoder.finish()]);
         dcaCropTime += (performance.now() - tCropStart);
@@ -3999,95 +1788,38 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
 
     if (grayOnly) {
         // Offset Tenengrad: reads from full-frame grayscale with per-frame center offsets
-        // Params: srcWidth, srcHeight, cropSize, batchSize
         queue.writeBuffer(cropBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, cropSize, batchSize]));
-
-        const offsetLapBindGroup = device.createBindGroup({
-            layout: offsetTenengradPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: cropBuffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: analyzeBuffers.grayBuffer } },  // Full-frame grayscale
-                { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },  // Per-frame centers
-                { binding: 3, resource: { buffer: cropBuffers.tenengradBuffer } },
-                { binding: 4, resource: { buffer: cropBuffers.laplacianBuffer } }
-            ]
-        });
-
-        pass = encoder.beginComputePass();
-        pass.setPipeline(offsetTenengradPipeline);
-        pass.setBindGroup(0, offsetLapBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-        pass.end();
+        const offsetLapBindGroup = createBindGroup(device, offsetTenengradPipeline, [
+            cropBuffers.paramsBuffer, analyzeBuffers.grayBuffer, cropBuffers.centersBuffer,
+            cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer
+        ]);
+        addComputePass(encoder, offsetTenengradPipeline, offsetLapBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
     } else {
         // Standard path: grayscale from cropped RGBA + tenengrad on cropped
         queue.writeBuffer(cropBuffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
-
-        const cropGrayBindGroup = device.createBindGroup({
-            layout: grayscalePipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
-                { binding: 1, resource: { buffer: cropBuffers.croppedRgbaBuffer } },
-                { binding: 2, resource: { buffer: cropBuffers.grayBuffer } }
-            ]
-        });
-
-        const lapBindGroup = device.createBindGroup({
-            layout: tenengradPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
-                { binding: 1, resource: { buffer: cropBuffers.grayBuffer } },
-                { binding: 2, resource: { buffer: cropBuffers.tenengradBuffer } },
-                { binding: 3, resource: { buffer: cropBuffers.laplacianBuffer } }
-            ]
-        });
-
-        pass = encoder.beginComputePass();
-        pass.setPipeline(grayscalePipeline);
-        pass.setBindGroup(0, cropGrayBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-        pass.end();
-
-        pass = encoder.beginComputePass();
-        pass.setPipeline(tenengradPipeline);
-        pass.setBindGroup(0, lapBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-        pass.end();
+        const cropGrayBindGroup = createBindGroup(device, grayscalePipeline, [
+            cropBuffers.grayParamsBuffer, cropBuffers.croppedRgbaBuffer, cropBuffers.grayBuffer
+        ]);
+        const lapBindGroup = createBindGroup(device, tenengradPipeline, [
+            cropBuffers.grayParamsBuffer, cropBuffers.grayBuffer, cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer
+        ]);
+        addComputePass(encoder, grayscalePipeline, cropGrayBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
+        addComputePass(encoder, tenengradPipeline, lapBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
     }
 
     // Reduction is the same for both paths (reads from tenengradBuffer)
-    const reductionBindGroup = device.createBindGroup({
-        layout: reductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: cropBuffers.tenengradBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.laplacianBuffer } },
-            { binding: 3, resource: { buffer: cropBuffers.reductionBuffer } }
-        ]
-    });
-
-    pass = encoder.beginComputePass();
-    pass.setPipeline(reductionPipeline);
-    pass.setBindGroup(0, reductionBindGroup);
-    pass.dispatchWorkgroups(numWorkgroupsCrop, batchSize, 1);
-    pass.end();
+    const reductionBindGroup = createBindGroup(device, reductionPipeline, [
+        cropBuffers.reductionParamsBuffer, cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer, cropBuffers.reductionBuffer
+    ]);
+    addComputePass(encoder, reductionPipeline, reductionBindGroup, reductionWorkgroups(numWorkgroupsCrop, batchSize));
 
     // Final sharpness reduction: sum all workgroup partials into 2 floats per frame
     // This reduces readback from ~1.1MB to 800 bytes per batch
     queue.writeBuffer(cropBuffers.sharpnessFinalParamsBuffer, 0, new Uint32Array([numWorkgroupsCrop, batchSize, cropPixelCount, 0]));
-    const sharpnessFinalBindGroup = device.createBindGroup({
-        layout: sharpnessFinalPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.sharpnessFinalParamsBuffer } },
-            { binding: 1, resource: { buffer: cropBuffers.reductionBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.sharpnessFinalBuffer } }
-        ]
-    });
-
-    pass = encoder.beginComputePass();
-    pass.setPipeline(sharpnessFinalPipeline);
-    pass.setBindGroup(0, sharpnessFinalBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
-    pass.end();
+    const sharpnessFinalBindGroup = createBindGroup(device, sharpnessFinalPipeline, [
+        cropBuffers.sharpnessFinalParamsBuffer, cropBuffers.reductionBuffer, cropBuffers.sharpnessFinalBuffer
+    ]);
+    addComputePass(encoder, sharpnessFinalPipeline, sharpnessFinalBindGroup, [Math.ceil(batchSize / 64), 1, 1]);
 
     // Select readback buffers based on generation (N-buffering for concurrent batches)
     const bufferGen = cachedCropConfig?.bufferGen || 0;
@@ -4367,21 +2099,9 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             new Float32Array(paramsData)[6] = 1.0;  // No stretch needed
             queue.writeBuffer(paramsBuffer, 0, paramsData);
 
-            const bindGroup = device.createBindGroup({
-                layout: demosaicPipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: paramsBuffer } },
-                    { binding: 1, resource: { buffer: inputBuffer } },
-                    { binding: 2, resource: { buffer: outputBuffer } }
-                ]
-            });
-
+            const bindGroup = createBindGroup(device, demosaicPipeline, [paramsBuffer, inputBuffer, outputBuffer]);
             const encoder = device.createCommandEncoder();
-            const pass = encoder.beginComputePass();
-            pass.setPipeline(demosaicPipeline);
-            pass.setBindGroup(0, bindGroup);
-            pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), 1);
-            pass.end();
+            addComputePass(encoder, demosaicPipeline, bindGroup, imageWorkgroups(srcWidth, srcHeight, 1));
             encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, pixelCount * outputBytesPerPixel);
             logGpuSubmit('singleFrame:demosaic');
             queue.submit([encoder.finish()]);

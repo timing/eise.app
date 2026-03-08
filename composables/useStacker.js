@@ -346,7 +346,7 @@ export function useStacker() {
         emit('set-caption', 'Initializing GPU workers...');
 
         // Initialize GPU workers (no OpenCV worker needed - alignment prep is pure JS)
-        const gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
+        const gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
         const gpuStackWorker = new Worker(workerUrl('/webgpu_worker.js'));
 
         try {

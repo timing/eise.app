@@ -549,7 +549,7 @@ export function useSerReader() {
         if (gpuAnalyzeWorker && gpuWorkerReady) return true;
         if (gpuInitFailed) return false; // Don't retry if GPU already known to be unavailable
 
-        gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
+        gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
 
         return new Promise((resolve) => {
             const timeout = setTimeout(() => {

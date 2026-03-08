@@ -72,7 +72,7 @@ async function initGpuWorker() {
 	if (gpuWorker) return gpuReady;
 
 	return new Promise((resolve) => {
-		gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
+		gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
 		gpuWorker.onmessage = (e) => {
 			if (e.data.type === 'ready') {
 				gpuReady = true;

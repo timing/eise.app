@@ -1581,7 +1581,7 @@ export function useAviReader() {
     async function initializeGpuWorker() {
         if (gpuReady) return true;
 
-        gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
+        gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
 
         try {
             await new Promise((resolve, reject) => {

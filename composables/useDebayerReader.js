@@ -204,7 +204,7 @@ export function useDebayerReader() {
         if (gpuWorker && gpuWorkerReady) return true;
         if (gpuInitFailed) return false;
 
-        gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
+        gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
 
         return new Promise((resolve) => {
             const timeout = setTimeout(() => {
