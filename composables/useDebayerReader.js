@@ -310,10 +310,9 @@ export function useDebayerReader() {
      * @param {Object} options - Options from analysis phase
      * @param {Object} options.cropRegion - Crop region { size } or null
      * @param {number} options.analysisStartTime - Start time for timing stats
-     * @param {boolean} options.useVngDemosaic - Whether to use VNG demosaic
      */
     function createFrameReReader(options = {}) {
-        const { cropRegion = null, analysisStartTime = performance.now(), useVngDemosaic = false } = options;
+        const { cropRegion = null, analysisStartTime = performance.now() } = options;
 
         // Build header object from metadata (compatible with what useStacker expects)
         const header = {
@@ -330,7 +329,6 @@ export function useDebayerReader() {
             bayerChoice,   // OpenCV pattern name from module state
             cropRegion,
             analysisStartTime,
-            useVngDemosaic,
 
             /**
              * Re-read a single frame and return raw buffer with center coordinates
@@ -770,7 +768,6 @@ export function useDebayerReader() {
             drizzleScale = 1.5,
             noiseRobustAlignment = false,
             surfaceMode = false,
-            useVngDemosaic = true,
         } = options;
 
         console.log('[useDebayerReader] processFile called - full pipeline');
@@ -1181,8 +1178,7 @@ export function useDebayerReader() {
         // Create frameReReader with analysis results
         const frameReReader = createFrameReReader({
             cropRegion,
-            analysisStartTime: analysisStats.startTime,
-            useVngDemosaic
+            analysisStartTime: analysisStats.startTime
         });
 
         // Manual threshold handling - emit to app.vue and return

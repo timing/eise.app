@@ -1552,10 +1552,10 @@ function cleanupGPUBuffers() {
     }
 }
 
-// Export for use in worker
-if (typeof self !== 'undefined') {
-    self.initWebGPU = initWebGPU;
-    self.matchTemplatesGPU = matchTemplatesGPU;
-    self.matchTemplatesBatchGPU = matchTemplatesBatchGPU;
-    self.cleanupGPUBuffers = cleanupGPUBuffers;
-}
+// ES6 exports for module worker
+export {
+    initWebGPU,
+    matchTemplatesGPU,
+    matchTemplatesBatchGPU,
+    cleanupGPUBuffers
+};

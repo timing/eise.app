@@ -1,6 +1,10 @@
 // WebGPU-accelerated frame stacking with local de-warping
 // Handles: displacement map generation, frame warping, and accumulation
 
+// Import VNG-only demosaic shader for stacking (always high quality)
+// and grayscale extraction shader for template matching
+import { demosaicVngShader, rgbaToGrayU8Shader } from './gpu/shaders.js';
+
 let stackDevice = null;
 let stackQueue = null;
 let warpPipeline = null;
@@ -263,6 +267,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+// VNG demosaic pipeline and buffers
+let vngDemosaicPipeline = null;
+let rgbaToGrayPipeline = null;
+let cachedDemosaicBuffers = null;
+let cachedDemosaicConfig = null;
+
 async function initStackingGPU() {
     if (isStackingReady) return true;
 
@@ -325,9 +335,29 @@ async function initStackingGPU() {
             compute: { module: shaderModule, entryPoint: 'main' }
         });
 
+        // VNG demosaic pipeline for stacking
+        const vngShaderModule = stackDevice.createShaderModule({
+            code: demosaicVngShader
+        });
+
+        vngDemosaicPipeline = stackDevice.createComputePipeline({
+            layout: 'auto',
+            compute: { module: vngShaderModule, entryPoint: 'main' }
+        });
+
+        // RGBA to u8 grayscale pipeline for template matching
+        const grayShaderModule = stackDevice.createShaderModule({
+            code: rgbaToGrayU8Shader
+        });
+
+        rgbaToGrayPipeline = stackDevice.createComputePipeline({
+            layout: 'auto',
+            compute: { module: grayShaderModule, entryPoint: 'main' }
+        });
+
         isStackingReady = true;
         stackDeviceLost = false;
-        console.log('WebGPU stacking initialized');
+        console.log('WebGPU stacking initialized (with VNG demosaic)');
         return true;
     } catch (e) {
         console.error('WebGPU stacking init error:', e);
@@ -348,6 +378,219 @@ reinitializeStackingGpu = async function() {
         stackReinitializing = false;
     }
 };
+
+// Get or create demosaic buffers for VNG demosaicing
+function getDemosaicBuffers(width, height, batchSize, bitDepth) {
+    const pixelCount = width * height;
+    // Input: raw Bayer (1 byte/pixel for 8-bit, 2 bytes/pixel for 16-bit)
+    const inputBytesPerPixel = bitDepth > 8 ? 2 : 1;
+    const inputSize = pixelCount * batchSize * inputBytesPerPixel;
+    // Output: Float32 RGBA (16 bytes/pixel)
+    const outputSize = pixelCount * batchSize * 16;
+
+    const requiredConfig = { inputSize, outputSize, batchSize };
+
+    if (cachedDemosaicBuffers && cachedDemosaicConfig &&
+        cachedDemosaicConfig.inputSize >= inputSize &&
+        cachedDemosaicConfig.outputSize >= outputSize) {
+        return cachedDemosaicBuffers;
+    }
+
+    // Cleanup old buffers
+    if (cachedDemosaicBuffers) {
+        Object.values(cachedDemosaicBuffers).forEach(buf => {
+            if (buf && buf.destroy) buf.destroy();
+        });
+    }
+
+    const align4 = (size) => Math.ceil(size / 4) * 4;
+    const headroom = 1.1;
+
+    cachedDemosaicBuffers = {
+        paramsBuffer: stackDevice.createBuffer({
+            size: 32,  // 8 u32/f32
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        }),
+        inputBuffer: stackDevice.createBuffer({
+            size: align4(Math.ceil(inputSize * headroom)),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        }),
+        outputBuffer: stackDevice.createBuffer({
+            size: align4(Math.ceil(outputSize * headroom)),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+        })
+    };
+
+    cachedDemosaicConfig = requiredConfig;
+    return cachedDemosaicBuffers;
+}
+
+/**
+ * VNG demosaic a batch of raw Bayer frames
+ * @param {Array} frames - Array of {data: Uint8Array|Uint16Array} raw Bayer frames
+ * @param {number} width - Frame width
+ * @param {number} height - Frame height
+ * @param {number} bayerPattern - Bayer pattern (0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG)
+ * @param {number} bitDepth - Bit depth (8 or 16)
+ * @param {number} scale - Stretch scale for 16-bit data (default 1.0)
+ * @returns {Float32Array} - Demosaiced RGBA data (all frames concatenated)
+ */
+async function demosaicVngBatch(frames, width, height, bayerPattern, bitDepth, scale = 1.0) {
+    if (!stackDevice || !vngDemosaicPipeline) {
+        throw new Error('Stacking GPU not initialized for VNG demosaic');
+    }
+
+    const batchSize = frames.length;
+    const pixelCount = width * height;
+    const buffers = getDemosaicBuffers(width, height, batchSize, bitDepth);
+
+    // Pack raw Bayer data into input buffer
+    const bytesPerPixel = bitDepth > 8 ? 2 : 1;
+    const inputData = new Uint8Array(pixelCount * batchSize * bytesPerPixel);
+    for (let i = 0; i < frames.length; i++) {
+        const frame = frames[i];
+        const offset = i * pixelCount * bytesPerPixel;
+        if (frame.data instanceof Uint16Array) {
+            inputData.set(new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength), offset);
+        } else {
+            inputData.set(frame.data, offset);
+        }
+    }
+    stackQueue.writeBuffer(buffers.inputBuffer, 0, inputData);
+
+    // Set params
+    const paramsData = new ArrayBuffer(32);
+    new Uint32Array(paramsData).set([width, height, batchSize, bayerPattern, bitDepth, 0, 0, 0]);
+    new Float32Array(paramsData)[5] = scale;
+    stackQueue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
+
+    // Create bind group and run shader
+    const bindGroup = stackDevice.createBindGroup({
+        layout: vngDemosaicPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: buffers.paramsBuffer } },
+            { binding: 1, resource: { buffer: buffers.inputBuffer } },
+            { binding: 2, resource: { buffer: buffers.outputBuffer } }
+        ]
+    });
+
+    const encoder = stackDevice.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(vngDemosaicPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(
+        Math.ceil(width / 16),
+        Math.ceil(height / 16),
+        batchSize
+    );
+    pass.end();
+
+    // Readback
+    const readbackBuffer = stackDevice.createBuffer({
+        size: pixelCount * batchSize * 16,  // Float32 RGBA
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    encoder.copyBufferToBuffer(buffers.outputBuffer, 0, readbackBuffer, 0, pixelCount * batchSize * 16);
+
+    stackQueue.submit([encoder.finish()]);
+
+    await safeStackMapAsync(readbackBuffer, GPUMapMode.READ);
+    const result = new Float32Array(readbackBuffer.getMappedRange().slice(0));
+    readbackBuffer.unmap();
+    readbackBuffer.destroy();
+
+    return result;
+}
+
+/**
+ * Extract u8 grayscale from Float32 RGBA for template matching
+ * @param {Float32Array} rgbaData - VNG-demosaiced RGBA data (all frames concatenated)
+ * @param {number} width - Frame width
+ * @param {number} height - Frame height
+ * @param {number} batchSize - Number of frames
+ * @returns {Uint8Array} - Grayscale data (one byte per pixel, all frames concatenated)
+ */
+async function extractGrayscale(rgbaData, width, height, batchSize) {
+    if (!stackDevice || !rgbaToGrayPipeline) {
+        throw new Error('Stacking GPU not initialized for grayscale extraction');
+    }
+
+    const pixelCount = width * height;
+    const totalPixels = pixelCount * batchSize;
+    // Buffer size must be multiple of 4 for u32 storage
+    const bufferSize = Math.ceil(totalPixels / 4) * 4;
+
+    // Create buffers
+    const rgbaBuffer = stackDevice.createBuffer({
+        size: rgbaData.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+    const grayBuffer = stackDevice.createBuffer({
+        size: bufferSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+
+    const paramsBuffer = stackDevice.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    // Upload RGBA data
+    stackQueue.writeBuffer(rgbaBuffer, 0, rgbaData);
+
+    // Set params
+    const paramsData = new Uint32Array([width, height, batchSize, 0]);
+    stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    // Clear buffer (atomicOr needs zeros)
+    const zeroData = new Uint8Array(bufferSize);
+    stackQueue.writeBuffer(grayBuffer, 0, zeroData);
+
+    // Create bind group and run shader
+    const bindGroup = stackDevice.createBindGroup({
+        layout: rgbaToGrayPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: paramsBuffer } },
+            { binding: 1, resource: { buffer: rgbaBuffer } },
+            { binding: 2, resource: { buffer: grayBuffer } }
+        ]
+    });
+
+    const encoder = stackDevice.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(rgbaToGrayPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(
+        Math.ceil(width / 16),
+        Math.ceil(height / 16),
+        batchSize
+    );
+    pass.end();
+
+    // Readback
+    const readbackBuffer = stackDevice.createBuffer({
+        size: bufferSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    encoder.copyBufferToBuffer(grayBuffer, 0, readbackBuffer, 0, bufferSize);
+
+    stackQueue.submit([encoder.finish()]);
+
+    await safeStackMapAsync(readbackBuffer, GPUMapMode.READ);
+    // Return only the actual pixels (trim padding)
+    const fullResult = new Uint8Array(readbackBuffer.getMappedRange());
+    const result = new Uint8Array(fullResult.slice(0, totalPixels));
+    readbackBuffer.unmap();
+
+    // Cleanup
+    rgbaBuffer.destroy();
+    grayBuffer.destroy();
+    paramsBuffer.destroy();
+    readbackBuffer.destroy();
+
+    return result;
+}
 
 function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
     const inPixels = inWidth * inHeight;
@@ -762,15 +1005,23 @@ function cleanupStackingBuffers() {
         cachedStackBuffers = null;
         cachedStackConfig = null;
     }
+    if (cachedDemosaicBuffers) {
+        Object.values(cachedDemosaicBuffers).forEach(buf => {
+            if (buf && buf.destroy) buf.destroy();
+        });
+        cachedDemosaicBuffers = null;
+        cachedDemosaicConfig = null;
+    }
 }
 
-// Export
-if (typeof self !== 'undefined') {
-    self.initStackingGPU = initStackingGPU;
-    self.getStackingBuffers = getStackingBuffers;
-    self.warpAndAccumulateFrame = warpAndAccumulateFrame;
-    self.warpAndAccumulateBatch = warpAndAccumulateBatch;
-    self.clearAccumulators = clearAccumulators;
-    self.readAccumulators = readAccumulators;
-    self.cleanupStackingBuffers = cleanupStackingBuffers;
-}
+// ES6 exports for module worker
+export {
+    initStackingGPU,
+    getStackingBuffers,
+    clearAccumulators,
+    warpAndAccumulateBatch,
+    readAccumulators,
+    demosaicVngBatch,
+    extractGrayscale,
+    cleanupStackingBuffers
+};

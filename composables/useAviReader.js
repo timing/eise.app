@@ -631,7 +631,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null, surfaceMode = false, useVngDemosaic = true, preParsedHeader = null) {
+    async function readAviFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null, surfaceMode = false, preParsedHeader = null) {
         // Reset comparison export captures for new processing
         resetCaptures();
 

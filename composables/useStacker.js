@@ -178,6 +178,46 @@ export function useStacker() {
     }
 
     /**
+     * Crop raw Bayer data to a square region centered at (centerX, centerY)
+     * Ensures crop starts at even coordinates to preserve Bayer pattern
+     * @param {Uint8Array|Uint16Array} data - Raw Bayer data (single channel)
+     * @param {number} srcWidth - Source image width
+     * @param {number} srcHeight - Source image height
+     * @param {number} cropSize - Size of square crop region
+     * @param {number} centerX - Center X coordinate
+     * @param {number} centerY - Center Y coordinate
+     * @returns {Uint8Array|Uint16Array} Cropped Bayer data
+     */
+    function cropRawBayer(data, srcWidth, srcHeight, cropSize, centerX, centerY) {
+        const halfCrop = Math.floor(cropSize / 2);
+
+        // Calculate crop start, ensuring even coordinates for Bayer alignment
+        let startX = Math.round(centerX - halfCrop);
+        let startY = Math.round(centerY - halfCrop);
+
+        // Clamp to image bounds
+        startX = Math.max(0, Math.min(srcWidth - cropSize, startX));
+        startY = Math.max(0, Math.min(srcHeight - cropSize, startY));
+
+        // Ensure even coordinates to preserve Bayer pattern
+        startX = startX & ~1;  // Round down to even
+        startY = startY & ~1;
+
+        // Create output buffer of same type as input
+        const OutputType = data instanceof Uint16Array ? Uint16Array : Uint8Array;
+        const cropped = new OutputType(cropSize * cropSize);
+
+        // Copy crop region row by row
+        for (let y = 0; y < cropSize; y++) {
+            const srcOffset = (startY + y) * srcWidth + startX;
+            const dstOffset = y * cropSize;
+            cropped.set(data.subarray(srcOffset, srcOffset + cropSize), dstOffset);
+        }
+
+        return cropped;
+    }
+
+    /**
      * Create alignment points grid (pure JS, no OpenCV)
      * PSS defaults: patchSize=20, searchRadius=8 (planets) or 34 (surface)
      */
@@ -310,7 +350,6 @@ export function useStacker() {
         const isImageFile = frameReReader.fileType === 'image' || frameReReader.rgbaFrames;
 
         let cropSize, srcWidth, srcHeight, bayerPattern;
-        const useVng = frameReReader.useVngDemosaic ?? false;  // VNG demosaic for stacking
 
         if (isSerFile) {
             const { header, bayerChoice, cropRegion } = frameReReader;
@@ -350,7 +389,7 @@ export function useStacker() {
 
         // Initialize GPU workers (no OpenCV worker needed - alignment prep is pure JS)
         const gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
-        const gpuStackWorker = new Worker(workerUrl('/webgpu_stacking_worker.js'));
+        const gpuStackWorker = new Worker(workerUrl('/webgpu_stacking_worker.js'), { type: 'module' });
 
         try {
             // Init GPU workers in parallel
@@ -365,6 +404,11 @@ export function useStacker() {
                 }),
                 new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => reject(new Error('GPU stack worker timeout')), 10000);
+                    gpuStackWorker.onerror = (e) => {
+                        clearTimeout(timeout);
+                        console.error('GPU stack worker error:', e);
+                        reject(new Error(`GPU stack worker load error: ${e.message}`));
+                    };
                     gpuStackWorker.onmessage = (e) => {
                         if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
                         else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
@@ -465,8 +509,7 @@ export function useStacker() {
                         bayerPattern,
                         threshold: 0.1,
                         requestId,
-                        metadataOnly: false, // Get float32 data for stacking
-                        useVng  // VNG demosaic for better quality during stacking
+                        metadataOnly: false // Get float32 data for stacking
                     });
                 });
             }
@@ -544,7 +587,10 @@ export function useStacker() {
                     alignmentPoints,
                     patchSize,
                     refBrightness,
-                    minApQuality: getMinApQuality()
+                    minApQuality: getMinApQuality(),
+                    bayerPattern,
+                    bitDepth: is16bit ? 16 : 8,
+                    bayerScale: is16bit ? (65535 / ((1 << (frameReReader.header?.pixelDepth || 16)) - 1)) : 1.0
                 });
             });
             addLog('GPU stacker initialized');
@@ -682,119 +728,113 @@ export function useStacker() {
                     capturePreCropFrame(rawFrame.data, srcWidth, srcHeight, globalIndex, frameCount, bayerPattern);
                 }
 
-                // Calculate shifts for batch via GPU template matching
-                // Use pre-computed packed grayscale from GPU demosaic shader (8-bit, faster)
-                const t0Gray = performance.now();
-                const frameGrayDatas = gpuResults.map(r => new Uint8Array(r.packedGrayBuffer || r.grayBuffer));
-                stackingStats.grayscaleMs.push(performance.now() - t0Gray);
-
-                // For surface mode, pass searchOffset to shift search region without affecting template extraction
+                // For surface mode, pass searchOffset to shift search region
                 const searchOffset = surfaceMode && (cumulativeDrift.dx !== 0 || cumulativeDrift.dy !== 0)
                     ? { dx: cumulativeDrift.dx, dy: cumulativeDrift.dy }
                     : null;
 
-                const t0Match = performance.now();
-                const batchShifts = await new Promise((resolve, reject) => {
-                    const requestId = batchStart;
-                    const handler = (e) => {
-                        if (e.data.requestId !== requestId) return;
-                        gpuStackWorker.removeEventListener('message', handler);
-                        if (e.data.type === 'batch-result') resolve(e.data.allShifts);
-                        else if (e.data.type === 'batch-error') reject(new Error(e.data.error));
-                    };
-                    gpuStackWorker.addEventListener('message', handler);
-                    gpuStackWorker.postMessage({
-                        type: 'match-templates-batch',
-                        requestId,
-                        refGrayData,
-                        frameGrayDatas,
-                        width: cropSize,
-                        height: cropSize,
-                        alignmentPoints,
-                        patchSize,
-                        searchRadius,
-                        searchOffset,
-                        noiseRobustAlignment
-                    });
-                });
-                stackingStats.templateMatchMs.push(performance.now() - t0Match);
-
-                // Update cumulative drift from last frame's shifts (surface mode)
-                if (surfaceMode && batchShifts.length > 0) {
-                    const lastFrameShifts = batchShifts[batchShifts.length - 1];
-                    const goodShifts = lastFrameShifts.filter(s => s.quality > 0.3);
-                    if (goodShifts.length >= 3) {
-                        // Use median of good shifts as current drift estimate
-                        const dxValues = goodShifts.map(s => s.dx).sort((a, b) => a - b);
-                        const dyValues = goodShifts.map(s => s.dy).sort((a, b) => a - b);
-                        const medianIdx = Math.floor(goodShifts.length / 2);
-                        cumulativeDrift = {
-                            dx: dxValues[medianIdx],
-                            dy: dyValues[medianIdx]
-                        };
-                    }
-                }
-
-                // Send batch to GPU stacker
-                // 16-bit: Float32Array (0.0-1.0) with inputFormat=0
-                // 8-bit: Uint8Array (0-255) with inputFormat=1 (GPU converts to float)
-                // For 16-bit: analysis uses 0.5 stretch, boost to 0.9 for stacking (factor = 0.9/0.5)
-                const stackingBoost = 0.9 / 0.5;
-                const batchForStacker = gpuResults.map((r, i) => {
-                    if (is16bit) {
-                        const src = new Float32Array(r.float32Buffer);
-                        const boosted = new Float32Array(src.length);
-                        for (let j = 0; j < src.length; j += 4) {
-                            boosted[j] = Math.min(1.0, src[j] * stackingBoost);
-                            boosted[j + 1] = Math.min(1.0, src[j + 1] * stackingBoost);
-                            boosted[j + 2] = Math.min(1.0, src[j + 2] * stackingBoost);
-                            boosted[j + 3] = src[j + 3]; // alpha unchanged
-                        }
-                        return { rgbaBuffer: boosted, sharpness: batchFrames[i].sharpness };
-                    } else {
-                        return { rgbaBuffer: new Uint8Array(r.uint8Buffer), sharpness: batchFrames[i].sharpness };
-                    }
-                });
                 const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
+                const t0Stack = performance.now();
 
-                // DEBUG: Check values being sent to stacking worker
-                if (is16bit && batchForStacker.length > 0 && processedCount === 0) {
-                    const buf = batchForStacker[0].rgbaBuffer;
-                    const centerIdx = Math.floor(buf.length / 8) * 4; // center of image
-                    console.log(`[Stacker DEBUG] First batch to stacker:`);
-                    console.log(`  - float32Buffer byteLength: ${gpuResults[0].float32Buffer?.byteLength}`);
-                    console.log(`  - rgbaBuffer type: ${buf.constructor.name}, length: ${buf.length}`);
-                    console.log(`  - First pixel: R=${buf[0]}, G=${buf[1]}, B=${buf[2]}, A=${buf[3]}`);
-                    console.log(`  - Center pixel: R=${buf[centerIdx]}, G=${buf[centerIdx+1]}, B=${buf[centerIdx+2]}, A=${buf[centerIdx+3]}`);
-                    // Check for reasonable values
-                    let nonZero = 0, max = 0;
-                    for (let j = 0; j < Math.min(1000, buf.length); j++) {
-                        if (buf[j] > 0) nonZero++;
-                        if (buf[j] > max) max = buf[j];
-                    }
-                    console.log(`  - First 1000 values: ${nonZero} non-zero, max=${max}`);
-                }
+                // Choose path based on input type: raw Bayer vs already-demosaiced RGBA
+                const isRawBayer = bayerPattern >= 0;
 
-                const t0Accum = performance.now();
-                await new Promise((resolve, reject) => {
-                    const handler = (e) => {
-                        if (e.data.type === 'stack-batch-done') {
-                            gpuStackWorker.removeEventListener('message', handler);
-                            resolve();
-                        } else if (e.data.type === 'stack-frame-error') {
-                            gpuStackWorker.removeEventListener('message', handler);
-                            reject(new Error(e.data.error));
-                        }
-                    };
-                    gpuStackWorker.addEventListener('message', handler);
-                    gpuStackWorker.postMessage({
-                        type: 'stack-frame-batch',
-                        frames: batchForStacker,
-                        shifts: batchShifts,
-                        frameWeights: batchWeights
+                if (isRawBayer) {
+                    // Raw Bayer: crop and send to worker for VNG demosaic + matching + stacking
+                    const croppedBayerFrames = rawBatch.frames.map((rawFrame, i) => {
+                        const center = rawBatch.centers[i];
+                        const croppedBayer = cropRawBayer(
+                            rawFrame.data,
+                            srcWidth, srcHeight,
+                            cropSize,
+                            center.x, center.y
+                        );
+                        return {
+                            bayerData: croppedBayer,
+                            sharpness: batchFrames[i].sharpness
+                        };
                     });
-                });
-                stackingStats.accumulateMs.push(performance.now() - t0Accum);
+
+                    await new Promise((resolve, reject) => {
+                        const handler = (e) => {
+                            if (e.data.type === 'stack-batch-done') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                resolve();
+                            } else if (e.data.type === 'stack-frame-error') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                reject(new Error(e.data.error));
+                            }
+                        };
+                        gpuStackWorker.addEventListener('message', handler);
+                        gpuStackWorker.postMessage({
+                            type: 'stack-frame-batch',
+                            frames: croppedBayerFrames,
+                            frameWeights: batchWeights,
+                            refGrayData,
+                            searchRadius,
+                            searchOffset,
+                            noiseRobustAlignment
+                        });
+                    });
+                } else {
+                    // Already RGBA (images, MONO): use bilinear-demosaiced data from analyze worker
+                    // Get grayscale for matching from analyze results
+                    const frameGrayDatas = gpuResults.map(r => new Uint8Array(r.packedGrayBuffer || r.grayBuffer));
+
+                    // Template matching
+                    const batchShifts = await new Promise((resolve, reject) => {
+                        const requestId = batchStart;
+                        const handler = (e) => {
+                            if (e.data.requestId !== requestId) return;
+                            gpuStackWorker.removeEventListener('message', handler);
+                            if (e.data.type === 'batch-result') resolve(e.data.allShifts);
+                            else if (e.data.type === 'batch-error') reject(new Error(e.data.error));
+                        };
+                        gpuStackWorker.addEventListener('message', handler);
+                        gpuStackWorker.postMessage({
+                            type: 'match-templates-batch',
+                            requestId,
+                            refGrayData,
+                            frameGrayDatas,
+                            width: cropSize,
+                            height: cropSize,
+                            alignmentPoints,
+                            patchSize,
+                            searchRadius,
+                            searchOffset,
+                            noiseRobustAlignment
+                        });
+                    });
+
+                    // Prepare RGBA frames for stacking
+                    const rgbaFrames = gpuResults.map((r, i) => {
+                        if (is16bit) {
+                            return { rgbaBuffer: new Float32Array(r.float32Buffer), sharpness: batchFrames[i].sharpness };
+                        } else {
+                            return { rgbaBuffer: new Uint8Array(r.uint8Buffer), sharpness: batchFrames[i].sharpness };
+                        }
+                    });
+
+                    await new Promise((resolve, reject) => {
+                        const handler = (e) => {
+                            if (e.data.type === 'stack-batch-done') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                resolve();
+                            } else if (e.data.type === 'stack-frame-error') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                reject(new Error(e.data.error));
+                            }
+                        };
+                        gpuStackWorker.addEventListener('message', handler);
+                        gpuStackWorker.postMessage({
+                            type: 'stack-frame-batch-rgba',
+                            frames: rgbaFrames,
+                            shifts: batchShifts,
+                            frameWeights: batchWeights
+                        });
+                    });
+                }
+                stackingStats.accumulateMs.push(performance.now() - t0Stack);
 
                 processedCount += batchFrames.length;
                 const progress = (processedCount / frameCount) * 90;
@@ -1001,7 +1041,7 @@ export function useStacker() {
         addLog('Initializing GPU worker...');
         emit('set-caption', 'Initializing GPU worker...');
 
-        const gpuWorker = new Worker(workerUrl('/webgpu_stacking_worker.js'));
+        const gpuWorker = new Worker(workerUrl('/webgpu_stacking_worker.js'), { type: 'module' });
 
         try {
             // Init WebGPU worker

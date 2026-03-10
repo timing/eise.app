@@ -689,7 +689,6 @@ async function processFiles(files) {
 			drizzleScale: effectiveDrizzleScale.value,
 			noiseRobustAlignment: effectiveNoiseRobust.value,
 			surfaceMode: surfaceMode.value,
-			useVngDemosaic: useVngDemosaic.value,
 		});
 		return;
 	}
@@ -727,7 +726,6 @@ async function processFiles(files) {
 				drizzleScale: effectiveDrizzleScale.value,
 				noiseRobustAlignment: effectiveNoiseRobust.value,
 				surfaceMode: surfaceMode.value,
-				useVngDemosaic: useVngDemosaic.value,
 			});
 			return;
 		}
@@ -772,14 +770,13 @@ async function processFiles(files) {
 						drizzleScale: effectiveDrizzleScale.value,
 						noiseRobustAlignment: effectiveNoiseRobust.value,
 						surfaceMode: surfaceMode.value,
-						useVngDemosaic: useVngDemosaic.value,
 					});
 					return;
 				}
 
 				// Non-Bayer AVI: use old reader for uncompressed BGR or MJPEG
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, useVngDemosaic.value, formatInfo.aviHeader);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, formatInfo.aviHeader);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);

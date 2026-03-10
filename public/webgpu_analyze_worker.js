@@ -3,7 +3,7 @@
 
 // Import WGSL shaders from separate module
 import {
-    demosaicShader,
+    demosaicBilinearShader,
     grayscaleShader,
     grayscaleFloat32Shader,
     tenengradShader,
@@ -430,7 +430,7 @@ async function init() {
     });
 
     // Create all compute pipelines
-    demosaicPipeline = await createPipeline(device, demosaicShader, 'demosaic');
+    demosaicPipeline = await createPipeline(device, demosaicBilinearShader, 'demosaic');
     demosaicCropPipeline = await createPipeline(device, demosaicCropShader, 'demosaicCrop');
     demosaicGrayPipeline = await createPipeline(device, demosaicGrayShader, 'demosaicGray');
     demosaicGrayOnlyPipeline = await createPipeline(device, demosaicGrayOnlyShader, 'demosaicGrayOnly');
@@ -561,7 +561,7 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         );
 
     cachedAnalyzeBuffers = {
-        paramsBuffer: uniformBuffer(device, 32),  // 8 u32 values for demosaic params including useVng
+        paramsBuffer: uniformBuffer(device, 32),  // 8 u32 values for demosaic params
         inputBuffers: createBufferArray(pixelBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
         // RGBA buffer: 4x larger for 16-bit to hold Float32 output (preserves precision for stacking)
         rgbaBuffer: storageBuffer(device, rgbaBufferSize, { copySrc: true, copyDst: true }),
@@ -620,7 +620,7 @@ function cleanupAnalyzeBuffers() {
     }
 }
 
-async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false, useVng = true, grayOnly = false) {
+async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false, grayOnly = false) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -672,8 +672,9 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
 
         // Demosaic params (mixed u32/f32 for scale)
         // Note: bitDepth already determined above via detectBitDepth()
+        // Always use bilinear (useVng=0) for analysis - VNG is done in stacking worker
         const paramsData = new ArrayBuffer(32);
-        new Uint32Array(paramsData).set([width, height, batchSize, bayerPattern, useVng ? 1 : 0, bitDepth, 0, 0]);
+        new Uint32Array(paramsData).set([width, height, batchSize, bayerPattern, 0, bitDepth, 0, 0]);
         new Float32Array(paramsData)[6] = scale;
         queue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
 
@@ -1153,9 +1154,8 @@ function rotateCropBuffers() {
  * @param {number} bayerPattern - Bayer pattern (0-3, or -1 for mono)
  * @param {number} threshold - Threshold for moments (default 0.1)
  * @param {boolean} metadataOnly - If true, skip float32 buffer readback
- * @param {boolean} useVng - If true, use VNG demosaic; otherwise bilinear
  */
-async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1, metadataOnly = false, useVng = true) {
+async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1, metadataOnly = false) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -1199,14 +1199,14 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         scale = prepared.scale;
     }
 
-    // Set crop params (including useVng for demosaic, bitDepth, and scale)
+    // Set crop params (always bilinear demosaic - VNG is done in stacking worker)
     const cropParams = new ArrayBuffer(32);
-    new Uint32Array(cropParams).set([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, useVng ? 1 : 0, bitDepth, 0]);
+    new Uint32Array(cropParams).set([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, 0, bitDepth, 0]);
     new Float32Array(cropParams)[7] = scale;
     queue.writeBuffer(buffers.paramsBuffer, 0, cropParams);
 
     // DEBUG: Log shader params
-    console.log(`[GPU] cropAndAnalyzeBatch shader params: srcWidth=${srcWidth}, srcHeight=${srcHeight}, cropSize=${cropSize}, bayerPattern=${bayerPattern}, batchSize=${batchSize}, useVng=${useVng}, bitDepth=${bitDepth}, scale=${scale}`);
+    console.log(`[GPU] cropAndAnalyzeBatch shader params: srcWidth=${srcWidth}, srcHeight=${srcHeight}, cropSize=${cropSize}, bayerPattern=${bayerPattern}, batchSize=${batchSize}, bitDepth=${bitDepth}, scale=${scale}`);
 
     // Prepare all bind groups and parameters upfront
     queue.writeBuffer(buffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
@@ -1513,7 +1513,6 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
  * 3. Read bounds to get centers
  * 4. Crop from already-demosaiced RGBA
  * 5. Calculate sharpness on cropped
- * @param {boolean} useVng - If true, use VNG demosaic; otherwise bilinear
  */
 // Timing stats for detectCropAnalyzeBatch
 let dcaBatchCount = 0;
@@ -1529,7 +1528,7 @@ let dcaBoundsTime = 0;      // bounds detection + centroid submit
 let dcaCropTime = 0;        // crop submit (non-grayOnly)
 let dcaSharpnessTime = 0;   // sharpness + reduction submit
 
-async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false, useVng = true, grayOnly = false, nextBatchFrames = null) {
+async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false, grayOnly = false, nextBatchFrames = null) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -1580,8 +1579,9 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
             queue.writeBuffer(currentInputBuffer, 0, prepared.data);
         }
 
+        // Always use bilinear (useVng=0) for analysis - VNG is done in stacking worker
         const paramsData = new ArrayBuffer(32);
-        new Uint32Array(paramsData).set([srcWidth, srcHeight, batchSize, bayerPattern, useVng ? 1 : 0, bitDepth, 0, 0]);
+        new Uint32Array(paramsData).set([srcWidth, srcHeight, batchSize, bayerPattern, 0, bitDepth, 0, 0]);
         new Float32Array(paramsData)[6] = scale;
         queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, paramsData);
         dcaUploadTime += (performance.now() - tUploadStart);
@@ -2184,10 +2184,10 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, useVng = false, grayOnly = false } = e.data;
+        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, grayOnly = false } = e.data;
 
         try {
-            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, useVng, grayOnly);
+            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, grayOnly);
             // Transfer uint8Buffer or float32Buffer depending on mode (none in grayOnly mode)
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'analyze-result', requestId, results }, transferables);
@@ -2204,10 +2204,10 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId, metadataOnly, useVng = false } = e.data;
+        const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId, metadataOnly } = e.data;
 
         try {
-            const results = await cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly, useVng);
+            const results = await cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly);
             // Transfer uint8Buffer or float32Buffer depending on mode
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'crop-analyze-result', requestId, results }, transferables);
@@ -2224,10 +2224,10 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly, useVng = false, grayOnly = false, nextBatchFrames = null } = e.data;
+        const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly, grayOnly = false, nextBatchFrames = null } = e.data;
 
         try {
-            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly, useVng, grayOnly, nextBatchFrames);
+            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly, grayOnly, nextBatchFrames);
             // Transfer uint8Buffer or float32Buffer depending on mode (none in grayOnly mode)
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'detect-crop-analyze-result', requestId, results }, transferables);
