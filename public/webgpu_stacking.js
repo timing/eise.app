@@ -178,11 +178,281 @@ fn main(
 }
 `;
 
+// Brightness reduction shader - computes mean brightness per frame from packed grayscale
+// Uses sparse sampling (every 8th pixel) matching CPU approach
+// One workgroup per frame, outputs one f32 per frame
+const brightnessShaderCode = `
+struct Params {
+    width: u32,
+    height: u32,
+    numFrames: u32,
+    sampleStep: u32,  // Sampling stride (8 = every 8th pixel)
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> grayPacked: array<u32>;  // Packed u8 grayscale
+@group(0) @binding(2) var<storage, read_write> brightness: array<f32>;  // Output: one f32 per frame
+
+var<workgroup> sharedSum: array<f32, 256>;
+var<workgroup> sharedCount: array<u32, 256>;
+
+fn sampleGray(frameIdx: u32, x: u32, y: u32) -> u32 {
+    let frameSize = params.width * params.height;
+    let pixelIdx = frameIdx * frameSize + y * params.width + x;
+    let packedIdx = pixelIdx >> 2u;
+    let byteOffset = (pixelIdx & 3u) << 3u;
+    return (grayPacked[packedIdx] >> byteOffset) & 0xFFu;
+}
+
+@compute @workgroup_size(256, 1, 1)
+fn main(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>
+) {
+    let frameIdx = wid.x;
+    let threadIdx = lid.x;
+
+    if (frameIdx >= params.numFrames) {
+        return;
+    }
+
+    // Calculate sample grid dimensions
+    let samplesX = (params.width + params.sampleStep - 1u) / params.sampleStep;
+    let samplesY = (params.height + params.sampleStep - 1u) / params.sampleStep;
+    let totalSamples = samplesX * samplesY;
+
+    // Each thread accumulates multiple samples
+    var localSum: f32 = 0.0;
+    var localCount: u32 = 0u;
+
+    var sampleIdx = threadIdx;
+    while (sampleIdx < totalSamples) {
+        let sy = sampleIdx / samplesX;
+        let sx = sampleIdx % samplesX;
+        let x = sx * params.sampleStep;
+        let y = sy * params.sampleStep;
+
+        let val = sampleGray(frameIdx, x, y);
+        if (val > 10u) {  // Skip near-black pixels (same as CPU)
+            localSum += f32(val);
+            localCount += 1u;
+        }
+        sampleIdx += 256u;
+    }
+
+    // Store in shared memory
+    sharedSum[threadIdx] = localSum;
+    sharedCount[threadIdx] = localCount;
+    workgroupBarrier();
+
+    // Parallel reduction
+    for (var stride: u32 = 128u; stride > 0u; stride = stride >> 1u) {
+        if (threadIdx < stride) {
+            sharedSum[threadIdx] += sharedSum[threadIdx + stride];
+            sharedCount[threadIdx] += sharedCount[threadIdx + stride];
+        }
+        workgroupBarrier();
+    }
+
+    // Thread 0 writes final result
+    if (threadIdx == 0u) {
+        let totalSum = sharedSum[0];
+        let totalCount = sharedCount[0];
+        brightness[frameIdx] = select(1.0, totalSum / f32(totalCount), totalCount > 0u);
+    }
+}
+`;
+
+// Single-frame warp shader that reads shifts/brightness from GPU buffers
+// Fully GPU-resident: no CPU readback of shifts or brightness
+// Dispatched once per frame to avoid accumulator race conditions
+const warpAccumulateBatchShader = `
+struct Params {
+    inWidth: u32,
+    inHeight: u32,
+    outWidth: u32,
+    outHeight: u32,
+    numAPs: u32,
+    patchSize: u32,
+    drizzleScale: f32,
+    minQuality: f32,
+    refBrightness: f32,
+    frameIdx: u32,        // Which frame to process
+    searchOffsetX: f32,
+    searchOffsetY: f32,
+    frameWeight: f32,
+    _pad: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> frameData: array<u32>;      // All frames: Float32 RGBA
+@group(0) @binding(2) var<storage, read> apPositions: array<u32>;    // AP positions: packed (x | y<<16)
+@group(0) @binding(3) var<storage, read> shifts: array<f32>;         // NCC results: [dx, dy, quality] per AP per frame
+@group(0) @binding(4) var<storage, read> brightness: array<f32>;     // Brightness per frame
+@group(0) @binding(5) var<storage, read_write> accumR: array<f32>;
+@group(0) @binding(6) var<storage, read_write> accumG: array<f32>;
+@group(0) @binding(7) var<storage, read_write> accumB: array<f32>;
+@group(0) @binding(8) var<storage, read_write> accumW: array<f32>;
+
+fn readPixelFloat32(pixelIdx: u32) -> vec4<f32> {
+    let pixelsPerFrame = params.inWidth * params.inHeight;
+    let baseIdx = (params.frameIdx * pixelsPerFrame + pixelIdx) * 4u;
+    let r = bitcast<f32>(frameData[baseIdx]);
+    let g = bitcast<f32>(frameData[baseIdx + 1u]);
+    let b = bitcast<f32>(frameData[baseIdx + 2u]);
+    let a = bitcast<f32>(frameData[baseIdx + 3u]);
+    return vec4<f32>(r, g, b, a) * 255.0;
+}
+
+fn cubicWeight(t: f32) -> f32 {
+    let at = abs(t);
+    if (at <= 1.0) {
+        return (1.5 * at - 2.5) * at * at + 1.0;
+    } else if (at < 2.0) {
+        return ((-0.5 * at + 2.5) * at - 4.0) * at + 2.0;
+    }
+    return 0.0;
+}
+
+fn sampleFrameBicubic(x: f32, y: f32) -> vec4<f32> {
+    let x0 = i32(floor(x));
+    let y0 = i32(floor(y));
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+    let w = i32(params.inWidth);
+    let h = i32(params.inHeight);
+
+    let wx0 = cubicWeight(fx + 1.0);
+    let wx1 = cubicWeight(fx);
+    let wx2 = cubicWeight(fx - 1.0);
+    let wx3 = cubicWeight(fx - 2.0);
+    let wy0 = cubicWeight(fy + 1.0);
+    let wy1 = cubicWeight(fy);
+    let wy2 = cubicWeight(fy - 1.0);
+    let wy3 = cubicWeight(fy - 2.0);
+
+    var result = vec4<f32>(0.0);
+    var totalWeight: f32 = 0.0;
+
+    for (var j: i32 = -1; j <= 2; j++) {
+        let cy = clamp(y0 + j, 0, h - 1);
+        let wy = select(select(select(wy3, wy2, j == 1), wy1, j == 0), wy0, j == -1);
+        for (var i: i32 = -1; i <= 2; i++) {
+            let cx = clamp(x0 + i, 0, w - 1);
+            let wx = select(select(select(wx3, wx2, i == 1), wx1, i == 0), wx0, i == -1);
+            let idx = u32(cy * w + cx);
+            let pixel = readPixelFloat32(idx);
+            let weight = wx * wy;
+            result += pixel * weight;
+            totalWeight += weight;
+        }
+    }
+
+    if (totalWeight > 0.0) {
+        result = result / totalWeight;
+    }
+    return result;
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let ox = gid.x;
+    let oy = gid.y;
+
+    if (ox >= params.outWidth || oy >= params.outHeight) {
+        return;
+    }
+
+    let outIdx = oy * params.outWidth + ox;
+    let invScale = 1.0 / params.drizzleScale;
+    let inX = f32(ox) * invScale;
+    let inY = f32(oy) * invScale;
+
+    // Gaussian interpolation params
+    let patchSize = f32(params.patchSize);
+    let influenceRadius = patchSize * 4.0;
+    let influenceRadius2 = influenceRadius * influenceRadius;
+    let sigma2 = patchSize * 1.5 * patchSize * 1.5 * 2.0;
+
+    // Interpolate displacement from APs
+    var totalWeight: f32 = 0.0;
+    var weightedDx: f32 = 0.0;
+    var weightedDy: f32 = 0.0;
+
+    let frameIdx = params.frameIdx;
+
+    for (var i: u32 = 0u; i < params.numAPs; i++) {
+        // Read shift for this frame and AP
+        let shiftIdx = (frameIdx * params.numAPs + i) * 3u;
+        let apDx = shifts[shiftIdx] + params.searchOffsetX;
+        let apDy = shifts[shiftIdx + 1u] + params.searchOffsetY;
+        let quality = shifts[shiftIdx + 2u];
+
+        if (quality < params.minQuality) {
+            continue;
+        }
+
+        // Read AP position
+        let apPacked = apPositions[i];
+        let apX = f32(apPacked & 0xFFFFu);
+        let apY = f32(apPacked >> 16u);
+
+        let dx = inX - apX;
+        let dy = inY - apY;
+        let dist2 = dx * dx + dy * dy;
+
+        if (dist2 < influenceRadius2) {
+            let gaussWeight = exp(-dist2 / sigma2);
+            let weight = gaussWeight * quality;
+            weightedDx += apDx * weight;
+            weightedDy += apDy * weight;
+            totalWeight += weight;
+        }
+    }
+
+    // Compute source coordinates
+    var srcX = inX;
+    var srcY = inY;
+    if (totalWeight > 0.0) {
+        srcX += weightedDx / totalWeight;
+        srcY += weightedDy / totalWeight;
+    }
+
+    // Bounds check
+    if (srcX < 0.0 || srcX >= f32(params.inWidth) - 1.0 ||
+        srcY < 0.0 || srcY >= f32(params.inHeight) - 1.0) {
+        return;
+    }
+
+    // Sample frame
+    let color = sampleFrameBicubic(srcX, srcY);
+
+    // Skip black pixels
+    if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
+        return;
+    }
+
+    // Compute brightness scale from GPU buffer
+    let frameBrightness = brightness[frameIdx];
+    let brightnessScale = select(params.refBrightness / frameBrightness, 1.0, frameBrightness < 1.0);
+
+    let w = params.frameWeight;
+    let b = brightnessScale;
+
+    accumR[outIdx] += color.r * b * w;
+    accumG[outIdx] += color.g * b * w;
+    accumB[outIdx] += color.b * b * w;
+    accumW[outIdx] += w;
+}
+`;
+
 let stackDevice = null;
 let stackQueue = null;
 let warpPipeline = null;
+let warpBatchPipeline = null;  // New: fully GPU-resident batch warp
 let accumulatePipeline = null;
 let nccBatchPipeline = null;  // Template matching on same device
+let brightnessPipeline = null;  // Brightness reduction on same device
 let isStackingReady = false;
 let stackDeviceLost = false; // Track if GPU device was lost
 let stackReinitializing = false;
@@ -550,9 +820,29 @@ async function initStackingGPU() {
             compute: { module: nccShaderModule, entryPoint: 'main' }
         });
 
+        // Brightness reduction pipeline (same device for zero-copy)
+        const brightnessShaderModule = stackDevice.createShaderModule({
+            code: brightnessShaderCode
+        });
+
+        brightnessPipeline = stackDevice.createComputePipeline({
+            layout: 'auto',
+            compute: { module: brightnessShaderModule, entryPoint: 'main' }
+        });
+
+        // Fully GPU-resident batch warp+accumulate pipeline
+        const warpBatchShaderModule = stackDevice.createShaderModule({
+            code: warpAccumulateBatchShader
+        });
+
+        warpBatchPipeline = stackDevice.createComputePipeline({
+            layout: 'auto',
+            compute: { module: warpBatchShaderModule, entryPoint: 'main' }
+        });
+
         isStackingReady = true;
         stackDeviceLost = false;
-        console.log('WebGPU stacking initialized (with VNG demosaic + NCC matching)');
+        console.log('WebGPU stacking initialized (with VNG demosaic + NCC matching + brightness + batch warp)');
         return true;
     } catch (e) {
         console.error('WebGPU stacking init error:', e);
@@ -1360,8 +1650,8 @@ function cleanupStackingBuffers() {
 
 /**
  * VNG demosaic + crop keeping BOTH RGBA and grayscale on GPU (fully zero-copy pipeline)
- * Also returns CPU grayscale for brightness calculation (small overhead, needed for normalization)
- * @returns {{rgbaGpuBuffer: GPUBuffer, grayGpuBuffer: GPUBuffer, grayData: Uint8Array, batchSize: number, cropSize: number}}
+ * NO CPU READBACK - brightness computed separately on GPU via computeBrightnessFromGpuBuffer
+ * @returns {{rgbaGpuBuffer: GPUBuffer, grayGpuBuffer: GPUBuffer, batchSize: number, cropSize: number}}
  */
 async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, bitDepth, scale = 1.0) {
     if (!stackDevice || !vngCropPipeline) {
@@ -1399,7 +1689,7 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
     });
 
-    // Grayscale stays on GPU for template matching (same device!)
+    // Grayscale stays on GPU for template matching AND brightness computation
     const grayGpuBuffer = stackDevice.createBuffer({
         size: grayOutputSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
@@ -1457,28 +1747,15 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
     );
     pass.end();
 
-    // Read back grayscale for brightness calculation (still needed for normalization)
-    // This is the only readback - template matching uses GPU buffer directly
-    const grayReadback = stackDevice.createBuffer({
-        size: grayOutputSize,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
-    encoder.copyBufferToBuffer(grayGpuBuffer, 0, grayReadback, 0, grayOutputSize);
-
     stackQueue.submit([encoder.finish()]);
-
-    await safeStackMapAsync(grayReadback, GPUMapMode.READ);
-    const grayData = new Uint8Array(grayReadback.getMappedRange().slice(0));
-    grayReadback.unmap();
-    grayReadback.destroy();
 
     // Cleanup temp buffers (but keep rgbaGpuBuffer and grayGpuBuffer!)
     paramsBuffer.destroy();
     inputBuffer.destroy();
     centersBuffer.destroy();
 
-    // Return GPU buffer handles + CPU grayscale for brightness - caller must destroy GPU buffers after use
-    return { rgbaGpuBuffer, grayGpuBuffer, grayData, batchSize, cropSize };
+    // Return GPU buffer handles - caller must destroy after use
+    return { rgbaGpuBuffer, grayGpuBuffer, batchSize, cropSize };
 }
 
 /**
@@ -1719,6 +1996,356 @@ async function matchTemplatesFromGpuBuffer(grayGpuBuffer, refGrayData, width, he
     return allShifts;
 }
 
+/**
+ * Compute mean brightness per frame from GPU grayscale buffer (zero-copy)
+ * Uses sparse sampling (every 8th pixel) matching CPU approach
+ * @param {GPUBuffer} grayGpuBuffer - Packed u8 grayscale from VNG demosaic
+ * @param {number} width - Frame width
+ * @param {number} height - Frame height
+ * @param {number} batchSize - Number of frames
+ * @returns {Float32Array} - Mean brightness per frame (0-255 scale)
+ */
+async function computeBrightnessFromGpuBuffer(grayGpuBuffer, width, height, batchSize) {
+    if (!stackDevice || !brightnessPipeline) {
+        throw new Error('Stacking GPU not initialized for brightness computation');
+    }
+
+    const sampleStep = 8;  // Match CPU sparse sampling
+
+    // Create buffers
+    const paramsBuffer = stackDevice.createBuffer({
+        size: 16,  // 4 u32
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    const brightnessBuffer = stackDevice.createBuffer({
+        size: batchSize * 4,  // One f32 per frame
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+
+    const readbackBuffer = stackDevice.createBuffer({
+        size: batchSize * 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+
+    // Upload params
+    const paramsData = new Uint32Array([width, height, batchSize, sampleStep]);
+    stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    // Create bind group
+    const bindGroup = stackDevice.createBindGroup({
+        layout: brightnessPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: paramsBuffer } },
+            { binding: 1, resource: { buffer: grayGpuBuffer } },
+            { binding: 2, resource: { buffer: brightnessBuffer } }
+        ]
+    });
+
+    // Run brightness reduction - one workgroup per frame
+    const encoder = stackDevice.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(brightnessPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(batchSize, 1, 1);
+    pass.end();
+
+    encoder.copyBufferToBuffer(brightnessBuffer, 0, readbackBuffer, 0, batchSize * 4);
+    stackQueue.submit([encoder.finish()]);
+
+    // Read results (tiny - just one f32 per frame!)
+    await safeStackMapAsync(readbackBuffer, GPUMapMode.READ);
+    const brightnessData = new Float32Array(readbackBuffer.getMappedRange().slice(0));
+    readbackBuffer.unmap();
+
+    // Cleanup
+    paramsBuffer.destroy();
+    brightnessBuffer.destroy();
+    readbackBuffer.destroy();
+
+    return brightnessData;
+}
+
+/**
+ * Template matching fully on GPU - returns GPU buffer, no readback
+ * @returns {{shiftsGpuBuffer: GPUBuffer, apPositionsBuffer: GPUBuffer, searchOffset: {dx, dy}}}
+ */
+async function matchTemplatesFullyGpu(grayGpuBuffer, refGrayData, width, height, batchSize,
+    alignmentPoints, patchSize, searchRadius, searchOffset = null) {
+
+    if (!stackDevice || !nccBatchPipeline) {
+        throw new Error('Stacking GPU not initialized for template matching');
+    }
+
+    const numAPs = alignmentPoints.length;
+    const templateSize = patchSize * patchSize;
+    const halfPatch = Math.floor(patchSize / 2);
+
+    const offsetX = searchOffset ? Math.round(searchOffset.dx) : 0;
+    const offsetY = searchOffset ? Math.round(searchOffset.dy) : 0;
+
+    // Extract reference templates and AP positions
+    const refTemplates = new Float32Array(numAPs * templateSize);
+    const apPositions = new Uint32Array(numAPs);
+
+    for (let i = 0; i < numAPs; i++) {
+        const ap = alignmentPoints[i];
+        // Store original AP positions (not offset) - offset applied in warp shader
+        apPositions[i] = (ap.x & 0xFFFF) | ((ap.y & 0xFFFF) << 16);
+
+        // For NCC search, use offset position
+        const searchX = ap.x + offsetX;
+        const searchY = ap.y + offsetY;
+        const tx0 = ap.x - halfPatch;
+        const ty0 = ap.y - halfPatch;
+
+        for (let py = 0; py < patchSize; py++) {
+            for (let px = 0; px < patchSize; px++) {
+                const sx = tx0 + px;
+                const sy = ty0 + py;
+                if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+                    refTemplates[i * templateSize + py * patchSize + px] = refGrayData[sy * width + sx];
+                }
+            }
+        }
+    }
+
+    // Create buffers
+    const paramsBuffer = stackDevice.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    const templatesBuffer = stackDevice.createBuffer({
+        size: refTemplates.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+    // AP positions buffer - kept for warp shader!
+    const apPositionsBuffer = stackDevice.createBuffer({
+        size: apPositions.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+    // NCC search positions (may be offset from original AP positions)
+    const searchPositions = new Uint32Array(numAPs);
+    for (let i = 0; i < numAPs; i++) {
+        const ap = alignmentPoints[i];
+        const searchX = ap.x + offsetX;
+        const searchY = ap.y + offsetY;
+        searchPositions[i] = (searchX & 0xFFFF) | ((searchY & 0xFFFF) << 16);
+    }
+
+    const searchPosBuffer = stackDevice.createBuffer({
+        size: searchPositions.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+    // Results buffer - kept on GPU!
+    const resultsSize = batchSize * numAPs * 3 * 4;
+    const shiftsGpuBuffer = stackDevice.createBuffer({
+        size: resultsSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+
+    // Upload data
+    const searchSize = patchSize + 2 * searchRadius;
+    const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, batchSize, width, height]);
+    stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
+    stackQueue.writeBuffer(templatesBuffer, 0, refTemplates);
+    stackQueue.writeBuffer(apPositionsBuffer, 0, apPositions);
+    stackQueue.writeBuffer(searchPosBuffer, 0, searchPositions);
+
+    // Create bind group
+    const bindGroup = stackDevice.createBindGroup({
+        layout: nccBatchPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: paramsBuffer } },
+            { binding: 1, resource: { buffer: templatesBuffer } },
+            { binding: 2, resource: { buffer: grayGpuBuffer } },
+            { binding: 3, resource: { buffer: searchPosBuffer } },
+            { binding: 4, resource: { buffer: shiftsGpuBuffer } }
+        ]
+    });
+
+    // Run NCC
+    const encoder = stackDevice.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(nccBatchPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(batchSize * numAPs, 1, 1);
+    pass.end();
+
+    stackQueue.submit([encoder.finish()]);
+
+    // Wait for NCC computation to complete before returning GPU buffers
+    await stackDevice.queue.onSubmittedWorkDone();
+
+    // Cleanup temp buffers (keep shiftsGpuBuffer and apPositionsBuffer!)
+    paramsBuffer.destroy();
+    templatesBuffer.destroy();
+    searchPosBuffer.destroy();
+
+    return {
+        shiftsGpuBuffer,
+        apPositionsBuffer,
+        searchOffset: { dx: offsetX, dy: offsetY }
+    };
+}
+
+/**
+ * Compute brightness fully on GPU - returns GPU buffer, no readback
+ * @returns {GPUBuffer} - Buffer with one f32 per frame
+ */
+async function computeBrightnessFullyGpu(grayGpuBuffer, width, height, batchSize) {
+    if (!stackDevice || !brightnessPipeline) {
+        throw new Error('Stacking GPU not initialized for brightness computation');
+    }
+
+    const sampleStep = 8;
+
+    const paramsBuffer = stackDevice.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    // Brightness buffer - kept on GPU!
+    const brightnessGpuBuffer = stackDevice.createBuffer({
+        size: batchSize * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+
+    stackQueue.writeBuffer(paramsBuffer, 0, new Uint32Array([width, height, batchSize, sampleStep]));
+
+    const bindGroup = stackDevice.createBindGroup({
+        layout: brightnessPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: paramsBuffer } },
+            { binding: 1, resource: { buffer: grayGpuBuffer } },
+            { binding: 2, resource: { buffer: brightnessGpuBuffer } }
+        ]
+    });
+
+    const encoder = stackDevice.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(brightnessPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(batchSize, 1, 1);
+    pass.end();
+
+    stackQueue.submit([encoder.finish()]);
+
+    // Wait for brightness computation to complete before returning GPU buffer
+    await stackDevice.queue.onSubmittedWorkDone();
+
+    paramsBuffer.destroy();
+
+    return brightnessGpuBuffer;
+}
+
+/**
+ * Warp and accumulate batch - fully GPU-resident, no intermediate readbacks
+ * All data stays on GPU: RGBA frames, shifts, brightness
+ * Creates separate params buffers per frame to allow single-submit batching
+ */
+async function warpAndAccumulateBatchFullyGpu(
+    rgbaGpuBuffer,      // From VNG demosaic
+    shiftsGpuBuffer,    // From matchTemplatesFullyGpu
+    brightnessGpuBuffer,// From computeBrightnessFullyGpu
+    apPositionsBuffer,  // From matchTemplatesFullyGpu
+    batchSize,
+    cropSize,
+    frameWeights,       // Array of weights (small - just numbers)
+    outWidth, outHeight,
+    numAPs,
+    patchSize,
+    drizzleScale,
+    refBrightness,
+    searchOffset,
+    minApQuality = 0.3
+) {
+    if (!stackDevice || !warpBatchPipeline) {
+        throw new Error('Stacking GPU not initialized for batch warp');
+    }
+
+    console.log(`[WarpBatchFullyGpu] batchSize=${batchSize} cropSize=${cropSize} outSize=${outWidth}x${outHeight} numAPs=${numAPs} patchSize=${patchSize} drizzleScale=${drizzleScale} refBrightness=${refBrightness} searchOffset=(${searchOffset.dx}, ${searchOffset.dy}) weights=${frameWeights.slice(0, 3).join(',')}...`);
+
+    const buffers = getStackingBuffers(cropSize, cropSize, outWidth, outHeight, numAPs);
+    const workgroupsX = Math.ceil(outWidth / 16);
+    const workgroupsY = Math.ceil(outHeight / 16);
+
+    // Create per-frame params buffers and bind groups
+    const paramsBuffers = [];
+    const bindGroups = [];
+
+    for (let frameIdx = 0; frameIdx < batchSize; frameIdx++) {
+        const paramsBuffer = stackDevice.createBuffer({
+            size: 56,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+
+        // Upload params for this frame
+        const paramsData = new ArrayBuffer(56);
+        const paramsU32 = new Uint32Array(paramsData);
+        const paramsF32 = new Float32Array(paramsData);
+        paramsU32[0] = cropSize;           // inWidth
+        paramsU32[1] = cropSize;           // inHeight
+        paramsU32[2] = outWidth;
+        paramsU32[3] = outHeight;
+        paramsU32[4] = numAPs;
+        paramsU32[5] = patchSize;
+        paramsF32[6] = drizzleScale;
+        paramsF32[7] = minApQuality;
+        paramsF32[8] = refBrightness;
+        paramsU32[9] = frameIdx;           // Which frame to process
+        paramsF32[10] = searchOffset.dx;
+        paramsF32[11] = searchOffset.dy;
+        paramsF32[12] = frameWeights[frameIdx];
+        paramsU32[13] = 0;                 // Padding
+        stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
+
+        const bindGroup = stackDevice.createBindGroup({
+            layout: warpBatchPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: paramsBuffer } },
+                { binding: 1, resource: { buffer: rgbaGpuBuffer } },
+                { binding: 2, resource: { buffer: apPositionsBuffer } },
+                { binding: 3, resource: { buffer: shiftsGpuBuffer } },
+                { binding: 4, resource: { buffer: brightnessGpuBuffer } },
+                { binding: 5, resource: { buffer: buffers.accumR } },
+                { binding: 6, resource: { buffer: buffers.accumG } },
+                { binding: 7, resource: { buffer: buffers.accumB } },
+                { binding: 8, resource: { buffer: buffers.accumW } }
+            ]
+        });
+
+        paramsBuffers.push(paramsBuffer);
+        bindGroups.push(bindGroup);
+    }
+
+    // Single encoder with sequential dispatches (GPU executes in order)
+    const encoder = stackDevice.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(warpBatchPipeline);
+
+    for (let frameIdx = 0; frameIdx < batchSize; frameIdx++) {
+        pass.setBindGroup(0, bindGroups[frameIdx]);
+        pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    }
+
+    pass.end();
+    stackQueue.submit([encoder.finish()]);
+
+    // Cleanup
+    for (const buf of paramsBuffers) {
+        buf.destroy();
+    }
+    rgbaGpuBuffer.destroy();
+    shiftsGpuBuffer.destroy();
+    brightnessGpuBuffer.destroy();
+    apPositionsBuffer.destroy();
+}
+
 // ES6 exports for module worker
 export {
     initStackingGPU,
@@ -1731,6 +2358,11 @@ export {
     demosaicVngCropBatchGpu,
     warpAndAccumulateFromGpuBuffer,
     matchTemplatesFromGpuBuffer,
+    computeBrightnessFromGpuBuffer,
+    // Fully GPU-resident functions (no intermediate readbacks)
+    matchTemplatesFullyGpu,
+    computeBrightnessFullyGpu,
+    warpAndAccumulateBatchFullyGpu,
     extractGrayscale,
     cleanupStackingBuffers
 };

@@ -20,6 +20,11 @@ import {
     demosaicVngCropBatchGpu,
     warpAndAccumulateFromGpuBuffer,
     matchTemplatesFromGpuBuffer,
+    computeBrightnessFromGpuBuffer,
+    // Fully GPU-resident functions (zero CPU readback)
+    matchTemplatesFullyGpu,
+    computeBrightnessFullyGpu,
+    warpAndAccumulateBatchFullyGpu,
     extractGrayscale,
     cleanupStackingBuffers
 } from './webgpu_stacking.js';
@@ -249,8 +254,7 @@ self.addEventListener('message', async (e) => {
 
         try {
             // VNG demosaic + crop - BOTH RGBA and grayscale stay on GPU!
-            // grayData is also returned for brightness calculation (small overhead)
-            const { rgbaGpuBuffer, grayGpuBuffer, grayData, batchSize, cropSize } = await demosaicVngCropBatchGpu(
+            const { rgbaGpuBuffer, grayGpuBuffer, batchSize, cropSize } = await demosaicVngCropBatchGpu(
                 frames.map(f => ({ data: f.data })),
                 ctx.srcWidth, ctx.srcHeight,
                 ctx.width,  // cropSize
@@ -260,9 +264,8 @@ self.addEventListener('message', async (e) => {
                 ctx.bayerScale
             );
 
-            // Template matching directly from GPU buffer (zero-copy!)
-            // Uses same GPU device as stacking
-            const shifts = await matchTemplatesFromGpuBuffer(
+            // Template matching - FULLY GPU-RESIDENT (no shifts readback!)
+            const { shiftsGpuBuffer, apPositionsBuffer, searchOffset: appliedOffset } = await matchTemplatesFullyGpu(
                 grayGpuBuffer,
                 refGrayData,
                 ctx.width,
@@ -274,48 +277,34 @@ self.addEventListener('message', async (e) => {
                 searchOffset
             );
 
+            // Compute brightness - FULLY GPU-RESIDENT (no brightness readback!)
+            const brightnessGpuBuffer = await computeBrightnessFullyGpu(
+                grayGpuBuffer,
+                ctx.width,
+                ctx.height,
+                batchSize
+            );
+
             // Done with grayscale GPU buffer
             grayGpuBuffer.destroy();
 
-            // Calculate brightness from CPU grayscale (needed for normalization)
-            const pixelsPerFrame = ctx.width * ctx.height;
-            const frameMetadata = frames.map((frame, i) => {
-                const grayStart = i * pixelsPerFrame;
-                const grayEnd = grayStart + pixelsPerFrame;
-                const frameGray = grayData.subarray(grayStart, grayEnd);
-
-                let sum = 0, count = 0;
-                const step = 8;
-                for (let y = 0; y < ctx.height; y += step) {
-                    for (let x = 0; x < ctx.width; x += step) {
-                        const val = frameGray[y * ctx.width + x];
-                        if (val > 10) {
-                            sum += val;
-                            count++;
-                        }
-                    }
-                }
-                const frameBrightness = count > 0 ? sum / count : 1;
-                const brightnessScale = ctx.refBrightness / frameBrightness;
-
-                return {
-                    sharpness: frame.sharpness,
-                    brightnessScale,
-                    frameWeight: frameWeights[i]
-                };
-            });
-
-            // Warp and accumulate directly from GPU buffer (zero-copy!)
-            await warpAndAccumulateFromGpuBuffer(
+            // Warp and accumulate - FULLY GPU-RESIDENT
+            // All data stays on GPU: RGBA, shifts, brightness
+            // Only frameWeights come from CPU (tiny - just numbers)
+            await warpAndAccumulateBatchFullyGpu(
                 rgbaGpuBuffer,
+                shiftsGpuBuffer,
+                brightnessGpuBuffer,
+                apPositionsBuffer,
                 batchSize,
                 cropSize,
-                frameMetadata,
-                shifts,
+                frameWeights,
                 ctx.outWidth, ctx.outHeight,
-                ctx.alignmentPoints,
+                ctx.alignmentPoints.length,
                 ctx.patchSize,
                 ctx.drizzleScale,
+                ctx.refBrightness,
+                appliedOffset,
                 ctx.minApQuality
             );
 
