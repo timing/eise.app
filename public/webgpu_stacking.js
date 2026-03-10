@@ -1175,6 +1175,228 @@ function cleanupStackingBuffers() {
     }
 }
 
+/**
+ * VNG demosaic + crop keeping RGBA on GPU (zero-copy to warp+accumulate)
+ * Only reads back grayscale (needed for template matching on separate GPU device)
+ * @returns {{rgbaGpuBuffer: GPUBuffer, grayData: Uint8Array, batchSize: number, cropSize: number}}
+ */
+async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, bitDepth, scale = 1.0) {
+    if (!stackDevice || !vngCropPipeline) {
+        throw new Error('Stacking GPU not initialized for VNG crop');
+    }
+
+    const batchSize = frames.length;
+    const srcPixelCount = srcWidth * srcHeight;
+    const cropPixelCount = cropSize * cropSize;
+
+    const bytesPerPixel = bitDepth > 8 ? 2 : 1;
+    const inputSize = srcPixelCount * batchSize * bytesPerPixel;
+    const rgbaOutputSize = cropPixelCount * batchSize * 16;  // Float32 RGBA
+    const grayOutputSize = Math.ceil(cropPixelCount * batchSize / 4) * 4;
+
+    // Create buffers
+    const paramsBuffer = stackDevice.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    const inputBuffer = stackDevice.createBuffer({
+        size: Math.ceil(inputSize / 4) * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+    const centersBuffer = stackDevice.createBuffer({
+        size: batchSize * 8,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+    // RGBA stays on GPU - add COPY_SRC for copyBufferToBuffer to frame buffers
+    const rgbaGpuBuffer = stackDevice.createBuffer({
+        size: rgbaOutputSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+
+    const grayOutputBuffer = stackDevice.createBuffer({
+        size: grayOutputSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+
+    // Pack and upload raw Bayer data
+    const inputData = new Uint8Array(srcPixelCount * batchSize * bytesPerPixel);
+    for (let i = 0; i < frames.length; i++) {
+        const frame = frames[i];
+        const offset = i * srcPixelCount * bytesPerPixel;
+        if (frame.data instanceof Uint16Array) {
+            inputData.set(new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength), offset);
+        } else {
+            inputData.set(frame.data, offset);
+        }
+    }
+    stackQueue.writeBuffer(inputBuffer, 0, inputData);
+
+    // Upload centers
+    const centersData = new Float32Array(batchSize * 2);
+    for (let i = 0; i < centers.length; i++) {
+        centersData[i * 2] = centers[i].x;
+        centersData[i * 2 + 1] = centers[i].y;
+    }
+    stackQueue.writeBuffer(centersBuffer, 0, centersData);
+
+    // Set params
+    const paramsData = new ArrayBuffer(32);
+    new Uint32Array(paramsData).set([srcWidth, srcHeight, cropSize, bayerPattern, batchSize, bitDepth, 0, 0]);
+    new Float32Array(paramsData)[6] = scale;
+    stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    // Run VNG demosaic
+    const encoder = stackDevice.createCommandEncoder();
+    encoder.clearBuffer(grayOutputBuffer, 0, grayOutputSize);
+
+    const bindGroup = stackDevice.createBindGroup({
+        layout: vngCropPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: paramsBuffer } },
+            { binding: 1, resource: { buffer: inputBuffer } },
+            { binding: 2, resource: { buffer: centersBuffer } },
+            { binding: 3, resource: { buffer: rgbaGpuBuffer } },
+            { binding: 4, resource: { buffer: grayOutputBuffer } }
+        ]
+    });
+
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(vngCropPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(
+        Math.ceil(cropSize / 16),
+        Math.ceil(cropSize / 16),
+        batchSize
+    );
+    pass.end();
+
+    // Only read back grayscale (small - needed for template matching on other GPU device)
+    const grayReadback = stackDevice.createBuffer({
+        size: grayOutputSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    encoder.copyBufferToBuffer(grayOutputBuffer, 0, grayReadback, 0, grayOutputSize);
+
+    stackQueue.submit([encoder.finish()]);
+
+    await safeStackMapAsync(grayReadback, GPUMapMode.READ);
+    const grayData = new Uint8Array(grayReadback.getMappedRange().slice(0));
+    grayReadback.unmap();
+
+    // Cleanup temp buffers (but keep rgbaGpuBuffer!)
+    paramsBuffer.destroy();
+    inputBuffer.destroy();
+    centersBuffer.destroy();
+    grayOutputBuffer.destroy();
+    grayReadback.destroy();
+
+    // Return GPU buffer handle - caller must destroy after use
+    return { rgbaGpuBuffer, grayData, batchSize, cropSize };
+}
+
+/**
+ * Warp and accumulate frames from GPU buffer (zero-copy from VNG demosaic)
+ * @param {GPUBuffer} rgbaGpuBuffer - GPU buffer with batch of Float32 RGBA frames
+ * @param {Array} frameMetadata - Array of {sharpness, brightnessScale, frameWeight} per frame
+ * @param {Array} allShifts - Shifts from template matching
+ */
+async function warpAndAccumulateFromGpuBuffer(rgbaGpuBuffer, batchSize, cropSize,
+    frameMetadata, allShifts, outWidth, outHeight, alignmentPoints, patchSize, drizzleScale, minApQuality = 0.3) {
+
+    if (!isStackingReady) {
+        throw new Error('WebGPU stacking not available');
+    }
+
+    const buffers = getStackingBuffers(cropSize, cropSize, outWidth, outHeight, alignmentPoints.length);
+    const numAPs = alignmentPoints.length;
+    const pixelsPerFrame = cropSize * cropSize;
+    const bytesPerFrame = pixelsPerFrame * 16;  // Float32 RGBA = 16 bytes/pixel
+    const workgroupsX = Math.ceil(outWidth / 16);
+    const workgroupsY = Math.ceil(outHeight / 16);
+
+    // Process frames in chunks of NUM_FRAME_BUFFERS (2)
+    for (let chunkStart = 0; chunkStart < batchSize; chunkStart += NUM_FRAME_BUFFERS) {
+        const chunkEnd = Math.min(chunkStart + NUM_FRAME_BUFFERS, batchSize);
+        const chunkSize = chunkEnd - chunkStart;
+
+        const encoder = stackDevice.createCommandEncoder();
+        const bindGroups = [];
+
+        for (let i = 0; i < chunkSize; i++) {
+            const frameIdx = chunkStart + i;
+            const meta = frameMetadata[frameIdx];
+            const shifts = allShifts[frameIdx];
+            const bufferIdx = i;
+
+            // Copy frame slice from VNG output buffer to frame buffer (GPU → GPU, no CPU!)
+            const srcOffset = frameIdx * bytesPerFrame;
+            encoder.copyBufferToBuffer(rgbaGpuBuffer, srcOffset, buffers.frameBuffers[bufferIdx], 0, bytesPerFrame);
+
+            // Upload AP data
+            const apData = new Float32Array(numAPs * 6);
+            for (let a = 0; a < numAPs; a++) {
+                apData[a * 6] = alignmentPoints[a].x;
+                apData[a * 6 + 1] = alignmentPoints[a].y;
+                apData[a * 6 + 2] = shifts[a].dx;
+                apData[a * 6 + 3] = shifts[a].dy;
+                apData[a * 6 + 4] = shifts[a].quality;
+                apData[a * 6 + 5] = 0;
+            }
+            stackQueue.writeBuffer(buffers.apBuffers[bufferIdx], 0, apData);
+
+            // Upload params (inputFormat=0 for Float32)
+            const paramsData = new ArrayBuffer(56);
+            const paramsU32 = new Uint32Array(paramsData);
+            const paramsF32 = new Float32Array(paramsData);
+            paramsU32[0] = cropSize;
+            paramsU32[1] = cropSize;
+            paramsU32[2] = outWidth;
+            paramsU32[3] = outHeight;
+            paramsU32[4] = numAPs;
+            paramsU32[5] = patchSize;
+            paramsF32[6] = drizzleScale;
+            paramsF32[7] = meta.frameWeight;
+            paramsF32[8] = meta.brightnessScale;
+            paramsF32[9] = 0;
+            paramsF32[10] = 0;
+            paramsF32[11] = minApQuality;
+            paramsU32[12] = 0;  // inputFormat = Float32
+            paramsU32[13] = 0;
+            stackQueue.writeBuffer(buffers.paramsBuffers[bufferIdx], 0, paramsData);
+
+            bindGroups.push(stackDevice.createBindGroup({
+                layout: warpPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: buffers.paramsBuffers[bufferIdx] } },
+                    { binding: 1, resource: { buffer: buffers.frameBuffers[bufferIdx] } },
+                    { binding: 2, resource: { buffer: buffers.apBuffers[bufferIdx] } },
+                    { binding: 3, resource: { buffer: buffers.accumR } },
+                    { binding: 4, resource: { buffer: buffers.accumG } },
+                    { binding: 5, resource: { buffer: buffers.accumB } },
+                    { binding: 6, resource: { buffer: buffers.accumW } }
+                ]
+            }));
+        }
+
+        // Run warp+accumulate for this chunk
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(warpPipeline);
+        for (let i = 0; i < chunkSize; i++) {
+            pass.setBindGroup(0, bindGroups[i]);
+            pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+        }
+        pass.end();
+
+        stackQueue.submit([encoder.finish()]);
+    }
+
+    // Destroy the VNG output buffer now that we're done with it
+    rgbaGpuBuffer.destroy();
+}
+
 // ES6 exports for module worker
 export {
     initStackingGPU,
@@ -1184,6 +1406,8 @@ export {
     readAccumulators,
     demosaicVngBatch,
     demosaicVngCropBatch,
+    demosaicVngCropBatchGpu,
+    warpAndAccumulateFromGpuBuffer,
     extractGrayscale,
     cleanupStackingBuffers
 };

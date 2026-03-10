@@ -17,6 +17,8 @@ import {
     readAccumulators,
     demosaicVngBatch,
     demosaicVngCropBatch,
+    demosaicVngCropBatchGpu,
+    warpAndAccumulateFromGpuBuffer,
     extractGrayscale,
     cleanupStackingBuffers
 } from './webgpu_stacking.js';
@@ -228,7 +230,8 @@ self.addEventListener('message', async (e) => {
     }
 
     // Step 2: Stack a batch of frames with VNG demosaic + crop + template matching + accumulation
-    // For raw Bayer input: VNG demosaic+crop → grayscale (from same pass) → template match → warp + accumulate
+    // OPTIMIZED: RGBA stays on GPU (zero-copy), only grayscale read back for template matching
+    // For raw Bayer input: VNG demosaic+crop → grayscale (readback) → template match → warp + accumulate (GPU buffer)
     // Accepts:
     //   - frames[].data (Uint8Array or Uint16Array) - full-size raw Bayer
     //   - centers[] - per-frame crop centers {x, y}
@@ -244,8 +247,8 @@ self.addEventListener('message', async (e) => {
         }
 
         try {
-            // VNG demosaic + crop in one GPU pass (outputs both RGBA and grayscale)
-            const { rgbaData, grayData } = await demosaicVngCropBatch(
+            // VNG demosaic + crop - RGBA stays on GPU, only grayscale read back
+            const { rgbaGpuBuffer, grayData, batchSize, cropSize } = await demosaicVngCropBatchGpu(
                 frames.map(f => ({ data: f.data })),
                 ctx.srcWidth, ctx.srcHeight,
                 ctx.width,  // cropSize
@@ -274,32 +277,42 @@ self.addEventListener('message', async (e) => {
                 noiseRobustAlignment
             );
 
-            // Split demosaiced RGBA into per-frame buffers
-            const floatsPerFrame = ctx.width * ctx.height * 4;  // RGBA floats
-            const rgbaFrames = frames.map((frame, i) => {
-                const start = i * floatsPerFrame;
-                return {
-                    rgbaBuffer: rgbaData.subarray(start, start + floatsPerFrame),
-                    sharpness: frame.sharpness
-                };
-            });
+            // Calculate brightness from grayscale (avoids RGBA readback)
+            // Grayscale is 0.299*R + 0.587*G + 0.114*B, so it's a good proxy for brightness
+            const frameMetadata = frames.map((frame, i) => {
+                const grayStart = i * pixelsPerFrame;
+                const grayEnd = grayStart + pixelsPerFrame;
+                const frameGray = grayData.subarray(grayStart, grayEnd);
 
-            // Prepare all frames with brightness normalization
-            const preparedFrames = rgbaFrames.map((frame, i) => {
-                const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, ctx.width, ctx.height);
+                // Sample brightness from grayscale (same sparse sampling as calcMeanBrightness)
+                let sum = 0, count = 0;
+                const step = 8;
+                for (let y = 0; y < ctx.height; y += step) {
+                    for (let x = 0; x < ctx.width; x += step) {
+                        const val = frameGray[y * ctx.width + x];
+                        if (val > 10) {  // Skip black pixels
+                            sum += val;
+                            count++;
+                        }
+                    }
+                }
+                const frameBrightness = count > 0 ? sum / count : 1;
                 const brightnessScale = ctx.refBrightness / frameBrightness;
+
                 return {
-                    rgbaBuffer: frame.rgbaBuffer,
+                    sharpness: frame.sharpness,
                     brightnessScale,
                     frameWeight: frameWeights[i]
                 };
             });
 
-            // Warp and accumulate with VNG-demosaiced RGBA
-            await warpAndAccumulateBatch(
-                preparedFrames,
+            // Warp and accumulate directly from GPU buffer (zero-copy!)
+            await warpAndAccumulateFromGpuBuffer(
+                rgbaGpuBuffer,
+                batchSize,
+                cropSize,
+                frameMetadata,
                 shifts,
-                ctx.width, ctx.height,
                 ctx.outWidth, ctx.outHeight,
                 ctx.alignmentPoints,
                 ctx.patchSize,

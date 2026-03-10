@@ -682,24 +682,21 @@ export function useStacker() {
             // Cumulative drift tracking for surface mode
             let cumulativeDrift = { dx: 0, dy: 0 };
 
-            // Pipelining state:
-            // - nextRawPromise: prefetch raw bytes from disk (I/O)
-            // - nextDemosaicPromise: prefetch demosaic results (GPU worker A)
-            // This allows demosaic(N+1) to run in parallel with match+accumulate(N) on GPU worker B
+            // Pipelining state
+            // isRawBayer already defined above for reference frame handling
             let batchStart = 0;
             let nextRawPromise = null;
-            let nextDemosaicPromise = null;
+            let nextDemosaicPromise = null;  // Only used for RGBA path
 
             while (batchStart < frameCount) {
                 const batchEnd = Math.min(batchStart + effectiveBatchSize, frameCount);
                 let batchFrames = framesToProcess.slice(batchStart, batchEnd);
 
-                // Get current batch's raw data (pre-loaded or load now)
+                // Load raw data from disk
                 let rawBatch;
                 const t0Load = performance.now();
                 if (nextRawPromise) {
                     rawBatch = await nextRawPromise;
-                    // Trim if batch size was reduced
                     if (rawBatch.frames.length > effectiveBatchSize) {
                         rawBatch.frames = rawBatch.frames.slice(0, effectiveBatchSize);
                         rawBatch.centers = rawBatch.centers.slice(0, effectiveBatchSize);
@@ -710,82 +707,14 @@ export function useStacker() {
                 }
                 stackingStats.frameLoadMs.push(performance.now() - t0Load);
 
-                // Get current batch's demosaic results (pre-computed or compute now)
-                const t0Demosaic = performance.now();
-                let gpuResults = null;
-                let retryFrames = rawBatch.frames;
-                let retryCenters = rawBatch.centers;
-
-                if (nextDemosaicPromise) {
-                    // Use prefetched demosaic results (was computed in parallel with previous batch's match+accumulate)
-                    const prefetched = await nextDemosaicPromise;
-                    gpuResults = prefetched.gpuResults;
-                    retryFrames = prefetched.frames;
-                    retryCenters = prefetched.centers;
-                    batchFrames = prefetched.batchFrames;
-                    rawBatch = { frames: retryFrames, centers: retryCenters };
-                    nextDemosaicPromise = null;
-                } else {
-                    // Compute demosaic now (first batch or after OOM)
-                    while (!gpuResults && retryFrames.length > 0) {
-                        try {
-                            gpuResults = await processGpuBatch(retryFrames, retryCenters);
-                        } catch (err) {
-                            if (isOOMError(err) && retryFrames.length > 1) {
-                                const newSize = Math.max(1, Math.floor(retryFrames.length / 2));
-                                addLog(`GPU memory error, reducing batch from ${retryFrames.length} to ${newSize}`);
-                                retryFrames = retryFrames.slice(0, newSize);
-                                retryCenters = retryCenters.slice(0, newSize);
-                                batchFrames = batchFrames.slice(0, newSize);
-                                effectiveBatchSize = newSize;
-                            } else {
-                                throw err;
-                            }
-                        }
-                    }
-                }
-                stackingStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
-
-                if (!gpuResults) break;
-                rawBatch.frames = retryFrames;
-                rawBatch.centers = retryCenters;
-
-                // Start prefetching next batch (raw + demosaic) to overlap with match+accumulate
-                // Demosaic runs on gpuAnalyzeWorker (separate GPU device from gpuStackWorker)
-                const nextStart = batchStart + retryFrames.length;
+                // Prefetch next batch from disk (parallel with current batch processing)
+                const nextStart = batchStart + rawBatch.frames.length;
                 if (nextStart < frameCount) {
                     const nextEnd = Math.min(nextStart + effectiveBatchSize, frameCount);
                     const nextFramesSlice = framesToProcess.slice(nextStart, nextEnd);
-
-                    // Chain: load raw → demosaic (both prefetched in parallel with current match+accumulate)
                     nextRawPromise = loadRawBatch(nextFramesSlice);
-                    nextDemosaicPromise = nextRawPromise.then(async (nextRaw) => {
-                        const results = await processGpuBatch(nextRaw.frames, nextRaw.centers);
-                        // Store metadata alongside results for next iteration
-                        return {
-                            gpuResults: results,
-                            frames: nextRaw.frames,
-                            centers: nextRaw.centers,
-                            batchFrames: nextFramesSlice
-                        };
-                    });
                 } else {
                     nextRawPromise = null;
-                    nextDemosaicPromise = null;
-                }
-
-                // Capture frames for comparison video (both raw pre-crop and processed post-crop)
-                for (let i = 0; i < gpuResults.length; i++) {
-                    const globalIndex = batchStart + i;
-                    // Post-crop: convert to uint8 for capture (16-bit needs conversion)
-                    const frameBuffer = is16bit ? gpuResults[i].float32Buffer : gpuResults[i].uint8Buffer;
-                    const uint8ForCapture = is16bit
-                        ? new Uint8Array(float32ToUint8(frameBuffer, cropSize, cropSize))
-                        : new Uint8Array(frameBuffer);
-                    capturePostCropFrame(uint8ForCapture, cropSize, cropSize, globalIndex, frameCount);
-                    // Pre-crop: store raw Bayer data for lazy demosaic later
-                    const rawFrame = rawBatch.frames[i];
-                    capturePreCropFrame(rawFrame.data, srcWidth, srcHeight, globalIndex, frameCount, bayerPattern);
                 }
 
                 // For surface mode, pass searchOffset to shift search region
@@ -796,11 +725,17 @@ export function useStacker() {
                 const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
                 const t0Stack = performance.now();
 
-                // Choose path based on input type: raw Bayer vs already-demosaiced RGBA
-                const isRawBayer = bayerPattern >= 0;
-
                 if (isRawBayer) {
-                    // Raw Bayer: send full frames + centers for GPU VNG demosaic + crop + matching + stacking
+                    // RAW BAYER PATH: VNG demosaic + stacking all on GPU stack worker
+                    // No bilinear demosaic needed - saves GPU transfer and compute
+
+                    // Capture raw frames for comparison video (lazy demosaic on export)
+                    for (let i = 0; i < rawBatch.frames.length; i++) {
+                        const globalIndex = batchStart + i;
+                        capturePreCropFrame(rawBatch.frames[i].data, srcWidth, srcHeight, globalIndex, frameCount, bayerPattern);
+                    }
+
+                    // Send to stack worker: VNG demosaic (GPU) → template match → warp+accumulate
                     const fullBayerFrames = rawBatch.frames.map((rawFrame, i) => ({
                         data: rawFrame.data,
                         sharpness: batchFrames[i].sharpness
@@ -828,9 +763,42 @@ export function useStacker() {
                             noiseRobustAlignment
                         });
                     });
+
                 } else {
-                    // Already RGBA (images, MONO): use bilinear-demosaiced data from analyze worker
-                    // Get grayscale for matching from analyze results
+                    // RGBA PATH (images, MONO): needs bilinear demosaic from analyze worker
+                    const t0Demosaic = performance.now();
+
+                    // Get or compute demosaic results
+                    let gpuResults;
+                    if (nextDemosaicPromise) {
+                        const prefetched = await nextDemosaicPromise;
+                        gpuResults = prefetched.gpuResults;
+                        nextDemosaicPromise = null;
+                    } else {
+                        gpuResults = await processGpuBatch(rawBatch.frames, rawBatch.centers);
+                    }
+                    stackingStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
+
+                    // Prefetch next batch demosaic (parallel with current stacking)
+                    if (nextRawPromise) {
+                        const nextFramesSlice = framesToProcess.slice(nextStart, Math.min(nextStart + effectiveBatchSize, frameCount));
+                        nextDemosaicPromise = nextRawPromise.then(async (nextRaw) => {
+                            const results = await processGpuBatch(nextRaw.frames, nextRaw.centers);
+                            return { gpuResults: results };
+                        });
+                    }
+
+                    // Capture for comparison video
+                    for (let i = 0; i < gpuResults.length; i++) {
+                        const globalIndex = batchStart + i;
+                        const frameBuffer = is16bit ? gpuResults[i].float32Buffer : gpuResults[i].uint8Buffer;
+                        const uint8ForCapture = is16bit
+                            ? new Uint8Array(float32ToUint8(frameBuffer, cropSize, cropSize))
+                            : new Uint8Array(frameBuffer);
+                        capturePostCropFrame(uint8ForCapture, cropSize, cropSize, globalIndex, frameCount);
+                    }
+
+                    // Get grayscale for matching
                     const frameGrayDatas = gpuResults.map(r => new Uint8Array(r.packedGrayBuffer || r.grayBuffer));
 
                     // Template matching
