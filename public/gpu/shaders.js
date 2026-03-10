@@ -435,6 +435,283 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+// VNG demosaic + crop shader for stacking
+// Reads from full-size source, outputs cropped region with VNG quality
+// Also outputs packed u8 grayscale for template matching
+export const demosaicVngCropShader = `
+struct Params {
+    srcWidth: u32,
+    srcHeight: u32,
+    cropSize: u32,
+    bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
+    batchSize: u32,
+    bitDepth: u32,      // 8 or 16
+    scale: f32,         // stretch scale for 16-bit
+    _pad: u32,
+}
+
+struct CropCenter {
+    x: f32,
+    y: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> input: array<u32>;
+@group(0) @binding(2) var<storage, read> centers: array<CropCenter>;
+@group(0) @binding(3) var<storage, read_write> output: array<u32>;  // Float32 RGBA via bitcast
+@group(0) @binding(4) var<storage, read_write> grayOutput: array<atomic<u32>>;  // Packed u8 grayscale
+
+fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
+    let pixelIdx = frameIdx * params.srcWidth * params.srcHeight + y * params.srcWidth + x;
+    if (params.bitDepth == 8u) {
+        let u32Idx = pixelIdx / 4u;
+        let bytePos = pixelIdx % 4u;
+        let packed = input[u32Idx];
+        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
+        return f32(rawValue) / 255.0;
+    } else {
+        let u32Idx = pixelIdx / 2u;
+        let halfPos = pixelIdx % 2u;
+        let packed = input[u32Idx];
+        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
+        return min(1.0, f32(rawValue) * params.scale / 65535.0);
+    }
+}
+
+fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
+    let cx = clamp(x, 0, i32(params.srcWidth) - 1);
+    let cy = clamp(y, 0, i32(params.srcHeight) - 1);
+    return getBayerValue(frameIdx, u32(cx), u32(cy));
+}
+
+fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
+    var grad: f32 = 0.0;
+    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
+    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
+    return grad;
+}
+
+fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
+    let gN = computeGradient(frameIdx, x, y, 0, -1);
+    let gS = computeGradient(frameIdx, x, y, 0, 1);
+    let gE = computeGradient(frameIdx, x, y, 1, 0);
+    let gW = computeGradient(frameIdx, x, y, -1, 0);
+    let gNE = computeGradient(frameIdx, x, y, 1, -1);
+    let gNW = computeGradient(frameIdx, x, y, -1, -1);
+    let gSE = computeGradient(frameIdx, x, y, 1, 1);
+    let gSW = computeGradient(frameIdx, x, y, -1, 1);
+
+    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
+    let threshold = minGrad * 1.5 + 0.001;
+    let center = sampleBayer(frameIdx, x, y);
+
+    var r: f32 = 0.0;
+    var g: f32 = 0.0;
+    var b: f32 = 0.0;
+
+    let n = sampleBayer(frameIdx, x, y - 1);
+    let s = sampleBayer(frameIdx, x, y + 1);
+    let e = sampleBayer(frameIdx, x + 1, y);
+    let w = sampleBayer(frameIdx, x - 1, y);
+    let ne = sampleBayer(frameIdx, x + 1, y - 1);
+    let nw = sampleBayer(frameIdx, x - 1, y - 1);
+    let se = sampleBayer(frameIdx, x + 1, y + 1);
+    let sw = sampleBayer(frameIdx, x - 1, y + 1);
+
+    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
+    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
+    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
+    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
+    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
+    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
+    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
+    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
+
+    if (pattern == 0u) { // RGGB
+        if (bx == 0u && by == 0u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 1u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 1u && by == 0u) {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        } else {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        }
+    } else if (pattern == 1u) { // BGGR
+        if (bx == 0u && by == 0u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 1u && by == 1u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 0u) {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        } else {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        }
+    } else if (pattern == 2u) { // GRBG
+        if (bx == 1u && by == 0u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 0u && by == 1u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 0u && by == 0u) {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        } else {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        }
+    } else { // GBRG (pattern == 3)
+        if (bx == 0u && by == 1u) {
+            r = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let bWeight = wNE + wNW + wSE + wSW;
+            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
+        } else if (bx == 1u && by == 0u) {
+            b = center;
+            let gSum = (n * wN + s * wS + e * wE + w * wW);
+            let gWeight = wN + wS + wE + wW;
+            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
+            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
+            let rWeight = wNE + wNW + wSE + wSW;
+            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
+        } else if (bx == 0u && by == 0u) {
+            g = center;
+            let bSum = (e * wE + w * wW);
+            let bWeight = wE + wW;
+            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
+            let rSum = (n * wN + s * wS);
+            let rWeight = wN + wS;
+            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
+        } else {
+            g = center;
+            let rSum = (e * wE + w * wW);
+            let rWeight = wE + wW;
+            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
+            let bSum = (n * wN + s * wS);
+            let bWeight = wN + wS;
+            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
+        }
+    }
+
+    return vec3<f32>(r, g, b);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let outX = gid.x;
+    let outY = gid.y;
+    let frameIdx = gid.z;
+
+    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
+        return;
+    }
+
+    // Calculate source coordinates from crop center
+    let center = centers[frameIdx];
+    let halfSize = f32(params.cropSize) / 2.0;
+    let cropStartX = i32(floor(center.x - halfSize)) & ~1;  // Ensure even for Bayer alignment
+    let cropStartY = i32(floor(center.y - halfSize)) & ~1;
+
+    let srcX = cropStartX + i32(outX);
+    let srcY = cropStartY + i32(outY);
+
+    // Clamp to source bounds
+    let x = u32(clamp(srcX, 0, i32(params.srcWidth) - 1));
+    let y = u32(clamp(srcY, 0, i32(params.srcHeight) - 1));
+
+    let bx = x % 2u;
+    let by = y % 2u;
+    let rgb = vngInterpolate(frameIdx, i32(x), i32(y), bx, by, params.bayerPattern);
+
+    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
+
+    // Output Float32 RGBA via bitcast
+    let baseIdx = outIdx * 4u;
+    output[baseIdx] = bitcast<u32>(rgb.x);
+    output[baseIdx + 1u] = bitcast<u32>(rgb.y);
+    output[baseIdx + 2u] = bitcast<u32>(rgb.z);
+    output[baseIdx + 3u] = bitcast<u32>(1.0);
+
+    // Output packed u8 grayscale for template matching
+    let gray = u32(clamp((0.299 * rgb.x + 0.587 * rgb.y + 0.114 * rgb.z) * 255.0, 0.0, 255.0));
+    let grayPackedIdx = outIdx >> 2u;
+    let grayByteOffset = (outIdx & 3u) << 3u;
+    atomicOr(&grayOutput[grayPackedIdx], gray << grayByteOffset);
+}
+`;
+
 // Grayscale conversion shader
 export const grayscaleShader = `
 struct Params {

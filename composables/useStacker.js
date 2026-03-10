@@ -331,6 +331,28 @@ export function useStacker() {
     }
 
     /**
+     * Prepare alignment data with pre-computed grayscale (for VNG demosaiced reference)
+     * Same as prepareAlignmentData but skips grayscale extraction
+     */
+    function prepareAlignmentDataWithGray(refGrayData, width, height, surfaceMode = false) {
+        // Create AP grid
+        const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode);
+
+        // Filter APs by quality
+        const filteredAPs = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
+        const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
+
+        return {
+            alignmentPoints: activeAPs,
+            refGrayData,
+            patchSize,
+            searchRadius,
+            width,
+            height
+        };
+    }
+
+    /**
      * Pipelined two-pass GPU stacking
      * Loads frames from file and stacks them concurrently for better performance
      * Instead of: load ALL → then stack ALL
@@ -532,40 +554,76 @@ export function useStacker() {
 
             // Load reference frame
             const { frames: refFrames, centers: refCenters } = await loadRawBatch([refFrameMeta]);
-            const refResults = await processGpuBatch(refFrames, refCenters);
+            const isRawBayer = bayerPattern >= 0;
 
-            // Use appropriate buffer type based on bit depth
-            // 16-bit: float32Buffer (0.0-1.0), 8-bit: uint8Buffer (0-255)
-            const refBuffer = is16bit ? refResults[0].float32Buffer : refResults[0].uint8Buffer;
-            const refBlob = is16bit
-                ? await float32ToBlob(refBuffer, cropSize, cropSize)
-                : await uint8ToBlob(refBuffer, cropSize, cropSize);
+            let refBuffer, refGrayData, refBlob;
+
+            if (isRawBayer) {
+                // Raw Bayer: VNG demosaic + crop via stack worker for consistency with stacked frames
+                const refCenter = refCenters[0];
+
+                const vngResult = await new Promise((resolve, reject) => {
+                    const handler = (e) => {
+                        if (e.data.type === 'vng-demosaic-ref-done') {
+                            gpuStackWorker.removeEventListener('message', handler);
+                            resolve(e.data);
+                        } else if (e.data.type === 'vng-demosaic-ref-error') {
+                            gpuStackWorker.removeEventListener('message', handler);
+                            reject(new Error(e.data.error));
+                        }
+                    };
+                    gpuStackWorker.addEventListener('message', handler);
+                    gpuStackWorker.postMessage({
+                        type: 'vng-demosaic-ref',
+                        bayerData: refFrames[0].data,
+                        srcWidth,
+                        srcHeight,
+                        cropSize,
+                        center: refCenter,
+                        bayerPattern,
+                        bitDepth: is16bit ? 16 : 8,
+                        bayerScale: is16bit ? (65535 / ((1 << (frameReReader.header?.pixelDepth || 16)) - 1)) : 1.0
+                    });
+                });
+
+                // VNG returns Float32 RGBA (0.0-1.0) and Uint8 grayscale
+                refBuffer = new Float32Array(vngResult.rgbaBuffer);
+                refGrayData = new Uint8Array(vngResult.grayBuffer);
+                refBlob = await float32ToBlob(refBuffer, cropSize, cropSize);
+            } else {
+                // RGBA input: use bilinear from analyze worker
+                const refResults = await processGpuBatch(refFrames, refCenters);
+                refBuffer = is16bit ? refResults[0].float32Buffer : refResults[0].uint8Buffer;
+                refBlob = is16bit
+                    ? await float32ToBlob(refBuffer, cropSize, cropSize)
+                    : await uint8ToBlob(refBuffer, cropSize, cropSize);
+                // Extract grayscale for alignment
+                refGrayData = rgbaToGrayscale(refBuffer, cropSize, cropSize, is16bit);
+            }
+
             const refFrame = {
                 ...refFrameMeta,
-                ...(is16bit ? { float32Buffer: refBuffer } : { uint8Buffer: refBuffer }),
+                float32Buffer: refBuffer instanceof Float32Array ? refBuffer : undefined,
+                uint8Buffer: refBuffer instanceof Uint8Array ? refBuffer : undefined,
                 width: cropSize,
                 height: cropSize,
                 blob: refBlob
             };
             emit('stacking-started', { referenceFrame: refFrame });
-            addLog(`Reference frame loaded: index ${refFrame.index}`);
+            addLog(`Reference frame loaded: index ${refFrame.index}${isRawBayer ? ' (VNG demosaic)' : ''}`);
 
             // Step 2: Prepare alignment points (pure JS, no OpenCV)
             emit('set-caption', 'Preparing alignment points...');
-            const refFrameData = {
-                ...(is16bit ? { float32Buffer: refBuffer.slice(0) } : { uint8Buffer: refBuffer.slice(0) }),
-                width: cropSize,
-                height: cropSize,
-                sharpness: refFrame.sharpness
-            };
-
-            const alignmentData = prepareAlignmentData(refFrameData, surfaceMode);
-            const { alignmentPoints, refGrayData, patchSize, searchRadius } = alignmentData;
+            // Both paths now have refGrayData ready, just create AP grid
+            const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropSize, cropSize, surfaceMode);
+            const { alignmentPoints, patchSize, searchRadius } = alignmentData;
             addLog(`Alignment prepared: ${alignmentPoints.length} APs`);
 
             // Calculate reference brightness for normalization
             // calcMeanBrightness returns 0-255 scale for both formats
-            const refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, is16bit);
+            // For raw Bayer, refBuffer is Float32 from VNG; for RGBA depends on is16bit
+            const isRefFloat32 = isRawBayer || is16bit;
+            const refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, isRefFloat32);
 
             // Step 3: Initialize GPU stacker
             await new Promise((resolve, reject) => {
@@ -583,6 +641,8 @@ export function useStacker() {
                     type: 'init-stacking',
                     width: cropSize,
                     height: cropSize,
+                    srcWidth,
+                    srcHeight,
                     drizzleScale,
                     alignmentPoints,
                     patchSize,
@@ -740,20 +800,11 @@ export function useStacker() {
                 const isRawBayer = bayerPattern >= 0;
 
                 if (isRawBayer) {
-                    // Raw Bayer: crop and send to worker for VNG demosaic + matching + stacking
-                    const croppedBayerFrames = rawBatch.frames.map((rawFrame, i) => {
-                        const center = rawBatch.centers[i];
-                        const croppedBayer = cropRawBayer(
-                            rawFrame.data,
-                            srcWidth, srcHeight,
-                            cropSize,
-                            center.x, center.y
-                        );
-                        return {
-                            bayerData: croppedBayer,
-                            sharpness: batchFrames[i].sharpness
-                        };
-                    });
+                    // Raw Bayer: send full frames + centers for GPU VNG demosaic + crop + matching + stacking
+                    const fullBayerFrames = rawBatch.frames.map((rawFrame, i) => ({
+                        data: rawFrame.data,
+                        sharpness: batchFrames[i].sharpness
+                    }));
 
                     await new Promise((resolve, reject) => {
                         const handler = (e) => {
@@ -768,7 +819,8 @@ export function useStacker() {
                         gpuStackWorker.addEventListener('message', handler);
                         gpuStackWorker.postMessage({
                             type: 'stack-frame-batch',
-                            frames: croppedBayerFrames,
+                            frames: fullBayerFrames,
+                            centers: rawBatch.centers,
                             frameWeights: batchWeights,
                             refGrayData,
                             searchRadius,

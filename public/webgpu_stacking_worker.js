@@ -16,6 +16,7 @@ import {
     warpAndAccumulateBatch,
     readAccumulators,
     demosaicVngBatch,
+    demosaicVngCropBatch,
     extractGrayscale,
     cleanupStackingBuffers
 } from './webgpu_stacking.js';
@@ -151,7 +152,7 @@ self.addEventListener('message', async (e) => {
     // GPU Stacking - streaming approach to avoid memory issues
     // Step 1: Initialize stacking
     if (type === 'init-stacking') {
-        const { width, height, drizzleScale, alignmentPoints, patchSize, refBrightness, minApQuality = 0.3,
+        const { width, height, srcWidth, srcHeight, drizzleScale, alignmentPoints, patchSize, refBrightness, minApQuality = 0.3,
                 bayerPattern = -1, bitDepth = 8, bayerScale = 1.0 } = e.data;
 
         try {
@@ -172,8 +173,10 @@ self.addEventListener('message', async (e) => {
             await clearAccumulators(outWidth, outHeight);
 
             // Store stacking context (including Bayer params for VNG demosaic)
+            // width/height = crop size, srcWidth/srcHeight = full source size
             stackingContext = {
-                width, height, outWidth, outHeight,
+                width, height, srcWidth: srcWidth || width, srcHeight: srcHeight || height,
+                outWidth, outHeight,
                 alignmentPoints, patchSize, drizzleScale, refBrightness, minApQuality,
                 bayerPattern, bitDepth, bayerScale
             };
@@ -185,14 +188,54 @@ self.addEventListener('message', async (e) => {
         }
     }
 
-    // Step 2: Stack a batch of frames with VNG demosaic + template matching + accumulation
-    // For raw Bayer input: VNG demosaic → grayscale extraction → template match → warp + accumulate
+    // VNG demosaic reference frame - returns RGBA + grayscale for alignment
+    // Used to ensure reference frame uses same demosaic as stacked frames
+    // Accepts full-size frame + center for cropping
+    if (type === 'vng-demosaic-ref') {
+        const { bayerData, srcWidth, srcHeight, cropSize, center, bayerPattern, bitDepth, bayerScale = 1.0 } = e.data;
+
+        try {
+            if (!stackingReady) {
+                stackingReady = await initStackingGPU();
+                if (!stackingReady) {
+                    throw new Error('Failed to initialize GPU stacking');
+                }
+            }
+
+            // VNG demosaic + crop single frame
+            const { rgbaData, grayData } = await demosaicVngCropBatch(
+                [{ data: bayerData }],
+                srcWidth, srcHeight,
+                cropSize,
+                [center],
+                bayerPattern,
+                bitDepth,
+                bayerScale
+            );
+
+            // Transfer buffers
+            self.postMessage({
+                type: 'vng-demosaic-ref-done',
+                rgbaBuffer: rgbaData.buffer,
+                grayBuffer: grayData.buffer,
+                width: cropSize,
+                height: cropSize
+            }, [rgbaData.buffer, grayData.buffer]);
+
+        } catch (err) {
+            self.postMessage({ type: 'vng-demosaic-ref-error', error: err.message });
+        }
+    }
+
+    // Step 2: Stack a batch of frames with VNG demosaic + crop + template matching + accumulation
+    // For raw Bayer input: VNG demosaic+crop → grayscale (from same pass) → template match → warp + accumulate
     // Accepts:
-    //   - frames[].bayerData (Uint8Array or Uint16Array) - raw Bayer, will be VNG demosaiced
+    //   - frames[].data (Uint8Array or Uint16Array) - full-size raw Bayer
+    //   - centers[] - per-frame crop centers {x, y}
     //   - refGrayData - reference frame grayscale for template matching
     //   - searchRadius, searchOffset, noiseRobustAlignment - template matching params
     if (type === 'stack-frame-batch') {
-        const { frames, frameWeights, refGrayData, searchRadius, searchOffset, noiseRobustAlignment } = e.data;
+        const { frames, centers, frameWeights, refGrayData, searchRadius, searchOffset, noiseRobustAlignment } = e.data;
         const ctx = stackingContext;
 
         if (!ctx) {
@@ -201,26 +244,15 @@ self.addEventListener('message', async (e) => {
         }
 
         try {
-            // VNG demosaic raw Bayer frames
-            console.log(`[StackWorker] VNG demosaicing ${frames.length} frames, pattern=${ctx.bayerPattern}, bitDepth=${ctx.bitDepth}...`);
-            const demosaicedData = await demosaicVngBatch(
-                frames.map(f => ({ data: f.bayerData })),
-                ctx.width, ctx.height,
+            // VNG demosaic + crop in one GPU pass (outputs both RGBA and grayscale)
+            const { rgbaData, grayData } = await demosaicVngCropBatch(
+                frames.map(f => ({ data: f.data })),
+                ctx.srcWidth, ctx.srcHeight,
+                ctx.width,  // cropSize
+                centers,
                 ctx.bayerPattern,
                 ctx.bitDepth,
                 ctx.bayerScale
-            );
-
-            // Debug: check VNG demosaic output (first frame, center pixel)
-            const debugIdx = Math.floor(ctx.width * ctx.height / 2) * 4;
-            console.log(`[StackWorker] VNG output sample: R=${demosaicedData[debugIdx].toFixed(4)}, G=${demosaicedData[debugIdx+1].toFixed(4)}, B=${demosaicedData[debugIdx+2].toFixed(4)}`);
-
-            // Extract grayscale for template matching
-            console.log(`[StackWorker] Extracting grayscale for template matching...`);
-            const grayData = await extractGrayscale(
-                demosaicedData,
-                ctx.width, ctx.height,
-                frames.length
             );
 
             // Split grayscale into per-frame arrays for template matching
@@ -230,7 +262,6 @@ self.addEventListener('message', async (e) => {
             });
 
             // Template matching with VNG-demosaiced grayscale
-            console.log(`[StackWorker] Template matching ${frames.length} frames...`);
             const shifts = await matchTemplatesBatchGPU(
                 refGrayData,
                 frameGrayDatas,
@@ -248,7 +279,7 @@ self.addEventListener('message', async (e) => {
             const rgbaFrames = frames.map((frame, i) => {
                 const start = i * floatsPerFrame;
                 return {
-                    rgbaBuffer: demosaicedData.subarray(start, start + floatsPerFrame),
+                    rgbaBuffer: rgbaData.subarray(start, start + floatsPerFrame),
                     sharpness: frame.sharpness
                 };
             });
