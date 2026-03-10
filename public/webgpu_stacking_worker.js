@@ -19,6 +19,7 @@ import {
     demosaicVngCropBatch,
     demosaicVngCropBatchGpu,
     warpAndAccumulateFromGpuBuffer,
+    matchTemplatesFromGpuBuffer,
     extractGrayscale,
     cleanupStackingBuffers
 } from './webgpu_stacking.js';
@@ -230,8 +231,8 @@ self.addEventListener('message', async (e) => {
     }
 
     // Step 2: Stack a batch of frames with VNG demosaic + crop + template matching + accumulation
-    // OPTIMIZED: RGBA stays on GPU (zero-copy), only grayscale read back for template matching
-    // For raw Bayer input: VNG demosaic+crop → grayscale (readback) → template match → warp + accumulate (GPU buffer)
+    // FULLY GPU-RESIDENT: RGBA and grayscale both stay on GPU, only small results read back
+    // For raw Bayer: VNG demosaic → template match (GPU buffer) → warp + accumulate (GPU buffer)
     // Accepts:
     //   - frames[].data (Uint8Array or Uint16Array) - full-size raw Bayer
     //   - centers[] - per-frame crop centers {x, y}
@@ -247,8 +248,9 @@ self.addEventListener('message', async (e) => {
         }
 
         try {
-            // VNG demosaic + crop - RGBA stays on GPU, only grayscale read back
-            const { rgbaGpuBuffer, grayData, batchSize, cropSize } = await demosaicVngCropBatchGpu(
+            // VNG demosaic + crop - BOTH RGBA and grayscale stay on GPU!
+            // grayData is also returned for brightness calculation (small overhead)
+            const { rgbaGpuBuffer, grayGpuBuffer, grayData, batchSize, cropSize } = await demosaicVngCropBatchGpu(
                 frames.map(f => ({ data: f.data })),
                 ctx.srcWidth, ctx.srcHeight,
                 ctx.width,  // cropSize
@@ -258,39 +260,36 @@ self.addEventListener('message', async (e) => {
                 ctx.bayerScale
             );
 
-            // Split grayscale into per-frame arrays for template matching
-            const pixelsPerFrame = ctx.width * ctx.height;
-            const frameGrayDatas = frames.map((_, i) => {
-                return new Uint8Array(grayData.buffer, i * pixelsPerFrame, pixelsPerFrame);
-            });
-
-            // Template matching with VNG-demosaiced grayscale
-            const shifts = await matchTemplatesBatchGPU(
+            // Template matching directly from GPU buffer (zero-copy!)
+            // Uses same GPU device as stacking
+            const shifts = await matchTemplatesFromGpuBuffer(
+                grayGpuBuffer,
                 refGrayData,
-                frameGrayDatas,
                 ctx.width,
                 ctx.height,
+                batchSize,
                 ctx.alignmentPoints,
                 ctx.patchSize,
                 searchRadius,
-                searchOffset,
-                noiseRobustAlignment
+                searchOffset
             );
 
-            // Calculate brightness from grayscale (avoids RGBA readback)
-            // Grayscale is 0.299*R + 0.587*G + 0.114*B, so it's a good proxy for brightness
+            // Done with grayscale GPU buffer
+            grayGpuBuffer.destroy();
+
+            // Calculate brightness from CPU grayscale (needed for normalization)
+            const pixelsPerFrame = ctx.width * ctx.height;
             const frameMetadata = frames.map((frame, i) => {
                 const grayStart = i * pixelsPerFrame;
                 const grayEnd = grayStart + pixelsPerFrame;
                 const frameGray = grayData.subarray(grayStart, grayEnd);
 
-                // Sample brightness from grayscale (same sparse sampling as calcMeanBrightness)
                 let sum = 0, count = 0;
                 const step = 8;
                 for (let y = 0; y < ctx.height; y += step) {
                     for (let x = 0; x < ctx.width; x += step) {
                         const val = frameGray[y * ctx.width + x];
-                        if (val > 10) {  // Skip black pixels
+                        if (val > 10) {
                             sum += val;
                             count++;
                         }

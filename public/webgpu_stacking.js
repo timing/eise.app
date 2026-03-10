@@ -1,15 +1,188 @@
 // WebGPU-accelerated frame stacking with local de-warping
 // Handles: displacement map generation, frame warping, and accumulation
+// Now also handles template matching on same device for zero-copy pipeline
 
 // Import VNG demosaic shaders for stacking (always high quality)
 // demosaicVngCropShader: VNG + crop in one pass (for batch stacking)
 // rgbaToGrayU8Shader: grayscale extraction for template matching
 import { demosaicVngShader, demosaicVngCropShader, rgbaToGrayU8Shader } from './gpu/shaders.js';
 
+// NCC batch template matching shader (moved from webgpu_template_match.js for single-device pipeline)
+const nccBatchShaderCode = `
+struct Params {
+    templateWidth: u32,
+    templateHeight: u32,
+    searchWidth: u32,
+    searchHeight: u32,
+    numAPs: u32,
+    numFrames: u32,
+    frameWidth: u32,
+    frameHeight: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> refTemplates: array<f32>;
+@group(0) @binding(2) var<storage, read> frameGraysPacked: array<u32>;
+@group(0) @binding(3) var<storage, read> apPositions: array<u32>;
+@group(0) @binding(4) var<storage, read_write> results: array<f32>;
+
+var<workgroup> sharedScores: array<f32, 256>;
+var<workgroup> sharedOffsets: array<u32, 256>;
+
+fn sampleFrame(frameIdx: u32, x: i32, y: i32) -> f32 {
+    if (x < 0 || y < 0 || u32(x) >= params.frameWidth || u32(y) >= params.frameHeight) {
+        return 0.0;
+    }
+    let frameSize = params.frameWidth * params.frameHeight;
+    let pixelIdx = frameIdx * frameSize + u32(y) * params.frameWidth + u32(x);
+    let packedIdx = pixelIdx >> 2u;
+    let byteOffset = (pixelIdx & 3u) << 3u;
+    let packed = frameGraysPacked[packedIdx];
+    return f32((packed >> byteOffset) & 0xFFu);
+}
+
+fn computeBatchNCC(frameIdx: u32, apIdx: u32, offsetX: i32, offsetY: i32) -> f32 {
+    let tw = params.templateWidth;
+    let th = params.templateHeight;
+    let templateSize = tw * th;
+    let templateStart = apIdx * templateSize;
+
+    let apPos = apPositions[apIdx];
+    let apX = i32(apPos & 0xFFFFu);
+    let apY = i32(apPos >> 16u);
+    let halfPatch = i32(tw / 2u);
+
+    let sx0 = apX - halfPatch + offsetX;
+    let sy0 = apY - halfPatch + offsetY;
+
+    var templateSum: f32 = 0.0;
+    var searchSum: f32 = 0.0;
+    let n = f32(templateSize);
+
+    for (var y: u32 = 0u; y < th; y++) {
+        for (var x: u32 = 0u; x < tw; x++) {
+            templateSum += refTemplates[templateStart + y * tw + x];
+            searchSum += sampleFrame(frameIdx, sx0 + i32(x), sy0 + i32(y));
+        }
+    }
+
+    let templateMean = templateSum / n;
+    let searchMean = searchSum / n;
+
+    var numerator: f32 = 0.0;
+    var templateVar: f32 = 0.0;
+    var searchVar: f32 = 0.0;
+
+    for (var y: u32 = 0u; y < th; y++) {
+        for (var x: u32 = 0u; x < tw; x++) {
+            let tVal = refTemplates[templateStart + y * tw + x] - templateMean;
+            templateVar += tVal * tVal;
+            let sVal = sampleFrame(frameIdx, sx0 + i32(x), sy0 + i32(y)) - searchMean;
+            searchVar += sVal * sVal;
+            numerator += tVal * sVal;
+        }
+    }
+
+    let denominator = sqrt(templateVar * searchVar);
+    if (denominator < 0.0001) {
+        return 0.0;
+    }
+    return numerator / denominator;
+}
+
+@compute @workgroup_size(256, 1, 1)
+fn main(
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>
+) {
+    let frameIdx = wid.x / params.numAPs;
+    let apIdx = wid.x % params.numAPs;
+    let threadIdx = lid.x;
+
+    if (frameIdx >= params.numFrames || apIdx >= params.numAPs) {
+        return;
+    }
+
+    let searchRadius = i32((params.searchWidth - params.templateWidth) / 2u);
+    let gridSize = u32(2 * searchRadius + 1);
+    let totalPositions = gridSize * gridSize;
+
+    var bestScore: f32 = -1.0;
+    var bestDx: i32 = 0;
+    var bestDy: i32 = 0;
+
+    var pos = threadIdx;
+    while (pos < totalPositions) {
+        let dy = i32(pos / gridSize);
+        let dx = i32(pos % gridSize);
+        let offsetX = dx - searchRadius;
+        let offsetY = dy - searchRadius;
+
+        let score = computeBatchNCC(frameIdx, apIdx, offsetX, offsetY);
+        if (score > bestScore) {
+            bestScore = score;
+            bestDx = offsetX;
+            bestDy = offsetY;
+        }
+        pos += 256u;
+    }
+
+    sharedScores[threadIdx] = bestScore;
+    let packedOffset = u32(bestDx + searchRadius) | (u32(bestDy + searchRadius) << 16u);
+    sharedOffsets[threadIdx] = packedOffset;
+    workgroupBarrier();
+
+    for (var stride: u32 = 128u; stride > 0u; stride = stride >> 1u) {
+        if (threadIdx < stride) {
+            let other = threadIdx + stride;
+            if (sharedScores[other] > sharedScores[threadIdx]) {
+                sharedScores[threadIdx] = sharedScores[other];
+                sharedOffsets[threadIdx] = sharedOffsets[other];
+            }
+        }
+        workgroupBarrier();
+    }
+
+    if (threadIdx == 0u) {
+        let finalOffset = sharedOffsets[0];
+        let intDx = i32(finalOffset & 0xFFFFu) - searchRadius;
+        let intDy = i32(finalOffset >> 16u) - searchRadius;
+        let centerScore = sharedScores[0];
+
+        var subDx: f32 = 0.0;
+        var subDy: f32 = 0.0;
+
+        if (intDx > -searchRadius && intDx < searchRadius) {
+            let scoreLeft = computeBatchNCC(frameIdx, apIdx, intDx - 1, intDy);
+            let scoreRight = computeBatchNCC(frameIdx, apIdx, intDx + 1, intDy);
+            let denom = scoreLeft - 2.0 * centerScore + scoreRight;
+            if (abs(denom) > 0.0001) {
+                subDx = clamp(0.5 * (scoreLeft - scoreRight) / denom, -0.5, 0.5);
+            }
+        }
+
+        if (intDy > -searchRadius && intDy < searchRadius) {
+            let scoreUp = computeBatchNCC(frameIdx, apIdx, intDx, intDy - 1);
+            let scoreDown = computeBatchNCC(frameIdx, apIdx, intDx, intDy + 1);
+            let denom = scoreUp - 2.0 * centerScore + scoreDown;
+            if (abs(denom) > 0.0001) {
+                subDy = clamp(0.5 * (scoreUp - scoreDown) / denom, -0.5, 0.5);
+            }
+        }
+
+        let resultIdx = (frameIdx * params.numAPs + apIdx) * 3u;
+        results[resultIdx] = f32(intDx) + subDx;
+        results[resultIdx + 1u] = f32(intDy) + subDy;
+        results[resultIdx + 2u] = centerScore;
+    }
+}
+`;
+
 let stackDevice = null;
 let stackQueue = null;
 let warpPipeline = null;
 let accumulatePipeline = null;
+let nccBatchPipeline = null;  // Template matching on same device
 let isStackingReady = false;
 let stackDeviceLost = false; // Track if GPU device was lost
 let stackReinitializing = false;
@@ -367,9 +540,19 @@ async function initStackingGPU() {
             compute: { module: grayShaderModule, entryPoint: 'main' }
         });
 
+        // NCC batch template matching pipeline (same device for zero-copy)
+        const nccShaderModule = stackDevice.createShaderModule({
+            code: nccBatchShaderCode
+        });
+
+        nccBatchPipeline = stackDevice.createComputePipeline({
+            layout: 'auto',
+            compute: { module: nccShaderModule, entryPoint: 'main' }
+        });
+
         isStackingReady = true;
         stackDeviceLost = false;
-        console.log('WebGPU stacking initialized (with VNG demosaic)');
+        console.log('WebGPU stacking initialized (with VNG demosaic + NCC matching)');
         return true;
     } catch (e) {
         console.error('WebGPU stacking init error:', e);
@@ -1176,9 +1359,9 @@ function cleanupStackingBuffers() {
 }
 
 /**
- * VNG demosaic + crop keeping RGBA on GPU (zero-copy to warp+accumulate)
- * Only reads back grayscale (needed for template matching on separate GPU device)
- * @returns {{rgbaGpuBuffer: GPUBuffer, grayData: Uint8Array, batchSize: number, cropSize: number}}
+ * VNG demosaic + crop keeping BOTH RGBA and grayscale on GPU (fully zero-copy pipeline)
+ * Also returns CPU grayscale for brightness calculation (small overhead, needed for normalization)
+ * @returns {{rgbaGpuBuffer: GPUBuffer, grayGpuBuffer: GPUBuffer, grayData: Uint8Array, batchSize: number, cropSize: number}}
  */
 async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, bitDepth, scale = 1.0) {
     if (!stackDevice || !vngCropPipeline) {
@@ -1210,13 +1393,14 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
 
-    // RGBA stays on GPU - add COPY_SRC for copyBufferToBuffer to frame buffers
+    // RGBA stays on GPU for warp+accumulate
     const rgbaGpuBuffer = stackDevice.createBuffer({
         size: rgbaOutputSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
     });
 
-    const grayOutputBuffer = stackDevice.createBuffer({
+    // Grayscale stays on GPU for template matching (same device!)
+    const grayGpuBuffer = stackDevice.createBuffer({
         size: grayOutputSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
     });
@@ -1250,7 +1434,7 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
 
     // Run VNG demosaic
     const encoder = stackDevice.createCommandEncoder();
-    encoder.clearBuffer(grayOutputBuffer, 0, grayOutputSize);
+    encoder.clearBuffer(grayGpuBuffer, 0, grayOutputSize);
 
     const bindGroup = stackDevice.createBindGroup({
         layout: vngCropPipeline.getBindGroupLayout(0),
@@ -1259,7 +1443,7 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
             { binding: 1, resource: { buffer: inputBuffer } },
             { binding: 2, resource: { buffer: centersBuffer } },
             { binding: 3, resource: { buffer: rgbaGpuBuffer } },
-            { binding: 4, resource: { buffer: grayOutputBuffer } }
+            { binding: 4, resource: { buffer: grayGpuBuffer } }
         ]
     });
 
@@ -1273,28 +1457,28 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
     );
     pass.end();
 
-    // Only read back grayscale (small - needed for template matching on other GPU device)
+    // Read back grayscale for brightness calculation (still needed for normalization)
+    // This is the only readback - template matching uses GPU buffer directly
     const grayReadback = stackDevice.createBuffer({
         size: grayOutputSize,
         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
     });
-    encoder.copyBufferToBuffer(grayOutputBuffer, 0, grayReadback, 0, grayOutputSize);
+    encoder.copyBufferToBuffer(grayGpuBuffer, 0, grayReadback, 0, grayOutputSize);
 
     stackQueue.submit([encoder.finish()]);
 
     await safeStackMapAsync(grayReadback, GPUMapMode.READ);
     const grayData = new Uint8Array(grayReadback.getMappedRange().slice(0));
     grayReadback.unmap();
+    grayReadback.destroy();
 
-    // Cleanup temp buffers (but keep rgbaGpuBuffer!)
+    // Cleanup temp buffers (but keep rgbaGpuBuffer and grayGpuBuffer!)
     paramsBuffer.destroy();
     inputBuffer.destroy();
     centersBuffer.destroy();
-    grayOutputBuffer.destroy();
-    grayReadback.destroy();
 
-    // Return GPU buffer handle - caller must destroy after use
-    return { rgbaGpuBuffer, grayData, batchSize, cropSize };
+    // Return GPU buffer handles + CPU grayscale for brightness - caller must destroy GPU buffers after use
+    return { rgbaGpuBuffer, grayGpuBuffer, grayData, batchSize, cropSize };
 }
 
 /**
@@ -1397,6 +1581,144 @@ async function warpAndAccumulateFromGpuBuffer(rgbaGpuBuffer, batchSize, cropSize
     rgbaGpuBuffer.destroy();
 }
 
+/**
+ * Template matching from GPU buffer (zero-copy from VNG demosaic)
+ * Uses same GPU device as stacking for fully GPU-resident pipeline
+ * @param {GPUBuffer} grayGpuBuffer - Packed u8 grayscale from VNG demosaic (stays on GPU)
+ * @param {Uint8Array} refGrayData - Reference frame grayscale (CPU - uploaded once)
+ * @param {number} width - Frame width
+ * @param {number} height - Frame height
+ * @param {number} batchSize - Number of frames in buffer
+ * @param {Array} alignmentPoints - Array of {x, y} alignment points
+ * @param {number} patchSize - Template patch size
+ * @param {number} searchRadius - Search radius in pixels
+ * @param {Object} searchOffset - Optional {dx, dy} for drift tracking
+ * @returns {Array} Array of shifts per frame, each containing shifts per AP
+ */
+async function matchTemplatesFromGpuBuffer(grayGpuBuffer, refGrayData, width, height, batchSize,
+    alignmentPoints, patchSize, searchRadius, searchOffset = null) {
+
+    if (!stackDevice || !nccBatchPipeline) {
+        throw new Error('Stacking GPU not initialized for template matching');
+    }
+
+    const numAPs = alignmentPoints.length;
+    const templateSize = patchSize * patchSize;
+    const frameSize = width * height;
+
+    // Extract reference templates (once per stack, small data)
+    const refTemplates = new Float32Array(numAPs * templateSize);
+    const apPositions = new Uint32Array(numAPs);
+    const halfPatch = Math.floor(patchSize / 2);
+
+    const offsetX = searchOffset ? Math.round(searchOffset.dx) : 0;
+    const offsetY = searchOffset ? Math.round(searchOffset.dy) : 0;
+
+    for (let i = 0; i < numAPs; i++) {
+        const ap = alignmentPoints[i];
+        const searchX = ap.x + offsetX;
+        const searchY = ap.y + offsetY;
+        apPositions[i] = (searchX & 0xFFFF) | ((searchY & 0xFFFF) << 16);
+
+        const tx0 = ap.x - halfPatch;
+        const ty0 = ap.y - halfPatch;
+        for (let py = 0; py < patchSize; py++) {
+            for (let px = 0; px < patchSize; px++) {
+                const sx = tx0 + px;
+                const sy = ty0 + py;
+                if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+                    refTemplates[i * templateSize + py * patchSize + px] = refGrayData[sy * width + sx];
+                }
+            }
+        }
+    }
+
+    // Create buffers for template matching
+    const paramsBuffer = stackDevice.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+
+    const templatesBuffer = stackDevice.createBuffer({
+        size: refTemplates.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+    const apPosBuffer = stackDevice.createBuffer({
+        size: apPositions.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    });
+
+    const resultsSize = batchSize * numAPs * 3 * 4;  // 3 floats per AP per frame
+    const resultsBuffer = stackDevice.createBuffer({
+        size: resultsSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+
+    const readbackBuffer = stackDevice.createBuffer({
+        size: resultsSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+
+    // Upload data
+    const searchSize = patchSize + 2 * searchRadius;
+    const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, batchSize, width, height]);
+    stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
+    stackQueue.writeBuffer(templatesBuffer, 0, refTemplates);
+    stackQueue.writeBuffer(apPosBuffer, 0, apPositions);
+
+    // Create bind group - grayGpuBuffer is directly used (zero-copy!)
+    const bindGroup = stackDevice.createBindGroup({
+        layout: nccBatchPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: paramsBuffer } },
+            { binding: 1, resource: { buffer: templatesBuffer } },
+            { binding: 2, resource: { buffer: grayGpuBuffer } },  // Direct GPU buffer!
+            { binding: 3, resource: { buffer: apPosBuffer } },
+            { binding: 4, resource: { buffer: resultsBuffer } }
+        ]
+    });
+
+    // Run NCC
+    const encoder = stackDevice.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(nccBatchPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(batchSize * numAPs, 1, 1);
+    pass.end();
+
+    encoder.copyBufferToBuffer(resultsBuffer, 0, readbackBuffer, 0, resultsSize);
+    stackQueue.submit([encoder.finish()]);
+
+    // Read results (small - only shifts, not image data)
+    await safeStackMapAsync(readbackBuffer, GPUMapMode.READ);
+    const resultsData = new Float32Array(readbackBuffer.getMappedRange().slice(0));
+    readbackBuffer.unmap();
+
+    // Cleanup
+    paramsBuffer.destroy();
+    templatesBuffer.destroy();
+    apPosBuffer.destroy();
+    resultsBuffer.destroy();
+    readbackBuffer.destroy();
+
+    // Unpack results
+    const allShifts = [];
+    for (let f = 0; f < batchSize; f++) {
+        const frameShifts = [];
+        for (let ap = 0; ap < numAPs; ap++) {
+            const baseIdx = (f * numAPs + ap) * 3;
+            const dx = resultsData[baseIdx];
+            const dy = resultsData[baseIdx + 1];
+            const quality = resultsData[baseIdx + 2];
+            frameShifts.push({ dx: dx + offsetX, dy: dy + offsetY, quality });
+        }
+        allShifts.push(frameShifts);
+    }
+
+    return allShifts;
+}
+
 // ES6 exports for module worker
 export {
     initStackingGPU,
@@ -1408,6 +1730,7 @@ export {
     demosaicVngCropBatch,
     demosaicVngCropBatchGpu,
     warpAndAccumulateFromGpuBuffer,
+    matchTemplatesFromGpuBuffer,
     extractGrayscale,
     cleanupStackingBuffers
 };
