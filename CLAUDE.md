@@ -59,6 +59,12 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 6. **Stacking**: Alignment points grid → GPU template matching → de-warping → weighted accumulation
 7. **Post-processing**: Wavelet sharpening, color correction
 
+## Design System & CSS
+
+- **Design System Reference**: See `/design-system` page for inventory of UI components and styles.
+- **Reuse existing styles**: Check `app.vue` for global styles before adding new CSS.
+- **Avoid duplication**: Check the design system before creating new button styles, message styles, or form controls.
+
 ## Key Technical Details
 
 **IMPORTANT: WebGPU Path is Primary**: When making changes to analysis/stacking code, always prioritize the WebGPU path. Key files:

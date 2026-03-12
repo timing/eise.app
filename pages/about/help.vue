@@ -2,7 +2,7 @@
 	<div class="page-layout page-layout-wide">
 		<div class="content">
 			<h2>How to Use eise.app - Planetary Image Stacking Guide</h2>
-			<p class="intro">This guide explains how eise.app processes your astrophotography videos and images to create sharp, detailed results.</p>
+			<p >This guide explains how eise.app processes your astrophotography videos and images to create sharp, detailed results.</p>
 
 			<h3>Getting Started</h3>
 			<ol>
@@ -103,11 +103,6 @@ useHead({
 </script>
 
 <style scoped>
-.intro {
-	font-size: 1.1em;
-	color: #aaa;
-	margin-bottom: 1.5rem;
-}
 dl {
 	margin: 1rem 0;
 }

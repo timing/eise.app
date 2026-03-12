@@ -523,6 +523,35 @@ canvas {
 .card h4 {
 	margin-bottom: 0;
 }
+/* Unified number input - replaces .percentage-input, .small-number-input, .inline-number, .repeats-input */
+.number-input {
+	width: 55px;
+	padding: 4px 6px;
+	border: 1px solid #ccc;
+	border-radius: 4px;
+	text-align: center;
+}
+.number-input:disabled {
+	background: #eee;
+	color: #999;
+}
+/* Primary action button (green) */
+.btn-primary {
+	background-color: #8CCF7E;
+	color: #111;
+	padding: 10px 20px;
+	border: none;
+	border-radius: 5px;
+	cursor: pointer;
+	font-weight: bold;
+}
+.btn-primary:hover {
+	background-color: #7ABF6E;
+}
+.btn-primary:disabled {
+	background-color: #ccc;
+	cursor: not-allowed;
+}
 #sentry-feedback {
 	--inset: auto 0 80px auto;
 }

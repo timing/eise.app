@@ -22,7 +22,7 @@
 		</div>
 
 		<div class="action-buttons">
-			<button class="stack-button" @click="proceedWithStacking">Stack {{ selectedCount }} frames</button>
+			<button class="btn-primary" @click="proceedWithStacking">Stack {{ selectedCount }} frames</button>
 		</div>
 	</div>
 
@@ -542,21 +542,6 @@ function proceedWithStacking() {
 .action-buttons {
 	margin-top: 20px;
 	text-align: center;
-}
-
-.stack-button {
-	background-color: #8CCF7E;
-	color: #111;
-	padding: 12px 30px;
-	border: none;
-	border-radius: 5px;
-	cursor: pointer;
-	font-size: 16px;
-	font-weight: bold;
-}
-
-.stack-button:hover {
-	background-color: #7ABF6E;
 }
 
 </style>

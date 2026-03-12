@@ -65,13 +65,13 @@
 					<label class="checkbox-option">
 						<input type="checkbox" v-model="enableMaxFrames" />
 						Limit to
-						<input type="number" v-model.number="selectedMaxFrames" min="100" max="5000" step="100" class="inline-number" :disabled="!enableMaxFrames" />
+						<input type="number" v-model.number="selectedMaxFrames" min="100" max="5000" step="100" class="number-input" :disabled="!enableMaxFrames" />
 						frames
 					</label>
 				</div>
 
 				<div class="action-buttons">
-					<button class="start-button" @click="startProcessing">{{ startButtonText }}</button>
+					<button class="btn-primary" @click="startProcessing">{{ startButtonText }}</button>
 					<button class="clear-button" @click="clearSelection">Clear</button>
 				</div>
 			</div>
@@ -104,7 +104,7 @@
 					<label class="radio-option">
 						<input type="radio" v-model="qualityMode" value="percentage" />
 						Stack best
-						<input type="number" v-model.number="stackPercentage" min="1" max="100" class="percentage-input" :disabled="qualityMode !== 'percentage'" />%
+						<input type="number" v-model.number="stackPercentage" min="1" max="100" class="number-input" :disabled="qualityMode !== 'percentage'" />%
 					</label>
 				</div>
 				<p v-if="showFrameSelectionInfo" class="info-text"><strong>Manual:</strong> After analysis, you'll see a quality graph and can choose which frames to stack.<br><strong>Percentage:</strong> Automatically selects the sharpest frames. Recommended if you run into memory issues.</p>
@@ -128,12 +128,12 @@
 
 				<label class="checkbox-option">
 					AP size:
-					<input type="number" min="10" max="64" step="2" v-model.number="apPatchSize" class="small-number-input" />
+					<input type="number" min="10" max="64" step="2" v-model.number="apPatchSize" class="number-input" />
 				</label>
 
 				<label class="checkbox-option">
 					AP quality threshold:
-					<input type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="small-number-input" />
+					<input type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="number-input" />
 				</label>
 
 								<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 30 is a safe middle ground.</p>
@@ -1262,19 +1262,6 @@ async function processFiles(files) {
 	gap: 10px;
 	margin-top: 10px;
 }
-.start-button {
-	background-color: #8CCF7E;
-	color: #111;
-	padding: 10px 20px;
-	border: none;
-	border-radius: 5px;
-	cursor: pointer;
-	font-size: 14px;
-	font-weight: bold;
-}
-.start-button:hover {
-	background-color: #7ABF6E;
-}
 .clear-button {
 	background-color: #888;
 	color: white;
@@ -1354,24 +1341,6 @@ async function processFiles(files) {
 .checkbox-option input[type="checkbox"] {
 	margin: 0;
 }
-.percentage-input {
-	width: 50px;
-	padding: 4px 6px;
-	border: 1px solid #ccc;
-	border-radius: 4px;
-	text-align: center;
-}
-.percentage-input:disabled {
-	background: #eee;
-	color: #999;
-}
-.small-number-input {
-	width: 55px;
-	padding: 3px 5px;
-	border: 1px solid #ccc;
-	border-radius: 4px;
-	text-align: center;
-}
 .memory-optimization-box {
 	background: #fff8e1;
 	border: 1px solid #ffcc80;
@@ -1396,18 +1365,6 @@ async function processFiles(files) {
 	border-radius: 3px;
 	margin-left: 5px;
 	vertical-align: middle;
-}
-.inline-number {
-	width: 60px;
-	padding: 4px 6px;
-	border: 1px solid #ccc;
-	border-radius: 4px;
-	text-align: center;
-	margin: 0 4px;
-}
-.inline-number:disabled {
-	background: #eee;
-	color: #999;
 }
 .build-date {
 	font-size: 0.85em;

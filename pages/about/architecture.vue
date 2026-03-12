@@ -2,7 +2,7 @@
 	<div class="page-layout page-layout-wide">
 		<div class="content architecture-page">
 			<h2>Technical Architecture</h2>
-			<p class="intro">This page documents the internal processing pipelines and algorithms used by eise.app. Useful for contributors or anyone curious about how it works.</p>
+			<p >This page documents the internal processing pipelines and algorithms used by eise.app. Useful for contributors or anyone curious about how it works.</p>
 
 			<h3>High-Level Overview</h3>
 			<pre class="diagram">
@@ -384,12 +384,6 @@ useHead({
 </script>
 
 <style scoped>
-.intro {
-	font-size: 1.1em;
-	color: #aaa;
-	margin-bottom: 1.5rem;
-}
-
 .architecture-page h3 {
 	margin-top: 2rem;
 	border-bottom: 1px solid #444;

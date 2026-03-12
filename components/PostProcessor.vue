@@ -151,7 +151,7 @@
 			</div>
 			<div>
 				<label>Saturation repeats:</label>
-				<input type="number" min="1" max="10" v-model.number="saturationRepeats" @input="applyProcessing" class="repeats-input"/>
+				<input type="number" min="1" max="10" v-model.number="saturationRepeats" @input="applyProcessing" class="number-input"/>
 			</div>
 
 			<h4>Crop</h4>
@@ -160,7 +160,7 @@
 				<button v-if="!cropMode && canUndoCrop" class="undo-crop" @click="undoCrop">Undo crop</button>
 				<template v-if="cropMode">
 					<span class="crop-hint">Click and drag on the image to select area</span>
-					<button class="apply-crop" @click="applyCrop" :disabled="!cropSelection">Apply crop</button>
+					<button class="btn-primary" @click="applyCrop" :disabled="!cropSelection">Apply crop</button>
 					<button class="cancel-crop" @click="cancelCrop">Cancel</button>
 				</template>
 			</div>
@@ -179,7 +179,7 @@
 				<button v-if="!edgeMaskMode && edgeMaskEnabled" class="remove-mask" @click="removeEdgeMask">Remove</button>
 				<template v-if="edgeMaskMode">
 					<span class="edge-mask-hint">Drag circle to move, drag edge to resize</span>
-					<button class="apply-mask" @click="applyEdgeMask">Apply</button>
+					<button class="btn-primary" @click="applyEdgeMask">Apply</button>
 					<button class="cancel-mask" @click="cancelEdgeMask">Cancel</button>
 				</template>
 			</div>
@@ -204,7 +204,7 @@
 				</template>
 				<template #toolbar>
 					<div class="toolbar-actions">
-						<button class="export-btn" @click="openExportPopup">
+						<button class="btn-primary" @click="openExportPopup">
 							⬇ Export
 						</button>
 						<div class="kebab-menu">
@@ -416,7 +416,7 @@ const handleCanvasReady = (canvasRef) => {
 const downloadCanvasAsPNG = () => {
 	if (!canvas) return;
 
-	track('download_processed');
+	track('download', { type: 'processed', format: 'png', bit_depth: 8 });
 	const dataURL = canvas.value.toDataURL('image/png');
 	const link = document.createElement('a');
 	const filename = exportFilename.value || inputFilename.value || 'eise_app';
@@ -432,7 +432,7 @@ const downloadCanvasAsPNG = () => {
 const downloadUnprocessedPNG = async () => {
 	if (!image16) return;
 
-	track('download_unprocessed');
+	track('download', { type: 'unprocessed', format: 'png', bit_depth: 16 });
 	try {
 		const filename = exportFilename.value || inputFilename.value || 'eise_app';
 		await download16BitPNG(
@@ -463,7 +463,7 @@ const downloadComparisonVideo = async () => {
 			captureProcessedImage(processedBlob);
 		}
 
-		track('download_comparison_video');
+		track('download', { type: 'comparison_video', format: 'mp4', bit_depth: null });
 
 		const videoBlob = await generateComparisonVideo($ffmpeg, $loadFFmpeg, (status) => {
 			exportProgress.value = status;
@@ -494,7 +494,7 @@ const downloadComparisonVideo = async () => {
 const downloadCroppedSer = () => {
 	if (!props.croppedSerData) return;
 
-	track('download_cropped_ser');
+	track('download', { type: 'cropped_ser', format: 'ser', bit_depth: null });
 	const url = URL.createObjectURL(props.croppedSerData.blob);
 	const a = document.createElement('a');
 	a.href = url;
@@ -511,7 +511,7 @@ const downloadCroppedSer = () => {
 const download16BitProcessedPNG = async () => {
 	if (!sharpenedImage16) return;
 
-	track('download_processed_16bit');
+	track('download', { type: 'processed', format: 'png', bit_depth: 16 });
 	try {
 		const filename = exportFilename.value || inputFilename.value || 'eise_app';
 		await download16BitPNG(
@@ -2122,12 +2122,6 @@ canvas {
 	max-width: none;
 }
 
-/* Saturation repeats input */
-.repeats-input {
-	width: 50px;
-	padding: 2px 4px;
-}
-
 /* Toolbar actions wrapper */
 .toolbar-actions {
 	display: flex;
@@ -2272,14 +2266,6 @@ canvas {
 	background-color: #e8e8e8;
 	color: #555;
 }
-.crop-controls .apply-crop {
-	background-color: #8CCF7E;
-	color: #111;
-}
-.crop-controls .apply-crop:disabled {
-	background-color: #ccc;
-	cursor: not-allowed;
-}
 .crop-controls .cancel-crop {
 	background-color: #888;
 	color: white;
@@ -2307,10 +2293,6 @@ canvas {
 	cursor: pointer;
 	background-color: #e8e8e8;
 	color: #555;
-}
-.edge-mask-controls .apply-mask {
-	background-color: #8CCF7E;
-	color: #111;
 }
 .edge-mask-controls .cancel-mask {
 	background-color: #888;
@@ -2388,15 +2370,6 @@ canvas {
 .controls {
 	position: relative;
 }
-button.download {
-	display: block;
-	margin-bottom: 8px;
-	background-color: #8CCF7E;
-	color: #111;
-}
-button.download:hover {
-	background-color: #7ABF6E;
-}
 .loading-inline {
 	position: absolute;
 	top: 10px;
@@ -2421,20 +2394,6 @@ button.download:hover {
 .comparison-btn:disabled {
 	opacity: 0.6;
 	cursor: not-allowed;
-}
-.export-btn {
-	background-color: #8CCF7E;
-	color: #111;
-	padding: 8px 16px;
-	border: none;
-	border-radius: 5px;
-	cursor: pointer;
-	font-weight: bold;
-	font-size: 14px;
-	line-height: 1;
-}
-.export-btn:hover {
-	background-color: #7ABF6E;
 }
 .export-popup-overlay {
 	position: fixed;

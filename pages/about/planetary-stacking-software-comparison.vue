@@ -2,7 +2,7 @@
 	<div class="page-layout page-layout-wide">
 		<div class="content">
 			<h2>Planetary Stacking Software Comparison 2026</h2>
-			<p class="intro">
+			<p >
 				Choosing the right stacking software for planetary astrophotography can be confusing.
 				This guide compares the most popular options: AutoStakkert!, Planetary System Stacker (PSS), Planet Stacker X, Registax, PIPP, and eise.app.
 			</p>
@@ -229,11 +229,6 @@ useHead({
 </script>
 
 <style scoped>
-.intro {
-	font-size: 1.1em;
-	color: #aaa;
-	margin-bottom: 1.5rem;
-}
 .table-wrapper {
 	overflow-x: auto;
 	margin: 1.5rem 0;
