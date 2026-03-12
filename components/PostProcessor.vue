@@ -260,7 +260,7 @@
 			<p class="share-note">If you share this image, a mention of eise.app is appreciated!</p>
 
 			<div class="export-popup-footer">
-				<a href="https://github.com/timing/eise.app/issues" target="_blank" class="feedback-cta" @click="handleFeedbackClick">
+				<a href="https://github.com/timing/eise.app/issues" target="_blank" class="btn-primary" @click="handleFeedbackClick">
 					💬 How was your result? Send feedback!
 				</a>
 				<button class="close-btn" @click="showExportPopup = false">Close</button>
@@ -2497,20 +2497,6 @@ canvas {
 	gap: 10px;
 	padding-top: 15px;
 }
-.feedback-cta {
-	background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-	border: none;
-	color: white;
-	cursor: pointer;
-	font-size: 13px;
-	padding: 10px 16px;
-	border-radius: 5px;
-	font-weight: bold;
-	flex: 1;
-}
-.feedback-cta:hover {
-	opacity: 0.9;
-}
 .close-btn {
 	padding: 8px 20px;
 	background-color: #eee;
@@ -2566,42 +2552,6 @@ canvas {
 	padding-top: 15px;
 	margin-top: 15px;
 	border-top: 1px solid #eee;
-}
-
-.file-input-wrapper {
-	position: relative;
-	margin-bottom: 10px;
-}
-
-.file-input-wrapper input[type="file"] {
-	position: absolute;
-	opacity: 0;
-	width: 100%;
-	height: 100%;
-	cursor: pointer;
-}
-
-.file-label {
-	display: block;
-	padding: 10px 15px;
-	background: #f5f5f5;
-	border: 2px dashed #ccc;
-	border-radius: 5px;
-	text-align: center;
-	cursor: pointer;
-	transition: all 0.2s;
-	color: #666;
-}
-
-.file-label:hover {
-	border-color: #8CCF7E;
-	background: #f0fff0;
-}
-
-.supported-formats {
-	font-size: 12px;
-	color: #888;
-	margin: 0;
 }
 
 /* Feature list styling - muted descriptions with bold titles */

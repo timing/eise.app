@@ -16,7 +16,7 @@
 
 		<!-- Cancel button during processing -->
 		<div v-if="isProcessing" class="action-buttons processing-actions">
-			<button class="cancel-button" @click="cancelProcessing">Cancel</button>
+			<button class="btn-danger" @click="cancelProcessing">Cancel</button>
 		</div>
 
 		<!-- Error message - always visible when set, regardless of processing state -->
@@ -72,7 +72,7 @@
 
 				<div class="action-buttons">
 					<button class="btn-primary" @click="startProcessing">{{ startButtonText }}</button>
-					<button class="clear-button" @click="clearSelection">Clear</button>
+					<button class="btn-secondary" @click="clearSelection">Clear</button>
 				</div>
 			</div>
 
@@ -1179,9 +1179,11 @@ async function processFiles(files) {
 	padding: 10px;
 	margin-top: 10px;
 	border-radius: 5px;
-	text-align: center;
+	text-align: left;
+	font-weight: bold;
 }
 .cancelled-message .feedback-prompt {
+	font-weight: normal;
 	font-size: 0.9em;
 	margin-top: 8px;
 }
@@ -1201,39 +1203,6 @@ async function processFiles(files) {
 .cancelled-message .reload-button:hover {
 	background-color: #6d5203;
 }
-.file-input-wrapper {
-	position: relative;
-	margin-bottom: 10px;
-}
-
-.file-input-wrapper input[type="file"] {
-	position: absolute;
-	opacity: 0;
-	width: 100%;
-	height: 100%;
-	cursor: pointer;
-}
-
-.file-label {
-	display: block;
-	padding: 10px 15px;
-	background: #f5f5f5;
-	border: 2px dashed #ccc;
-	border-radius: 5px;
-	text-align: center;
-	cursor: pointer;
-	transition: all 0.2s;
-	color: #666;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.file-label:hover {
-	border-color: #8CCF7E;
-	background: #f0fff0;
-}
-
 .supported-formats {
 	font-size: 12px;
 	color: #888;
@@ -1261,31 +1230,6 @@ async function processFiles(files) {
 	display: flex;
 	gap: 10px;
 	margin-top: 10px;
-}
-.clear-button {
-	background-color: #888;
-	color: white;
-	padding: 10px 20px;
-	border: none;
-	border-radius: 5px;
-	cursor: pointer;
-	font-size: 14px;
-}
-.clear-button:hover {
-	background-color: #666;
-}
-.cancel-button {
-	background-color: #D9534F;
-	color: white;
-	padding: 10px 20px;
-	border: none;
-	border-radius: 5px;
-	cursor: pointer;
-	font-size: 14px;
-	font-weight: bold;
-}
-.cancel-button:hover {
-	background-color: #C9302C;
 }
 .processing-actions {
 	justify-content: center;

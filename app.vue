@@ -366,7 +366,8 @@ html,body {
 html {
 	background: radial-gradient(circle at bottom, #27587c, #0A2940);
 }
-.content a, .content a:visited {
+.content a:not(.btn-primary):not(.btn-secondary):not(.btn-danger),
+.content a:visited:not(.btn-primary):not(.btn-secondary):not(.btn-danger) {
 	color: inherit;
 }
 body {
@@ -537,6 +538,7 @@ canvas {
 }
 /* Primary action button (green) */
 .btn-primary {
+	display: inline-block;
 	background-color: #8CCF7E;
 	color: #111;
 	padding: 10px 20px;
@@ -544,13 +546,77 @@ canvas {
 	border-radius: 5px;
 	cursor: pointer;
 	font-weight: bold;
+	text-decoration: none;
 }
 .btn-primary:hover {
 	background-color: #7ABF6E;
+	color: #111;
+	text-decoration: none;
 }
 .btn-primary:disabled {
 	background-color: #ccc;
 	cursor: not-allowed;
+}
+/* Danger/cancel button (red) */
+.btn-danger {
+	background-color: #D9534F;
+	color: white;
+	padding: 10px 20px;
+	border: none;
+	border-radius: 5px;
+	cursor: pointer;
+	font-weight: bold;
+}
+.btn-danger:hover {
+	background-color: #C9302C;
+}
+/* Secondary button (gray) */
+.btn-secondary {
+	background-color: #888;
+	color: white;
+	padding: 10px 20px;
+	border: none;
+	border-radius: 5px;
+	cursor: pointer;
+}
+.btn-secondary:hover {
+	background-color: #666;
+}
+/* File input */
+.file-input-wrapper {
+	position: relative;
+	margin-bottom: 10px;
+}
+.file-input-wrapper input[type="file"] {
+	position: absolute;
+	opacity: 0;
+	width: 100%;
+	height: 100%;
+	cursor: pointer;
+}
+.file-label {
+	display: block;
+	padding: 10px 15px;
+	background: #f5f5f5;
+	border: 2px dashed #ccc;
+	border-radius: 5px;
+	text-align: center;
+	cursor: pointer;
+	transition: all 0.2s;
+	color: #666;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.file-label:hover,
+.file-input-wrapper:hover .file-label {
+	border-color: #8CCF7E;
+	background: #f0fff0;
+}
+.supported-formats {
+	font-size: 12px;
+	color: #888;
+	margin-top: 5px;
 }
 #sentry-feedback {
 	--inset: auto 0 80px auto;
@@ -671,12 +737,5 @@ canvas {
 }
 .webgpu-dialog-buttons .continue-button:hover {
 	background-color: #7ABF6E;
-}
-.webgpu-dialog-buttons .cancel-button {
-	background-color: #eee;
-	color: #333;
-}
-.webgpu-dialog-buttons .cancel-button:hover {
-	background-color: #ddd;
 }
 </style>

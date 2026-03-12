@@ -19,7 +19,7 @@
 				<p class="browser-tip">For faster processing, try using a recent version of Chrome, Edge, or Safari 18+.</p>
 				<div class="webgpu-dialog-buttons">
 					<button class="continue-button" @click="handleWebGPUContinueCPU">Continue with CPU (slower)</button>
-					<button class="cancel-button" @click="handleWebGPUCancel">Cancel</button>
+					<button class="btn-secondary" @click="handleWebGPUCancel">Cancel</button>
 				</div>
 			</div>
 		</div>

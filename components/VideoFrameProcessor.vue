@@ -4,7 +4,7 @@
 			<LoadingIndicator />
 
 			<div class="action-buttons processing-actions">
-				<button class="cancel-button" @click="cancelProcessing">Cancel</button>
+				<button class="btn-danger" @click="cancelProcessing">Cancel</button>
 			</div>
 
 			<div v-if="skippedFrames > 0" class="skipped-info">
@@ -467,9 +467,11 @@ async function processImageFrames(files) {
 		padding: 10px;
 		margin-top: 10px;
 		border-radius: 5px;
-		text-align: center;
+		text-align: left;
+		font-weight: bold;
 	}
 	.cancelled-message .feedback-prompt {
+		font-weight: normal;
 		font-size: 0.9em;
 		margin-top: 8px;
 	}
@@ -508,19 +510,6 @@ async function processImageFrames(files) {
 	.processing-actions {
 		justify-content: center;
 		margin-top: 20px;
-	}
-	.cancel-button {
-		background-color: #D9534F;
-		color: white;
-		padding: 10px 20px;
-		border: none;
-		border-radius: 5px;
-		cursor: pointer;
-		font-size: 14px;
-		font-weight: bold;
-	}
-	.cancel-button:hover {
-		background-color: #C9302C;
 	}
 	/* Side-by-side grayscale/color preview */
 	.dual-preview {

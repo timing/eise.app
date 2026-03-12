@@ -179,7 +179,7 @@
 
         <div class="feedback-box">
             <p>Ideas for this page? Something not working?</p>
-            <a href="https://github.com/timing/eise.app/issues" target="_blank" class="feedback-cta" @click="handleFeedbackClick">
+            <a href="https://github.com/timing/eise.app/issues" target="_blank" class="btn-primary" @click="handleFeedbackClick">
                 💬 Send feedback!
             </a>
         </div>
@@ -841,38 +841,6 @@ onUnmounted(() => {
     font-size: 12px;
 }
 
-.file-input-wrapper {
-    position: relative;
-    margin-bottom: 15px;
-}
-
-.file-input-wrapper input[type="file"] {
-    position: absolute;
-    opacity: 0;
-    width: 100%;
-    height: 100%;
-    cursor: pointer;
-}
-
-.file-label {
-    display: block;
-    padding: 10px 15px;
-    background: #f5f5f5;
-    border: 2px dashed #ccc;
-    border-radius: 5px;
-    text-align: center;
-    cursor: pointer;
-    transition: all 0.2s;
-    color: #666;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.file-label:hover {
-    border-color: #8CCF7E;
-    background: #f0fff0;
-}
 
 .file-info {
     background: #f9f9f9;
@@ -1246,20 +1214,4 @@ onUnmounted(() => {
     margin: 0 0 15px 0;
 }
 
-.feedback-cta {
-    display: inline-block;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    border: none;
-    color: white;
-    cursor: pointer;
-    font-size: 14px;
-    padding: 12px 24px;
-    border-radius: 5px;
-    font-weight: bold;
-    text-decoration: none;
-}
-
-.feedback-cta:hover {
-    opacity: 0.9;
-}
 </style>
