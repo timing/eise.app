@@ -10,7 +10,7 @@ import { reportError } from '@/composables/useSentryReporting';
 import { useWebGpuAnalyzeWorker } from '@/composables/useWebGpuAnalyzeWorker';
 
 export function useFFmpegReader() {
-    const { addLog, emit } = useEventBus();
+    const { addLog, emit, on } = useEventBus();
     const { stackFramesLocally } = useStacker();
     const { capturePreCropFrame, capturePostCropFrame, resetCaptures } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
@@ -27,6 +27,36 @@ export function useFFmpegReader() {
     let unifiedAnalyzeWorkers = [];
     let workersReady = false;
     const recyclingWorkers = new Set();
+    let cancelled = false;
+    let activeLiteWorkers = []; // Track lite workers for cancellation
+
+    // Cancel processing and terminate all workers
+    function cancelProcessing() {
+        cancelled = true;
+        addLog('Cancelling FFmpeg processing...');
+
+        // Terminate all CPU workers
+        unifiedAnalyzeWorkers.forEach(worker => {
+            try { worker.terminate(); } catch (e) { /* ignore */ }
+        });
+        unifiedAnalyzeWorkers = [];
+
+        // Terminate lite workers
+        activeLiteWorkers.forEach(worker => {
+            try { worker.terminate(); } catch (e) { /* ignore */ }
+        });
+        activeLiteWorkers = [];
+
+        // Terminate GPU worker
+        terminateGpuWorker();
+
+        workersReady = false;
+        recyclingWorkers.clear();
+        addLog('FFmpeg workers terminated');
+    }
+
+    // Listen for cancel event from UI
+    on('cancel-processing', cancelProcessing);
 
     // Initialize analysis workers
     async function initializeWorkers() {
@@ -344,6 +374,7 @@ export function useFFmpegReader() {
      */
     async function processFFmpegFrames(ffmpeg, pngFilenames, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         resetCaptures();
+        cancelled = false; // Reset cancellation flag
 
         // Initialize GPU worker
         const gpuOk = await initializeGpuWorker();
@@ -716,10 +747,12 @@ export function useFFmpegReader() {
         } = options;
 
         resetCaptures();
+        cancelled = false; // Reset cancellation flag
 
         // Lite mode: use only 2 workers to reduce memory pressure
         const LITE_WORKER_COUNT = 2;
         const liteWorkers = [];
+        activeLiteWorkers = liteWorkers; // Track for cancellation
 
         addLog(`Initializing ${LITE_WORKER_COUNT} analysis workers (Lite mode)...`);
         for (let i = 0; i < LITE_WORKER_COUNT; i++) {

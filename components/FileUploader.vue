@@ -22,6 +22,18 @@
 		<!-- Error message - always visible when set, regardless of processing state -->
 		<div v-if="errorMessage" class="error-message">
 			<p>{{ errorMessage }}</p>
+			<p class="feedback-prompt">
+				Something went wrong? <a href="https://github.com/timing/eise.app/issues" @click="openErrorFeedback">Let me know what happened</a> so I can fix it.
+			</p>
+		</div>
+
+		<!-- Cancelled message -->
+		<div v-if="showCancelledMessage" class="cancelled-message">
+			<p>Processing cancelled.</p>
+			<p class="feedback-prompt">
+				Was something not working? <a href="https://github.com/timing/eise.app/issues" @click="openCancelFeedback">Let me know</a> so I can improve things.
+			</p>
+			<button class="reload-button" @click="reloadPage">Start over</button>
 		</div>
 
 		<!-- Initial state: file selection and settings (hidden during processing) -->
@@ -219,10 +231,31 @@ const { detectPlatform, checkFileSize } = useLiteMemoryLimits();
 const { openFeedback } = useFeedback();
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
+async function openErrorFeedback(event) {
+	const opened = await openFeedback({
+		formTitle: 'Report an issue',
+		messagePlaceholder: 'What were you trying to do when this error occurred?',
+	});
+	if (opened) {
+		event.preventDefault();
+	}
+}
+
+async function openCancelFeedback(event) {
+	const opened = await openFeedback({
+		formTitle: 'What went wrong?',
+		messagePlaceholder: 'Why did you cancel? Was something not working or taking too long?',
+	});
+	if (opened) {
+		event.preventDefault();
+	}
+}
+
 const enableMaxFrames = ref(false);
 const selectedMaxFrames = ref(100);
 
 const errorMessage = ref(null);
+const showCancelledMessage = ref(false);
 
 // Info toggle state
 const showMaxFramesInfo = ref(false);
@@ -605,6 +638,10 @@ function cancelProcessing() {
 	}
 	eventBusEmit('stop-loading');
 	eventBusEmit('cancel-processing');
+	showCancelledMessage.value = true;
+}
+
+function reloadPage() {
 	window.location.reload();
 }
 
@@ -1113,6 +1150,43 @@ async function processFiles(files) {
 	margin-top: 10px;
 	border-radius: 5px;
 	font-weight: bold;
+}
+.error-message .feedback-prompt {
+	font-weight: normal;
+	font-size: 0.9em;
+	margin-top: 8px;
+}
+.error-message .feedback-prompt a {
+	color: #D9534F;
+	text-decoration: underline;
+}
+.cancelled-message {
+	background-color: #fff3cd;
+	color: #856404;
+	padding: 10px;
+	margin-top: 10px;
+	border-radius: 5px;
+	text-align: center;
+}
+.cancelled-message .feedback-prompt {
+	font-size: 0.9em;
+	margin-top: 8px;
+}
+.cancelled-message .feedback-prompt a {
+	color: #856404;
+	text-decoration: underline;
+}
+.cancelled-message .reload-button {
+	margin-top: 12px;
+	padding: 8px 16px;
+	background-color: #856404;
+	color: white;
+	border: none;
+	border-radius: 4px;
+	cursor: pointer;
+}
+.cancelled-message .reload-button:hover {
+	background-color: #6d5203;
 }
 .file-input-wrapper {
 	position: relative;
