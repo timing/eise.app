@@ -166,6 +166,7 @@ export function useStacker() {
     /**
      * Calculate mean brightness of non-black pixels (for normalization)
      * Supports both Float32 (0.0-1.0) and Uint8 (0-255) input
+     * Always returns brightness in 0-255 scale for consistency with stacking worker
      */
     function calcMeanBrightness(buffer, width, height, isFloat32 = false) {
         let sum = 0;
@@ -199,7 +200,49 @@ export function useStacker() {
                 }
             }
         }
-        return count > 0 ? sum / count : (isFloat32 ? 1.0/255 : 1);
+        // Always return in 0-255 scale (matches stacking worker's calcMeanBrightness)
+        const avg = count > 0 ? sum / count : 1;
+        return isFloat32 ? avg * 255 : avg;
+    }
+
+    /**
+     * Crop raw Bayer data to a square region centered at (centerX, centerY)
+     * Ensures crop starts at even coordinates to preserve Bayer pattern
+     * @param {Uint8Array|Uint16Array} data - Raw Bayer data (single channel)
+     * @param {number} srcWidth - Source image width
+     * @param {number} srcHeight - Source image height
+     * @param {number} cropSize - Size of square crop region
+     * @param {number} centerX - Center X coordinate
+     * @param {number} centerY - Center Y coordinate
+     * @returns {Uint8Array|Uint16Array} Cropped Bayer data
+     */
+    function cropRawBayer(data, srcWidth, srcHeight, cropSize, centerX, centerY) {
+        const halfCrop = Math.floor(cropSize / 2);
+
+        // Calculate crop start, ensuring even coordinates for Bayer alignment
+        let startX = Math.round(centerX - halfCrop);
+        let startY = Math.round(centerY - halfCrop);
+
+        // Clamp to image bounds
+        startX = Math.max(0, Math.min(srcWidth - cropSize, startX));
+        startY = Math.max(0, Math.min(srcHeight - cropSize, startY));
+
+        // Ensure even coordinates to preserve Bayer pattern
+        startX = startX & ~1;  // Round down to even
+        startY = startY & ~1;
+
+        // Create output buffer of same type as input
+        const OutputType = data instanceof Uint16Array ? Uint16Array : Uint8Array;
+        const cropped = new OutputType(cropSize * cropSize);
+
+        // Copy crop region row by row
+        for (let y = 0; y < cropSize; y++) {
+            const srcOffset = (startY + y) * srcWidth + startX;
+            const dstOffset = y * cropSize;
+            cropped.set(data.subarray(srcOffset, srcOffset + cropSize), dstOffset);
+        }
+
+        return cropped;
     }
 
     /**
@@ -316,6 +359,28 @@ export function useStacker() {
     }
 
     /**
+     * Prepare alignment data with pre-computed grayscale (for VNG demosaiced reference)
+     * Same as prepareAlignmentData but skips grayscale extraction
+     */
+    function prepareAlignmentDataWithGray(refGrayData, width, height, surfaceMode = false) {
+        // Create AP grid
+        const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode);
+
+        // Filter APs by quality
+        const filteredAPs = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
+        const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
+
+        return {
+            alignmentPoints: activeAPs,
+            refGrayData,
+            patchSize,
+            searchRadius,
+            width,
+            height
+        };
+    }
+
+    /**
      * Pipelined two-pass GPU stacking
      * Loads frames from file and stacks them concurrently for better performance
      * Instead of: load ALL → then stack ALL
@@ -335,7 +400,6 @@ export function useStacker() {
         const isImageFile = frameReReader.fileType === 'image' || frameReReader.rgbaFrames;
 
         let cropSize, srcWidth, srcHeight, bayerPattern;
-        const useVng = frameReReader.useVngDemosaic ?? false;  // VNG demosaic for stacking
 
         if (isSerFile) {
             const { header, bayerChoice, cropRegion } = frameReReader;
@@ -375,8 +439,8 @@ export function useStacker() {
         cancelled = false; // Reset cancellation flag
 
         // Initialize GPU workers (no OpenCV worker needed - alignment prep is pure JS)
-        const gpuAnalyzeWorker = trackWorker(new Worker(workerUrl('/webgpu_analyze_worker.js')));
-        const gpuStackWorker = trackWorker(new Worker(workerUrl('/webgpu_worker.js')));
+        const gpuAnalyzeWorker = trackWorker(new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' }));
+        const gpuStackWorker = trackWorker(new Worker(workerUrl('/webgpu_stacking_worker.js'), { type: 'module' }));
 
         try {
             // Init GPU workers in parallel
@@ -391,6 +455,11 @@ export function useStacker() {
                 }),
                 new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => reject(new Error('GPU stack worker timeout')), 10000);
+                    gpuStackWorker.onerror = (e) => {
+                        clearTimeout(timeout);
+                        console.error('GPU stack worker error:', e);
+                        reject(new Error(`GPU stack worker load error: ${e.message}`));
+                    };
                     gpuStackWorker.onmessage = (e) => {
                         if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
                         else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
@@ -406,8 +475,8 @@ export function useStacker() {
                 const centers = [];
 
                 if (isSerFile) {
-                    // Handle multi-file SER (uses getFrame method)
-                    if (frameReReader.fileType === 'ser-multi') {
+                    // Prefer getFrame() when available (works for unified debayer reader, multi-file, etc.)
+                    if (frameReReader.getFrame) {
                         // Parallel reads via getFrame
                         const results = await Promise.all(
                             batchFrames.map(frame => frameReReader.getFrame(frame))
@@ -423,7 +492,7 @@ export function useStacker() {
                             }
                         }
                     } else {
-                        // Single-file SER - parallel file reads
+                        // Legacy path: direct file reads for old SER reader
                         const { file, frameSize, header } = frameReReader;
                         const frameBuffers = await Promise.all(
                             batchFrames.map(frame => {
@@ -441,9 +510,9 @@ export function useStacker() {
                     }
                 } else if (isImageFile) {
                     if (frameReReader.getFrame) {
-                        // Parallel reads via getFrame (for MJPEG)
+                        // Parallel reads via getFrame (for images/MJPEG)
                         const results = await Promise.all(
-                            batchFrames.map(frame => frameReReader.getFrame(frame))
+                            batchFrames.map(frame => frameReReader.getFrame(frame.index))
                         );
                         for (let i = 0; i < results.length; i++) {
                             const rgba = results[i];
@@ -491,8 +560,7 @@ export function useStacker() {
                         bayerPattern,
                         threshold: 0.1,
                         requestId,
-                        metadataOnly: false, // Get float32 data for stacking
-                        useVng  // VNG demosaic for better quality during stacking
+                        metadataOnly: false // Get float32 data for stacking
                     });
                 });
             }
@@ -515,48 +583,85 @@ export function useStacker() {
 
             // Load reference frame
             const { frames: refFrames, centers: refCenters } = await loadRawBatch([refFrameMeta]);
-            const refResults = await processGpuBatch(refFrames, refCenters);
+            const isRawBayer = bayerPattern >= 0;
 
-            // Validate reference frame was processed successfully
-            if (!refResults || refResults.length === 0 || !refResults[0]) {
-                throw new Error('Failed to process reference frame - GPU returned no results');
+            let refBuffer, refGrayData, refBlob;
+
+            if (isRawBayer) {
+                // Raw Bayer: VNG demosaic + crop via stack worker for consistency with stacked frames
+                const refCenter = refCenters[0];
+
+                const vngResult = await new Promise((resolve, reject) => {
+                    const handler = (e) => {
+                        if (e.data.type === 'vng-demosaic-ref-done') {
+                            gpuStackWorker.removeEventListener('message', handler);
+                            resolve(e.data);
+                        } else if (e.data.type === 'vng-demosaic-ref-error') {
+                            gpuStackWorker.removeEventListener('message', handler);
+                            reject(new Error(e.data.error));
+                        }
+                    };
+                    gpuStackWorker.addEventListener('message', handler);
+                    gpuStackWorker.postMessage({
+                        type: 'vng-demosaic-ref',
+                        bayerData: refFrames[0].data,
+                        srcWidth,
+                        srcHeight,
+                        cropSize,
+                        center: refCenter,
+                        bayerPattern,
+                        bitDepth: is16bit ? 16 : 8,
+                        bayerScale: is16bit ? (65535 / ((1 << (frameReReader.header?.pixelDepth || 16)) - 1)) : 1.0
+                    });
+                });
+
+                // VNG returns Float32 RGBA (0.0-1.0) and Uint8 grayscale
+                refBuffer = new Float32Array(vngResult.rgbaBuffer);
+                refGrayData = new Uint8Array(vngResult.grayBuffer);
+                refBlob = await float32ToBlob(refBuffer, cropSize, cropSize);
+            } else {
+                // RGBA input: use bilinear from analyze worker
+                const refResults = await processGpuBatch(refFrames, refCenters);
+
+                // Validate reference frame was processed successfully
+                if (!refResults || refResults.length === 0 || !refResults[0]) {
+                    throw new Error('Failed to process reference frame - GPU returned no results');
+                }
+
+                refBuffer = is16bit ? refResults[0].float32Buffer : refResults[0].uint8Buffer;
+                if (!refBuffer) {
+                    throw new Error(`Failed to process reference frame - no ${is16bit ? 'float32' : 'uint8'} buffer returned`);
+                }
+                refBlob = is16bit
+                    ? await float32ToBlob(refBuffer, cropSize, cropSize)
+                    : await uint8ToBlob(refBuffer, cropSize, cropSize);
+                // Extract grayscale for alignment
+                refGrayData = rgbaToGrayscale(refBuffer, cropSize, cropSize, is16bit);
             }
 
-            // Use appropriate buffer type based on bit depth
-            // 16-bit: float32Buffer (0.0-1.0), 8-bit: uint8Buffer (0-255)
-            const refBuffer = is16bit ? refResults[0].float32Buffer : refResults[0].uint8Buffer;
-            if (!refBuffer) {
-                throw new Error(`Failed to process reference frame - no ${is16bit ? 'float32' : 'uint8'} buffer returned`);
-            }
-            const refBlob = is16bit
-                ? await float32ToBlob(refBuffer, cropSize, cropSize)
-                : await uint8ToBlob(refBuffer, cropSize, cropSize);
             const refFrame = {
                 ...refFrameMeta,
-                ...(is16bit ? { float32Buffer: refBuffer } : { uint8Buffer: refBuffer }),
+                float32Buffer: refBuffer instanceof Float32Array ? refBuffer : undefined,
+                uint8Buffer: refBuffer instanceof Uint8Array ? refBuffer : undefined,
                 width: cropSize,
                 height: cropSize,
                 blob: refBlob
             };
             emit('stacking-started', { referenceFrame: refFrame });
-            addLog(`Reference frame loaded: index ${refFrame.index}`);
+            addLog(`Reference frame loaded: index ${refFrame.index}${isRawBayer ? ' (VNG demosaic)' : ''}`);
 
             // Step 2: Prepare alignment points (pure JS, no OpenCV)
             emit('set-caption', 'Preparing alignment points...');
-            const refFrameData = {
-                ...(is16bit ? { float32Buffer: refBuffer.slice(0) } : { uint8Buffer: refBuffer.slice(0) }),
-                width: cropSize,
-                height: cropSize,
-                sharpness: refFrame.sharpness
-            };
-
-            const alignmentData = prepareAlignmentData(refFrameData, surfaceMode);
-            const { alignmentPoints, refGrayData, patchSize, searchRadius } = alignmentData;
+            // Both paths now have refGrayData ready, just create AP grid
+            const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropSize, cropSize, surfaceMode);
+            const { alignmentPoints, patchSize, searchRadius } = alignmentData;
             addLog(`Alignment prepared: ${alignmentPoints.length} APs`);
 
             // Calculate reference brightness for normalization
             // calcMeanBrightness returns 0-255 scale for both formats
-            const refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, is16bit);
+            // For raw Bayer, refBuffer is Float32 from VNG; for RGBA depends on is16bit
+            const isRefFloat32 = isRawBayer || is16bit;
+            const refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, isRefFloat32);
 
             // Step 3: Initialize GPU stacker
             await new Promise((resolve, reject) => {
@@ -574,11 +679,16 @@ export function useStacker() {
                     type: 'init-stacking',
                     width: cropSize,
                     height: cropSize,
+                    srcWidth,
+                    srcHeight,
                     drizzleScale,
                     alignmentPoints,
                     patchSize,
                     refBrightness,
-                    minApQuality: getMinApQuality()
+                    minApQuality: getMinApQuality(),
+                    bayerPattern,
+                    bitDepth: is16bit ? 16 : 8,
+                    bayerScale: is16bit ? (65535 / ((1 << (frameReReader.header?.pixelDepth || 16)) - 1)) : 1.0
                 });
             });
             addLog('GPU stacker initialized');
@@ -610,20 +720,21 @@ export function useStacker() {
             // Cumulative drift tracking for surface mode
             let cumulativeDrift = { dx: 0, dy: 0 };
 
-            // Pre-load first batch
+            // Pipelining state
+            // isRawBayer already defined above for reference frame handling
             let batchStart = 0;
-            let nextBatchPromise = null;
+            let nextRawPromise = null;
+            let nextDemosaicPromise = null;  // Only used for RGBA path
 
             while (batchStart < frameCount) {
                 const batchEnd = Math.min(batchStart + effectiveBatchSize, frameCount);
                 let batchFrames = framesToProcess.slice(batchStart, batchEnd);
 
-                // Get current batch (pre-loaded or load now)
+                // Load raw data from disk
                 let rawBatch;
                 const t0Load = performance.now();
-                if (nextBatchPromise) {
-                    rawBatch = await nextBatchPromise;
-                    // Trim if batch size was reduced
+                if (nextRawPromise) {
+                    rawBatch = await nextRawPromise;
                     if (rawBatch.frames.length > effectiveBatchSize) {
                         rawBatch.frames = rawBatch.frames.slice(0, effectiveBatchSize);
                         rawBatch.centers = rawBatch.centers.slice(0, effectiveBatchSize);
@@ -634,143 +745,154 @@ export function useStacker() {
                 }
                 stackingStats.frameLoadMs.push(performance.now() - t0Load);
 
-                // Start loading next batch while processing current
+                // Prefetch next batch from disk (parallel with current batch processing)
                 const nextStart = batchStart + rawBatch.frames.length;
                 if (nextStart < frameCount) {
                     const nextEnd = Math.min(nextStart + effectiveBatchSize, frameCount);
-                    const nextFrames = framesToProcess.slice(nextStart, nextEnd);
-                    nextBatchPromise = loadRawBatch(nextFrames);
+                    const nextFramesSlice = framesToProcess.slice(nextStart, nextEnd);
+                    nextRawPromise = loadRawBatch(nextFramesSlice);
                 } else {
-                    nextBatchPromise = null;
+                    nextRawPromise = null;
                 }
 
-                // Process current batch via GPU (demosaic + crop) with OOM handling
-                const t0Demosaic = performance.now();
-                let gpuResults = null;
-                let retryFrames = rawBatch.frames;
-                let retryCenters = rawBatch.centers;
-                while (!gpuResults && retryFrames.length > 0) {
-                    try {
-                        gpuResults = await processGpuBatch(retryFrames, retryCenters);
-                    } catch (err) {
-                        if (isOOMError(err) && retryFrames.length > 1) {
-                            const newSize = Math.max(1, Math.floor(retryFrames.length / 2));
-                            addLog(`GPU memory error, reducing batch from ${retryFrames.length} to ${newSize}`);
-                            retryFrames = retryFrames.slice(0, newSize);
-                            retryCenters = retryCenters.slice(0, newSize);
-                            batchFrames = batchFrames.slice(0, newSize);
-                            effectiveBatchSize = newSize;
-                            nextBatchPromise = null; // Cancel pre-fetch
-                        } else {
-                            throw err;
-                        }
-                    }
-                }
-                stackingStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
-                if (!gpuResults) break;
-                rawBatch.frames = retryFrames;
-                rawBatch.centers = retryCenters;
-
-                // Capture frames for comparison video (both raw pre-crop and processed post-crop)
-                for (let i = 0; i < gpuResults.length; i++) {
-                    const globalIndex = batchStart + i;
-                    // Post-crop: convert to uint8 for capture (16-bit needs conversion)
-                    const frameBuffer = is16bit ? gpuResults[i].float32Buffer : gpuResults[i].uint8Buffer;
-                    const uint8ForCapture = is16bit
-                        ? new Uint8Array(float32ToUint8(frameBuffer, cropSize, cropSize))
-                        : new Uint8Array(frameBuffer);
-                    capturePostCropFrame(uint8ForCapture, cropSize, cropSize, globalIndex, frameCount);
-                    // Pre-crop: store raw Bayer data for lazy demosaic later
-                    const rawFrame = rawBatch.frames[i];
-                    capturePreCropFrame(rawFrame.data, srcWidth, srcHeight, globalIndex, frameCount, bayerPattern);
-                }
-
-                // Calculate shifts for batch via GPU template matching
-                const t0Gray = performance.now();
-                const frameGrayDatas = gpuResults.map(r => {
-                    const buffer = is16bit ? r.float32Buffer : r.uint8Buffer;
-                    return rgbaToGrayscale(buffer, cropSize, cropSize, is16bit);
-                });
-                stackingStats.grayscaleMs.push(performance.now() - t0Gray);
-
-                // For surface mode, pass searchOffset to shift search region without affecting template extraction
+                // For surface mode, pass searchOffset to shift search region
                 const searchOffset = surfaceMode && (cumulativeDrift.dx !== 0 || cumulativeDrift.dy !== 0)
                     ? { dx: cumulativeDrift.dx, dy: cumulativeDrift.dy }
                     : null;
 
-                const t0Match = performance.now();
-                const batchShifts = await new Promise((resolve, reject) => {
-                    const requestId = batchStart;
-                    const handler = (e) => {
-                        if (e.data.requestId !== requestId) return;
-                        gpuStackWorker.removeEventListener('message', handler);
-                        if (e.data.type === 'batch-result') resolve(e.data.allShifts);
-                        else if (e.data.type === 'batch-error') reject(new Error(e.data.error));
-                    };
-                    gpuStackWorker.addEventListener('message', handler);
-                    gpuStackWorker.postMessage({
-                        type: 'match-templates-batch',
-                        requestId,
-                        refGrayData,
-                        frameGrayDatas,
-                        width: cropSize,
-                        height: cropSize,
-                        alignmentPoints,
-                        patchSize,
-                        searchRadius,
-                        searchOffset,
-                        noiseRobustAlignment
-                    });
-                });
-                stackingStats.templateMatchMs.push(performance.now() - t0Match);
-
-                // Update cumulative drift from last frame's shifts (surface mode)
-                if (surfaceMode && batchShifts.length > 0) {
-                    const lastFrameShifts = batchShifts[batchShifts.length - 1];
-                    const goodShifts = lastFrameShifts.filter(s => s.quality > 0.3);
-                    if (goodShifts.length >= 3) {
-                        // Use median of good shifts as current drift estimate
-                        const dxValues = goodShifts.map(s => s.dx).sort((a, b) => a - b);
-                        const dyValues = goodShifts.map(s => s.dy).sort((a, b) => a - b);
-                        const medianIdx = Math.floor(goodShifts.length / 2);
-                        cumulativeDrift = {
-                            dx: dxValues[medianIdx],
-                            dy: dyValues[medianIdx]
-                        };
-                    }
-                }
-
-                // Send batch to GPU stacker
-                // 16-bit: Float32Array (0.0-1.0) with inputFormat=0
-                // 8-bit: Uint8Array (0-255) with inputFormat=1 (GPU converts to float)
-                const batchForStacker = gpuResults.map((r, i) => ({
-                    rgbaBuffer: is16bit
-                        ? new Float32Array(r.float32Buffer)
-                        : new Uint8Array(r.uint8Buffer),
-                    sharpness: batchFrames[i].sharpness
-                }));
                 const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
+                const t0Stack = performance.now();
 
-                const t0Accum = performance.now();
-                await new Promise((resolve, reject) => {
-                    const handler = (e) => {
-                        if (e.data.type === 'stack-batch-done') {
-                            gpuStackWorker.removeEventListener('message', handler);
-                            resolve();
-                        } else if (e.data.type === 'stack-frame-error') {
-                            gpuStackWorker.removeEventListener('message', handler);
-                            reject(new Error(e.data.error));
-                        }
-                    };
-                    gpuStackWorker.addEventListener('message', handler);
-                    gpuStackWorker.postMessage({
-                        type: 'stack-frame-batch',
-                        frames: batchForStacker,
-                        shifts: batchShifts,
-                        frameWeights: batchWeights
+                if (isRawBayer) {
+                    // RAW BAYER PATH: VNG demosaic + stacking all on GPU stack worker
+                    // No bilinear demosaic needed - saves GPU transfer and compute
+
+                    // Capture raw frames for comparison video (lazy demosaic on export)
+                    for (let i = 0; i < rawBatch.frames.length; i++) {
+                        const globalIndex = batchStart + i;
+                        capturePreCropFrame(rawBatch.frames[i].data, srcWidth, srcHeight, globalIndex, frameCount, bayerPattern);
+                    }
+
+                    // Send to stack worker: VNG demosaic (GPU) → template match → warp+accumulate
+                    const fullBayerFrames = rawBatch.frames.map((rawFrame, i) => ({
+                        data: rawFrame.data,
+                        sharpness: batchFrames[i].sharpness
+                    }));
+
+                    await new Promise((resolve, reject) => {
+                        const handler = (e) => {
+                            if (e.data.type === 'stack-batch-done') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                resolve();
+                            } else if (e.data.type === 'stack-frame-error') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                reject(new Error(e.data.error));
+                            }
+                        };
+                        gpuStackWorker.addEventListener('message', handler);
+                        gpuStackWorker.postMessage({
+                            type: 'stack-frame-batch',
+                            frames: fullBayerFrames,
+                            centers: rawBatch.centers,
+                            frameWeights: batchWeights,
+                            refGrayData,
+                            searchRadius,
+                            searchOffset,
+                            noiseRobustAlignment
+                        });
                     });
-                });
-                stackingStats.accumulateMs.push(performance.now() - t0Accum);
+
+                } else {
+                    // RGBA PATH (images, MONO): needs bilinear demosaic from analyze worker
+                    const t0Demosaic = performance.now();
+
+                    // Get or compute demosaic results
+                    let gpuResults;
+                    if (nextDemosaicPromise) {
+                        const prefetched = await nextDemosaicPromise;
+                        gpuResults = prefetched.gpuResults;
+                        nextDemosaicPromise = null;
+                    } else {
+                        gpuResults = await processGpuBatch(rawBatch.frames, rawBatch.centers);
+                    }
+                    stackingStats.gpuDemosaicMs.push(performance.now() - t0Demosaic);
+
+                    // Prefetch next batch demosaic (parallel with current stacking)
+                    if (nextRawPromise) {
+                        const nextFramesSlice = framesToProcess.slice(nextStart, Math.min(nextStart + effectiveBatchSize, frameCount));
+                        nextDemosaicPromise = nextRawPromise.then(async (nextRaw) => {
+                            const results = await processGpuBatch(nextRaw.frames, nextRaw.centers);
+                            return { gpuResults: results };
+                        });
+                    }
+
+                    // Capture for comparison video
+                    for (let i = 0; i < gpuResults.length; i++) {
+                        const globalIndex = batchStart + i;
+                        const frameBuffer = is16bit ? gpuResults[i].float32Buffer : gpuResults[i].uint8Buffer;
+                        const uint8ForCapture = is16bit
+                            ? new Uint8Array(float32ToUint8(frameBuffer, cropSize, cropSize))
+                            : new Uint8Array(frameBuffer);
+                        capturePostCropFrame(uint8ForCapture, cropSize, cropSize, globalIndex, frameCount);
+                    }
+
+                    // Get grayscale for matching
+                    const frameGrayDatas = gpuResults.map(r => new Uint8Array(r.packedGrayBuffer || r.grayBuffer));
+
+                    // Template matching
+                    const batchShifts = await new Promise((resolve, reject) => {
+                        const requestId = batchStart;
+                        const handler = (e) => {
+                            if (e.data.requestId !== requestId) return;
+                            gpuStackWorker.removeEventListener('message', handler);
+                            if (e.data.type === 'batch-result') resolve(e.data.allShifts);
+                            else if (e.data.type === 'batch-error') reject(new Error(e.data.error));
+                        };
+                        gpuStackWorker.addEventListener('message', handler);
+                        gpuStackWorker.postMessage({
+                            type: 'match-templates-batch',
+                            requestId,
+                            refGrayData,
+                            frameGrayDatas,
+                            width: cropSize,
+                            height: cropSize,
+                            alignmentPoints,
+                            patchSize,
+                            searchRadius,
+                            searchOffset,
+                            noiseRobustAlignment
+                        });
+                    });
+
+                    // Prepare RGBA frames for stacking
+                    const rgbaFrames = gpuResults.map((r, i) => {
+                        if (is16bit) {
+                            return { rgbaBuffer: new Float32Array(r.float32Buffer), sharpness: batchFrames[i].sharpness };
+                        } else {
+                            return { rgbaBuffer: new Uint8Array(r.uint8Buffer), sharpness: batchFrames[i].sharpness };
+                        }
+                    });
+
+                    await new Promise((resolve, reject) => {
+                        const handler = (e) => {
+                            if (e.data.type === 'stack-batch-done') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                resolve();
+                            } else if (e.data.type === 'stack-frame-error') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                reject(new Error(e.data.error));
+                            }
+                        };
+                        gpuStackWorker.addEventListener('message', handler);
+                        gpuStackWorker.postMessage({
+                            type: 'stack-frame-batch-rgba',
+                            frames: rgbaFrames,
+                            shifts: batchShifts,
+                            frameWeights: batchWeights
+                        });
+                    });
+                }
+                stackingStats.accumulateMs.push(performance.now() - t0Stack);
 
                 processedCount += batchFrames.length;
                 const progress = (processedCount / frameCount) * 90;
@@ -798,6 +920,8 @@ export function useStacker() {
 
             // Cleanup
             gpuStackWorker.postMessage({ type: 'cleanup' });
+            // Print GPU timing summary before terminating
+            gpuAnalyzeWorker.postMessage({ type: 'print-gpu-timing' });
             untrackWorker(gpuAnalyzeWorker);
             untrackWorker(gpuStackWorker);
             gpuAnalyzeWorker.terminate();
@@ -980,7 +1104,7 @@ export function useStacker() {
         emit('set-caption', 'Initializing GPU worker...');
         cancelled = false; // Reset cancellation flag
 
-        const gpuWorker = trackWorker(new Worker(workerUrl('/webgpu_worker.js')));
+        const gpuWorker = trackWorker(new Worker(workerUrl('/webgpu_stacking_worker.js'), { type: 'module' }));
 
         try {
             // Init WebGPU worker
@@ -1069,7 +1193,7 @@ export function useStacker() {
                 const batchEnd = Math.min(batchStart + batchSize, framesToProcess.length);
                 const batchIndices = framesToProcess.slice(batchStart, batchEnd);
 
-                // Convert batch frames to grayscale (handle Uint8 and Float32)
+                // Convert RGBA to grayscale for template matching
                 const t0Gray = performance.now();
                 const frameGrayDatas = batchIndices.map(f => {
                     const frame = frameData[f];
@@ -1224,7 +1348,7 @@ export function useStacker() {
                     };
                     gpuWorker.addEventListener('message', handler);
                     gpuWorker.postMessage({
-                        type: 'stack-frame-batch',
+                        type: 'stack-frame-batch-rgba',
                         frames: batchFrames,
                         shifts: batchShifts,
                         frameWeights: batchWeights

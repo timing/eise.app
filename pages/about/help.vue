@@ -81,6 +81,9 @@
 				<dd>Enable "Auto color balance" in the Post Processor, or manually adjust saturation and RGB alignment.</dd>
 			</dl>
 
+			<h3>Technical Details</h3>
+			<p>Want to understand how eise.app works under the hood? Check out the <NuxtLink to="/about/architecture/">technical architecture</NuxtLink> page with detailed pipeline diagrams and algorithm explanations.</p>
+
 			<h3>Need more help?</h3>
 			<p>Head over to <a href="https://github.com/timing/eise.app" target="_blank">eise.app on GitHub</a> to ask questions or report issues.</p>
 		</div>

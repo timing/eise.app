@@ -23,12 +23,21 @@ Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate
 
 /deconv_channel_worker.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
+/wavelet_sharpen_worker.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
+/wavelet_sharpen_worker.wasm.js
+Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate
 
 /wavelet_sharpen_worker.wasm
 Cache-Control: no-cache, must-revalidate
 
-/webgpu_worker.js
+/webgpu_stacking_worker.js
 Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate
 
@@ -41,5 +50,9 @@ Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate
 
 /webgpu_stacking.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
+/precrop_worker.js
 Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate

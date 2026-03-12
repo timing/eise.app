@@ -1,6 +1,40 @@
 // WebGPU Batched Frame Analysis Worker
-// Handles: Demosaic, Sharpness (Laplacian), Circularity (Moments)
-console.log('webgpu_analyze_worker.js loaded (v1)');
+// Handles: Demosaic, Sharpness (Tenengrad), Circularity (Moments)
+
+// Import WGSL shaders from separate module
+import {
+    demosaicBilinearShader,
+    grayscaleShader,
+    grayscaleFloat32Shader,
+    tenengradShader,
+    reductionShader,
+    sharpnessFinalShader,
+    blurShader,
+    boundsShader,
+    boundsReductionShader,
+    centroidShader,
+    momentsShader,
+    momentsReductionShader,
+    circularityFinalShader,
+    demosaicGrayOnlyShader,
+    offsetTenengradShader,
+    rgbaCropShader,
+    demosaicCropShader,
+    demosaicGrayShader
+} from './gpu/shaders.js';
+
+import {
+    createBindGroup,
+    addComputePass,
+    imageWorkgroups,
+    reductionWorkgroups,
+    createPipeline,
+    storageBuffer,
+    uniformBuffer,
+    readbackBuffer
+} from './gpu/helpers.js';
+
+console.log('webgpu_analyze_worker.js loaded (v4)');
 
 let device = null;
 let queue = null;
@@ -14,6 +48,33 @@ const MAX_REINIT_ATTEMPTS = 3;
 const MAX_CONCURRENT_BATCHES = 2;
 let activeBatchCount = 0;
 let batchWaiters = [];
+
+// Calculate circularity from image moments using eigenvalue ratio
+// Returns value 0-1 where 1 = perfect circle
+function calculateCircularityFromMoments(m00, m10, m01, m20, m11, m02) {
+    if (m00 <= 0) return 0;
+
+    const cx = m10 / m00;
+    const cy = m01 / m00;
+
+    // Central moments
+    const mu20 = m20 / m00 - cx * cx;
+    const mu02 = m02 / m00 - cy * cy;
+    const mu11 = m11 / m00 - cx * cy;
+
+    // Eigenvalues of covariance matrix
+    const trace = mu20 + mu02;
+    const det = mu20 * mu02 - mu11 * mu11;
+    const discriminant = Math.sqrt(Math.max(0, trace * trace - 4 * det));
+    const lambda1 = (trace + discriminant) / 2;
+    const lambda2 = (trace - discriminant) / 2;
+
+    // Circularity = ratio of eigenvalues (1 = perfect circle)
+    if (lambda1 > 0) {
+        return Math.min(lambda2, lambda1) / Math.max(lambda2, lambda1);
+    }
+    return 0;
+}
 
 // Forward declaration - will be set after init() is defined
 let reinitializeGpu = null;
@@ -80,6 +141,29 @@ function releaseBatchSlot() {
     }
 }
 
+// Separate semaphore for analyzeBatch (only allows 1 at a time since buffers aren't double-buffered)
+let analyzeInProgress = false;
+let analyzeWaiters = [];
+
+async function acquireAnalyzeSlot() {
+    if (!analyzeInProgress) {
+        analyzeInProgress = true;
+        return;
+    }
+    return new Promise(resolve => {
+        analyzeWaiters.push(resolve);
+    });
+}
+
+function releaseAnalyzeSlot() {
+    if (analyzeWaiters.length > 0) {
+        const resolve = analyzeWaiters.shift();
+        resolve();
+    } else {
+        analyzeInProgress = false;
+    }
+}
+
 // Wait for all batches to complete (for cleanup)
 function waitForAllBatchesComplete() {
     if (activeBatchCount === 0) {
@@ -98,9 +182,78 @@ function waitForAllBatchesComplete() {
     });
 }
 
+// ===== GPU TIMING INSTRUMENTATION =====
+// Tracks time between GPU submissions to identify CPU bottlenecks
+let gpuTimingEnabled = true;  // Set to false to disable logging
+let lastGpuSubmit = 0;
+let lastGpuPhase = '';
+let gpuTimingStats = {
+    submits: [],
+    phases: {}
+};
+
+function logGpuSubmit(label) {
+    if (!gpuTimingEnabled) return;
+    const now = performance.now();
+    if (lastGpuSubmit > 0) {
+        const gap = now - lastGpuSubmit;
+        console.log(`[GPU] ${label}: ${gap.toFixed(1)}ms since "${lastGpuPhase}"`);
+        gpuTimingStats.submits.push({ from: lastGpuPhase, to: label, gap });
+    }
+    lastGpuSubmit = now;
+    lastGpuPhase = label;
+}
+
+function logGpuPhase(phase, duration) {
+    if (!gpuTimingEnabled) return;
+    if (!gpuTimingStats.phases[phase]) {
+        gpuTimingStats.phases[phase] = { count: 0, total: 0, max: 0 };
+    }
+    const stats = gpuTimingStats.phases[phase];
+    stats.count++;
+    stats.total += duration;
+    stats.max = Math.max(stats.max, duration);
+}
+
+function printGpuTimingSummary() {
+    if (!gpuTimingEnabled) return;
+    console.log('\n===== GPU TIMING SUMMARY =====');
+
+    // Analyze gaps (CPU bottlenecks)
+    if (gpuTimingStats.submits.length > 0) {
+        const gaps = gpuTimingStats.submits.map(s => s.gap);
+        const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+        const maxGap = Math.max(...gaps);
+        console.log(`Submit gaps: avg=${avgGap.toFixed(1)}ms, max=${maxGap.toFixed(1)}ms, count=${gaps.length}`);
+
+        // Show worst offenders
+        const sorted = [...gpuTimingStats.submits].sort((a, b) => b.gap - a.gap).slice(0, 3);
+        console.log('Longest gaps:');
+        sorted.forEach(s => console.log(`  ${s.gap.toFixed(1)}ms: ${s.from} → ${s.to}`));
+    }
+
+    // Show phase durations
+    console.log('\nPhase durations:');
+    for (const [phase, stats] of Object.entries(gpuTimingStats.phases)) {
+        console.log(`  ${phase}: avg=${(stats.total/stats.count).toFixed(1)}ms, max=${stats.max.toFixed(1)}ms, count=${stats.count}`);
+    }
+    console.log('==============================\n');
+
+    // Reset for next run
+    gpuTimingStats = { submits: [], phases: {} };
+    lastGpuSubmit = 0;
+    lastGpuPhase = '';
+}
+
 // Helper to detect bit depth from frame data (fast check, no processing)
 function detectBitDepth(frames) {
-    return frames[0]?.data instanceof Uint16Array ? 16 : 8;
+    const data = frames[0]?.data;
+    const is16bit = data instanceof Uint16Array;
+    // Debug logging for 16-bit detection issues
+    if (data && !is16bit) {
+        console.log(`[GPU] detectBitDepth: data type=${data.constructor?.name}, length=${data.length || data.byteLength}, instanceof Uint16Array=${is16bit}`);
+    }
+    return is16bit ? 16 : 8;
 }
 
 // Helper function to prepare Bayer data for GPU upload with auto-stretch for 16-bit
@@ -120,7 +273,8 @@ function prepareBayerData(frames, pixelCount, skipStretch = false) {
         const u32Count = Math.ceil(totalPixels / 2);
         bayerData = new Uint32Array(u32Count);
 
-        // Calculate stretch scale (GPU will apply it)
+        // Calculate stretch scale (GPU will apply it during demosaic)
+        // Conservative: only stretch if data is in lower half of 16-bit range
         let scale16bit = 1.0;
         if (!skipStretch) {
             const sampleSize = Math.min(10000, frames[0].data.length);
@@ -134,8 +288,14 @@ function prepareBayerData(frames, pixelCount, skipStretch = false) {
             }
             sample.sort((a, b) => a - b);
             const p99 = sample[Math.floor(sample.length * 0.99)];
+            // Conservative stretch: only if data is in lower half of 16-bit range, cap at 2x
             if (p99 > 0 && p99 < 32768) {
                 scale16bit = Math.min(32768 / p99, 2.0);
+            }
+            // Debug: log stretch for first batch
+            if (batchSize > 0) {
+                const effectiveBits = p99 > 0 ? Math.ceil(Math.log2(p99 + 1)) : 0;
+                console.log(`[GPU] 16-bit analyze stretch: p99=${p99}, effectiveBits=${effectiveBits}, scale=${scale16bit.toFixed(2)}`);
             }
         }
 
@@ -182,1655 +342,34 @@ function prepareBayerData(frames, pixelCount, skipStretch = false) {
 let demosaicPipeline = null;
 let demosaicCropPipeline = null;
 let demosaicGrayPipeline = null;  // Fused demosaic + grayscale
+let demosaicGrayOnlyPipeline = null;  // Grayscale-only demosaic (fast, for analysis)
 let rgbaCropPipeline = null;
 let grayscalePipeline = null;
-let laplacianPipeline = null;
+let grayscaleFloat32Pipeline = null;  // Grayscale for 16-bit Float32 RGBA input
+let tenengradPipeline = null;
+let offsetTenengradPipeline = null;  // Reads from full-frame with per-frame offsets (no crop needed)
 let reductionPipeline = null;
 let momentsPipeline = null;
 let momentsReductionPipeline = null;
+let circularityFinalPipeline = null;
 let boundsPipeline = null;
 let boundsReductionPipeline = null;
 let centroidPipeline = null;
+let blurPipeline = null;  // Gaussian blur for noise reduction before bounds detection
+let sharpnessFinalPipeline = null;  // Final reduction: workgroup sums → 2 floats per frame
 
 // Cached buffers for reuse across batches
 let cachedAnalyzeBuffers = null;
 let cachedAnalyzeConfig = null;
 
-// ============================================================
-// WGSL SHADERS
-// ============================================================
-
-// Demosaic shader - converts Bayer pattern to RGB (supports bilinear and VNG)
-const demosaicShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
-    useVng: u32,        // 0=bilinear, 1=VNG
-    bitDepth: u32,      // 8 or 16
-    scale: f32,         // stretch scale for 16-bit (1.0 = no stretch)
-    _pad3: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;  // Raw Bayer data (packed: 4 pixels/u32 for 8-bit, 2 pixels/u32 for 16-bit)
-@group(0) @binding(2) var<storage, read_write> output: array<u32>;  // RGBA output
-
-fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let pixelIdx = frameIdx * params.width * params.height + y * params.width + x;
-    if (params.bitDepth == 8u) {
-        // 8-bit packed: 4 pixels per u32
-        let u32Idx = pixelIdx / 4u;
-        let bytePos = pixelIdx % 4u;
-        let packed = input[u32Idx];
-        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
-        return f32(rawValue) / 255.0;
-    } else {
-        // 16-bit packed: 2 pixels per u32, with GPU-side stretch
-        let u32Idx = pixelIdx / 2u;
-        let halfPos = pixelIdx % 2u;
-        let packed = input[u32Idx];
-        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
-        return min(1.0, f32(rawValue) * params.scale / 65535.0);
-    }
-}
-
-fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(params.width) - 1);
-    let cy = clamp(y, 0, i32(params.height) - 1);
-    return getBayerValue(frameIdx, u32(cx), u32(cy));
-}
-
-// VNG gradient computation - computes gradient in a given direction
-fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
-    // Gradient = sum of absolute differences along the direction
-    var grad: f32 = 0.0;
-    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
-    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
-    return grad;
-}
-
-// VNG interpolation for missing colors
-// Returns (r, g, b) using gradient-weighted interpolation
-fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    // Compute gradients in 8 directions: N, S, E, W, NE, NW, SE, SW
-    let gN = computeGradient(frameIdx, x, y, 0, -1);
-    let gS = computeGradient(frameIdx, x, y, 0, 1);
-    let gE = computeGradient(frameIdx, x, y, 1, 0);
-    let gW = computeGradient(frameIdx, x, y, -1, 0);
-    let gNE = computeGradient(frameIdx, x, y, 1, -1);
-    let gNW = computeGradient(frameIdx, x, y, -1, -1);
-    let gSE = computeGradient(frameIdx, x, y, 1, 1);
-    let gSW = computeGradient(frameIdx, x, y, -1, 1);
-
-    // Find minimum gradient and set threshold
-    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
-    let threshold = minGrad * 1.5 + 0.001;  // Small epsilon to avoid division issues
-
-    // Current pixel value
-    let center = sampleBayer(frameIdx, x, y);
-
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    // Determine what color the current pixel is and interpolate missing colors
-    // using gradient-weighted averaging
-
-    // Sample neighbors for interpolation
-    let n = sampleBayer(frameIdx, x, y - 1);
-    let s = sampleBayer(frameIdx, x, y + 1);
-    let e = sampleBayer(frameIdx, x + 1, y);
-    let w = sampleBayer(frameIdx, x - 1, y);
-    let ne = sampleBayer(frameIdx, x + 1, y - 1);
-    let nw = sampleBayer(frameIdx, x - 1, y - 1);
-    let se = sampleBayer(frameIdx, x + 1, y + 1);
-    let sw = sampleBayer(frameIdx, x - 1, y + 1);
-
-    // Gradient weights (inverse, so low gradient = high weight)
-    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
-    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
-    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
-    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
-    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
-    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
-    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
-    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
-
-    // Use pattern-specific VNG interpolation
-    // For each pixel type, we interpolate missing colors using gradient-weighted neighbors
-
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) { // R pixel
-            r = center;
-            // Green: use weighted average of NSEW green neighbors
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            // Blue: use weighted average of diagonal blue neighbors
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 1u) { // B pixel
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 0u) { // G pixel (R row)
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else { // G pixel (B row)
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) { // B pixel
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 1u) { // R pixel
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) { // G pixel (B row)
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else { // G pixel (R row)
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) { // R pixel
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 0u && by == 1u) { // B pixel
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) { // G pixel (R row)
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else { // G pixel (B row)
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else { // GBRG (pattern == 3)
-        if (bx == 0u && by == 1u) { // R pixel
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) { // B pixel
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) { // G pixel (B row)
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else { // G pixel (R row)
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    }
-
-    return vec3<f32>(r, g, b);
-}
-
-// Bilinear interpolation (original simple demosaic)
-fn bilinearInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) { // R pixel
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) { // B pixel
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) { // G pixel (R row)
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else { // G pixel (B row)
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) { // B pixel
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) { // R pixel
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) { // G pixel (B row)
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else { // G pixel (R row)
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) { // R pixel
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 1u) { // B pixel
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) { // G pixel (R row)
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else { // G pixel (B row)
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else { // GBRG (pattern == 3)
-        if (bx == 0u && by == 1u) { // R pixel
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) { // B pixel
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) { // G pixel (B row)
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else { // G pixel (R row)
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    }
-
-    return vec3<f32>(r, g, b);
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Determine pixel position in Bayer pattern
-    let bx = x % 2u;
-    let by = y % 2u;
-    let ix = i32(x);
-    let iy = i32(y);
-
-    let pattern = params.bayerPattern;
-
-    // Use VNG or bilinear interpolation based on params
-    var rgb: vec3<f32>;
-    if (params.useVng == 1u) {
-        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    } else {
-        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    }
-
-    let outIdx = frameIdx * params.width * params.height + y * params.width + x;
-
-    if (params.bitDepth == 16u) {
-        // 16-bit input: output Float32 RGBA to preserve precision through stacking
-        // Stacker receives Float32 directly (inputFormat=0)
-        let baseIdx = outIdx * 4u;
-        output[baseIdx] = bitcast<u32>(rgb.x);
-        output[baseIdx + 1u] = bitcast<u32>(rgb.y);
-        output[baseIdx + 2u] = bitcast<u32>(rgb.z);
-        output[baseIdx + 3u] = bitcast<u32>(1.0);
-    } else {
-        // 8-bit input: pack as Uint8 RGBA (saves memory, stacker converts to Float32 on GPU)
-        // Stacker receives Uint8 and converts via inputFormat=1
-        let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
-        let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
-        let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
-        let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-        output[outIdx] = rgba;
-    }
-}
-`;
-
-// Demosaic + Crop shader - crops around per-frame centers during demosaic (supports bilinear and VNG)
-const demosaicCropShader = `
-struct Params {
-    srcWidth: u32,      // Source frame width
-    srcHeight: u32,     // Source frame height
-    cropSize: u32,      // Output crop size (square)
-    bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
-    batchSize: u32,
-    useVng: u32,        // 0=bilinear, 1=VNG
-    bitDepth: u32,      // 8 or 16
-    scale: f32,         // stretch scale for 16-bit (1.0 = no stretch)
-}
-
-struct CropCenter {
-    x: f32,
-    y: f32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;      // Raw Bayer data
-@group(0) @binding(2) var<storage, read> centers: array<CropCenter>;  // Per-frame centers
-@group(0) @binding(3) var<storage, read_write> output: array<u32>;    // Cropped RGBA output
-
-fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let pixelIdx = frameIdx * params.srcWidth * params.srcHeight + y * params.srcWidth + x;
-    if (params.bitDepth == 8u) {
-        // 8-bit packed: 4 pixels per u32
-        let u32Idx = pixelIdx / 4u;
-        let bytePos = pixelIdx % 4u;
-        let packed = input[u32Idx];
-        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
-        return f32(rawValue) / 255.0;
-    } else {
-        // 16-bit packed: 2 pixels per u32, with GPU-side stretch
-        let u32Idx = pixelIdx / 2u;
-        let halfPos = pixelIdx % 2u;
-        let packed = input[u32Idx];
-        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
-        return min(1.0, f32(rawValue) * params.scale / 65535.0);
-    }
-}
-
-fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(params.srcWidth) - 1);
-    let cy = clamp(y, 0, i32(params.srcHeight) - 1);
-    return getBayerValue(frameIdx, u32(cx), u32(cy));
-}
-
-// VNG gradient computation
-fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
-    var grad: f32 = 0.0;
-    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
-    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
-    return grad;
-}
-
-// VNG interpolation
-fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    let gN = computeGradient(frameIdx, x, y, 0, -1);
-    let gS = computeGradient(frameIdx, x, y, 0, 1);
-    let gE = computeGradient(frameIdx, x, y, 1, 0);
-    let gW = computeGradient(frameIdx, x, y, -1, 0);
-    let gNE = computeGradient(frameIdx, x, y, 1, -1);
-    let gNW = computeGradient(frameIdx, x, y, -1, -1);
-    let gSE = computeGradient(frameIdx, x, y, 1, 1);
-    let gSW = computeGradient(frameIdx, x, y, -1, 1);
-
-    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
-    let threshold = minGrad * 1.5 + 0.001;
-
-    let center = sampleBayer(frameIdx, x, y);
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    let n = sampleBayer(frameIdx, x, y - 1);
-    let s = sampleBayer(frameIdx, x, y + 1);
-    let e = sampleBayer(frameIdx, x + 1, y);
-    let w = sampleBayer(frameIdx, x - 1, y);
-    let ne = sampleBayer(frameIdx, x + 1, y - 1);
-    let nw = sampleBayer(frameIdx, x - 1, y - 1);
-    let se = sampleBayer(frameIdx, x + 1, y + 1);
-    let sw = sampleBayer(frameIdx, x - 1, y + 1);
-
-    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
-    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
-    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
-    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
-    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
-    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
-    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
-    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
-
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 1u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 1u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 0u && by == 1u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else { // GBRG
-        if (bx == 0u && by == 1u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    }
-    return vec3<f32>(r, g, b);
-}
-
-// Bilinear interpolation
-fn bilinearInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    if (pattern == 0u) { // RGGB
-        if (bx == 0u && by == 0u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 1u) { // BGGR
-        if (bx == 0u && by == 0u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 2u) { // GRBG
-        if (bx == 1u && by == 0u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 1u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else { // GBRG
-        if (bx == 0u && by == 1u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    }
-    return vec3<f32>(r, g, b);
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let outX = gid.x;
-    let outY = gid.y;
-    let frameIdx = gid.z;
-
-    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let center = centers[frameIdx];
-    let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize)) & ~1;
-    let cropStartY = i32(floor(center.y - halfSize)) & ~1;
-
-    let srcX = cropStartX + i32(outX);
-    let srcY = cropStartY + i32(outY);
-
-    let x = u32(clamp(srcX, 0, i32(params.srcWidth) - 1));
-    let y = u32(clamp(srcY, 0, i32(params.srcHeight) - 1));
-    let ix = i32(x);
-    let iy = i32(y);
-
-    let bx = x % 2u;
-    let by = y % 2u;
-    let pattern = params.bayerPattern;
-
-    // Use VNG or bilinear interpolation based on params
-    var rgb: vec3<f32>;
-    if (params.useVng == 1u) {
-        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    } else {
-        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    }
-
-    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
-
-    if (params.bitDepth == 16u) {
-        // 16-bit: output Float32 RGBA (4 u32s per pixel via bitcast)
-        let baseIdx = outIdx * 4u;
-        output[baseIdx] = bitcast<u32>(rgb.x);
-        output[baseIdx + 1u] = bitcast<u32>(rgb.y);
-        output[baseIdx + 2u] = bitcast<u32>(rgb.z);
-        output[baseIdx + 3u] = bitcast<u32>(1.0);
-    } else {
-        // 8-bit: pack as RGBA (1 u32 per pixel)
-        let ri = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
-        let gi = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
-        let bi = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
-        let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-        output[outIdx] = rgba;
-    }
-}
-`;
-
-// RGBA Crop shader - crops RGBA images without demosaicing (for PNG/JPEG input)
-const rgbaCropShader = `
-struct Params {
-    srcWidth: u32,
-    srcHeight: u32,
-    cropSize: u32,
-    _pad1: u32,
-    batchSize: u32,
-    _pad2: u32,
-    _pad3: u32,
-    _pad4: u32,
-}
-
-struct CropCenter {
-    x: f32,
-    y: f32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;       // Source RGBA
-@group(0) @binding(2) var<storage, read> centers: array<CropCenter>;
-@group(0) @binding(3) var<storage, read_write> output: array<u32>; // Cropped RGBA
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let outX = gid.x;
-    let outY = gid.y;
-    let frameIdx = gid.z;
-
-    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let center = centers[frameIdx];
-    let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize));
-    let cropStartY = i32(floor(center.y - halfSize));
-
-    let srcX = u32(clamp(cropStartX + i32(outX), 0, i32(params.srcWidth) - 1));
-    let srcY = u32(clamp(cropStartY + i32(outY), 0, i32(params.srcHeight) - 1));
-
-    let srcIdx = frameIdx * params.srcWidth * params.srcHeight + srcY * params.srcWidth + srcX;
-    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
-
-    output[outIdx] = input[srcIdx];
-}
-`;
-
-// Grayscale conversion shader
-const grayscaleShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    _pad: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;  // RGBA
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // Grayscale float
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    let rgba = input[idx];
-
-    let r = f32(rgba & 0xFFu) / 255.0;
-    let g = f32((rgba >> 8u) & 0xFFu) / 255.0;
-    let b = f32((rgba >> 16u) & 0xFFu) / 255.0;
-
-    // Standard grayscale weights
-    let gray = 0.299 * r + 0.587 * g + 0.114 * b;
-    output[idx] = gray;
-}
-`;
-
-// Fused demosaic + grayscale shader - outputs both RGBA and grayscale in one pass (supports bilinear and VNG)
-const demosaicGrayShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    bayerPattern: u32,
-    useVng: u32,        // 0=bilinear, 1=VNG
-    bitDepth: u32,      // 8 or 16
-    scale: f32,         // stretch scale for 16-bit (1.0 = no stretch)
-    _pad3: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<u32>;
-@group(0) @binding(2) var<storage, read_write> rgbaOutput: array<u32>;
-@group(0) @binding(3) var<storage, read_write> grayOutput: array<f32>;
-
-fn getBayerValue(frameIdx: u32, x: u32, y: u32) -> f32 {
-    let pixelIdx = frameIdx * params.width * params.height + y * params.width + x;
-    if (params.bitDepth == 8u) {
-        // 8-bit packed: 4 pixels per u32
-        let u32Idx = pixelIdx / 4u;
-        let bytePos = pixelIdx % 4u;
-        let packed = input[u32Idx];
-        let rawValue = (packed >> (bytePos * 8u)) & 0xFFu;
-        return f32(rawValue) / 255.0;
-    } else {
-        // 16-bit packed: 2 pixels per u32, with GPU-side stretch
-        let u32Idx = pixelIdx / 2u;
-        let halfPos = pixelIdx % 2u;
-        let packed = input[u32Idx];
-        let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
-        return min(1.0, f32(rawValue) * params.scale / 65535.0);
-    }
-}
-
-fn sampleBayer(frameIdx: u32, x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(params.width) - 1);
-    let cy = clamp(y, 0, i32(params.height) - 1);
-    return getBayerValue(frameIdx, u32(cx), u32(cy));
-}
-
-fn computeGradient(frameIdx: u32, x: i32, y: i32, dx: i32, dy: i32) -> f32 {
-    var grad: f32 = 0.0;
-    grad += abs(sampleBayer(frameIdx, x, y) - sampleBayer(frameIdx, x + dx, y + dy));
-    grad += abs(sampleBayer(frameIdx, x + dx, y + dy) - sampleBayer(frameIdx, x + dx * 2, y + dy * 2));
-    return grad;
-}
-
-fn vngInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    let gN = computeGradient(frameIdx, x, y, 0, -1);
-    let gS = computeGradient(frameIdx, x, y, 0, 1);
-    let gE = computeGradient(frameIdx, x, y, 1, 0);
-    let gW = computeGradient(frameIdx, x, y, -1, 0);
-    let gNE = computeGradient(frameIdx, x, y, 1, -1);
-    let gNW = computeGradient(frameIdx, x, y, -1, -1);
-    let gSE = computeGradient(frameIdx, x, y, 1, 1);
-    let gSW = computeGradient(frameIdx, x, y, -1, 1);
-
-    var minGrad = min(min(min(gN, gS), min(gE, gW)), min(min(gNE, gNW), min(gSE, gSW)));
-    let threshold = minGrad * 1.5 + 0.001;
-    let center = sampleBayer(frameIdx, x, y);
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    let n = sampleBayer(frameIdx, x, y - 1);
-    let s = sampleBayer(frameIdx, x, y + 1);
-    let e = sampleBayer(frameIdx, x + 1, y);
-    let w = sampleBayer(frameIdx, x - 1, y);
-    let ne = sampleBayer(frameIdx, x + 1, y - 1);
-    let nw = sampleBayer(frameIdx, x - 1, y - 1);
-    let se = sampleBayer(frameIdx, x + 1, y + 1);
-    let sw = sampleBayer(frameIdx, x - 1, y + 1);
-
-    let wN = select(0.0, 1.0 / (gN + 0.001), gN <= threshold);
-    let wS = select(0.0, 1.0 / (gS + 0.001), gS <= threshold);
-    let wE = select(0.0, 1.0 / (gE + 0.001), gE <= threshold);
-    let wW = select(0.0, 1.0 / (gW + 0.001), gW <= threshold);
-    let wNE = select(0.0, 1.0 / (gNE + 0.001), gNE <= threshold);
-    let wNW = select(0.0, 1.0 / (gNW + 0.001), gNW <= threshold);
-    let wSE = select(0.0, 1.0 / (gSE + 0.001), gSE <= threshold);
-    let wSW = select(0.0, 1.0 / (gSW + 0.001), gSW <= threshold);
-
-    if (pattern == 0u) {
-        if (bx == 0u && by == 0u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 1u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else if (pattern == 1u) {
-        if (bx == 0u && by == 0u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 1u && by == 1u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    } else if (pattern == 2u) {
-        if (bx == 1u && by == 0u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 0u && by == 1u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        } else {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        }
-    } else {
-        if (bx == 0u && by == 1u) {
-            r = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let bSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let bWeight = wNE + wNW + wSE + wSW;
-            b = select((ne + nw + se + sw) * 0.25, bSum / bWeight, bWeight > 0.0);
-        } else if (bx == 1u && by == 0u) {
-            b = center;
-            let gSum = (n * wN + s * wS + e * wE + w * wW);
-            let gWeight = wN + wS + wE + wW;
-            g = select((n + s + e + w) * 0.25, gSum / gWeight, gWeight > 0.0);
-            let rSum = (ne * wNE + nw * wNW + se * wSE + sw * wSW);
-            let rWeight = wNE + wNW + wSE + wSW;
-            r = select((ne + nw + se + sw) * 0.25, rSum / rWeight, rWeight > 0.0);
-        } else if (bx == 0u && by == 0u) {
-            g = center;
-            let bSum = (e * wE + w * wW);
-            let bWeight = wE + wW;
-            b = select((e + w) * 0.5, bSum / bWeight, bWeight > 0.0);
-            let rSum = (n * wN + s * wS);
-            let rWeight = wN + wS;
-            r = select((n + s) * 0.5, rSum / rWeight, rWeight > 0.0);
-        } else {
-            g = center;
-            let rSum = (e * wE + w * wW);
-            let rWeight = wE + wW;
-            r = select((e + w) * 0.5, rSum / rWeight, rWeight > 0.0);
-            let bSum = (n * wN + s * wS);
-            let bWeight = wN + wS;
-            b = select((n + s) * 0.5, bSum / bWeight, bWeight > 0.0);
-        }
-    }
-    return vec3<f32>(r, g, b);
-}
-
-fn bilinearInterpolate(frameIdx: u32, x: i32, y: i32, bx: u32, by: u32, pattern: u32) -> vec3<f32> {
-    var r: f32 = 0.0;
-    var g: f32 = 0.0;
-    var b: f32 = 0.0;
-
-    if (pattern == 0u) {
-        if (bx == 0u && by == 0u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 1u) {
-        if (bx == 0u && by == 0u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 1u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else if (pattern == 2u) {
-        if (bx == 1u && by == 0u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 1u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    } else {
-        if (bx == 0u && by == 1u) {
-            r = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            b = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 1u && by == 0u) {
-            b = sampleBayer(frameIdx, x, y);
-            g = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y) +
-                 sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.25;
-            r = (sampleBayer(frameIdx, x-1, y-1) + sampleBayer(frameIdx, x+1, y-1) +
-                 sampleBayer(frameIdx, x-1, y+1) + sampleBayer(frameIdx, x+1, y+1)) * 0.25;
-        } else if (bx == 0u && by == 0u) {
-            g = sampleBayer(frameIdx, x, y);
-            b = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            r = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        } else {
-            g = sampleBayer(frameIdx, x, y);
-            r = (sampleBayer(frameIdx, x-1, y) + sampleBayer(frameIdx, x+1, y)) * 0.5;
-            b = (sampleBayer(frameIdx, x, y-1) + sampleBayer(frameIdx, x, y+1)) * 0.5;
-        }
-    }
-    return vec3<f32>(r, g, b);
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let bx = x % 2u;
-    let by = y % 2u;
-    let ix = i32(x);
-    let iy = i32(y);
-    let pattern = params.bayerPattern;
-
-    var rgb: vec3<f32>;
-    if (params.useVng == 1u) {
-        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    } else {
-        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    }
-
-    let r = rgb.x;
-    let g = rgb.y;
-    let b = rgb.z;
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-
-    // Output RGBA - format depends on bit depth
-    if (params.bitDepth == 16u) {
-        // 16-bit: output Float32 RGBA (4 u32s per pixel via bitcast)
-        let baseIdx = idx * 4u;
-        rgbaOutput[baseIdx] = bitcast<u32>(r);
-        rgbaOutput[baseIdx + 1u] = bitcast<u32>(g);
-        rgbaOutput[baseIdx + 2u] = bitcast<u32>(b);
-        rgbaOutput[baseIdx + 3u] = bitcast<u32>(1.0);
-    } else {
-        // 8-bit: pack as RGBA (1 u32 per pixel)
-        let ri = u32(clamp(r * 255.0, 0.0, 255.0));
-        let gi = u32(clamp(g * 255.0, 0.0, 255.0));
-        let bi = u32(clamp(b * 255.0, 0.0, 255.0));
-        let rgba = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
-        rgbaOutput[idx] = rgba;
-    }
-
-    // Output grayscale (fused - avoids separate pass)
-    let gray = 0.299 * r + 0.587 * g + 0.114 * b;
-    grayOutput[idx] = gray;
-}
-`;
-
-// Tenengrad shader - Sobel gradient magnitude squared (matches CPU sharpness metric)
-const laplacianShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    _pad: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> input: array<f32>;  // Grayscale
-@group(0) @binding(2) var<storage, read_write> laplacian: array<f32>;  // Gradient magnitude squared
-@group(0) @binding(3) var<storage, read_write> laplacianSq: array<f32>;  // Not used but kept for compatibility
-
-fn sampleGray(frameIdx: u32, x: i32, y: i32) -> f32 {
-    let cx = clamp(x, 0, i32(params.width) - 1);
-    let cy = clamp(y, 0, i32(params.height) - 1);
-    let idx = frameIdx * params.width * params.height + u32(cy) * params.width + u32(cx);
-    return input[idx];
-}
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let ix = i32(x);
-    let iy = i32(y);
-
-    // Sobel X: [-1,0,1], [-2,0,2], [-1,0,1]
-    let gx = -1.0 * sampleGray(frameIdx, ix-1, iy-1) + 1.0 * sampleGray(frameIdx, ix+1, iy-1)
-           + -2.0 * sampleGray(frameIdx, ix-1, iy)   + 2.0 * sampleGray(frameIdx, ix+1, iy)
-           + -1.0 * sampleGray(frameIdx, ix-1, iy+1) + 1.0 * sampleGray(frameIdx, ix+1, iy+1);
-
-    // Sobel Y: [-1,-2,-1], [0,0,0], [1,2,1]
-    let gy = -1.0 * sampleGray(frameIdx, ix-1, iy-1) - 2.0 * sampleGray(frameIdx, ix, iy-1) - 1.0 * sampleGray(frameIdx, ix+1, iy-1)
-           +  1.0 * sampleGray(frameIdx, ix-1, iy+1) + 2.0 * sampleGray(frameIdx, ix, iy+1) + 1.0 * sampleGray(frameIdx, ix+1, iy+1);
-
-    // Tenengrad = Gx² + Gy² (gradient magnitude squared)
-    let tenengrad = gx * gx + gy * gy;
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    laplacian[idx] = tenengrad;
-    laplacianSq[idx] = 0.0;  // Not needed for Tenengrad
-}
-`;
-
-// Reduction shader - sums values across frame for variance calculation
-const reductionShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    inputSize: u32,  // Total pixels per frame
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> laplacian: array<f32>;
-@group(0) @binding(2) var<storage, read> laplacianSq: array<f32>;
-@group(0) @binding(3) var<storage, read_write> results: array<f32>;  // [sum, sumSq] per frame
-
-var<workgroup> sharedSum: array<f32, 256>;
-var<workgroup> sharedSumSq: array<f32, 256>;
-
-@compute @workgroup_size(256, 1, 1)
-fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) wid: vec3<u32>
-) {
-    let frameIdx = wid.y;
-    let localIdx = lid.x;
-    let pixelsPerWorkgroup = 256u;
-    let startPixel = wid.x * pixelsPerWorkgroup + localIdx;
-
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Load values
-    var sum: f32 = 0.0;
-    var sumSq: f32 = 0.0;
-
-    if (startPixel < params.inputSize) {
-        let idx = frameIdx * params.inputSize + startPixel;
-        sum = laplacian[idx];
-        sumSq = laplacianSq[idx];
-    }
-
-    sharedSum[localIdx] = sum;
-    sharedSumSq[localIdx] = sumSq;
-    workgroupBarrier();
-
-    // Parallel reduction
-    for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
-        if (localIdx < stride) {
-            sharedSum[localIdx] += sharedSum[localIdx + stride];
-            sharedSumSq[localIdx] += sharedSumSq[localIdx + stride];
-        }
-        workgroupBarrier();
-    }
-
-    // Write partial result
-    if (localIdx == 0u) {
-        // Calculate actual number of workgroups based on input size
-        let numWorkgroups = (params.inputSize + 255u) / 256u;
-        let resultIdx = frameIdx * numWorkgroups + wid.x;
-        results[resultIdx * 2u] = sharedSum[0];
-        results[resultIdx * 2u + 1u] = sharedSumSq[0];
-    }
-}
-`;
-
-// Moments shader - calculates image moments for circularity
-const momentsShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    threshold: f32,  // For binarization
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> grayscale: array<f32>;
-@group(0) @binding(2) var<storage, read_write> moments: array<f32>;  // Per-pixel contributions
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    let val = grayscale[idx];
-
-    // Binary threshold
-    let binary = select(0.0, 1.0, val > params.threshold);
-
-    let fx = f32(x);
-    let fy = f32(y);
-
-    // Store moments contributions: m00, m10, m01, m20, m11, m02
-    let momIdx = idx * 6u;
-    moments[momIdx + 0u] = binary;           // m00
-    moments[momIdx + 1u] = binary * fx;      // m10
-    moments[momIdx + 2u] = binary * fy;      // m01
-    moments[momIdx + 3u] = binary * fx * fx; // m20
-    moments[momIdx + 4u] = binary * fx * fy; // m11
-    moments[momIdx + 5u] = binary * fy * fy; // m02
-}
-`;
-
-// Moments reduction shader
-const momentsReductionShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    inputSize: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> moments: array<f32>;
-@group(0) @binding(2) var<storage, read_write> results: array<f32>;  // 6 moments per frame
-
-var<workgroup> sharedData: array<f32, 1536>;  // 256 * 6
-
-@compute @workgroup_size(256, 1, 1)
-fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) wid: vec3<u32>
-) {
-    let frameIdx = wid.y;
-    let localIdx = lid.x;
-    let startPixel = wid.x * 256u + localIdx;
-
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Load 6 moment values per thread
-    for (var m = 0u; m < 6u; m++) {
-        var val: f32 = 0.0;
-        if (startPixel < params.inputSize) {
-            val = moments[(frameIdx * params.inputSize + startPixel) * 6u + m];
-        }
-        sharedData[localIdx * 6u + m] = val;
-    }
-    workgroupBarrier();
-
-    // Parallel reduction for all 6 moments
-    for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
-        if (localIdx < stride) {
-            for (var m = 0u; m < 6u; m++) {
-                sharedData[localIdx * 6u + m] += sharedData[(localIdx + stride) * 6u + m];
-            }
-        }
-        workgroupBarrier();
-    }
-
-    // Write partial results
-    if (localIdx == 0u) {
-        let numWorkgroups = (params.inputSize + 255u) / 256u;
-        let resultIdx = (frameIdx * numWorkgroups + wid.x) * 6u;
-        for (var m = 0u; m < 6u; m++) {
-            results[resultIdx + m] = sharedData[m];
-        }
-    }
-}
-`;
-
-// Bounding box shader - finds min/max x,y of bright pixels for planet detection
-const boundsShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    threshold: f32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> grayscale: array<f32>;
-@group(0) @binding(2) var<storage, read_write> bounds: array<u32>;  // Per-pixel: minX, minY, maxX, maxY
-
-@compute @workgroup_size(16, 16, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let frameIdx = gid.z;
-
-    if (x >= params.width || y >= params.height || frameIdx >= params.batchSize) {
-        return;
-    }
-
-    let idx = frameIdx * params.width * params.height + y * params.width + x;
-    let val = grayscale[idx];
-
-    let boundsIdx = idx * 4u;
-
-    // If pixel is bright (above threshold), set bounds to this pixel's coords
-    // Otherwise set to invalid values that won't affect min/max
-    if (val > params.threshold) {
-        bounds[boundsIdx + 0u] = x;      // minX candidate
-        bounds[boundsIdx + 1u] = y;      // minY candidate
-        bounds[boundsIdx + 2u] = x;      // maxX candidate
-        bounds[boundsIdx + 3u] = y;      // maxY candidate
-    } else {
-        bounds[boundsIdx + 0u] = 0xFFFFFFFFu;  // Large value for min
-        bounds[boundsIdx + 1u] = 0xFFFFFFFFu;
-        bounds[boundsIdx + 2u] = 0u;           // Small value for max
-        bounds[boundsIdx + 3u] = 0u;
-    }
-}
-`;
-
-// Bounding box reduction shader - finds min/max across all pixels
-const boundsReductionShader = `
-struct Params {
-    width: u32,
-    height: u32,
-    batchSize: u32,
-    inputSize: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> bounds: array<u32>;
-@group(0) @binding(2) var<storage, read_write> results: array<u32>;  // 4 values per frame: minX, minY, maxX, maxY
-
-var<workgroup> sharedBounds: array<u32, 1024>;  // 256 * 4
-
-@compute @workgroup_size(256, 1, 1)
-fn main(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) wid: vec3<u32>
-) {
-    let frameIdx = wid.y;
-    let localIdx = lid.x;
-    let startPixel = wid.x * 256u + localIdx;
-
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Load 4 bound values per thread (minX, minY, maxX, maxY)
-    if (startPixel < params.inputSize) {
-        let boundsIdx = (frameIdx * params.inputSize + startPixel) * 4u;
-        sharedBounds[localIdx * 4u + 0u] = bounds[boundsIdx + 0u];
-        sharedBounds[localIdx * 4u + 1u] = bounds[boundsIdx + 1u];
-        sharedBounds[localIdx * 4u + 2u] = bounds[boundsIdx + 2u];
-        sharedBounds[localIdx * 4u + 3u] = bounds[boundsIdx + 3u];
-    } else {
-        sharedBounds[localIdx * 4u + 0u] = 0xFFFFFFFFu;
-        sharedBounds[localIdx * 4u + 1u] = 0xFFFFFFFFu;
-        sharedBounds[localIdx * 4u + 2u] = 0u;
-        sharedBounds[localIdx * 4u + 3u] = 0u;
-    }
-    workgroupBarrier();
-
-    // Parallel reduction - min for indices 0,1 and max for indices 2,3
-    for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
-        if (localIdx < stride) {
-            let idx1 = localIdx * 4u;
-            let idx2 = (localIdx + stride) * 4u;
-            // Min for minX, minY
-            sharedBounds[idx1 + 0u] = min(sharedBounds[idx1 + 0u], sharedBounds[idx2 + 0u]);
-            sharedBounds[idx1 + 1u] = min(sharedBounds[idx1 + 1u], sharedBounds[idx2 + 1u]);
-            // Max for maxX, maxY
-            sharedBounds[idx1 + 2u] = max(sharedBounds[idx1 + 2u], sharedBounds[idx2 + 2u]);
-            sharedBounds[idx1 + 3u] = max(sharedBounds[idx1 + 3u], sharedBounds[idx2 + 3u]);
-        }
-        workgroupBarrier();
-    }
-
-    // Write partial results
-    if (localIdx == 0u) {
-        let numWorkgroups = (params.inputSize + 255u) / 256u;
-        let resultIdx = (frameIdx * numWorkgroups + wid.x) * 4u;
-        results[resultIdx + 0u] = sharedBounds[0u];
-        results[resultIdx + 1u] = sharedBounds[1u];
-        results[resultIdx + 2u] = sharedBounds[2u];
-        results[resultIdx + 3u] = sharedBounds[3u];
-    }
-}
-`;
-
-// Centroid computation shader - reduces partial bounds to final centroids
-// This eliminates the need to read back bounds to CPU before cropping
-const centroidShader = `
-struct Params {
-    srcWidth: u32,
-    srcHeight: u32,
-    batchSize: u32,
-    numWorkgroups: u32,
-}
-
-@group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> boundsPartial: array<u32>;  // 4 values per workgroup per frame
-@group(0) @binding(2) var<storage, read_write> centers: array<f32>;  // 2 floats per frame (x, y)
-@group(0) @binding(3) var<storage, read_write> boundsOutput: array<u32>;  // 4 u32 per frame: minX, minY, maxX, maxY
-
-@compute @workgroup_size(64, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let frameIdx = gid.x;
-    if (frameIdx >= params.batchSize) {
-        return;
-    }
-
-    // Reduce all workgroup results for this frame
-    var minX: u32 = params.srcWidth;
-    var minY: u32 = params.srcHeight;
-    var maxX: u32 = 0u;
-    var maxY: u32 = 0u;
-
-    for (var w: u32 = 0u; w < params.numWorkgroups; w = w + 1u) {
-        let idx = (frameIdx * params.numWorkgroups + w) * 4u;
-        let wMinX = boundsPartial[idx + 0u];
-        let wMinY = boundsPartial[idx + 1u];
-        let wMaxX = boundsPartial[idx + 2u];
-        let wMaxY = boundsPartial[idx + 3u];
-
-        minX = min(minX, wMinX);
-        minY = min(minY, wMinY);
-        maxX = max(maxX, wMaxX);
-        maxY = max(maxY, wMaxY);
-    }
-
-    // Write final bounds for later CPU readback
-    let boundsIdx = frameIdx * 4u;
-    boundsOutput[boundsIdx + 0u] = minX;
-    boundsOutput[boundsIdx + 1u] = minY;
-    boundsOutput[boundsIdx + 2u] = maxX;
-    boundsOutput[boundsIdx + 3u] = maxY;
-
-    // Compute and write centroid
-    let centerIdx = frameIdx * 2u;
-    if (maxX > minX && maxY > minY) {
-        centers[centerIdx + 0u] = f32(minX + maxX) / 2.0;
-        centers[centerIdx + 1u] = f32(minY + maxY) / 2.0;
-    } else {
-        // No valid object found - use frame center
-        centers[centerIdx + 0u] = f32(params.srcWidth) / 2.0;
-        centers[centerIdx + 1u] = f32(params.srcHeight) / 2.0;
-    }
-}
-`;
+// Pipelined upload state - allows uploading next batch while GPU processes current
+let pipelinedUpload = {
+    ready: false,           // True if data is pre-uploaded in buffer
+    bufferIndex: 0,         // Which buffer index has the pre-uploaded data (cycles 0 to N-1)
+    bayerData: null,        // The prepared Bayer data (already packed)
+    scale: 1.0,             // Scale factor for the pre-uploaded data
+    batchSize: 0,           // Batch size of pre-uploaded data
+};
 
 // ============================================================
 // INITIALIZATION
@@ -1890,93 +429,25 @@ async function init() {
         }
     });
 
-    // Helper to create shader module with error checking
-    async function createShader(code, name) {
-        const module = device.createShaderModule({ code });
-        const info = await module.getCompilationInfo();
-        for (const msg of info.messages) {
-            if (msg.type === 'error') {
-                throw new Error(`Shader ${name} error: ${msg.message} at line ${msg.lineNum}`);
-            }
-            if (msg.type === 'warning') {
-                console.warn(`Shader ${name} warning: ${msg.message}`);
-            }
-        }
-        return module;
-    }
-
-    // Create pipelines with error checking
-    const demosaicModule = await createShader(demosaicShader, 'demosaic');
-    demosaicPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: demosaicModule, entryPoint: 'main' }
-    });
-
-    const demosaicCropModule = await createShader(demosaicCropShader, 'demosaicCrop');
-    demosaicCropPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: demosaicCropModule, entryPoint: 'main' }
-    });
-
-    const demosaicGrayModule = await createShader(demosaicGrayShader, 'demosaicGray');
-    demosaicGrayPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: demosaicGrayModule, entryPoint: 'main' }
-    });
-
-    const rgbaCropModule = await createShader(rgbaCropShader, 'rgbaCrop');
-    rgbaCropPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: rgbaCropModule, entryPoint: 'main' }
-    });
-
-    const grayscaleModule = await createShader(grayscaleShader, 'grayscale');
-    grayscalePipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: grayscaleModule, entryPoint: 'main' }
-    });
-
-    const laplacianModule = await createShader(laplacianShader, 'laplacian');
-    laplacianPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: laplacianModule, entryPoint: 'main' }
-    });
-
-    const reductionModule = await createShader(reductionShader, 'reduction');
-    reductionPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: reductionModule, entryPoint: 'main' }
-    });
-
-    const momentsModule = await createShader(momentsShader, 'moments');
-    momentsPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: momentsModule, entryPoint: 'main' }
-    });
-
-    const momentsReductionModule = await createShader(momentsReductionShader, 'momentsReduction');
-    momentsReductionPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: momentsReductionModule, entryPoint: 'main' }
-    });
-
-    const boundsModule = await createShader(boundsShader, 'bounds');
-    boundsPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: boundsModule, entryPoint: 'main' }
-    });
-
-    const boundsReductionModule = await createShader(boundsReductionShader, 'boundsReduction');
-    boundsReductionPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: boundsReductionModule, entryPoint: 'main' }
-    });
-
-    const centroidModule = await createShader(centroidShader, 'centroid');
-    centroidPipeline = device.createComputePipeline({
-        layout: 'auto',
-        compute: { module: centroidModule, entryPoint: 'main' }
-    });
+    // Create all compute pipelines
+    demosaicPipeline = await createPipeline(device, demosaicBilinearShader, 'demosaic');
+    demosaicCropPipeline = await createPipeline(device, demosaicCropShader, 'demosaicCrop');
+    demosaicGrayPipeline = await createPipeline(device, demosaicGrayShader, 'demosaicGray');
+    demosaicGrayOnlyPipeline = await createPipeline(device, demosaicGrayOnlyShader, 'demosaicGrayOnly');
+    rgbaCropPipeline = await createPipeline(device, rgbaCropShader, 'rgbaCrop');
+    grayscalePipeline = await createPipeline(device, grayscaleShader, 'grayscale');
+    grayscaleFloat32Pipeline = await createPipeline(device, grayscaleFloat32Shader, 'grayscaleFloat32');
+    tenengradPipeline = await createPipeline(device, tenengradShader, 'tenengrad');
+    offsetTenengradPipeline = await createPipeline(device, offsetTenengradShader, 'offsetTenengrad');
+    reductionPipeline = await createPipeline(device, reductionShader, 'reduction');
+    momentsPipeline = await createPipeline(device, momentsShader, 'moments');
+    momentsReductionPipeline = await createPipeline(device, momentsReductionShader, 'momentsReduction');
+    circularityFinalPipeline = await createPipeline(device, circularityFinalShader, 'circularityFinal');
+    boundsPipeline = await createPipeline(device, boundsShader, 'bounds');
+    boundsReductionPipeline = await createPipeline(device, boundsReductionShader, 'boundsReduction');
+    centroidPipeline = await createPipeline(device, centroidShader, 'centroid');
+    blurPipeline = await createPipeline(device, blurShader, 'blur');
+    sharpnessFinalPipeline = await createPipeline(device, sharpnessFinalShader, 'sharpnessFinal');
 
     isReady = true;
     deviceLost = false;
@@ -2066,7 +537,7 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
 
     // Destroy old buffers if they exist
     if (cachedAnalyzeBuffers) {
-        Object.values(cachedAnalyzeBuffers).forEach(buf => {
+        Object.values(cachedAnalyzeBuffers).flat().forEach(buf => {
             if (buf && buf.destroy) buf.destroy();
         });
     }
@@ -2083,81 +554,40 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const momentsReductionSize = align4(Math.ceil(requiredSizes.momentsReductionSize * headroom));
     const boundsReductionSize = align4(Math.ceil(requiredSizes.boundsReductionSize * headroom));
 
+    // Helper to create array of N identical buffers for concurrent batch support
+    const createBufferArray = (size, usage) =>
+        Array.from({ length: MAX_CONCURRENT_BATCHES }, () =>
+            device.createBuffer({ size, usage })
+        );
+
     cachedAnalyzeBuffers = {
-        paramsBuffer: device.createBuffer({
-            size: 32,  // 8 u32 values for demosaic params including useVng
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        inputBuffer: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
+        paramsBuffer: uniformBuffer(device, 32),  // 8 u32 values for demosaic params
+        inputBuffers: createBufferArray(pixelBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
         // RGBA buffer: 4x larger for 16-bit to hold Float32 output (preserves precision for stacking)
-        rgbaBuffer: device.createBuffer({
-            size: rgbaBufferSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-        }),
-        grayBuffer: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        laplacianBuffer: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        laplacianSqBuffer: device.createBuffer({
-            size: pixelBufferSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        reductionBuffer: device.createBuffer({
-            size: reductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        momentsBuffer: device.createBuffer({
-            size: momentsPixelSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        momentsReductionBuffer: device.createBuffer({
-            size: momentsReductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        reductionParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        momentsParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        reductionReadback: device.createBuffer({
-            size: reductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        momentsReadback: device.createBuffer({
-            size: momentsReductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
+        rgbaBuffer: storageBuffer(device, rgbaBufferSize, { copySrc: true, copyDst: true }),
+        grayBuffer: storageBuffer(device, pixelBufferSize, { copySrc: true, copyDst: true }),
+        grayReadback: readbackBuffer(device, pixelBufferSize),
+        // Blurred grayscale for noise reduction before bounds detection
+        blurredGrayBuffer: storageBuffer(device, pixelBufferSize),
+        tenengradBuffer: storageBuffer(device, pixelBufferSize),
+        laplacianBuffer: storageBuffer(device, pixelBufferSize),
+        reductionBuffer: storageBuffer(device, reductionSize, { copySrc: true }),
+        momentsBuffer: storageBuffer(device, momentsPixelSize),
+        momentsReductionBuffer: storageBuffer(device, momentsReductionSize, { copySrc: true }),
+        reductionParamsBuffer: uniformBuffer(device, 16),
+        momentsParamsBuffer: uniformBuffer(device, 16),
+        reductionReadback: readbackBuffer(device, reductionSize),
+        momentsReadback: readbackBuffer(device, momentsReductionSize),
+        // Circularity + centroid: computed on GPU from moments (3 floats per frame: circ, cx, cy)
+        circularityBuffer: storageBuffer(device, batchSize * 3 * 4, { copySrc: true }),
+        circularityParamsBuffer: uniformBuffer(device, 16),
+        circularityReadback: readbackBuffer(device, batchSize * 3 * 4),
         // RGBA readback: matches rgbaBuffer size for 16-bit Float32 support
-        rgbaReadback: device.createBuffer({
-            size: rgbaBufferSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        boundsBuffer: device.createBuffer({
-            size: boundsPixelSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        boundsReductionBuffer: device.createBuffer({
-            size: boundsReductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        boundsParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        boundsReadback: device.createBuffer({
-            size: boundsReductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        })
+        rgbaReadback: readbackBuffer(device, rgbaBufferSize),
+        boundsBuffer: storageBuffer(device, boundsPixelSize),
+        boundsReductionBuffer: storageBuffer(device, boundsReductionSize, { copySrc: true }),
+        boundsParamsBuffer: uniformBuffer(device, 16),
+        boundsReadback: readbackBuffer(device, boundsReductionSize)
     };
 
     cachedAnalyzeConfig = {
@@ -2190,7 +620,7 @@ function cleanupAnalyzeBuffers() {
     }
 }
 
-async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false, useVng = true) {
+async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false, grayOnly = false) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -2198,10 +628,23 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     const pixelCount = width * height;
     const numWorkgroups = Math.ceil(pixelCount / 256);
 
+    // Determine if we need demosaic (bayerPattern >= 0 means Bayer data)
+    const needsDemosaic = bayerPattern >= 0;
+
     // Memory safeguard: prevent allocations that would likely fail
+    // Mono input (bayerPattern < 0): much lower memory - just grayBuffer + optional RGBA
+    // Bayer/demosaic: needs input buffers + RGBA output
     // metadataOnly: Uint8 RGBA only (4 bytes/px)
-    // full mode: Float32 RGBA (16 bytes/px) + Uint8 RGBA copy (4 bytes/px) = 20 bytes/px
-    const bytesPerPixel = metadataOnly ? 4 : 20;
+    // full mode with demosaic: Float32 RGBA (16 bytes/px) + Uint8 RGBA copy (4 bytes/px) = 20 bytes/px
+    // mono grayOnly: just 1 byte/px for grayscale
+    // mono non-grayOnly: 1 + 4 = 5 bytes/px (gray + RGBA)
+    let bytesPerPixel;
+    if (!needsDemosaic) {
+        // Mono/RGBA input - much lower memory requirements
+        bytesPerPixel = grayOnly ? 1 : 5;
+    } else {
+        bytesPerPixel = metadataOnly ? 4 : 20;
+    }
     const estimatedMemory = batchSize * pixelCount * bytesPerPixel;
     const maxMemory = 512 * 1024 * 1024; // 512MB hard limit (allow some headroom over 256MB target)
     if (estimatedMemory > maxMemory) {
@@ -2210,12 +653,13 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         throw new Error(`Memory limit: ${batchSize} frames of ${width}x${height} needs ${neededMB}MB (limit: 512MB). Try processing fewer frames or use smaller resolution. Max batch: ${maxFrames} frames.`);
     }
 
-    // Determine if we need demosaic (bayerPattern >= 0 means Bayer data)
-    const needsDemosaic = bayerPattern >= 0;
-
     // Detect bit depth early so we allocate correct buffer sizes
     // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+    console.log(`[GPU] analyzeBatch: bitDepth=${bitDepth}, batchSize=${batchSize}, needsDemosaic=${needsDemosaic}`);
+
+    // Wait for analyze slot BEFORE getting buffers (only 1 analyzeBatch at a time since buffers aren't double-buffered)
+    await acquireAnalyzeSlot();
 
     // Get cached buffers (creates if needed, reuses if possible)
     const buffers = getAnalyzeBuffers(batchSize, width, height, bitDepth);
@@ -2224,64 +668,112 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     if (needsDemosaic) {
         // Upload Bayer data to input buffer (auto-stretch for 16-bit to handle dark data)
         const { data: bayerData, scale } = prepareBayerData(frames, pixelCount, false);
-        queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
+        queue.writeBuffer(buffers.inputBuffers[0], 0, bayerData);
 
         // Demosaic params (mixed u32/f32 for scale)
         // Note: bitDepth already determined above via detectBitDepth()
+        // Always use bilinear (useVng=0) for analysis - VNG is done in stacking worker
         const paramsData = new ArrayBuffer(32);
-        new Uint32Array(paramsData).set([width, height, batchSize, bayerPattern, useVng ? 1 : 0, bitDepth, 0, 0]);
+        new Uint32Array(paramsData).set([width, height, batchSize, bayerPattern, 0, bitDepth, 0, 0]);
         new Float32Array(paramsData)[6] = scale;
         queue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
 
-        // Run fused demosaic + grayscale (outputs both RGBA and grayscale in one pass)
-        const demosaicGrayBindGroup = device.createBindGroup({
-            layout: demosaicGrayPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: buffers.inputBuffer } },
-                { binding: 2, resource: { buffer: buffers.rgbaBuffer } },
-                { binding: 3, resource: { buffer: buffers.grayBuffer } }
-            ]
-        });
-
-        const encoder = device.createCommandEncoder();
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(demosaicGrayPipeline);
-        pass.setBindGroup(0, demosaicGrayBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
-        pass.end();
-        queue.submit([encoder.finish()]);
+        if (grayOnly) {
+            // Grayscale-only demosaic (fast, no RGBA output)
+            const demosaicGrayOnlyBindGroup = createBindGroup(device, demosaicGrayOnlyPipeline, [
+                buffers.paramsBuffer, buffers.inputBuffers[0], buffers.grayBuffer
+            ]);
+            const encoder = device.createCommandEncoder();
+            addComputePass(encoder, demosaicGrayOnlyPipeline, demosaicGrayOnlyBindGroup, imageWorkgroups(width, height, batchSize));
+            logGpuSubmit('analyzeBatch:demosaic-grayOnly');
+            queue.submit([encoder.finish()]);
+        } else {
+            // Run fused demosaic + grayscale (outputs both RGBA and grayscale in one pass)
+            const demosaicGrayBindGroup = createBindGroup(device, demosaicGrayPipeline, [
+                buffers.paramsBuffer, buffers.inputBuffers[0], buffers.rgbaBuffer, buffers.grayBuffer
+            ]);
+            const encoder = device.createCommandEncoder();
+            addComputePass(encoder, demosaicGrayPipeline, demosaicGrayBindGroup, imageWorkgroups(width, height, batchSize));
+            logGpuSubmit('analyzeBatch:demosaic+gray');
+            queue.submit([encoder.finish()]);
+        }
         grayAlreadyComputed = true;
     } else {
-        // Input is already RGBA - write each frame directly to GPU buffer (no staging buffer)
-        for (let i = 0; i < batchSize; i++) {
-            const frame = frames[i];
-            const byteOffset = i * pixelCount * 4;  // 4 bytes per RGBA pixel
-            // Handle both Uint8Array and ArrayBuffer inputs
-            let src;
-            if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
-                src = frame.data;
-            } else if (frame.data instanceof ArrayBuffer) {
-                src = new Uint8Array(frame.data);
-            } else if (frame.data.buffer instanceof ArrayBuffer) {
-                // TypedArray - create Uint8Array view at correct offset
-                src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
-            } else {
-                console.error('Unknown frame data type:', typeof frame.data, frame.data);
-                continue;
-            }
+        // Input is either RGBA (4 bytes/pixel) or mono grayscale (1 byte/pixel)
+        // Check first frame to determine input format
+        const firstFrame = frames[0];
+        let firstSrc;
+        if (firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray) {
+            firstSrc = firstFrame.data;
+        } else if (firstFrame.data instanceof ArrayBuffer) {
+            firstSrc = new Uint8Array(firstFrame.data);
+        } else if (firstFrame.data.buffer instanceof ArrayBuffer) {
+            firstSrc = new Uint8Array(firstFrame.data.buffer, firstFrame.data.byteOffset, firstFrame.data.byteLength);
+        }
 
-            if (src.length !== pixelCount * 4) {
-                console.error(`Frame ${i}: RGBA data size mismatch. Expected ${pixelCount * 4}, got ${src.length}`);
-                continue;
-            }
+        const isMonoInput = firstSrc && firstSrc.length === pixelCount;
 
-            // Write directly to GPU buffer at offset
-            queue.writeBuffer(buffers.rgbaBuffer, byteOffset, src);
+        if (isMonoInput) {
+            // Mono grayscale input - expand to RGBA so grayscale shader can process it
+            // (grayBuffer is float32, so we can't upload uint8 mono data directly)
+            for (let i = 0; i < batchSize; i++) {
+                const frame = frames[i];
+                let src;
+                if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
+                    src = frame.data;
+                } else if (frame.data instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data);
+                } else if (frame.data.buffer instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
+                } else {
+                    console.error('Unknown frame data type:', typeof frame.data, frame.data);
+                    continue;
+                }
+                // Expand mono to RGBA
+                const rgba = new Uint8Array(pixelCount * 4);
+                for (let j = 0; j < pixelCount; j++) {
+                    const v = src[j];
+                    rgba[j * 4] = v;
+                    rgba[j * 4 + 1] = v;
+                    rgba[j * 4 + 2] = v;
+                    rgba[j * 4 + 3] = 255;
+                }
+                const byteOffset = i * pixelCount * 4;
+                queue.writeBuffer(buffers.rgbaBuffer, byteOffset, rgba);
+            }
+            // Let grayscale shader convert RGBA to float32 grayscale
+            // (don't set grayAlreadyComputed - we need the shader to run)
+        } else {
+            // Input is already RGBA - write each frame directly to GPU buffer (no staging buffer)
+            for (let i = 0; i < batchSize; i++) {
+                const frame = frames[i];
+                const byteOffset = i * pixelCount * 4;  // 4 bytes per RGBA pixel
+                // Handle both Uint8Array and ArrayBuffer inputs
+                let src;
+                if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
+                    src = frame.data;
+                } else if (frame.data instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data);
+                } else if (frame.data.buffer instanceof ArrayBuffer) {
+                    // TypedArray - create Uint8Array view at correct offset
+                    src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
+                } else {
+                    console.error('Unknown frame data type:', typeof frame.data, frame.data);
+                    continue;
+                }
+
+                if (src.length !== pixelCount * 4) {
+                    console.error(`Frame ${i}: RGBA data size mismatch. Expected ${pixelCount * 4}, got ${src.length}`);
+                    continue;
+                }
+
+                // Write directly to GPU buffer at offset
+                queue.writeBuffer(buffers.rgbaBuffer, byteOffset, src);
+            }
         }
     }
 
-    // Update params for grayscale/laplacian
+    // Update params for grayscale/tenengrad
     queue.writeBuffer(buffers.paramsBuffer, 0, new Uint32Array([width, height, batchSize, 0]));
 
     // Update reduction params
@@ -2294,52 +786,33 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     queue.writeBuffer(buffers.momentsParamsBuffer, 0, momentsParamsData);
 
     // Create bind groups (must recreate each time)
-    const grayBindGroup = device.createBindGroup({
-        layout: grayscalePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: buffers.rgbaBuffer } },
-            { binding: 2, resource: { buffer: buffers.grayBuffer } }
-        ]
-    });
+    // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
+    const grayPipeline = bitDepth === 16 ? grayscaleFloat32Pipeline : grayscalePipeline;
+    const grayBindGroup = createBindGroup(device, grayPipeline, [
+        buffers.paramsBuffer, buffers.rgbaBuffer, buffers.grayBuffer
+    ]);
+    const lapBindGroup = createBindGroup(device, tenengradPipeline, [
+        buffers.paramsBuffer, buffers.grayBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer
+    ]);
+    const reductionBindGroup = createBindGroup(device, reductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer, buffers.reductionBuffer
+    ]);
+    const momentsBindGroup = createBindGroup(device, momentsPipeline, [
+        buffers.momentsParamsBuffer, buffers.grayBuffer, buffers.momentsBuffer
+    ]);
+    const momentsReductionBindGroup = createBindGroup(device, momentsReductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.momentsBuffer, buffers.momentsReductionBuffer
+    ]);
 
-    const lapBindGroup = device.createBindGroup({
-        layout: laplacianPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 3, resource: { buffer: buffers.laplacianSqBuffer } }
-        ]
-    });
-
-    const reductionBindGroup = device.createBindGroup({
-        layout: reductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianSqBuffer } },
-            { binding: 3, resource: { buffer: buffers.reductionBuffer } }
-        ]
-    });
-
-    const momentsBindGroup = device.createBindGroup({
-        layout: momentsPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.momentsParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.momentsBuffer } }
-        ]
-    });
-
-    const momentsReductionBindGroup = device.createBindGroup({
-        layout: momentsReductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.momentsBuffer } },
-            { binding: 2, resource: { buffer: buffers.momentsReductionBuffer } }
-        ]
-    });
+    // Circularity final pass: compute circularity from summed moments on GPU
+    // Circularity params: numWorkgroups, batchSize, defaultCenterX, defaultCenterY
+    const circularityParamsData = new ArrayBuffer(16);
+    new Uint32Array(circularityParamsData, 0, 2).set([numWorkgroups, batchSize]);
+    new Float32Array(circularityParamsData, 8, 2).set([width / 2, height / 2]);
+    queue.writeBuffer(buffers.circularityParamsBuffer, 0, circularityParamsData);
+    const circularityBindGroup = createBindGroup(device, circularityFinalPipeline, [
+        buffers.circularityParamsBuffer, buffers.momentsReductionBuffer, buffers.circularityBuffer
+    ]);
 
     // Update bounds params (same threshold as moments)
     const boundsParamsData = new ArrayBuffer(16);
@@ -2347,23 +820,12 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     new Float32Array(boundsParamsData, 12, 1).set([threshold]);
     queue.writeBuffer(buffers.boundsParamsBuffer, 0, boundsParamsData);
 
-    const boundsBindGroup = device.createBindGroup({
-        layout: boundsPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.boundsParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.boundsBuffer } }
-        ]
-    });
-
-    const boundsReductionBindGroup = device.createBindGroup({
-        layout: boundsReductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.boundsBuffer } },
-            { binding: 2, resource: { buffer: buffers.boundsReductionBuffer } }
-        ]
-    });
+    const boundsBindGroup = createBindGroup(device, boundsPipeline, [
+        buffers.boundsParamsBuffer, buffers.grayBuffer, buffers.boundsBuffer
+    ]);
+    const boundsReductionBindGroup = createBindGroup(device, boundsReductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.boundsBuffer, buffers.boundsReductionBuffer
+    ]);
 
     // Execute all passes in a single command encoder
     const encoder = device.createCommandEncoder();
@@ -2372,15 +834,15 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     let pass;
     if (!grayAlreadyComputed) {
         pass = encoder.beginComputePass();
-        pass.setPipeline(grayscalePipeline);
+        pass.setPipeline(grayPipeline);
         pass.setBindGroup(0, grayBindGroup);
         pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
         pass.end();
     }
 
-    // Combined pass: Laplacian + Moments + Bounds (all read from grayBuffer, independent outputs)
+    // Combined pass: Tenengrad + Moments + Bounds (all read from grayBuffer, independent outputs)
     pass = encoder.beginComputePass();
-    pass.setPipeline(laplacianPipeline);
+    pass.setPipeline(tenengradPipeline);
     pass.setBindGroup(0, lapBindGroup);
     pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
     pass.setPipeline(momentsPipeline);
@@ -2404,90 +866,94 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
     pass.end();
 
+    // Circularity final pass: must run after moments reduction completes
+    pass = encoder.beginComputePass();
+    pass.setPipeline(circularityFinalPipeline);
+    pass.setBindGroup(0, circularityBindGroup);
+    pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
+    pass.end();
+
     // Copy results for readback
     const reductionCopySize = batchSize * numWorkgroups * 2 * 4;
-    const momentsCopySize = batchSize * numWorkgroups * 6 * 4;
+    const circularityCopySize = batchSize * 3 * 4;  // 3 floats per frame: circ, cx, cy (computed on GPU)
     const boundsCopySize = batchSize * numWorkgroups * 4 * 4;
     // RGBA copy size: 4x larger for 16-bit (Float32 output vs packed Uint8)
     const rgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
     const rgbaCopySize = batchSize * pixelCount * rgbaBytesPerPixel;
 
     encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, buffers.reductionReadback, 0, reductionCopySize);
-    encoder.copyBufferToBuffer(buffers.momentsReductionBuffer, 0, buffers.momentsReadback, 0, momentsCopySize);
+    encoder.copyBufferToBuffer(buffers.circularityBuffer, 0, buffers.circularityReadback, 0, circularityCopySize);
     encoder.copyBufferToBuffer(buffers.boundsReductionBuffer, 0, buffers.boundsReadback, 0, boundsCopySize);
-    encoder.copyBufferToBuffer(buffers.rgbaBuffer, 0, buffers.rgbaReadback, 0, rgbaCopySize);
+    // Skip RGBA and grayscale readback in grayOnly mode (saves significant bandwidth)
+    // Grayscale buffer is always float32 (4 bytes per pixel)
+    const grayCopySize = batchSize * pixelCount * 4;
+    if (!grayOnly) {
+        encoder.copyBufferToBuffer(buffers.rgbaBuffer, 0, buffers.rgbaReadback, 0, rgbaCopySize);
+        encoder.copyBufferToBuffer(buffers.grayBuffer, 0, buffers.grayReadback, 0, grayCopySize);
+    }
 
+    logGpuSubmit(grayOnly ? 'analyzeBatch:analysis+readback(grayOnly)' : 'analyzeBatch:analysis+readback');
     queue.submit([encoder.finish()]);
 
     // Read back results
     await safeMapAsync(buffers.reductionReadback, GPUMapMode.READ);
-    await safeMapAsync(buffers.momentsReadback, GPUMapMode.READ);
+    await safeMapAsync(buffers.circularityReadback, GPUMapMode.READ);
     await safeMapAsync(buffers.boundsReadback, GPUMapMode.READ);
-    await safeMapAsync(buffers.rgbaReadback, GPUMapMode.READ);
 
     const reductionData = new Float32Array(buffers.reductionReadback.getMappedRange().slice(0, reductionCopySize));
-    const momentsData = new Float32Array(buffers.momentsReadback.getMappedRange().slice(0, momentsCopySize));
+    const circularityData = new Float32Array(buffers.circularityReadback.getMappedRange().slice(0, circularityCopySize));
     const boundsData = new Uint32Array(buffers.boundsReadback.getMappedRange().slice(0, boundsCopySize));
-    // RGBA data type depends on bit depth:
-    // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
-    // - 16-bit: Float32Array (4 floats/pixel, values in 0-1 range)
-    const rgbaRawBuffer = buffers.rgbaReadback.getMappedRange().slice(0, rgbaCopySize);
-    const rgbaData = bitDepth === 16 ? new Float32Array(rgbaRawBuffer) : new Uint8Array(rgbaRawBuffer);
+
+    // RGBA and grayscale readback only when not in grayOnly mode
+    let rgbaData = null;
+    let grayData = null;
+    if (!grayOnly) {
+        await safeMapAsync(buffers.rgbaReadback, GPUMapMode.READ);
+        await safeMapAsync(buffers.grayReadback, GPUMapMode.READ);
+        // RGBA data type depends on bit depth:
+        // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
+        // - 16-bit: Float32Array (4 floats/pixel, values in 0-1 range)
+        const rgbaRawBuffer = buffers.rgbaReadback.getMappedRange().slice(0, rgbaCopySize);
+        rgbaData = bitDepth === 16 ? new Float32Array(rgbaRawBuffer) : new Uint8Array(rgbaRawBuffer);
+        // Grayscale is always Float32 (sharpness values in 0-1 range)
+        const grayRawBuffer = buffers.grayReadback.getMappedRange().slice(0, grayCopySize);
+        grayData = new Float32Array(grayRawBuffer);
+    }
 
     buffers.reductionReadback.unmap();
-    buffers.momentsReadback.unmap();
+    buffers.circularityReadback.unmap();
     buffers.boundsReadback.unmap();
-    buffers.rgbaReadback.unmap();
+    if (!grayOnly) {
+        buffers.rgbaReadback.unmap();
+        buffers.grayReadback.unmap();
+    }
 
     // Process results for each frame
     const results = [];
 
     for (let i = 0; i < batchSize; i++) {
-        // Sum up partial reductions for Tenengrad sharpness
+        // Sum up partial reductions for both Tenengrad and Laplacian
         let tenengradSum = 0;
+        let laplacianSum = 0;
         for (let w = 0; w < numWorkgroups; w++) {
-            tenengradSum += reductionData[(i * numWorkgroups + w) * 2];
+            const idx = (i * numWorkgroups + w) * 2;
+            tenengradSum += reductionData[idx];
+            laplacianSum += reductionData[idx + 1];
         }
 
-        // Tenengrad sharpness = mean of gradient magnitude squared
         // Scale by 255² = 65025 to match CPU which uses 0-255 grayscale (we use 0-1)
-        const sharpness = (tenengradSum / pixelCount) * 65025;
+        const tenengradMean = (tenengradSum / pixelCount) * 65025;
+        const laplacianMean = (laplacianSum / pixelCount) * 65025;
 
-        // Sum up moments
-        let m00 = 0, m10 = 0, m01 = 0, m20 = 0, m11 = 0, m02 = 0;
-        for (let w = 0; w < numWorkgroups; w++) {
-            const idx = (i * numWorkgroups + w) * 6;
-            m00 += momentsData[idx];
-            m10 += momentsData[idx + 1];
-            m01 += momentsData[idx + 2];
-            m20 += momentsData[idx + 3];
-            m11 += momentsData[idx + 4];
-            m02 += momentsData[idx + 5];
-        }
+        // Combined sharpness = geometric mean of Tenengrad and Laplacian
+        // Geometric mean naturally balances metrics regardless of their absolute scales
+        const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
-        // Calculate circularity from moments
-        let circularity = 0;
-        if (m00 > 0) {
-            const cx = m10 / m00;
-            const cy = m01 / m00;
-
-            // Central moments
-            const mu20 = m20 / m00 - cx * cx;
-            const mu02 = m02 / m00 - cy * cy;
-            const mu11 = m11 / m00 - cx * cy;
-
-            // Eigenvalues of covariance matrix
-            const trace = mu20 + mu02;
-            const det = mu20 * mu02 - mu11 * mu11;
-            const discriminant = Math.sqrt(Math.max(0, trace * trace - 4 * det));
-            const lambda1 = (trace + discriminant) / 2;
-            const lambda2 = (trace - discriminant) / 2;
-
-            // Circularity = ratio of eigenvalues (1 = perfect circle)
-            if (lambda1 > 0) {
-                circularity = Math.min(lambda2, lambda1) / Math.max(lambda2, lambda1);
-            }
-        }
+        // Get circularity and centroid from GPU (computed in circularityFinalShader)
+        const circIdx = i * 3;
+        const circularity = circularityData[circIdx];
+        const centroidX = circularityData[circIdx + 1];
+        const centroidY = circularityData[circIdx + 2];
 
         // Calculate bounds from partial reductions
         let minX = width, minY = height, maxX = 0, maxY = 0;
@@ -2503,13 +969,6 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
             if (wMaxY > maxY) maxY = wMaxY;
         }
 
-        // Calculate centroid from moments (more accurate than bbox center)
-        let centroidX = width / 2, centroidY = height / 2;
-        if (m00 > 0) {
-            centroidX = m10 / m00;
-            centroidY = m01 / m00;
-        }
-
         // Build bounds object (null if no bright pixels detected)
         let bounds = null;
         if (maxX >= minX && maxY >= minY && minX < width && minY < height) {
@@ -2523,32 +982,47 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
             };
         }
 
-        // Extract RGBA for this frame
-        // Size depends on bit depth: 4 bytes/pixel (8-bit) or 16 bytes/pixel (16-bit Float32)
-        const elementsPerPixel = bitDepth === 16 ? 4 : 4;  // 4 floats or 4 bytes
-        const frameRgba = rgbaData.slice(i * pixelCount * elementsPerPixel, (i + 1) * pixelCount * elementsPerPixel);
-
-        // Return buffer in appropriate format for stacking
-        // - 8-bit: uint8Buffer (packed RGBA) - GPU stacker converts to float32 on GPU
-        // - 16-bit: float32Buffer (4 floats/pixel, 0-1 range) - preserves full precision for stacking
+        // Build result object
         const result = {
             sharpness,
+            tenengrad: tenengradMean,
+            laplacian: laplacianMean,
             circularity,
             bounds,
             width,
-            height
+            height,
+            index: frames[i].index
         };
 
-        if (bitDepth === 16) {
-            // 16-bit: return Float32 buffer (preserves precision through stacking)
-            result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
-        } else {
-            // 8-bit: return Uint8 buffer (GPU stacker converts to float32 on GPU)
-            result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+        // Extract RGBA and grayscale for this frame (skip in grayOnly mode)
+        if (!grayOnly && rgbaData) {
+            // Size depends on bit depth: 4 bytes/pixel (8-bit) or 16 bytes/pixel (16-bit Float32)
+            const elementsPerPixel = bitDepth === 16 ? 4 : 4;  // 4 floats or 4 bytes
+            const frameRgba = rgbaData.slice(i * pixelCount * elementsPerPixel, (i + 1) * pixelCount * elementsPerPixel);
+
+            // Return buffer in appropriate format for stacking
+            // - 8-bit: uint8Buffer (packed RGBA) - GPU stacker converts to float32 on GPU
+            // - 16-bit: float32Buffer (4 floats/pixel, 0-1 range) - preserves full precision for stacking
+            if (bitDepth === 16) {
+                // 16-bit: return Float32 buffer (preserves precision through stacking)
+                result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+            } else {
+                // 8-bit: return Uint8 buffer (GPU stacker converts to float32 on GPU)
+                result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+            }
+
+            // Also extract grayscale for side-by-side preview
+            if (grayData) {
+                const frameGray = grayData.slice(i * pixelCount, (i + 1) * pixelCount);
+                result.grayBuffer = frameGray.buffer.slice(frameGray.byteOffset, frameGray.byteOffset + frameGray.byteLength);
+            }
         }
 
         results.push(result);
     }
+
+    // Release analyze slot to allow next analyzeBatch to proceed
+    releaseAnalyzeSlot();
 
     // Buffers are cached and reused - no cleanup here
     return results;
@@ -2574,24 +1048,31 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
     // Cropped RGBA size: 4x larger for 16-bit (Float32 output)
     const croppedRgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
 
+    // Packed grayscale for template matching: 4 pixels per u32
+    const packedGraySize = Math.ceil(batchSize * cropPixelCount / 4) * 4;
+
     const requiredSizes = {
         inputSize: batchSize * srcPixelCount * 4,       // Raw Bayer (u32 per pixel)
         centersSize: batchSize * 8,                     // 2 floats per frame (x, y)
         boundsOutputSize: batchSize * 16,               // 4 u32 per frame (minX, minY, maxX, maxY)
         croppedRgbaSize: batchSize * cropPixelCount * croppedRgbaBytesPerPixel, // Cropped RGBA output (16-bit = 4x)
+        packedGraySize: packedGraySize,                 // Packed u8 grayscale for template matching (4 pixels per u32)
         graySize: batchSize * cropPixelCount * 4,       // Grayscale float (always f32)
+        tenengradSize: batchSize * cropPixelCount * 4,
         laplacianSize: batchSize * cropPixelCount * 4,
-        laplacianSqSize: batchSize * cropPixelCount * 4,
         reductionSize: batchSize * numWorkgroups * 8,
         momentsSize: batchSize * cropPixelCount * 6 * 4,      // 6 floats per pixel
         momentsReductionSize: batchSize * numWorkgroups * 6 * 4,  // 6 floats per workgroup
-        bitDepth
+        sharpnessFinalSize: batchSize * 2 * 4,          // 2 floats per frame (tenengrad, laplacian)
+        bitDepth,
+        numWorkgroups  // Store for use in shader params
     };
 
     // Validate cache - check sizes that determine buffer requirements
     if (cachedCropBuffers && cachedCropConfig &&
         cachedCropConfig.inputSize >= requiredSizes.inputSize &&
         cachedCropConfig.croppedRgbaSize >= requiredSizes.croppedRgbaSize &&
+        cachedCropConfig.packedGraySize >= requiredSizes.packedGraySize &&
         cachedCropConfig.momentsSize >= requiredSizes.momentsSize &&
         cachedCropConfig.reductionSize >= requiredSizes.reductionSize &&
         cachedCropConfig.momentsReductionSize >= requiredSizes.momentsReductionSize &&
@@ -2608,111 +1089,48 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
 
     // Cleanup old buffers (safe now - only current batch is active)
     if (cachedCropBuffers) {
-        Object.values(cachedCropBuffers).forEach(buf => {
+        Object.values(cachedCropBuffers).flat().forEach(buf => {
             if (buf && buf.destroy) buf.destroy();
         });
         // Keep activeBatchCount at 1 (current batch still has its slot)
         batchWaiters = [];
     }
 
+    // Helper to create array of N identical buffers for concurrent batch support
+    const createBufferArray = (size, usage) =>
+        Array.from({ length: MAX_CONCURRENT_BATCHES }, () =>
+            device.createBuffer({ size, usage })
+        );
+
     cachedCropBuffers = {
-        paramsBuffer: device.createBuffer({
-            size: 32, // 8 u32s for params
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        inputBuffer: device.createBuffer({
-            size: requiredSizes.inputSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
-        inputBufferAlt: device.createBuffer({
-            size: requiredSizes.inputSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
-        centersBuffer: device.createBuffer({
-            size: requiredSizes.centersSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        }),
-        boundsOutputBuffer: device.createBuffer({
-            size: requiredSizes.boundsOutputSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        // Double-buffering for bounds readback (matches concurrency limit)
-        boundsOutputReadback: device.createBuffer({
-            size: requiredSizes.boundsOutputSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        boundsOutputReadbackAlt: device.createBuffer({
-            size: requiredSizes.boundsOutputSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        centroidParamsBuffer: device.createBuffer({
-            size: 16,  // 4 u32s: srcWidth, srcHeight, batchSize, numWorkgroups
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        croppedRgbaBuffer: device.createBuffer({
-            size: requiredSizes.croppedRgbaSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        grayBuffer: device.createBuffer({
-            size: requiredSizes.graySize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        laplacianBuffer: device.createBuffer({
-            size: requiredSizes.laplacianSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        laplacianSqBuffer: device.createBuffer({
-            size: requiredSizes.laplacianSqSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        reductionBuffer: device.createBuffer({
-            size: requiredSizes.reductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        readbackBuffer: device.createBuffer({
-            size: requiredSizes.reductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        readbackBufferAlt: device.createBuffer({
-            size: requiredSizes.reductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        momentsBuffer: device.createBuffer({
-            size: requiredSizes.momentsSize,
-            usage: GPUBufferUsage.STORAGE
-        }),
-        momentsReductionBuffer: device.createBuffer({
-            size: requiredSizes.momentsReductionSize,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-        }),
-        momentsReadbackBuffer: device.createBuffer({
-            size: requiredSizes.momentsReductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        momentsReadbackBufferAlt: device.createBuffer({
-            size: requiredSizes.momentsReductionSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        croppedReadbackBuffer: device.createBuffer({
-            size: requiredSizes.croppedRgbaSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        croppedReadbackBufferAlt: device.createBuffer({
-            size: requiredSizes.croppedRgbaSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        }),
-        grayParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        reductionParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        }),
-        momentsParamsBuffer: device.createBuffer({
-            size: 16,
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        })
+        paramsBuffer: uniformBuffer(device, 32),  // 8 u32s for params
+        inputBuffers: createBufferArray(requiredSizes.inputSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
+        centersBuffer: storageBuffer(device, requiredSizes.centersSize, { copyDst: true }),
+        boundsOutputBuffer: storageBuffer(device, requiredSizes.boundsOutputSize, { copySrc: true }),
+        // N-buffering for readback (matches MAX_CONCURRENT_BATCHES)
+        boundsOutputReadbacks: createBufferArray(requiredSizes.boundsOutputSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+        centroidParamsBuffer: uniformBuffer(device, 16),  // 4 u32s: srcWidth, srcHeight, batchSize, numWorkgroups
+        croppedRgbaBuffer: storageBuffer(device, requiredSizes.croppedRgbaSize, { copySrc: true }),
+        // Packed grayscale for template matching (output by demosaic shader)
+        packedGrayBuffer: storageBuffer(device, requiredSizes.packedGraySize, { copySrc: true, copyDst: true }),
+        packedGrayReadbacks: createBufferArray(requiredSizes.packedGraySize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+        grayBuffer: storageBuffer(device, requiredSizes.graySize, { copySrc: true }),
+        grayReadbacks: createBufferArray(requiredSizes.graySize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+        tenengradBuffer: storageBuffer(device, requiredSizes.tenengradSize),
+        laplacianBuffer: storageBuffer(device, requiredSizes.laplacianSize),
+        reductionBuffer: storageBuffer(device, requiredSizes.reductionSize, { copySrc: true }),
+        readbackBuffers: createBufferArray(requiredSizes.reductionSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+        momentsBuffer: storageBuffer(device, requiredSizes.momentsSize),
+        momentsReductionBuffer: storageBuffer(device, requiredSizes.momentsReductionSize, { copySrc: true }),
+        momentsReadbackBuffers: createBufferArray(requiredSizes.momentsReductionSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+        croppedReadbackBuffers: createBufferArray(requiredSizes.croppedRgbaSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+        grayParamsBuffer: uniformBuffer(device, 16),
+        reductionParamsBuffer: uniformBuffer(device, 16),
+        momentsParamsBuffer: uniformBuffer(device, 16),
+        // Final sharpness reduction: 2 floats per frame (tenengrad, laplacian)
+        sharpnessFinalBuffer: storageBuffer(device, requiredSizes.sharpnessFinalSize, { copySrc: true }),
+        sharpnessFinalReadbacks: createBufferArray(requiredSizes.sharpnessFinalSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
+        sharpnessFinalParamsBuffer: uniformBuffer(device, 16)
     };
 
     cachedCropConfig = { ...requiredSizes, bufferGen: 0 };
@@ -2736,9 +1154,8 @@ function rotateCropBuffers() {
  * @param {number} bayerPattern - Bayer pattern (0-3, or -1 for mono)
  * @param {number} threshold - Threshold for moments (default 0.1)
  * @param {boolean} metadataOnly - If true, skip float32 buffer readback
- * @param {boolean} useVng - If true, use VNG demosaic; otherwise bilinear
  */
-async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1, metadataOnly = false, useVng = true) {
+async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1, metadataOnly = false) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -2752,6 +1169,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     // Detect bitDepth FIRST so we allocate correct buffer sizes
     // 16-bit SER needs 4x larger RGBA buffers for Float32 output
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+    console.log(`[GPU] cropAndAnalyzeBatch: bitDepth=${bitDepth}, batchSize=${batchSize}, needsDemosaic=${needsDemosaic}`);
 
     // Wait for a batch slot BEFORE getting buffers (prevents buffer destruction while in use)
     await acquireBatchSlot();
@@ -2770,16 +1188,25 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     let bayerData = null;
     let scale = 1.0;
     if (needsDemosaic) {
+        // DEBUG: Check raw input values
+        if (frames[0]?.data) {
+            const rawData = frames[0].data;
+            const midIdx = Math.floor(rawData.length / 2);
+            console.log(`[GPU] cropAndAnalyzeBatch raw input: type=${rawData.constructor?.name}, midValue=${rawData[midIdx]}, sample=[${rawData[midIdx]}, ${rawData[midIdx+1]}, ${rawData[midIdx+2]}]`);
+        }
         const prepared = prepareBayerData(frames, srcPixelCount, false);
         bayerData = prepared.data;
         scale = prepared.scale;
     }
 
-    // Set crop params (including useVng for demosaic, bitDepth, and scale)
+    // Set crop params (always bilinear demosaic - VNG is done in stacking worker)
     const cropParams = new ArrayBuffer(32);
-    new Uint32Array(cropParams).set([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, useVng ? 1 : 0, bitDepth, 0]);
+    new Uint32Array(cropParams).set([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, 0, bitDepth, 0]);
     new Float32Array(cropParams)[7] = scale;
     queue.writeBuffer(buffers.paramsBuffer, 0, cropParams);
+
+    // DEBUG: Log shader params
+    console.log(`[GPU] cropAndAnalyzeBatch shader params: srcWidth=${srcWidth}, srcHeight=${srcHeight}, cropSize=${cropSize}, bayerPattern=${bayerPattern}, batchSize=${batchSize}, bitDepth=${bitDepth}, scale=${scale}`);
 
     // Prepare all bind groups and parameters upfront
     queue.writeBuffer(buffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
@@ -2791,78 +1218,62 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     queue.writeBuffer(buffers.momentsParamsBuffer, 0, momentsParamsData);
 
     // Create bind groups for analysis passes
-    const grayBindGroup = device.createBindGroup({
-        layout: grayscalePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.grayParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.croppedRgbaBuffer } },
-            { binding: 2, resource: { buffer: buffers.grayBuffer } }
-        ]
-    });
-
-    const lapBindGroup = device.createBindGroup({
-        layout: laplacianPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.grayParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 3, resource: { buffer: buffers.laplacianSqBuffer } }
-        ]
-    });
-
-    const reduceBindGroup = device.createBindGroup({
-        layout: reductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.laplacianBuffer } },
-            { binding: 2, resource: { buffer: buffers.laplacianSqBuffer } },
-            { binding: 3, resource: { buffer: buffers.reductionBuffer } }
-        ]
-    });
-
-    const momentsBindGroup = device.createBindGroup({
-        layout: momentsPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.momentsParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.grayBuffer } },
-            { binding: 2, resource: { buffer: buffers.momentsBuffer } }
-        ]
-    });
-
-    const momentsReduceBindGroup = device.createBindGroup({
-        layout: momentsReductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: buffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: buffers.momentsBuffer } },
-            { binding: 2, resource: { buffer: buffers.momentsReductionBuffer } }
-        ]
-    });
+    // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
+    const grayPipeline = bitDepth === 16 ? grayscaleFloat32Pipeline : grayscalePipeline;
+    const grayBindGroup = createBindGroup(device, grayPipeline, [
+        buffers.grayParamsBuffer, buffers.croppedRgbaBuffer, buffers.grayBuffer
+    ]);
+    const lapBindGroup = createBindGroup(device, tenengradPipeline, [
+        buffers.grayParamsBuffer, buffers.grayBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer
+    ]);
+    const reduceBindGroup = createBindGroup(device, reductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer, buffers.reductionBuffer
+    ]);
+    const momentsBindGroup = createBindGroup(device, momentsPipeline, [
+        buffers.momentsParamsBuffer, buffers.grayBuffer, buffers.momentsBuffer
+    ]);
+    const momentsReduceBindGroup = createBindGroup(device, momentsReductionPipeline, [
+        buffers.reductionParamsBuffer, buffers.momentsBuffer, buffers.momentsReductionBuffer
+    ]);
 
     // Execute all passes in a single command encoder
     const encoder = device.createCommandEncoder();
 
+    // Clear packed gray buffer before demosaic (atomicOr needs zeros)
+    const packedGraySize = Math.ceil(batchSize * cropPixelCount / 4) * 4;
+    encoder.clearBuffer(buffers.packedGrayBuffer, 0, packedGraySize);
+
     if (needsDemosaic) {
         // Upload Bayer data (already prepared above)
-        queue.writeBuffer(buffers.inputBuffer, 0, bayerData);
+        queue.writeBuffer(buffers.inputBuffers[0], 0, bayerData);
 
-        const demosaicCropBindGroup = device.createBindGroup({
-            layout: demosaicCropPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: buffers.inputBuffer } },
-                { binding: 2, resource: { buffer: buffers.centersBuffer } },
-                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } }
-            ]
-        });
+        const demosaicCropBindGroup = createBindGroup(device, demosaicCropPipeline, [
+            buffers.paramsBuffer, buffers.inputBuffers[0], buffers.centersBuffer,
+            buffers.croppedRgbaBuffer, buffers.packedGrayBuffer
+        ]);
 
-        // Demosaic + crop pass
+        // Demosaic + crop pass (also outputs packed grayscale)
         let pass = encoder.beginComputePass();
         pass.setPipeline(demosaicCropPipeline);
         pass.setBindGroup(0, demosaicCropBindGroup);
         pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
         pass.end();
     } else {
-        // RGBA input - write each frame directly to GPU buffer at offset (no staging buffer)
+        // Input is either RGBA (4 bytes/pixel) or mono grayscale (1 byte/pixel)
+        // Check first frame to determine input format
+        const firstFrame = frames[0];
+        let firstSrc;
+        if (firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray) {
+            firstSrc = firstFrame.data;
+        } else if (firstFrame.data instanceof ArrayBuffer) {
+            firstSrc = new Uint8Array(firstFrame.data);
+        } else if (firstFrame.data.buffer instanceof ArrayBuffer) {
+            firstSrc = new Uint8Array(firstFrame.data.buffer, firstFrame.data.byteOffset, firstFrame.data.byteLength);
+        }
+
+        const isMonoInput = firstSrc && firstSrc.length === srcPixelCount;
+
+        // Write each frame to GPU buffer (expand mono to RGBA if needed)
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
             const byteOffset = i * srcPixelCount * 4;  // 4 bytes per RGBA pixel
@@ -2877,21 +1288,30 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
                 console.error('Unknown frame data type:', typeof frame.data);
                 continue;
             }
-            // Write directly to GPU buffer at offset
-            queue.writeBuffer(buffers.inputBuffer, byteOffset, src);
+
+            if (isMonoInput) {
+                // Expand mono to RGBA
+                const rgba = new Uint8Array(srcPixelCount * 4);
+                for (let j = 0; j < srcPixelCount; j++) {
+                    const v = src[j];
+                    rgba[j * 4] = v;
+                    rgba[j * 4 + 1] = v;
+                    rgba[j * 4 + 2] = v;
+                    rgba[j * 4 + 3] = 255;
+                }
+                queue.writeBuffer(buffers.inputBuffers[0], byteOffset, rgba);
+            } else {
+                // Write directly to GPU buffer at offset
+                queue.writeBuffer(buffers.inputBuffers[0], byteOffset, src);
+            }
         }
 
-        const rgbaCropBindGroup = device.createBindGroup({
-            layout: rgbaCropPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: buffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: buffers.inputBuffer } },
-                { binding: 2, resource: { buffer: buffers.centersBuffer } },
-                { binding: 3, resource: { buffer: buffers.croppedRgbaBuffer } }
-            ]
-        });
+        const rgbaCropBindGroup = createBindGroup(device, rgbaCropPipeline, [
+            buffers.paramsBuffer, buffers.inputBuffers[0], buffers.centersBuffer,
+            buffers.croppedRgbaBuffer, buffers.packedGrayBuffer
+        ]);
 
-        // RGBA crop pass
+        // RGBA crop pass (also outputs packed grayscale)
         let pass = encoder.beginComputePass();
         pass.setPipeline(rgbaCropPipeline);
         pass.setBindGroup(0, rgbaCropBindGroup);
@@ -2901,14 +1321,14 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
 
     // Grayscale pass
     let pass = encoder.beginComputePass();
-    pass.setPipeline(grayscalePipeline);
+    pass.setPipeline(grayPipeline);
     pass.setBindGroup(0, grayBindGroup);
     pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
     pass.end();
 
-    // Combined pass: Laplacian + Moments (both read from grayBuffer, independent outputs)
+    // Combined pass: Tenengrad + Moments (both read from grayBuffer, independent outputs)
     pass = encoder.beginComputePass();
-    pass.setPipeline(laplacianPipeline);
+    pass.setPipeline(tenengradPipeline);
     pass.setBindGroup(0, lapBindGroup);
     pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
     pass.setPipeline(momentsPipeline);
@@ -2926,18 +1346,23 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
     pass.end();
 
-    // Select readback buffers based on generation (double-buffering)
-    const useAlt = (cachedCropConfig?.bufferGen || 0) % 2 === 1;
-    const readbackBuf = useAlt ? buffers.readbackBufferAlt : buffers.readbackBuffer;
-    const momentsReadbackBuf = useAlt ? buffers.momentsReadbackBufferAlt : buffers.momentsReadbackBuffer;
-    const croppedReadbackBuf = useAlt ? buffers.croppedReadbackBufferAlt : buffers.croppedReadbackBuffer;
+    // Select readback buffers based on generation (N-buffering for concurrent batches)
+    const bufferIdx = (cachedCropConfig?.bufferGen || 0) % MAX_CONCURRENT_BATCHES;
+    const readbackBuf = buffers.readbackBuffers[bufferIdx];
+    const momentsReadbackBuf = buffers.momentsReadbackBuffers[bufferIdx];
+    const croppedReadbackBuf = buffers.croppedReadbackBuffers[bufferIdx];
+    const packedGrayReadbackBuf = buffers.packedGrayReadbacks[bufferIdx];
 
     // Copy results to readback buffers
+    // 16-bit needs 4x more bytes per pixel (4 floats vs 1 packed u32)
+    const croppedRgbaCopySize = batchSize * cropPixelCount * (bitDepth === 16 ? 16 : 4);
     encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroups * 8);
     encoder.copyBufferToBuffer(buffers.momentsReductionBuffer, 0, momentsReadbackBuf, 0, batchSize * numWorkgroups * 6 * 4);
-    encoder.copyBufferToBuffer(buffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * 4);
+    encoder.copyBufferToBuffer(buffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, croppedRgbaCopySize);
+    encoder.copyBufferToBuffer(buffers.packedGrayBuffer, 0, packedGrayReadbackBuf, 0, packedGraySize);
 
     // Single submit for all passes
+    logGpuSubmit('cropAnalyzeBatch:all+readback');
     queue.submit([encoder.finish()]);
 
     // Rotate buffers for next batch (so next batch uses alternate set)
@@ -2947,7 +1372,8 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     await Promise.all([
         safeMapAsync(readbackBuf, GPUMapMode.READ),
         safeMapAsync(momentsReadbackBuf, GPUMapMode.READ),
-        safeMapAsync(croppedReadbackBuf, GPUMapMode.READ)
+        safeMapAsync(croppedReadbackBuf, GPUMapMode.READ),
+        safeMapAsync(packedGrayReadbackBuf, GPUMapMode.READ)
     ]);
 
     // Read data from mapped buffers
@@ -2963,21 +1389,50 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
     const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
     croppedReadbackBuf.unmap();
+
+    // DEBUG: Sample cropped data with full statistics
+    if (bitDepth === 16 && batchSize > 0) {
+        const framePixels = cropPixelCount;
+        const centerIdx = Math.floor(framePixels / 2) * 4;
+
+        // Calculate statistics for first frame
+        let maxR = 0, maxG = 0, maxB = 0, sumR = 0, count = 0;
+        for (let i = 0; i < framePixels * 4; i += 4) {
+            if (croppedData[i] > 0.01 || croppedData[i+1] > 0.01 || croppedData[i+2] > 0.01) {
+                sumR += croppedData[i];
+                count++;
+            }
+            if (croppedData[i] > maxR) maxR = croppedData[i];
+            if (croppedData[i+1] > maxG) maxG = croppedData[i+1];
+            if (croppedData[i+2] > maxB) maxB = croppedData[i+2];
+        }
+        const avgR = count > 0 ? sumR / count : 0;
+
+        console.log(`[GPU] Demosaic output stats: maxR=${maxR.toFixed(4)}, maxG=${maxG.toFixed(4)}, maxB=${maxB.toFixed(4)}, avgR=${avgR.toFixed(4)}`);
+        console.log(`[GPU] Center pixel: R=${croppedData[centerIdx].toFixed(4)}, G=${croppedData[centerIdx+1].toFixed(4)}, B=${croppedData[centerIdx+2].toFixed(4)}`);
+    }
+
+    // Packed grayscale for template matching and preview (8-bit, 1 byte per pixel)
+    const packedGrayData = new Uint8Array(packedGrayReadbackBuf.getMappedRange().slice(0));
+    packedGrayReadbackBuf.unmap();
+
     releaseBatchSlot();  // Allow next batch to proceed
 
     // Process results
     const results = [];
     for (let i = 0; i < batchSize; i++) {
-        // Sum sharpness from workgroups
-        let sumLap = 0, sumLapSq = 0;
+        // Sum both Tenengrad and Laplacian from workgroups
+        let tenengradSum = 0, laplacianSum = 0;
         for (let w = 0; w < numWorkgroups; w++) {
             const idx = (i * numWorkgroups + w) * 2;
-            sumLap += reductionData[idx];
-            sumLapSq += reductionData[idx + 1];
+            tenengradSum += reductionData[idx];
+            laplacianSum += reductionData[idx + 1];
         }
-        // Tenengrad sharpness = mean of gradient magnitude squared
         // Scale by 255² = 65025 to match CPU which uses 0-255 grayscale (GPU uses 0-1)
-        const sharpness = (sumLap / cropPixelCount) * 65025;
+        const tenengradMean = (tenengradSum / cropPixelCount) * 65025;
+        const laplacianMean = (laplacianSum / cropPixelCount) * 65025;
+        // Combined sharpness = geometric mean of both metrics
+        const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
         // Sum moments for circularity (6 values per workgroup: m00, m10, m01, m20, m11, m02)
         let m00 = 0, m10 = 0, m01 = 0, m20 = 0, m11 = 0, m02 = 0;
@@ -3020,12 +1475,20 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         const elementsPerPixel = bitDepth === 16 ? 4 : 4;  // 4 floats or 4 bytes
         const frameRgba = croppedData.slice(i * cropPixelCount * elementsPerPixel, (i + 1) * cropPixelCount * elementsPerPixel);
 
+        // Extract packed grayscale for this frame (8-bit, 1 byte per pixel)
+        const grayBytesPerFrame = cropPixelCount;
+        const framePackedGray = packedGrayData.slice(i * grayBytesPerFrame, (i + 1) * grayBytesPerFrame);
+
         const result = {
             sharpness,
+            tenengrad: tenengradMean,
+            laplacian: laplacianMean,
             circularity,
             index: frames[i].index,
             width: cropSize,
-            height: cropSize
+            height: cropSize,
+            // 8-bit grayscale for template matching and preview
+            packedGrayBuffer: framePackedGray.buffer.slice(framePackedGray.byteOffset, framePackedGray.byteOffset + framePackedGray.byteLength)
         };
 
         if (bitDepth === 16) {
@@ -3050,7 +1513,6 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
  * 3. Read bounds to get centers
  * 4. Crop from already-demosaiced RGBA
  * 5. Calculate sharpness on cropped
- * @param {boolean} useVng - If true, use VNG demosaic; otherwise bilinear
  */
 // Timing stats for detectCropAnalyzeBatch
 let dcaBatchCount = 0;
@@ -3058,8 +1520,15 @@ let dcaPrepTime = 0;
 let dcaGpuSubmitTime = 0;
 let dcaMapAsyncTime = 0;
 let dcaResultBuildTime = 0;
+// Detailed per-step timing
+let dcaUploadTime = 0;      // prepareBayerData + writeBuffer
+let dcaDemosaicTime = 0;    // demosaic shader submit
+let dcaBlurTime = 0;        // Gaussian blur for noise reduction
+let dcaBoundsTime = 0;      // bounds detection + centroid submit
+let dcaCropTime = 0;        // crop submit (non-grayOnly)
+let dcaSharpnessTime = 0;   // sharpness + reduction submit
 
-async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false, useVng = true) {
+async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold = 0.1, metadataOnly = false, grayOnly = false, nextBatchFrames = null) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -3075,6 +1544,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Detect bit depth early for correct buffer allocation
     // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+    console.log(`[GPU] detectCropAnalyzeBatch: bitDepth=${bitDepth}, batchSize=${batchSize}, needsDemosaic=${needsDemosaic}, grayOnly=${grayOnly}, threshold=${threshold}`);
 
     // Wait for a batch slot BEFORE getting buffers (prevents buffer destruction while in use)
     await acquireBatchSlot();
@@ -3085,213 +1555,239 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Get buffers for cropped analysis (reuses some, creates others)
     const cropBuffers = await getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
 
-    // ===== STEP 1: Upload raw data and demosaic to full RGBA =====
+    // ===== STEP 1: Upload raw data and demosaic =====
+    // When grayOnly: demosaic directly to grayscale (fast path)
+    // When !grayOnly: demosaic to RGBA (need color for stacking)
+    const tUploadStart = performance.now();
+
+    // Check if we have pre-uploaded data from previous batch's pipeline
+    const usePipelinedData = pipelinedUpload.ready && pipelinedUpload.batchSize === batchSize && needsDemosaic;
+    const currentInputBuffer = usePipelinedData
+        ? analyzeBuffers.inputBuffers[pipelinedUpload.bufferIndex]
+        : analyzeBuffers.inputBuffers[0];
+
     if (needsDemosaic) {
-        // Upload Bayer data (auto-stretch for 16-bit to handle very dark data)
-        // Note: bitDepth already determined above via detectBitDepth()
-        const { data: bayerData, scale } = prepareBayerData(frames, srcPixelCount, false);
-        queue.writeBuffer(analyzeBuffers.inputBuffer, 0, bayerData);
-        // Demosaic params (mixed u32/f32 for scale)
+        let scale;
+        if (usePipelinedData) {
+            // Data already uploaded to alternate buffer - just use it
+            scale = pipelinedUpload.scale;
+            pipelinedUpload.ready = false;  // Consume the pre-uploaded data
+        } else {
+            // Normal path: prepare and upload data
+            const prepared = prepareBayerData(frames, srcPixelCount, false);
+            scale = prepared.scale;
+            queue.writeBuffer(currentInputBuffer, 0, prepared.data);
+        }
+
+        // Always use bilinear (useVng=0) for analysis - VNG is done in stacking worker
         const paramsData = new ArrayBuffer(32);
-        new Uint32Array(paramsData).set([srcWidth, srcHeight, batchSize, bayerPattern, useVng ? 1 : 0, bitDepth, 0, 0]);
+        new Uint32Array(paramsData).set([srcWidth, srcHeight, batchSize, bayerPattern, 0, bitDepth, 0, 0]);
         new Float32Array(paramsData)[6] = scale;
         queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, paramsData);
+        dcaUploadTime += (performance.now() - tUploadStart);
 
-        const demosaicBindGroup = device.createBindGroup({
-            layout: demosaicPipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
-                { binding: 1, resource: { buffer: analyzeBuffers.inputBuffer } },
-                { binding: 2, resource: { buffer: analyzeBuffers.rgbaBuffer } }
-            ]
-        });
-
-        const encoder = device.createCommandEncoder();
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(demosaicPipeline);
-        pass.setBindGroup(0, demosaicBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-        pass.end();
-        queue.submit([encoder.finish()]);
+        const tDemosaicStart = performance.now();
+        if (grayOnly) {
+            // Fast path: demosaic directly to grayscale (no RGBA)
+            const demosaicGrayOnlyBindGroup = createBindGroup(device, demosaicGrayOnlyPipeline, [
+                analyzeBuffers.paramsBuffer, currentInputBuffer, analyzeBuffers.grayBuffer
+            ]);
+            const encoder = device.createCommandEncoder();
+            addComputePass(encoder, demosaicGrayOnlyPipeline, demosaicGrayOnlyBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
+            logGpuSubmit('detectCropAnalyze:demosaic-grayOnly');
+            queue.submit([encoder.finish()]);
+            dcaDemosaicTime += (performance.now() - tDemosaicStart);
+        } else {
+            // Full path: demosaic to RGBA (for cropping and stacking)
+            const demosaicBindGroup = createBindGroup(device, demosaicPipeline, [
+                analyzeBuffers.paramsBuffer, currentInputBuffer, analyzeBuffers.rgbaBuffer
+            ]);
+            const encoder = device.createCommandEncoder();
+            addComputePass(encoder, demosaicPipeline, demosaicBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
+            logGpuSubmit('detectCropAnalyze:demosaic');
+            queue.submit([encoder.finish()]);
+            dcaDemosaicTime += (performance.now() - tDemosaicStart);
+        }
     } else {
-        // RGBA input - write each frame directly to GPU buffer at offset (no staging buffer)
+        // Input is either RGBA (4 bytes/pixel) or mono grayscale (1 byte/pixel)
+        // Check first frame to determine input format
+        const firstFrame = frames[0];
+        let firstSrc = firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray
+            ? firstFrame.data
+            : new Uint8Array(firstFrame.data.buffer || firstFrame.data);
+        const isMonoInput = firstSrc.length === srcPixelCount;
+
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
-            const byteOffset = i * srcPixelCount * 4;  // 4 bytes per RGBA pixel
+            const byteOffset = i * srcPixelCount * 4;
             let src = frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray
                 ? frame.data
                 : new Uint8Array(frame.data.buffer || frame.data);
-            // Write directly to GPU buffer at offset
-            queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, src);
+
+            if (isMonoInput) {
+                // Expand mono to RGBA
+                const rgba = new Uint8Array(srcPixelCount * 4);
+                for (let j = 0; j < srcPixelCount; j++) {
+                    const v = src[j];
+                    rgba[j * 4] = v;
+                    rgba[j * 4 + 1] = v;
+                    rgba[j * 4 + 2] = v;
+                    rgba[j * 4 + 3] = 255;
+                }
+                queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, rgba);
+            } else {
+                queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, src);
+            }
         }
+        dcaUploadTime += (performance.now() - tUploadStart);
     }
 
-    // ===== STEP 2: Grayscale + bounds detection on full frame =====
+    // ===== STEP 2a: Grayscale conversion =====
+    const tBoundsStart = performance.now();
+    // When grayOnly AND needsDemosaic: grayscale already computed by demosaic shader
+    // Otherwise: need to compute grayscale from RGBA (includes mono input expanded to RGBA)
     queue.writeBuffer(analyzeBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, 0]));
     queue.writeBuffer(analyzeBuffers.reductionParamsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, srcPixelCount]));
 
+    let encoder = device.createCommandEncoder();
+
+    // Run grayscale pass unless demosaic shader already computed it (grayOnly + needsDemosaic)
+    const needsGrayscalePass = !grayOnly || !needsDemosaic;
+    if (needsGrayscalePass) {
+        // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
+        const grayPipeline = bitDepth === 16 ? grayscaleFloat32Pipeline : grayscalePipeline;
+        const grayBindGroup = createBindGroup(device, grayPipeline, [
+            analyzeBuffers.paramsBuffer, analyzeBuffers.rgbaBuffer, analyzeBuffers.grayBuffer
+        ]);
+        addComputePass(encoder, grayPipeline, grayBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
+    }
+
+    // ===== STEP 2b: Gaussian blur for noise reduction (matches CPU GaussianBlur) =====
+    const tBlurStart = performance.now();
+    const blurBindGroup = createBindGroup(device, blurPipeline, [
+        analyzeBuffers.paramsBuffer, analyzeBuffers.grayBuffer, analyzeBuffers.blurredGrayBuffer
+    ]);
+    addComputePass(encoder, blurPipeline, blurBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
+    dcaBlurTime += (performance.now() - tBlurStart);
+
+    // ===== STEP 2c: Bounds detection on blurred grayscale =====
     const boundsParamsData = new ArrayBuffer(16);
     new Uint32Array(boundsParamsData, 0, 3).set([srcWidth, srcHeight, batchSize]);
     new Float32Array(boundsParamsData, 12, 1).set([threshold]);
     queue.writeBuffer(analyzeBuffers.boundsParamsBuffer, 0, boundsParamsData);
 
-    const grayBindGroup = device.createBindGroup({
-        layout: grayscalePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: analyzeBuffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },
-            { binding: 2, resource: { buffer: analyzeBuffers.grayBuffer } }
-        ]
-    });
+    const boundsBindGroup = createBindGroup(device, boundsPipeline, [
+        analyzeBuffers.boundsParamsBuffer, analyzeBuffers.blurredGrayBuffer, analyzeBuffers.boundsBuffer
+    ]);
+    const boundsReductionBindGroup = createBindGroup(device, boundsReductionPipeline, [
+        analyzeBuffers.reductionParamsBuffer, analyzeBuffers.boundsBuffer, analyzeBuffers.boundsReductionBuffer
+    ]);
 
-    const boundsBindGroup = device.createBindGroup({
-        layout: boundsPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: analyzeBuffers.boundsParamsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.grayBuffer } },
-            { binding: 2, resource: { buffer: analyzeBuffers.boundsBuffer } }
-        ]
-    });
-
-    const boundsReductionBindGroup = device.createBindGroup({
-        layout: boundsReductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: analyzeBuffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.boundsBuffer } },
-            { binding: 2, resource: { buffer: analyzeBuffers.boundsReductionBuffer } }
-        ]
-    });
-
-    let encoder = device.createCommandEncoder();
-    let pass = encoder.beginComputePass();
-    pass.setPipeline(grayscalePipeline);
-    pass.setBindGroup(0, grayBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-    pass.end();
-
-    pass = encoder.beginComputePass();
-    pass.setPipeline(boundsPipeline);
-    pass.setBindGroup(0, boundsBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), batchSize);
-    pass.end();
-
-    pass = encoder.beginComputePass();
-    pass.setPipeline(boundsReductionPipeline);
-    pass.setBindGroup(0, boundsReductionBindGroup);
-    pass.dispatchWorkgroups(numWorkgroupsFull, batchSize, 1);
-    pass.end();
+    addComputePass(encoder, boundsPipeline, boundsBindGroup, imageWorkgroups(srcWidth, srcHeight, batchSize));
+    addComputePass(encoder, boundsReductionPipeline, boundsReductionBindGroup, reductionWorkgroups(numWorkgroupsFull, batchSize));
 
     // ===== STEP 3: Compute centroids on GPU (no CPU sync) =====
     queue.writeBuffer(cropBuffers.centroidParamsBuffer, 0, new Uint32Array([srcWidth, srcHeight, batchSize, numWorkgroupsFull]));
 
-    const centroidBindGroup = device.createBindGroup({
-        layout: centroidPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.centroidParamsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.boundsReductionBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },
-            { binding: 3, resource: { buffer: cropBuffers.boundsOutputBuffer } }
-        ]
-    });
+    const centroidBindGroup = createBindGroup(device, centroidPipeline, [
+        cropBuffers.centroidParamsBuffer, analyzeBuffers.boundsReductionBuffer,
+        cropBuffers.centersBuffer, cropBuffers.boundsOutputBuffer
+    ]);
+    addComputePass(encoder, centroidPipeline, centroidBindGroup, [Math.ceil(batchSize / 64), 1, 1]);
 
-    pass = encoder.beginComputePass();
-    pass.setPipeline(centroidPipeline);
-    pass.setBindGroup(0, centroidBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
-    pass.end();
-
+    logGpuSubmit('detectCropAnalyze:centroid');
     queue.submit([encoder.finish()]);
+    dcaBoundsTime += (performance.now() - tBoundsStart);
 
     // ===== STEP 4: Crop from demosaiced RGBA using GPU-computed centers =====
-    const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, 0, batchSize, 0, 0, 0]);
-    queue.writeBuffer(cropBuffers.paramsBuffer, 0, cropParams);
+    const tCropStart = performance.now();
+    // Skip crop when grayOnly - offset Tenengrad reads directly from full-frame grayscale
+    if (!grayOnly) {
+        const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, 0, batchSize, 0, 0, 0]);
+        queue.writeBuffer(cropBuffers.paramsBuffer, 0, cropParams);
 
-    // Crop from the already-demosaiced rgbaBuffer
-    const rgbaCropBindGroup = device.createBindGroup({
-        layout: rgbaCropPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.paramsBuffer } },
-            { binding: 1, resource: { buffer: analyzeBuffers.rgbaBuffer } },  // Source: full demosaiced
-            { binding: 2, resource: { buffer: cropBuffers.centersBuffer } },
-            { binding: 3, resource: { buffer: cropBuffers.croppedRgbaBuffer } }  // Dest: cropped
-        ]
-    });
+        // Clear packed gray buffer before crop (atomicOr requires zeroed memory)
+        const packedGraySize = Math.ceil(batchSize * cropPixelCount / 4) * 4;
+        encoder = device.createCommandEncoder();
+        encoder.clearBuffer(cropBuffers.packedGrayBuffer, 0, packedGraySize);
 
-    encoder = device.createCommandEncoder();
-    pass = encoder.beginComputePass();
-    pass.setPipeline(rgbaCropPipeline);
-    pass.setBindGroup(0, rgbaCropBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-    pass.end();
-    queue.submit([encoder.finish()]);
+        // Crop from the already-demosaiced rgbaBuffer
+        const rgbaCropBindGroup = createBindGroup(device, rgbaCropPipeline, [
+            cropBuffers.paramsBuffer, analyzeBuffers.rgbaBuffer, cropBuffers.centersBuffer,
+            cropBuffers.croppedRgbaBuffer, cropBuffers.packedGrayBuffer
+        ]);
+        addComputePass(encoder, rgbaCropPipeline, rgbaCropBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
+        logGpuSubmit('detectCropAnalyze:crop');
+        queue.submit([encoder.finish()]);
+        dcaCropTime += (performance.now() - tCropStart);
+    }
 
-    // ===== STEP 5: Sharpness calculation on cropped =====
-    queue.writeBuffer(cropBuffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
+    // ===== STEP 5: Sharpness calculation =====
+    const tSharpnessStart = performance.now();
+    // grayOnly: offset Tenengrad reads directly from full-frame grayscale with per-frame centers
+    // !grayOnly: grayscale from cropped RGBA + tenengrad on cropped
     queue.writeBuffer(cropBuffers.reductionParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, cropPixelCount]));
 
-    const cropGrayBindGroup = device.createBindGroup({
-        layout: grayscalePipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
-            { binding: 1, resource: { buffer: cropBuffers.croppedRgbaBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.grayBuffer } }
-        ]
-    });
-
-    const lapBindGroup = device.createBindGroup({
-        layout: laplacianPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.grayParamsBuffer } },
-            { binding: 1, resource: { buffer: cropBuffers.grayBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.laplacianBuffer } },
-            { binding: 3, resource: { buffer: cropBuffers.laplacianSqBuffer } }
-        ]
-    });
-
-    const reductionBindGroup = device.createBindGroup({
-        layout: reductionPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: { buffer: cropBuffers.reductionParamsBuffer } },
-            { binding: 1, resource: { buffer: cropBuffers.laplacianBuffer } },
-            { binding: 2, resource: { buffer: cropBuffers.laplacianSqBuffer } },
-            { binding: 3, resource: { buffer: cropBuffers.reductionBuffer } }
-        ]
-    });
-
     encoder = device.createCommandEncoder();
 
-    pass = encoder.beginComputePass();
-    pass.setPipeline(grayscalePipeline);
-    pass.setBindGroup(0, cropGrayBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-    pass.end();
+    if (grayOnly) {
+        // Offset Tenengrad: reads from full-frame grayscale with per-frame center offsets
+        queue.writeBuffer(cropBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, cropSize, batchSize]));
+        const offsetLapBindGroup = createBindGroup(device, offsetTenengradPipeline, [
+            cropBuffers.paramsBuffer, analyzeBuffers.grayBuffer, cropBuffers.centersBuffer,
+            cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer
+        ]);
+        addComputePass(encoder, offsetTenengradPipeline, offsetLapBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
+    } else {
+        // Standard path: grayscale from cropped RGBA + tenengrad on cropped
+        // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
+        const cropGrayPipeline = bitDepth === 16 ? grayscaleFloat32Pipeline : grayscalePipeline;
+        queue.writeBuffer(cropBuffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
+        const cropGrayBindGroup = createBindGroup(device, cropGrayPipeline, [
+            cropBuffers.grayParamsBuffer, cropBuffers.croppedRgbaBuffer, cropBuffers.grayBuffer
+        ]);
+        const lapBindGroup = createBindGroup(device, tenengradPipeline, [
+            cropBuffers.grayParamsBuffer, cropBuffers.grayBuffer, cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer
+        ]);
+        addComputePass(encoder, cropGrayPipeline, cropGrayBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
+        addComputePass(encoder, tenengradPipeline, lapBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
+    }
 
-    pass = encoder.beginComputePass();
-    pass.setPipeline(laplacianPipeline);
-    pass.setBindGroup(0, lapBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
-    pass.end();
+    // Reduction is the same for both paths (reads from tenengradBuffer)
+    const reductionBindGroup = createBindGroup(device, reductionPipeline, [
+        cropBuffers.reductionParamsBuffer, cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer, cropBuffers.reductionBuffer
+    ]);
+    addComputePass(encoder, reductionPipeline, reductionBindGroup, reductionWorkgroups(numWorkgroupsCrop, batchSize));
 
-    pass = encoder.beginComputePass();
-    pass.setPipeline(reductionPipeline);
-    pass.setBindGroup(0, reductionBindGroup);
-    pass.dispatchWorkgroups(numWorkgroupsCrop, batchSize, 1);
-    pass.end();
+    // Final sharpness reduction: sum all workgroup partials into 2 floats per frame
+    // This reduces readback from ~1.1MB to 800 bytes per batch
+    queue.writeBuffer(cropBuffers.sharpnessFinalParamsBuffer, 0, new Uint32Array([numWorkgroupsCrop, batchSize, cropPixelCount, 0]));
+    const sharpnessFinalBindGroup = createBindGroup(device, sharpnessFinalPipeline, [
+        cropBuffers.sharpnessFinalParamsBuffer, cropBuffers.reductionBuffer, cropBuffers.sharpnessFinalBuffer
+    ]);
+    addComputePass(encoder, sharpnessFinalPipeline, sharpnessFinalBindGroup, [Math.ceil(batchSize / 64), 1, 1]);
 
-    // Select readback buffers based on generation (double-buffering)
+    // Select readback buffers based on generation (N-buffering for concurrent batches)
     const bufferGen = cachedCropConfig?.bufferGen || 0;
-    const useAlt = bufferGen % 2 === 1;
-    const readbackBuf = useAlt ? cropBuffers.readbackBufferAlt : cropBuffers.readbackBuffer;
-    const croppedReadbackBuf = useAlt ? cropBuffers.croppedReadbackBufferAlt : cropBuffers.croppedReadbackBuffer;
-    const boundsReadbackBuf = useAlt ? cropBuffers.boundsOutputReadbackAlt : cropBuffers.boundsOutputReadback;
+    const bufferIdx = bufferGen % MAX_CONCURRENT_BATCHES;
+    const sharpnessReadbackBuf = cropBuffers.sharpnessFinalReadbacks[bufferIdx];
+    const croppedReadbackBuf = cropBuffers.croppedReadbackBuffers[bufferIdx];
+    const boundsReadbackBuf = cropBuffers.boundsOutputReadbacks[bufferIdx];
+    const grayReadbackBuf = cropBuffers.grayReadbacks[bufferIdx];
 
-    // Copy results for readback
-    // Cropped RGBA size: 4x larger for 16-bit (Float32 output)
-    const croppedRgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
-    encoder.copyBufferToBuffer(cropBuffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroupsCrop * 8);
-    encoder.copyBufferToBuffer(cropBuffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * croppedRgbaBytesPerPixel);
+    // Copy results for readback (sharpnessFinal is only 800 bytes vs 1.1MB for partial sums)
+    encoder.copyBufferToBuffer(cropBuffers.sharpnessFinalBuffer, 0, sharpnessReadbackBuf, 0, batchSize * 2 * 4);
     encoder.copyBufferToBuffer(cropBuffers.boundsOutputBuffer, 0, boundsReadbackBuf, 0, batchSize * 16);
+    // Copy cropped RGBA and grayscale only when not in grayOnly mode (saves significant bandwidth)
+    if (!grayOnly) {
+        const croppedRgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
+        const grayCopySize = batchSize * cropPixelCount * 4;  // Float32 grayscale
+        encoder.copyBufferToBuffer(cropBuffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, batchSize * cropPixelCount * croppedRgbaBytesPerPixel);
+        encoder.copyBufferToBuffer(cropBuffers.grayBuffer, 0, grayReadbackBuf, 0, grayCopySize);
+    }
+    logGpuSubmit('detectCropAnalyze:sharpness+readback');
     queue.submit([encoder.finish()]);
+    dcaSharpnessTime += (performance.now() - tSharpnessStart);
     const tAfterSubmit = performance.now();
     dcaPrepTime += (tAfterSubmit - t0);
 
@@ -3299,28 +1795,68 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     rotateCropBuffers();
 
     // ===== STEP 6: Read back results (including bounds from GPU centroid shader) =====
-    await Promise.all([
-        safeMapAsync(readbackBuf, GPUMapMode.READ),
-        safeMapAsync(croppedReadbackBuf, GPUMapMode.READ),
+    // Skip cropped RGBA and grayscale readback in grayOnly mode (saves significant bandwidth)
+    const mapPromises = [
+        safeMapAsync(sharpnessReadbackBuf, GPUMapMode.READ),
         safeMapAsync(boundsReadbackBuf, GPUMapMode.READ)
-    ]);
+    ];
+    if (!grayOnly) {
+        mapPromises.push(safeMapAsync(croppedReadbackBuf, GPUMapMode.READ));
+        mapPromises.push(safeMapAsync(grayReadbackBuf, GPUMapMode.READ));
+    }
+
+    // ===== PIPELINING: Prepare next batch while waiting for GPU =====
+    // While GPU processes current batch, prepare and upload next batch to next buffer
+    if (nextBatchFrames && nextBatchFrames.length > 0 && needsDemosaic) {
+        const nextSrcPixelCount = srcWidth * srcHeight;  // Same dimensions
+        const nextPrepared = prepareBayerData(nextBatchFrames, nextSrcPixelCount, false);
+
+        // Upload to the next buffer in rotation
+        const nextBufferIndex = (pipelinedUpload.bufferIndex + 1) % MAX_CONCURRENT_BATCHES;
+        const nextInputBuffer = analyzeBuffers.inputBuffers[nextBufferIndex];
+
+        queue.writeBuffer(nextInputBuffer, 0, nextPrepared.data);
+
+        // Mark as ready for next batch
+        pipelinedUpload.ready = true;
+        pipelinedUpload.bufferIndex = nextBufferIndex;
+        pipelinedUpload.scale = nextPrepared.scale;
+        pipelinedUpload.batchSize = nextBatchFrames.length;
+    }
+
+    await Promise.all(mapPromises);
     const tAfterMapAsync = performance.now();
     dcaMapAsyncTime += (tAfterMapAsync - tAfterSubmit);
 
-    const reductionData = new Float32Array(readbackBuf.getMappedRange().slice(0));
-    // Cropped RGBA type depends on bit depth:
-    // - 8-bit: Uint8Array (packed RGBA)
-    // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
-    const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
-    const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
+    // Read final sharpness values (2 floats per frame: tenengrad, laplacian)
+    const sharpnessData = new Float32Array(sharpnessReadbackBuf.getMappedRange().slice(0));
     // Read bounds computed by GPU centroid shader
     const boundsData = new Uint32Array(boundsReadbackBuf.getMappedRange().slice(0));
-    readbackBuf.unmap();
-    croppedReadbackBuf.unmap();
+
+    // Cropped RGBA and grayscale readback only when not in grayOnly mode
+    let croppedData = null;
+    let grayData = null;
+    if (!grayOnly) {
+        // Cropped RGBA type depends on bit depth:
+        // - 8-bit: Uint8Array (packed RGBA)
+        // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
+        const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
+        croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
+        // Grayscale is always Float32
+        grayData = new Float32Array(grayReadbackBuf.getMappedRange().slice(0));
+    }
+
+    sharpnessReadbackBuf.unmap();
     boundsReadbackBuf.unmap();
+    if (!grayOnly) {
+        croppedReadbackBuf.unmap();
+        grayReadbackBuf.unmap();
+    }
     releaseBatchSlot();  // Allow next batch to proceed
 
     // Build bounds and centers arrays from GPU output
+    // Check for cut-off frames (object touching edge) - matches CPU behavior
+    const edgeMargin = Math.max(srcWidth, srcHeight) * 0.01;
     const bounds = [];
     const centers = [];
     for (let i = 0; i < batchSize; i++) {
@@ -3329,56 +1865,94 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         const maxX = boundsData[i * 4 + 2];
         const maxY = boundsData[i * 4 + 3];
 
-        if (maxX > minX && maxY > minY) {
+        // DEBUG: Log bounds for first frame
+        if (i === 0) {
             const centroidX = (minX + maxX) / 2;
             const centroidY = (minY + maxY) / 2;
-            const bboxWidth = maxX - minX;
-            const bboxHeight = maxY - minY;
-            const circularity = Math.min(bboxWidth, bboxHeight) / Math.max(bboxWidth, bboxHeight);
-            centers.push({ x: centroidX, y: centroidY });
-            bounds.push({
-                x: minX, y: minY,
-                width: bboxWidth, height: bboxHeight,
-                centroidX, centroidY,
-                size: Math.max(bboxWidth, bboxHeight),
-                circularity
-            });
+            console.log(`[GPU] detectCropAnalyzeBatch bounds[0]: minX=${minX}, minY=${minY}, maxX=${maxX}, maxY=${maxY}, centroid=(${centroidX}, ${centroidY}), srcSize=${srcWidth}x${srcHeight}`);
+        }
+
+        if (maxX > minX && maxY > minY) {
+            // Check if object is cut off at the edges (1% margin like CPU)
+            const isCutOff = minX < edgeMargin || minY < edgeMargin ||
+                             maxX > srcWidth - edgeMargin || maxY > srcHeight - edgeMargin;
+
+            if (isCutOff) {
+                // Object is cut off - mark as invalid
+                console.log(`[GPU] Frame ${i} CUT-OFF: bounds (${minX},${minY})-(${maxX},${maxY}), frame ${srcWidth}x${srcHeight}`);
+                centers.push(null);
+                bounds.push({ cutOff: true });
+            } else {
+                const centroidX = (minX + maxX) / 2;
+                const centroidY = (minY + maxY) / 2;
+                const bboxWidth = maxX - minX;
+                const bboxHeight = maxY - minY;
+                const circularity = Math.min(bboxWidth, bboxHeight) / Math.max(bboxWidth, bboxHeight);
+                centers.push({ x: centroidX, y: centroidY });
+                bounds.push({
+                    x: minX, y: minY,
+                    width: bboxWidth, height: bboxHeight,
+                    centroidX, centroidY,
+                    size: Math.max(bboxWidth, bboxHeight),
+                    circularity
+                });
+            }
         } else {
             centers.push(null);
             bounds.push(null);
         }
     }
 
+    // Summary of bounds detection
+    const cutOffCount = bounds.filter(b => b?.cutOff).length;
+    const nullCount = bounds.filter(b => b === null).length;
+    const validCount = bounds.filter(b => b && !b.cutOff).length;
+    if (cutOffCount > 0 || nullCount > 0) {
+        console.log(`[GPU] Bounds summary: ${validCount} valid, ${cutOffCount} cut-off, ${nullCount} no-detection (out of ${batchSize})`);
+    }
+
     // Build results
     const results = [];
     for (let i = 0; i < batchSize; i++) {
-        let tenengradSum = 0;
-        for (let w = 0; w < numWorkgroupsCrop; w++) {
-            tenengradSum += reductionData[(i * numWorkgroupsCrop + w) * 2];
-        }
-        const sharpness = (tenengradSum / cropPixelCount) * 65025;
-
-        // Return buffer in appropriate format for stacking
-        // - 8-bit: uint8Buffer (packed RGBA) - stacker converts to Float32 on GPU
-        // - 16-bit: float32Buffer (4 floats/pixel) - preserves precision
-        const elementsPerPixel = 4;  // 4 floats or 4 bytes
-        const frameRgba = croppedData.slice(i * cropPixelCount * elementsPerPixel, (i + 1) * cropPixelCount * elementsPerPixel);
+        // Read final sharpness values from GPU (already scaled and averaged by sharpnessFinalShader)
+        const tenengradMean = sharpnessData[i * 2];
+        const laplacianMean = sharpnessData[i * 2 + 1];
+        // Combined sharpness = geometric mean of both metrics
+        const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
         const result = {
             sharpness,
+            tenengrad: tenengradMean,
+            laplacian: laplacianMean,
             circularity: bounds[i]?.circularity || 0,
             index: frames[i].index,
             bounds: bounds[i],
             centerX: centers[i]?.x,
             centerY: centers[i]?.y,
             width: cropSize,
-            height: cropSize
+            height: cropSize,
+            cutOff: bounds[i]?.cutOff || false
         };
 
-        if (bitDepth === 16) {
-            result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
-        } else {
-            result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+        // Extract cropped RGBA and grayscale only when not in grayOnly mode
+        if (!grayOnly && croppedData) {
+            // Return buffer in appropriate format for stacking
+            // - 8-bit: uint8Buffer (packed RGBA) - stacker converts to Float32 on GPU
+            // - 16-bit: float32Buffer (4 floats/pixel) - preserves precision
+            const elementsPerPixel = 4;  // 4 floats or 4 bytes
+            const frameRgba = croppedData.slice(i * cropPixelCount * elementsPerPixel, (i + 1) * cropPixelCount * elementsPerPixel);
+
+            if (bitDepth === 16) {
+                result.float32Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+            } else {
+                result.uint8Buffer = frameRgba.buffer.slice(frameRgba.byteOffset, frameRgba.byteOffset + frameRgba.byteLength);
+            }
+
+            // Also extract grayscale for side-by-side preview
+            if (grayData) {
+                const frameGray = grayData.slice(i * cropPixelCount, (i + 1) * cropPixelCount);
+                result.grayBuffer = frameGray.buffer.slice(frameGray.byteOffset, frameGray.byteOffset + frameGray.byteLength);
+            }
         }
 
         results.push(result);
@@ -3391,7 +1965,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
 
     // Log every 10 batches
     if (dcaBatchCount % 10 === 0) {
-        console.log(`[GPU Timing] ${dcaBatchCount} batches: prep=${(dcaPrepTime/dcaBatchCount).toFixed(1)}ms, mapAsync=${(dcaMapAsyncTime/dcaBatchCount).toFixed(1)}ms, resultBuild=${(dcaResultBuildTime/dcaBatchCount).toFixed(1)}ms`);
+        console.log(`[GPU Timing] ${dcaBatchCount} batches: upload=${(dcaUploadTime/dcaBatchCount).toFixed(1)}ms, demosaic=${(dcaDemosaicTime/dcaBatchCount).toFixed(1)}ms, blur=${(dcaBlurTime/dcaBatchCount).toFixed(1)}ms, bounds=${(dcaBoundsTime/dcaBatchCount).toFixed(1)}ms, crop=${(dcaCropTime/dcaBatchCount).toFixed(1)}ms, sharpness=${(dcaSharpnessTime/dcaBatchCount).toFixed(1)}ms, mapAsync=${(dcaMapAsyncTime/dcaBatchCount).toFixed(1)}ms`);
     }
 
     return results;
@@ -3441,26 +2015,12 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
     // We use bitDepth=16 for input reading, so output is Float32
     const outputBytesPerPixel = 16;  // Float32 RGBA
 
-    const inputBuffer = device.createBuffer({
-        size: u32Count * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    });
+    const inputBuffer = storageBuffer(device, u32Count * 4, { copyDst: true });
     queue.writeBuffer(inputBuffer, 0, inputData);
 
-    const outputBuffer = device.createBuffer({
-        size: pixelCount * outputBytesPerPixel,  // Float32 RGBA output
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-    });
-
-    const readbackBuffer = device.createBuffer({
-        size: pixelCount * outputBytesPerPixel,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
-
-    const paramsBuffer = device.createBuffer({
-        size: 32,  // 8 u32 values for demosaic params
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
+    const outputBuffer = storageBuffer(device, pixelCount * outputBytesPerPixel, { copySrc: true });  // Float32 RGBA output
+    const readbackBuf = readbackBuffer(device, pixelCount * outputBytesPerPixel);
+    const paramsBuffer = uniformBuffer(device, 32);  // 8 u32 values for demosaic params
 
     const results = [];
 
@@ -3487,29 +2047,18 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             new Float32Array(paramsData)[6] = 1.0;  // No stretch needed
             queue.writeBuffer(paramsBuffer, 0, paramsData);
 
-            const bindGroup = device.createBindGroup({
-                layout: demosaicPipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: paramsBuffer } },
-                    { binding: 1, resource: { buffer: inputBuffer } },
-                    { binding: 2, resource: { buffer: outputBuffer } }
-                ]
-            });
-
+            const bindGroup = createBindGroup(device, demosaicPipeline, [paramsBuffer, inputBuffer, outputBuffer]);
             const encoder = device.createCommandEncoder();
-            const pass = encoder.beginComputePass();
-            pass.setPipeline(demosaicPipeline);
-            pass.setBindGroup(0, bindGroup);
-            pass.dispatchWorkgroups(Math.ceil(srcWidth / 16), Math.ceil(srcHeight / 16), 1);
-            pass.end();
-            encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuffer, 0, pixelCount * outputBytesPerPixel);
+            addComputePass(encoder, demosaicPipeline, bindGroup, imageWorkgroups(srcWidth, srcHeight, 1));
+            encoder.copyBufferToBuffer(outputBuffer, 0, readbackBuf, 0, pixelCount * outputBytesPerPixel);
+            logGpuSubmit('singleFrame:demosaic');
             queue.submit([encoder.finish()]);
 
-            await safeMapAsync(readbackBuffer, GPUMapMode.READ);
+            await safeMapAsync(readbackBuf, GPUMapMode.READ);
             // Demosaic outputs Float32 RGBA (4 floats per pixel, values 0-1)
             // Convert to Uint8 for thumbnail display
-            const float32Data = new Float32Array(readbackBuffer.getMappedRange().slice(0));
-            readbackBuffer.unmap();
+            const float32Data = new Float32Array(readbackBuf.getMappedRange().slice(0));
+            readbackBuf.unmap();
 
             fullRgba = new Uint8ClampedArray(pixelCount * 4);
             for (let i = 0; i < pixelCount; i++) {
@@ -3576,7 +2125,7 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
     // Cleanup
     inputBuffer.destroy();
     outputBuffer.destroy();
-    readbackBuffer.destroy();
+    readbackBuf.destroy();
     paramsBuffer.destroy();
 
     return results;
@@ -3617,17 +2166,29 @@ self.addEventListener('message', async (e) => {
         return;
     }
 
+    if (type === 'print-gpu-timing') {
+        printGpuTimingSummary();
+        self.postMessage({ type: 'gpu-timing-printed' });
+        return;
+    }
+
+    if (type === 'set-gpu-timing') {
+        gpuTimingEnabled = e.data.enabled;
+        console.log(`[GPU] Timing ${gpuTimingEnabled ? 'enabled' : 'disabled'}`);
+        return;
+    }
+
     if (type === 'analyze-batch') {
         if (!isReady) {
             self.postMessage({ type: 'analyze-error', error: 'Not initialized' });
             return;
         }
 
-        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, useVng = false } = e.data;
+        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, grayOnly = false } = e.data;
 
         try {
-            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, useVng);
-            // Transfer uint8Buffer or float32Buffer depending on mode
+            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, grayOnly);
+            // Transfer uint8Buffer or float32Buffer depending on mode (none in grayOnly mode)
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'analyze-result', requestId, results }, transferables);
         } catch (err) {
@@ -3643,10 +2204,10 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId, metadataOnly, useVng = false } = e.data;
+        const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId, metadataOnly } = e.data;
 
         try {
-            const results = await cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly, useVng);
+            const results = await cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly);
             // Transfer uint8Buffer or float32Buffer depending on mode
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'crop-analyze-result', requestId, results }, transferables);
@@ -3663,11 +2224,11 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly, useVng = false } = e.data;
+        const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly, grayOnly = false, nextBatchFrames = null } = e.data;
 
         try {
-            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly, useVng);
-            // Transfer uint8Buffer or float32Buffer depending on mode
+            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly, grayOnly, nextBatchFrames);
+            // Transfer uint8Buffer or float32Buffer depending on mode (none in grayOnly mode)
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'detect-crop-analyze-result', requestId, results }, transferables);
         } catch (err) {

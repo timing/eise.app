@@ -7,8 +7,8 @@ export function useWorkerUrl() {
 
     /**
      * Get worker URL with cache busting query param
-     * @param {string} path - Worker path like '/webgpu_worker.js'
-     * @returns {string} - Path with cache bust param like '/webgpu_worker.js?v=1737820800'
+     * @param {string} path - Worker path like '/webgpu_stacking_worker.js'
+     * @returns {string} - Path with cache bust param like '/webgpu_stacking_worker.js?v=1737820800'
      */
     function workerUrl(path) {
         return `${path}?v=${buildTs}`;

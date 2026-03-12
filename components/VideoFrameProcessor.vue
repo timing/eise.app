@@ -30,16 +30,25 @@
 
 		<div class="content" v-if="processingStage === 'analyzing' || processingStage === 'stacking'">
 			<div class="preview-frames-row">
-				<div v-if="processingStage === 'analyzing' && bestFrame" class="preview-frame">
-					<h4>Sharpest Frame</h4>
-					<canvas ref="bestFrameCanvas"></canvas>
-					<p class="frame-stats">Sharpness: {{ bestFrame.sharpness?.toFixed(2) }} · Circularity: {{ bestFrame.circularity?.toFixed(2) || '?' }}</p>
+				<div v-if="processingStage === 'analyzing' && bestFrame" class="preview-frame" :class="{ 'dual-preview': bestFrame?.grayBlob }">
+					<h4>Sharpest Frame{{ bestFrame?.grayBlob ? ' (Analysis vs Color)' : '' }}</h4>
+					<div class="dual-canvas-row">
+						<div v-if="bestFrame?.grayBlob" class="canvas-wrapper">
+							<span class="canvas-label">Grayscale (used for analysis)</span>
+							<canvas ref="bestFrameGrayCanvas"></canvas>
+						</div>
+						<div class="canvas-wrapper">
+							<span v-if="bestFrame?.grayBlob" class="canvas-label">Color (used for stacking)</span>
+							<canvas ref="bestFrameCanvas"></canvas>
+						</div>
+					</div>
+					<p class="frame-stats">Sharpness: {{ bestFrame.sharpness?.toFixed(2) }} (Tenengrad: {{ bestFrame.tenengrad?.toFixed(2) }}, Laplacian: {{ bestFrame.laplacian?.toFixed(2) }}) · Circularity: {{ bestFrame.circularity?.toFixed(2) || '?' }}</p>
 				</div>
 
 				<div v-if="processingStage === 'analyzing' && refCandidate" class="preview-frame">
 					<h4>Reference Candidate</h4>
 					<canvas ref="refCandidateCanvas"></canvas>
-					<p class="frame-stats">Sharpness: {{ refCandidate.sharpness?.toFixed(2) }} · Circularity: {{ refCandidate.circularity?.toFixed(2) || '?' }}</p>
+					<p class="frame-stats">Sharpness: {{ refCandidate.sharpness?.toFixed(2) }} (Tenengrad: {{ refCandidate.tenengrad?.toFixed(2) }}, Laplacian: {{ refCandidate.laplacian?.toFixed(2) }}) · Circularity: {{ refCandidate.circularity?.toFixed(2) || '?' }}</p>
 				</div>
 			</div>
 
@@ -55,11 +64,13 @@
 import { onMounted, ref, watch, defineProps, onBeforeUpdate, nextTick } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useTracking } from '@/composables/useTracking';
+import { useProcessingState } from '@/composables/useProcessingState';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { useFeedback } from '@/composables/useFeedback';
 
 const { on, addLog, emit } = useEventBus();
 const { track } = useTracking();
+const { getTrackingContext } = useProcessingState();
 const { workerUrl } = useWorkerUrl();
 const { openFeedback } = useFeedback();
 
@@ -99,6 +110,7 @@ const bestFrame = ref(null);
 const referenceFrame = ref(null);
 const refCandidate = ref(null);  // Most circular from top frames
 const bestFrameCanvas = ref(null);
+const bestFrameGrayCanvas = ref(null);  // Grayscale preview for side-by-side comparison
 const referenceFrameCanvas = ref(null);
 const refCandidateCanvas = ref(null);
 const croppedSerData = ref(null);
@@ -239,7 +251,7 @@ onMounted(async () => {
 
 
 function cancelProcessing() {
-	track('stack_cancelled');
+	track('stack_cancelled', getTrackingContext());
 	emit('stop-loading');
 	emit('cancel-processing');
 	showCancelledMessage.value = true;
@@ -259,10 +271,17 @@ watch(() => props.frames, (newVal) => {
 
 function updateBestFrameCanvas() {
 	nextTick(() => {
-		if (bestFrame.value && bestFrameCanvas.value) {
-			const blob = bestFrame.value instanceof Blob ? bestFrame.value : bestFrame.value?.blob;
-			if (blob) {
-				drawImageOnCanvas(bestFrameCanvas.value, blob);
+		if (bestFrame.value) {
+			// Draw color preview
+			if (bestFrameCanvas.value) {
+				const blob = bestFrame.value instanceof Blob ? bestFrame.value : bestFrame.value?.blob;
+				if (blob) {
+					drawImageOnCanvas(bestFrameCanvas.value, blob);
+				}
+			}
+			// Draw grayscale preview (side-by-side comparison)
+			if (bestFrameGrayCanvas.value && bestFrame.value?.grayBlob) {
+				drawImageOnCanvas(bestFrameGrayCanvas.value, bestFrame.value.grayBlob);
 			}
 		}
 	});
@@ -466,10 +485,9 @@ async function processImageFrames(files) {
 		border: none;
 		border-radius: 4px;
 		cursor: pointer;
-		font-size: 0.95em;
 	}
 	.cancelled-message .reload-button:hover {
-		background: #6d5003;
+		background: #6d5203;
 	}
 	.skipped-info {
 		background-color: #fff3cd;
@@ -503,5 +521,24 @@ async function processImageFrames(files) {
 	}
 	.cancel-button:hover {
 		background-color: #C9302C;
+	}
+	/* Side-by-side grayscale/color preview */
+	.dual-preview {
+		min-width: 500px;
+	}
+	.dual-canvas-row {
+		display: flex;
+		gap: 15px;
+		justify-content: center;
+	}
+	.canvas-wrapper {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+	}
+	.canvas-label {
+		font-size: 11px;
+		color: #999;
+		margin-bottom: 5px;
 	}
 </style>

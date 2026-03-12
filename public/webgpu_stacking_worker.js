@@ -1,12 +1,39 @@
 // Dedicated WebGPU worker - no OpenCV, just GPU compute
 // Supports: template matching (single/batch) and GPU stacking
+// This is a module worker - use { type: 'module' } when creating
+
+import {
+    initWebGPU,
+    matchTemplatesGPU,
+    matchTemplatesBatchGPU,
+    cleanupGPUBuffers
+} from './webgpu_template_match.js';
+
+import {
+    initStackingGPU,
+    getStackingBuffers,
+    clearAccumulators,
+    warpAndAccumulateBatch,
+    readAccumulators,
+    demosaicVngBatch,
+    demosaicVngCropBatch,
+    demosaicVngCropBatchGpu,
+    warpAndAccumulateFromGpuBuffer,
+    matchTemplatesFromGpuBuffer,
+    computeBrightnessFromGpuBuffer,
+    // Fully GPU-resident functions (zero CPU readback)
+    matchTemplatesFullyGpu,
+    computeBrightnessFullyGpu,
+    warpAndAccumulateBatchFullyGpu,
+    extractGrayscale,
+    cleanupStackingBuffers
+} from './webgpu_stacking.js';
+
+console.log('[StackWorker] Modules loaded');
 
 let isReady = false;
 let stackingReady = false;
-
-// Load WebGPU modules
-self.importScripts('/webgpu_template_match.js');
-self.importScripts('/webgpu_stacking.js');
+let stackingContext = null;
 
 // Initialize WebGPU on startup
 async function init() {
@@ -133,7 +160,8 @@ self.addEventListener('message', async (e) => {
     // GPU Stacking - streaming approach to avoid memory issues
     // Step 1: Initialize stacking
     if (type === 'init-stacking') {
-        const { width, height, drizzleScale, alignmentPoints, patchSize, refBrightness, minApQuality = 0.3 } = e.data;
+        const { width, height, srcWidth, srcHeight, drizzleScale, alignmentPoints, patchSize, refBrightness, minApQuality = 0.3,
+                bayerPattern = -1, bitDepth = 8, bayerScale = 1.0 } = e.data;
 
         try {
             if (!stackingReady) {
@@ -152,10 +180,13 @@ self.addEventListener('message', async (e) => {
             // Clear accumulators
             await clearAccumulators(outWidth, outHeight);
 
-            // Store stacking context
-            self.stackingContext = {
-                width, height, outWidth, outHeight,
-                alignmentPoints, patchSize, drizzleScale, refBrightness, minApQuality
+            // Store stacking context (including Bayer params for VNG demosaic)
+            // width/height = crop size, srcWidth/srcHeight = full source size
+            stackingContext = {
+                width, height, srcWidth: srcWidth || width, srcHeight: srcHeight || height,
+                outWidth, outHeight,
+                alignmentPoints, patchSize, drizzleScale, refBrightness, minApQuality,
+                bayerPattern, bitDepth, bayerScale
             };
 
             self.postMessage({ type: 'init-stacking-done', outWidth, outHeight });
@@ -165,10 +196,56 @@ self.addEventListener('message', async (e) => {
         }
     }
 
-    // Step 2: Stack a batch of frames
+    // VNG demosaic reference frame - returns RGBA + grayscale for alignment
+    // Used to ensure reference frame uses same demosaic as stacked frames
+    // Accepts full-size frame + center for cropping
+    if (type === 'vng-demosaic-ref') {
+        const { bayerData, srcWidth, srcHeight, cropSize, center, bayerPattern, bitDepth, bayerScale = 1.0 } = e.data;
+
+        try {
+            if (!stackingReady) {
+                stackingReady = await initStackingGPU();
+                if (!stackingReady) {
+                    throw new Error('Failed to initialize GPU stacking');
+                }
+            }
+
+            // VNG demosaic + crop single frame
+            const { rgbaData, grayData } = await demosaicVngCropBatch(
+                [{ data: bayerData }],
+                srcWidth, srcHeight,
+                cropSize,
+                [center],
+                bayerPattern,
+                bitDepth,
+                bayerScale
+            );
+
+            // Transfer buffers
+            self.postMessage({
+                type: 'vng-demosaic-ref-done',
+                rgbaBuffer: rgbaData.buffer,
+                grayBuffer: grayData.buffer,
+                width: cropSize,
+                height: cropSize
+            }, [rgbaData.buffer, grayData.buffer]);
+
+        } catch (err) {
+            self.postMessage({ type: 'vng-demosaic-ref-error', error: err.message });
+        }
+    }
+
+    // Step 2: Stack a batch of frames with VNG demosaic + crop + template matching + accumulation
+    // FULLY GPU-RESIDENT: RGBA and grayscale both stay on GPU, only small results read back
+    // For raw Bayer: VNG demosaic → template match (GPU buffer) → warp + accumulate (GPU buffer)
+    // Accepts:
+    //   - frames[].data (Uint8Array or Uint16Array) - full-size raw Bayer
+    //   - centers[] - per-frame crop centers {x, y}
+    //   - refGrayData - reference frame grayscale for template matching
+    //   - searchRadius, searchOffset, noiseRobustAlignment - template matching params
     if (type === 'stack-frame-batch') {
-        const { frames, shifts, frameWeights } = e.data;
-        const ctx = self.stackingContext;
+        const { frames, centers, frameWeights, refGrayData, searchRadius, searchOffset, noiseRobustAlignment } = e.data;
+        const ctx = stackingContext;
 
         if (!ctx) {
             self.postMessage({ type: 'stack-frame-error', error: 'Stacking not initialized' });
@@ -176,28 +253,102 @@ self.addEventListener('message', async (e) => {
         }
 
         try {
-            for (let i = 0; i < frames.length; i++) {
-                const frame = frames[i];
+            // VNG demosaic + crop - BOTH RGBA and grayscale stay on GPU!
+            const { rgbaGpuBuffer, grayGpuBuffer, batchSize, cropSize } = await demosaicVngCropBatchGpu(
+                frames.map(f => ({ data: f.data })),
+                ctx.srcWidth, ctx.srcHeight,
+                ctx.width,  // cropSize
+                centers,
+                ctx.bayerPattern,
+                ctx.bitDepth,
+                ctx.bayerScale
+            );
 
-                // Calculate brightness normalization
+            // Template matching - FULLY GPU-RESIDENT (no shifts readback!)
+            const { shiftsGpuBuffer, apPositionsBuffer, searchOffset: appliedOffset } = await matchTemplatesFullyGpu(
+                grayGpuBuffer,
+                refGrayData,
+                ctx.width,
+                ctx.height,
+                batchSize,
+                ctx.alignmentPoints,
+                ctx.patchSize,
+                searchRadius,
+                searchOffset
+            );
+
+            // Compute brightness - FULLY GPU-RESIDENT (no brightness readback!)
+            const brightnessGpuBuffer = await computeBrightnessFullyGpu(
+                grayGpuBuffer,
+                ctx.width,
+                ctx.height,
+                batchSize
+            );
+
+            // Done with grayscale GPU buffer
+            grayGpuBuffer.destroy();
+
+            // Warp and accumulate - FULLY GPU-RESIDENT
+            // All data stays on GPU: RGBA, shifts, brightness
+            // Only frameWeights come from CPU (tiny - just numbers)
+            await warpAndAccumulateBatchFullyGpu(
+                rgbaGpuBuffer,
+                shiftsGpuBuffer,
+                brightnessGpuBuffer,
+                apPositionsBuffer,
+                batchSize,
+                cropSize,
+                frameWeights,
+                ctx.outWidth, ctx.outHeight,
+                ctx.alignmentPoints.length,
+                ctx.patchSize,
+                ctx.drizzleScale,
+                ctx.refBrightness,
+                appliedOffset,
+                ctx.minApQuality
+            );
+
+            self.postMessage({ type: 'stack-batch-done', count: frames.length });
+
+        } catch (err) {
+            self.postMessage({ type: 'stack-frame-error', error: err.message });
+        }
+    }
+
+    // Step 2b: Stack RGBA frames (already demosaiced - for MONO/image inputs)
+    // Uses pre-computed shifts from template matching
+    if (type === 'stack-frame-batch-rgba') {
+        const { frames, shifts, frameWeights } = e.data;
+        const ctx = stackingContext;
+
+        if (!ctx) {
+            self.postMessage({ type: 'stack-frame-error', error: 'Stacking not initialized' });
+            return;
+        }
+
+        try {
+            // Prepare all frames with brightness normalization
+            const preparedFrames = frames.map((frame, i) => {
                 const frameBrightness = calcMeanBrightness(frame.rgbaBuffer, ctx.width, ctx.height);
                 const brightnessScale = ctx.refBrightness / frameBrightness;
-
-                // Warp and accumulate this frame
-                await warpAndAccumulateFrame(
-                    frame.rgbaBuffer,
-                    ctx.width, ctx.height,
-                    ctx.outWidth, ctx.outHeight,
-                    ctx.alignmentPoints,
-                    shifts[i],
-                    ctx.patchSize,
-                    ctx.drizzleScale,
-                    frameWeights[i],
+                return {
+                    rgbaBuffer: frame.rgbaBuffer,
                     brightnessScale,
-                    0, 0,  // globalOffset disabled
-                    ctx.minApQuality
-                );
-            }
+                    frameWeight: frameWeights[i]
+                };
+            });
+
+            // Warp and accumulate
+            await warpAndAccumulateBatch(
+                preparedFrames,
+                shifts,
+                ctx.width, ctx.height,
+                ctx.outWidth, ctx.outHeight,
+                ctx.alignmentPoints,
+                ctx.patchSize,
+                ctx.drizzleScale,
+                ctx.minApQuality
+            );
 
             self.postMessage({ type: 'stack-batch-done', count: frames.length });
 
@@ -208,7 +359,7 @@ self.addEventListener('message', async (e) => {
 
     // Step 3: Finalize stacking
     if (type === 'finalize-stacking') {
-        const ctx = self.stackingContext;
+        const ctx = stackingContext;
 
         if (!ctx) {
             self.postMessage({ type: 'finalize-error', error: 'Stacking not initialized' });
@@ -219,16 +370,29 @@ self.addEventListener('message', async (e) => {
             // Read back accumulated results
             const { accumR, accumG, accumB, accumW } = await readAccumulators(ctx.outWidth, ctx.outHeight);
 
-            // DEBUG: Check accumulator values from CENTER of image (not black corners)
+            // DEBUG: Full accumulator statistics
             const centerY = Math.floor(ctx.outHeight / 2);
             const centerX = Math.floor(ctx.outWidth / 2);
             const centerIdx = centerY * ctx.outWidth + centerX;
-            console.log(`accumR center sample (${centerX},${centerY}):`, Array.from(accumR.slice(centerIdx, centerIdx + 8)));
-            console.log(`accumW center sample:`, Array.from(accumW.slice(centerIdx, centerIdx + 8)));
-            // Also show the normalized values
-            const sampleR = accumR[centerIdx];
-            const sampleW = accumW[centerIdx];
-            console.log(`Center pixel: accumR=${sampleR}, accumW=${sampleW}, normalized=${sampleR / sampleW / 255}`);
+
+            // Find max values in accumulators
+            let maxAccumR = 0, maxAccumW = 0, maxNormalized = 0;
+            let sumW = 0, countW = 0;
+            for (let i = 0; i < accumR.length; i++) {
+                if (accumR[i] > maxAccumR) maxAccumR = accumR[i];
+                if (accumW[i] > maxAccumW) maxAccumW = accumW[i];
+                if (accumW[i] > 0) {
+                    const norm = accumR[i] / accumW[i] / 255;
+                    if (norm > maxNormalized) maxNormalized = norm;
+                    sumW += accumW[i];
+                    countW++;
+                }
+            }
+
+            console.log(`[Finalize] Accumulator stats:`);
+            console.log(`  - maxAccumR=${maxAccumR.toFixed(2)}, maxAccumW=${maxAccumW.toFixed(2)}, maxNormalized=${maxNormalized.toFixed(4)}`);
+            console.log(`  - avgWeight=${(sumW/countW).toFixed(4)}, pixelsWithData=${countW}/${accumR.length}`);
+            console.log(`  - Center (${centerX},${centerY}): accumR=${accumR[centerIdx].toFixed(2)}, accumW=${accumW[centerIdx].toFixed(4)}, normalized=${(accumR[centerIdx] / accumW[centerIdx] / 255).toFixed(4)}`);
 
             // Create final image
             const result = new Uint8ClampedArray(ctx.outWidth * ctx.outHeight * 4);
@@ -268,7 +432,7 @@ self.addEventListener('message', async (e) => {
             ctxCanvas.putImageData(new ImageData(result, ctx.outWidth, ctx.outHeight), 0, 0);
             const blob = await canvas.convertToBlob({ type: 'image/png' });
 
-            self.stackingContext = null;
+            stackingContext = null;
 
             // Transfer float32Data buffer for zero-copy
             self.postMessage({
@@ -286,12 +450,8 @@ self.addEventListener('message', async (e) => {
 
     // Cleanup buffers when done
     if (type === 'cleanup') {
-        if (typeof cleanupGPUBuffers === 'function') {
-            cleanupGPUBuffers();
-        }
-        if (typeof cleanupStackingBuffers === 'function') {
-            cleanupStackingBuffers();
-        }
+        cleanupGPUBuffers();
+        cleanupStackingBuffers();
         self.postMessage({ type: 'cleanup-done' });
     }
 });

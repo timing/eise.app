@@ -11,22 +11,25 @@ eise.app is a fully browser-based planetary image stacking tool designed to simp
     *   **FFmpeg.js:** Enables in-browser extraction of frames from video files.
     *   **OpenCV-WASM:** Utilized for image processing tasks including Bayer demosaicing, sharpness analysis, local alignment, frame stacking, wavelet sharpening, noise reduction, and color alignment. Note: The current `opencv-bindings` build does *not* include `cv.imencode` or `cv.imdecode` functions. Image encoding to PNG is achieved by drawing to an `OffscreenCanvas` and then using `convertToBlob`.
 
-**Architecture:**
+**Architecture (Updated March 2026):**
 
 1.  **User Interaction:** An astrophotographer selects a video, SER, AVI, or image files through the frontend.
-2.  **Frame Extraction:** FFmpeg.js extracts frames from video files. SER and AVI files are parsed directly in JavaScript.
-3.  **Frame Analysis (WebWorkers):** WebWorkers utilizing OpenCV-WASM analyze frames for sharpness using Tenengrad (Sobel-based) metrics. Auto-crop detection centers on the planet using contour detection.
-4.  **Bayer Demosaicing:** Raw Bayer frames from SER/AVI are demosaiced to RGB using OpenCV's VNG (Variable Number of Gradients) demosaicing for better quality on fine planetary detail.
-5.  **Frame Selection:** Best 30% of frames are selected based on sharpness scores (or user-defined threshold).
-6.  **Client-Side Stacking (WebWorker):** The stacking algorithm runs entirely in the browser:
+2.  **Format Detection:** FileUploader routes to appropriate reader based on file type.
+3.  **Frame Extraction:**
+    - SER/AVI: Parsed directly by `useSerParser`/`useAviParser`
+    - Video: FFmpeg.js extracts frames via `useFFmpegReader`
+4.  **Frame Analysis (WebGPU):** GPU compute shaders analyze frames for sharpness using Tenengrad metrics. Auto-crop detection centers on the planet.
+5.  **Bayer Demosaicing:** Raw Bayer frames are demosaiced to RGB on GPU using VNG (Variable Number of Gradients) for quality or bilinear for speed.
+6.  **Frame Selection:** Best 30% of frames are selected based on sharpness scores (or user-defined threshold).
+7.  **Client-Side Stacking (WebGPU):** The stacking algorithm runs entirely in the browser:
     *   Creates alignment point grid across the image
-    *   Detects local shifts at each AP using template matching (`cv.matchTemplate`)
+    *   GPU template matching detects local shifts at each AP
     *   Builds smooth displacement maps using Gaussian-weighted interpolation
-    *   De-warps each frame using `cv.remap()` with bilinear interpolation
+    *   GPU shader de-warps each frame
     *   Accumulates frames with sharpness-based weighting
-7.  **Post-processing:** Wavelet sharpening, noise reduction, and chromatic aberration correction using OpenCV-WASM.
+8.  **Post-processing:** Wavelet sharpening, noise reduction, and chromatic aberration correction.
 
-The application provides a fully in-browser experience for planetary image stacking with no server required.
+The application provides a fully in-browser experience for planetary image stacking with no server required. WebGPU is the primary path; OpenCV-WASM is available as CPU fallback.
 
 ## Building and Running
 

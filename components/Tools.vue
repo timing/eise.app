@@ -226,6 +226,9 @@
                                 class="fps-input"
                             />
                         </div>
+                        <button @click="downloadRawFrame" class="download-raw-button">
+                            Download Raw Frame
+                        </button>
                     </div>
                 </div>
             </div>
@@ -236,7 +239,7 @@
 
 <script setup>
 import { ref, computed, onUnmounted, onMounted } from 'vue';
-import { parseSerHeader } from '@/composables/useSerReader';
+import { parseSerHeader, SER_HEADER_SIZE } from '@/composables/useSerParser';
 import { useFeedback } from '@/composables/useFeedback';
 
 const { openFeedback } = useFeedback();
@@ -288,8 +291,6 @@ const startFrame = ref(1);
 const endFrame = ref(1);
 const isProcessing = ref(false);
 const progress = ref(0);
-
-const SER_HEADER_SIZE = 178;
 
 const outputFrameCount = computed(() => {
     if (!serHeader.value) return 0;
@@ -666,6 +667,34 @@ function nextFrame() {
         currentFrame.value++;
         renderCurrentFrame();
     }
+}
+
+async function downloadRawFrame() {
+    if (!selectedFile.value || !serHeader.value) return;
+
+    const header = serHeader.value;
+    const bpp = forcedBitDepth.value === 16 ? 2 : 1;
+    const currentFrameSize = header.width * header.height * bpp;
+    const frameOffset = SER_HEADER_SIZE + (currentFrame.value - 1) * currentFrameSize;
+
+    // Read raw frame data from file
+    const frameSlice = selectedFile.value.slice(frameOffset, frameOffset + currentFrameSize);
+    const frameBuffer = await frameSlice.arrayBuffer();
+
+    // Create blob and download
+    const blob = new Blob([frameBuffer], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+
+    // Generate filename with frame number and bit depth
+    const originalName = selectedFile.value.name.replace(/\.ser$/i, '');
+    a.download = `${originalName}_frame${currentFrame.value}_${forcedBitDepth.value}bit_${header.width}x${header.height}.raw`;
+
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
 
 function togglePlayback() {
@@ -1188,6 +1217,23 @@ onUnmounted(() => {
     border: 1px solid #ccc;
     border-radius: 4px;
     text-align: center;
+}
+
+.download-raw-button {
+    margin-left: auto;
+    padding: 8px 12px;
+    background: #e3f2fd;
+    border: 1px solid #90caf9;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: bold;
+    color: #1565c0;
+}
+
+.download-raw-button:hover {
+    background: #bbdefb;
+    border-color: #64b5f6;
 }
 
 /* Feedback box */

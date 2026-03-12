@@ -9,12 +9,14 @@ import { ref, computed, provide, defineAsyncComponent, watch } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker, WebGPUUnavailableError } from '@/composables/useStacker';
 import { useTracking } from '@/composables/useTracking';
+import { useProcessingState } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
 import { useLiteMode } from '@/composables/useLiteMode';
 
 const { on, emit: eventBusEmit, addLog } = useEventBus();
 const { stackFramesLocally } = useStacker();
 const { track, trackHumanInteraction } = useTracking();
+const { getTrackingContext } = useProcessingState();
 const router = useRouter();
 
 // Processing state
@@ -135,7 +137,6 @@ function detectBrowser() {
 
 onMounted(async () => {
 	isMounted.value = true;
-	track('page_view');
 	trackHumanInteraction();
 
 	const urlParams = new URLSearchParams(window.location.search);
@@ -169,7 +170,7 @@ onMounted(async () => {
 		croppedSerData.value = data;
 	});
 	on('stack-failed', (data) => {
-		track('stack_failed');
+		track('stack_failed', getTrackingContext());
 		isProcessing.value = false;
 		const error = data?.error || new Error(`Stacking failed: ${data?.reason || 'unknown reason'}`);
 		reportError(error, {
@@ -334,13 +335,13 @@ async function handleStackedImageReady(data) {
 	stackedFloat32Data.value = data.float32Data || null;
 	stackedImageDimensions.value = (data.width && data.height) ? { width: data.width, height: data.height } : null;
 	isProcessing.value = false;
-	track('stack_finished');
+	track('stack_finished', getTrackingContext());
 	navigateTo('/post-processor/');
 }
 
 function handleProcessingStarted() {
 	isProcessing.value = true;
-	track('stack_start');
+	track('stack_start', getTrackingContext());
 }
 
 async function handlePostProcessing(data) {

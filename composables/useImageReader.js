@@ -33,7 +33,7 @@ export function useImageReader() {
     async function initializeGpuWorker() {
         if (gpuReady) return true;
 
-        gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
+        gpuWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
 
         try {
             await new Promise((resolve, reject) => {
@@ -212,7 +212,7 @@ export function useImageReader() {
         return data;
     }
 
-    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
+    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
         // Initialize GPU worker
         const gpuOk = await initializeGpuWorker();
         if (!gpuOk) {
@@ -412,7 +412,8 @@ export function useImageReader() {
             if (canCropCount >= cropThreshold && detectedSizes.length > 0) {
                 const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
                 const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
-                const desiredSize = Math.ceil(medianSize * 1.05 / 2) * 2;
+                const marginMultiplier = 1 + (cropMarginPercent / 100);
+                const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
                 const maxAllowedSize = Math.min(firstWidth, firstHeight);
                 const finalSize = Math.min(desiredSize, maxAllowedSize);
 
@@ -431,7 +432,7 @@ export function useImageReader() {
                     cropRegion = { size: finalSize, medianObjectSize: medianSize };
                 }
 
-                addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}`);
+                addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
             } else {
                 addLog(`Only ${canCropCount}/${sampleIndices.length} images can be cropped. Skipping auto-crop.`);
             }

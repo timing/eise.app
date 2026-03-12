@@ -272,7 +272,7 @@ export function useComparisonExport() {
         const results = [];
 
         // Create a temporary GPU worker for demosaic (the stacking worker may have been terminated)
-        const worker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
+        const worker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
 
         try {
             // Wait for worker to initialize

@@ -6,6 +6,24 @@ import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { useLiteMode } from '@/composables/useLiteMode';
 
+// Import from new parser module
+import {
+    parseSerHeader,
+    SER_HEADER_SIZE,
+    detectActualBitDepth,
+    validateFrameCount,
+    detectScaleFactor,
+    scale16bitData,
+    getOpenCVBayerPattern,
+    getGpuBayerPattern,
+    getBytesPerPixel,
+    getFrameSize,
+    getFrameOffset,
+} from '@/composables/useSerParser';
+
+// Re-export parseSerHeader for backwards compatibility (used by Tools.vue)
+export { parseSerHeader };
+
 // Helper to detect and provide user-friendly messages for memory errors
 function isMemoryError(error) {
     const msg = error?.message?.toLowerCase() || '';
@@ -48,57 +66,6 @@ function bayerChoiceToGpuPattern(bayerChoice) {
         'MONO': -1  // No demosaic needed
     };
     return mapping[bayerChoice] ?? -1;
-}
-
-// These functions remain on the main thread as they are not performance bottlenecks
-// Exported for use by Tools component
-export function parseSerHeader(buffer) {
-    const view = new DataView(buffer);
-    const le = true; // SER files are little-endian
-
-    // Standard SER V3 header layout:
-    // 0-13: FileID "LUCAM-RECORDER" (14 bytes)
-    // 14-17: LuID (4 bytes) - camera ID
-    // 18-21: ColorID (4 bytes) - color format (0=MONO, 8=RGGB, 9=GRBG, 10=GBRG, 11=BGGR)
-    // 22-25: LittleEndian (4 bytes) - byte order indicator
-    // 26-29: ImageWidth (4 bytes)
-    // 30-33: ImageHeight (4 bytes)
-    // 34-37: PixelDepthPerPlane (4 bytes) - bits per pixel (8, 10, 12, 14, 16)
-    // 38-41: FrameCount (4 bytes)
-    // 42-81: Observer (40 bytes)
-    // 82-121: Instrument (40 bytes)
-    // 122-161: Telescope (40 bytes)
-    // 162-169: DateTime (8 bytes)
-    // 170-177: DateTimeUTC (8 bytes)
-
-    let h = {
-        fileId: Array.from(new Uint8Array(buffer.slice(0, 14))).map(b => String.fromCharCode(b)).join(''),
-        luId: view.getInt32(14, le),
-        colorID: view.getInt32(18, le),
-        littleEndian: view.getInt32(22, le),
-        width: view.getInt32(26, le),
-        height: view.getInt32(30, le),
-        pixelDepth: view.getInt32(34, le),  // PixelDepthPerPlane - bits per pixel
-        frameCount: view.getInt32(38, le),
-        observer: Array.from(new Uint8Array(buffer.slice(42, 82))).map(b => String.fromCharCode(b)).join('').replace(/\0/g, ''),
-        instrument: Array.from(new Uint8Array(buffer.slice(82, 122))).map(b => String.fromCharCode(b)).join('').replace(/\0/g, ''),
-        telescope: Array.from(new Uint8Array(buffer.slice(122, 162))).map(b => String.fromCharCode(b)).join('').replace(/\0/g, ''),
-        dateTime: view.getBigInt64(162, le),
-        dateTimeUTC: view.getBigInt64(170, le)
-    };
-
-    // Sanity check: if values don't make sense, the file might have a non-standard layout
-    if (h.width <= 0 || h.width > 10000 || h.height <= 0 || h.height > 10000) {
-        console.warn('SER header values look invalid, file may be corrupted or non-standard');
-    }
-
-    // Ensure pixelDepth is sensible (common values: 8, 10, 12, 14, 16)
-    if (h.pixelDepth <= 0 || h.pixelDepth > 16) {
-        console.warn(`Unusual pixelDepth ${h.pixelDepth}, defaulting to 8`);
-        h.pixelDepth = 8;
-    }
-
-    return h;
 }
 
 // This function will still be used on the main thread for preview rendering.
@@ -618,7 +585,7 @@ export function useSerReader() {
         if (gpuAnalyzeWorker && gpuWorkerReady) return true;
         if (gpuInitFailed) return false; // Don't retry if GPU already known to be unavailable
 
-        gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'));
+        gpuAnalyzeWorker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
 
         return new Promise((resolve) => {
             const timeout = setTimeout(() => {
@@ -708,7 +675,8 @@ export function useSerReader() {
                 bayerPattern,
                 threshold,
                 requestId,
-                metadataOnly
+                metadataOnly,
+                grayOnly: true  // Fast path: grayscale-only demosaic (no RGBA)
             });
         });
     }
@@ -799,7 +767,8 @@ export function useSerReader() {
                 bayerPattern,
                 threshold,
                 requestId,
-                metadataOnly
+                metadataOnly,
+                grayOnly: true  // Fast path: grayscale-only demosaic + offset Laplacian (no crop)
             });
         });
     }
@@ -843,101 +812,39 @@ export function useSerReader() {
         emit('start-loading', 'Reading file header');
         emit('update-loading', 0); // Initial progress
 
-        const headerBuf = await file.slice(0, 178).arrayBuffer();
+        const headerBuf = await file.slice(0, SER_HEADER_SIZE).arrayBuffer();
         const header = parseSerHeader(headerBuf);
 
-        // Calculate bytes per pixel and frame size
-        let bpp = header.pixelDepth > 8 ? 2 : 1;
-        let frameSize = header.width * header.height * bpp;
-
-        // Detect if header lies about bit depth (says 16-bit but actually 8-bit)
-        // Key check: if 8-bit frameSize matches the header's frame count exactly, it's 8-bit data
-        if (header.pixelDepth > 8) {
-            const frameSize16 = header.width * header.height * 2;
-            const frameSize8 = header.width * header.height * 1;
-            const dataSize = file.size - 178;
-
-            const frameCount16 = Math.floor(dataSize / frameSize16);
-            const frameCount8 = Math.floor(dataSize / frameSize8);
-            const headerFrames = header.frameCount;
-
-            addLog(`Bit depth check: header=${headerFrames} frames, as 16-bit=${frameCount16}, as 8-bit=${frameCount8}`);
-
-            // If 8-bit calculation matches header frame count, it's actually 8-bit data
-            if (frameCount8 === headerFrames && frameCount16 !== headerFrames) {
-                addLog(`Header says 16-bit but file size matches 8-bit (${headerFrames} frames). Treating as 8-bit.`);
-                header.pixelDepth = 8;
-                bpp = 1;
-                frameSize = frameSize8;
-            }
+        // Detect and correct bit depth using new parser (handles lying headers)
+        const bitDepthResult = detectActualBitDepth(header, file.size);
+        let bpp = bitDepthResult.bpp;
+        let frameSize = bitDepthResult.frameSize;
+        if (bitDepthResult.corrected) {
+            addLog(bitDepthResult.message);
         }
 
-        // Validate header against actual file size
-        const expectedFileSize = 178 + (frameSize * header.frameCount);
-        const actualFrameCount = Math.floor((file.size - 178) / frameSize);
-
+        // Validate frame count using new parser
+        const frameCountResult = validateFrameCount(header, file.size, frameSize);
         addLog(`SER Header: ${header.width}x${header.height}, ${header.frameCount} frames, ${header.pixelDepth}-bit, colorID=${header.colorID}, littleEndian=${header.littleEndian}`);
-
-        // Use calculated frame count if header value seems wrong
-        if (actualFrameCount !== header.frameCount) {
-            addLog(`Warning: Header says ${header.frameCount} frames, but file size suggests ${actualFrameCount} frames. Using calculated value.`);
-            header.frameCount = actualFrameCount;
+        if (frameCountResult.corrected) {
+            addLog(frameCountResult.message);
         }
 
-        // Determine initial bayer choice from header for auto-detection hint
-        // SER colorID to OpenCV Bayer patterns (OpenCV uses inverted naming convention)
-        // Industry RGGB → OpenCV BG, Industry BGGR → OpenCV RG, etc.
-        const bayerMap = { 0: "MONO", 8: "COLOR_BayerBG2RGB", 9: "COLOR_BayerGB2RGB", 10: "COLOR_BayerGR2RGB", 11: "COLOR_BayerRG2RGB" };
-        let autoDetectedProfile = bayerMap[header.colorID];
-        if (!autoDetectedProfile) {
-            // Default fallback for unknown colorID - use RGGB (most common)
-            autoDetectedProfile = "COLOR_BayerBG2RGB";
-        }
+        // Get Bayer pattern from colorID using new parser
+        let autoDetectedProfile = getOpenCVBayerPattern(header.colorID);
 
         // Read first frame for color profile selector
-        const firstFrameBuffer = await file.slice(178, 178 + frameSize).arrayBuffer();
+        const firstFrameBuffer = await file.slice(SER_HEADER_SIZE, SER_HEADER_SIZE + frameSize).arrayBuffer();
 
-        // Detect if 16-bit data doesn't use full range (common: 8-bit, 10-bit, 12-bit in 16-bit container)
-        // Scale factor to expand data to full 16-bit range for proper shader processing
+        // Detect scale factor for sub-16-bit data using new parser
         let data16bitScaleFactor = 1;
         if (header.pixelDepth > 8) {
-            const u16 = new Uint16Array(firstFrameBuffer);
-            // Sample pixels across the frame for reliable max detection
-            const sampleSize = Math.min(5000, u16.length);
-            const step = Math.max(1, Math.floor(u16.length / sampleSize));
-            let maxVal = 0;
-            for (let i = 0; i < u16.length && i < sampleSize * step; i += step) {
-                if (u16[i] > maxVal) maxVal = u16[i];
+            const scaleResult = detectScaleFactor(new Uint16Array(firstFrameBuffer));
+            data16bitScaleFactor = scaleResult.scaleFactor;
+            addLog(`16-bit diagnostic: max sampled value=${scaleResult.maxSampledValue}`);
+            if (scaleResult.effectiveBits < 16) {
+                addLog(`Detected ${scaleResult.effectiveBits}-bit data in 16-bit container. Scale factor: ${data16bitScaleFactor.toFixed(2)}`);
             }
-            addLog(`16-bit diagnostic: max sampled value=${maxVal}`);
-
-            // Determine scale factor based on actual data range
-            // Common bit depths: 8-bit (255), 10-bit (1023), 12-bit (4095), 14-bit (16383)
-            if (maxVal > 0 && maxVal < 32768) {
-                // Find the likely bit depth and scale to full 16-bit
-                let effectiveBits;
-                if (maxVal <= 255) effectiveBits = 8;
-                else if (maxVal <= 1023) effectiveBits = 10;
-                else if (maxVal <= 4095) effectiveBits = 12;
-                else if (maxVal <= 16383) effectiveBits = 14;
-                else effectiveBits = 16;
-
-                if (effectiveBits < 16) {
-                    const maxForBits = (1 << effectiveBits) - 1;
-                    data16bitScaleFactor = 65535 / maxForBits;
-                    addLog(`Detected ${effectiveBits}-bit data in 16-bit container (max=${maxVal}). Scale factor: ${data16bitScaleFactor.toFixed(2)}`);
-                }
-            }
-        }
-
-        // Helper to scale 16-bit data to full range
-        function scale16bitData(buffer, scaleFactor) {
-            if (scaleFactor === 1) return buffer;
-            const u16 = new Uint16Array(buffer);
-            for (let i = 0; i < u16.length; i++) {
-                u16[i] = Math.min(65535, Math.round(u16[i] * scaleFactor));
-            }
-            return buffer;
         }
 
         // Minimum frame size for auto-crop to be useful
@@ -2378,17 +2285,20 @@ export function useSerReader() {
         for (let i = 0; i < files.length; i++) {
             const file = files[i];
             try {
-                const headerBuf = await file.slice(0, 178).arrayBuffer();
+                const headerBuf = await file.slice(0, SER_HEADER_SIZE).arrayBuffer();
                 const header = parseSerHeader(headerBuf);
 
-                const bpp = header.pixelDepth > 8 ? 2 : 1;
-                const frameSize = header.width * header.height * bpp;
+                // Use new parser functions for validation
+                const bitDepthResult = detectActualBitDepth(header, file.size);
+                if (bitDepthResult.corrected) {
+                    addLog(`${file.name}: ${bitDepthResult.message}`);
+                }
+                const frameSize = bitDepthResult.frameSize;
 
-                // Validate frame count against file size
-                const actualFrameCount = Math.floor((file.size - 178) / frameSize);
-                if (actualFrameCount !== header.frameCount) {
-                    addLog(`${file.name}: Header says ${header.frameCount} frames, file size suggests ${actualFrameCount}. Using calculated value.`);
-                    header.frameCount = actualFrameCount;
+                // Validate frame count
+                const frameCountResult = validateFrameCount(header, file.size, frameSize);
+                if (frameCountResult.corrected) {
+                    addLog(`${file.name}: ${frameCountResult.message}`);
                 }
 
                 fileInfos.push({
@@ -2435,11 +2345,10 @@ export function useSerReader() {
         // PHASE 3: Color profile selection (using first file's header)
         const firstHeader = fileInfos[0].header;
         const firstFrameSize = fileInfos[0].frameSize;
-        // SER colorID to OpenCV Bayer patterns (OpenCV uses inverted naming convention)
-        const bayerMap = { 0: "MONO", 8: "COLOR_BayerBG2RGB", 9: "COLOR_BayerGB2RGB", 10: "COLOR_BayerGR2RGB", 11: "COLOR_BayerRG2RGB" };
-        let autoDetectedProfile = bayerMap[firstHeader.colorID] || "COLOR_BayerBG2RGB";
+        // Get Bayer pattern from colorID using new parser
+        let autoDetectedProfile = getOpenCVBayerPattern(firstHeader.colorID);
 
-        const firstFrameBuffer = await fileInfos[0].file.slice(178, 178 + firstFrameSize).arrayBuffer();
+        const firstFrameBuffer = await fileInfos[0].file.slice(SER_HEADER_SIZE, SER_HEADER_SIZE + firstFrameSize).arrayBuffer();
 
         // Try to crop the first frame for better preview in color selector
         let previewBuffer = firstFrameBuffer;

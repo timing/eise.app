@@ -25,14 +25,14 @@ export default defineNuxtConfig({
 			],
 			script: [
 				{
-					src: 'https://scripts.simpleanalyticscdn.com/latest.js',
+					src: 'https://api.eise.app/latest.js',
 					async: true,
 					defer: true,
-					crossorigin: 'anonymous',
+					'data-hostname': 'eise.app',
 				}
 			],
 			noscript: [
-				{ children: '<img src="https://queue.simpleanalyticscdn.com/noscript.gif" alt="" referrerpolicy="no-referrer-when-downgrade" />' }
+				{ children: '<img src="https://api.eise.app/noscript.gif" alt="" referrerpolicy="no-referrer-when-downgrade" />' }
 			]
 		}
 	},

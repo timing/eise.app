@@ -126,12 +126,6 @@
 				</div>
 
 				<label class="checkbox-option">
-					<input type="checkbox" v-model="useVngDemosaic" />
-					VNG demosaicing
-				</label>
-
-
-				<label class="checkbox-option">
 					AP size:
 					<input type="number" min="10" max="64" step="2" v-model.number="apPatchSize" class="small-number-input" />
 				</label>
@@ -141,7 +135,7 @@
 					<input type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="small-number-input" />
 				</label>
 
-								<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 30 is a safe middle ground.<br><strong>VNG demosaicing:</strong> Variable Number of Gradients - higher quality color interpolation for raw Bayer data. When disabled, uses faster bilinear interpolation.</p>
+								<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 30 is a safe middle ground.</p>
 
 				<template v-if="targetType !== 'sun-moon'">
 					<div class="separator"></div>
@@ -199,8 +193,9 @@
 import { fetchFile } from '@ffmpeg/ffmpeg';
 import { computed, defineEmits, ref, onMounted, watch, inject } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
-import { useSerReader } from '@/composables/useSerReader';
+// useSerReader removed - now using useSerParser + useDebayerReader
 import { useAviReader } from '@/composables/useAviReader';
+import { useFFmpegReader } from '@/composables/useFFmpegReader';
 import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
@@ -278,7 +273,6 @@ const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
 const noiseRobustAlignment = ref(false);
-const useVngDemosaic = ref(true); // VNG demosaic (default) vs bilinear
 const minApQuality = ref(0.3); // Alignment point quality threshold (NCC score)
 const apPatchSize = ref(30); // Alignment point patch size in pixels
 // Computed for checkbox binding - shows unchecked when GPU is on
@@ -316,7 +310,6 @@ function loadSettings() {
 			if (settings.enableMaxFrames !== undefined) enableMaxFrames.value = settings.enableMaxFrames;
 			if (settings.selectedMaxFrames) selectedMaxFrames.value = settings.selectedMaxFrames;
 			if (settings.targetType) targetType.value = settings.targetType;
-			if (settings.useVngDemosaic !== undefined) useVngDemosaic.value = settings.useVngDemosaic;
 			if (settings.minApQuality !== undefined) minApQuality.value = settings.minApQuality;
 			if (settings.apPatchSize !== undefined) apPatchSize.value = settings.apPatchSize;
 		}
@@ -337,7 +330,6 @@ function saveSettings() {
 			enableMaxFrames: enableMaxFrames.value,
 			selectedMaxFrames: selectedMaxFrames.value,
 			targetType: targetType.value,
-			useVngDemosaic: useVngDemosaic.value,
 			minApQuality: minApQuality.value,
 			apPatchSize: apPatchSize.value
 		};
@@ -348,7 +340,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, useVngDemosaic, minApQuality, apPatchSize], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize], saveSettings);
 
 onMounted(async () => {
 	loadSettings();
@@ -421,7 +413,7 @@ watch([selectedFiles, isMobileDevice, liteMode], () => {
 }, { immediate: true });
 
 const { addLog, emit: eventBusEmit, on, logs } = useEventBus();
-const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatchSize } = useProcessingState();
+const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatchSize, getTrackingContext } = useProcessingState();
 
 // Sync stacking settings to shared state for stacker to use
 watch(minApQuality, (val) => setSharedMinApQuality(val), { immediate: true });
@@ -628,7 +620,7 @@ async function startProcessing() {
 			filename,
 			logs: logs.value
 		});
-		track('stack_failed');
+		track('stack_failed', getTrackingContext());
 		const errorMsg = error.message || 'An error occurred during processing';
 		// Set error and stop processing - FileUploader will show with error visible
 		isProcessing.value = false;
@@ -638,7 +630,7 @@ async function startProcessing() {
 }
 
 function cancelProcessing() {
-	track('stack_cancelled');
+	track('stack_cancelled', getTrackingContext());
 	isProcessing.value = false;
 	selectedFiles.value = [];
 	if (fileInput.value) {
@@ -666,7 +658,7 @@ const RAW_EXTENSIONS = ['.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2', 
 const isRawFile = (file) => RAW_EXTENSIONS.some(ext => file.name.toLowerCase().endsWith(ext));
 
 async function processFiles(files) {
-	const { setInputFilename } = useProcessingState();
+	const { setInputFilename, setTrackingContext } = useProcessingState();
 
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser') || file.name.endsWith('.avi'));
 	const imageFiles = files.filter(file => file.type.startsWith('image/'));
@@ -704,17 +696,29 @@ async function processFiles(files) {
 		return;
 	}
 
-	// Handle multiple SER files (combined stacking) - not available in lite mode
-	if (serFiles.length > 1 && !liteMode.value) {
+	// Handle multiple SER files (combined stacking)
+	if (serFiles.length > 1) {
+		setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: useGPU.value });
 		emit('processing-started');
-		const { readSerFiles } = useSerReader();
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
-		await readSerFiles(serFiles, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value, useVngDemosaic.value);
-		return;
-	} else if (serFiles.length > 1 && liteMode.value) {
-		alert('Multiple SER files are not supported in Lite Mode. Please select a single file.');
-		isProcessing.value = false;
-		eventBusEmit('stop-loading');
+
+		const { useMultiSerParser } = await import('@/composables/useSerParser');
+		const { useDebayerReader } = await import('@/composables/useDebayerReader');
+
+		const parser = useMultiSerParser();
+		await parser.init(serFiles);
+
+		const reader = useDebayerReader();
+		await reader.init(serFiles[0], parser);  // First file for reference, parser handles all
+		await reader.processFile({
+			maxFrames: effectiveMaxFrames.value,
+			manualThreshold: effectiveQualityMode.value === 'manual',
+			cropMarginPercent: effectiveCropMargin.value,
+			stackPercentage: effectiveStackPercentage.value,
+			drizzleScale: effectiveDrizzleScale.value,
+			noiseRobustAlignment: effectiveNoiseRobust.value,
+			surfaceMode: surfaceMode.value,
+		});
 		return;
 	}
 
@@ -730,11 +734,29 @@ async function processFiles(files) {
 			}
 		}
 
-		// Handle SER files with direct reader (not in lite mode - lite mode uses FFmpeg)
-		if (fileToProcess.name.endsWith('.ser') && !liteMode.value) {
+		// Handle SER files with unified debayer reader
+		if (fileToProcess.name.endsWith('.ser')) {
+			setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: useGPU.value });
 			emit('processing-started');
-			const { readSerFile } = useSerReader();
-			await readSerFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, surfaceMode.value, useVngDemosaic.value);
+
+			// Use new unified debayer reader
+			const { useSerParser } = await import('@/composables/useSerParser');
+			const { useDebayerReader } = await import('@/composables/useDebayerReader');
+
+			const parser = useSerParser();
+			await parser.init(fileToProcess);
+
+			const reader = useDebayerReader();
+			await reader.init(fileToProcess, parser);
+			await reader.processFile({
+				maxFrames: effectiveMaxFrames.value,
+				manualThreshold: effectiveQualityMode.value === 'manual',
+				cropMarginPercent: effectiveCropMargin.value,
+				stackPercentage: effectiveStackPercentage.value,
+				drizzleScale: effectiveDrizzleScale.value,
+				noiseRobustAlignment: effectiveNoiseRobust.value,
+				surfaceMode: surfaceMode.value,
+			});
 			return;
 		}
 
@@ -753,10 +775,40 @@ async function processFiles(files) {
 			const formatInfo = await checkAviFormat(headerBuffer, fileToProcess.size);
 
 			if (formatInfo.isSupported) {
-				// Can process directly - readAviFile handles both uncompressed and MJPEG
-				// Pass pre-parsed header to avoid parsing twice
+				// Check if it's 8-bit raw Bayer that needs the unified debayer reader
+				const { is8bitRawFormat } = await import('@/composables/useAviParser');
+				const is8bitRaw = is8bitRawFormat(formatInfo.aviHeader.fourCC, formatInfo.aviHeader.bpp);
+
+				if (is8bitRaw) {
+					// Route 8-bit raw Bayer AVI through unified debayer reader
+					setTrackingContext({ file_type: 'avi', reader: 'debayer', gpu_enabled: useGPU.value });
+					emit('processing-started');
+					addLog('8-bit raw Bayer AVI detected. Using unified debayer reader.');
+
+					const { useAviParser } = await import('@/composables/useAviParser');
+					const { useDebayerReader } = await import('@/composables/useDebayerReader');
+
+					const parser = useAviParser();
+					await parser.init(fileToProcess);
+
+					const reader = useDebayerReader();
+					await reader.init(fileToProcess, parser);
+					await reader.processFile({
+						maxFrames: effectiveMaxFrames.value,
+						manualThreshold: effectiveQualityMode.value === 'manual',
+						cropMarginPercent: effectiveCropMargin.value,
+						stackPercentage: effectiveStackPercentage.value,
+						drizzleScale: effectiveDrizzleScale.value,
+						noiseRobustAlignment: effectiveNoiseRobust.value,
+						surfaceMode: surfaceMode.value,
+					});
+					return;
+				}
+
+				// Non-Bayer AVI: use old reader for uncompressed BGR or MJPEG
+				setTrackingContext({ file_type: 'avi', reader: 'avi', gpu_enabled: useGPU.value });
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, useVngDemosaic.value, formatInfo.aviHeader);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, formatInfo.aviHeader);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -821,6 +873,9 @@ async function processFiles(files) {
 		addLog('Storing video in memory done');
 
 		// Only switch to processing view after we know the file loaded successfully
+		// Determine file type for tracking (could be AVI needing FFmpeg or other video format)
+		const ffmpegFileType = fileToProcess.name.endsWith('.avi') ? 'avi' : 'video';
+		setTrackingContext({ file_type: ffmpegFileType, reader: 'ffmpeg', gpu_enabled: useGPU.value });
 		emit('processing-started');
 
 		// Run pre-crop detection if enabled
@@ -904,7 +959,7 @@ async function processFiles(files) {
 			}
 			addLog(`Video duration: ${videoDuration.toFixed(1)}s`);
 
-			const { processBatchedVideoFrames } = useAviReader();
+			const { processBatchedVideoFrames } = useFFmpegReader();
 			const totalFrames = effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : 100;
 
 			await processBatchedVideoFrames($ffmpeg, fileToProcess.name, totalFrames, videoDuration, {
@@ -965,11 +1020,10 @@ async function processFiles(files) {
 				return;
 			}
 
-			// Route PNG frames through AVI reader - it will read and delete files from $ffmpeg
-			const { processFFmpegFrames } = useAviReader();
-			const skipAutoCrop = preCropRegion !== null;
+			// Route PNG frames through FFmpeg reader
+			const { processFFmpegFrames } = useFFmpegReader();
 
-			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
+			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
 		}
 	
 	} else if (imageFiles.length > 1) {
@@ -981,11 +1035,12 @@ async function processFiles(files) {
 			return;
 		}
 
+		setTrackingContext({ file_type: 'images', reader: 'image', gpu_enabled: useGPU.value });
 		emit('processing-started');
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing
@@ -1123,16 +1178,15 @@ async function processFiles(files) {
 }
 .cancelled-message .reload-button {
 	margin-top: 12px;
-	padding: 8px 20px;
-	background: #856404;
+	padding: 8px 16px;
+	background-color: #856404;
 	color: white;
 	border: none;
 	border-radius: 4px;
 	cursor: pointer;
-	font-size: 0.95em;
 }
 .cancelled-message .reload-button:hover {
-	background: #6d5003;
+	background-color: #6d5203;
 }
 .file-input-wrapper {
 	position: relative;

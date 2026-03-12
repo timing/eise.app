@@ -14,6 +14,7 @@
 					<div class="dropdown-menu">
 						<NuxtLink to="/about/" @click="aboutDropdownOpen = false">About eise.app</NuxtLink>
 						<NuxtLink to="/about/help/" @click="aboutDropdownOpen = false">Help & How it Works</NuxtLink>
+						<NuxtLink to="/about/architecture/" @click="aboutDropdownOpen = false">Technical Architecture</NuxtLink>
 						<NuxtLink to="/about/planetary-stacking-software-comparison/" @click="aboutDropdownOpen = false">Stacking Software Comparison</NuxtLink>
 					</div>
 				</div>
