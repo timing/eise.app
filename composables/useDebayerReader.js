@@ -1204,6 +1204,23 @@ export function useDebayerReader() {
             return; // app.vue handles quality selection and stacking
         }
 
+        // Check for no valid frames before attempting to stack
+        if (bestFramesForStacking.length === 0) {
+            let errorMsg = 'No valid frames could be processed for stacking.';
+
+            if (cutOffFrameCount > 0 && cutOffFrameCount >= completedFrames * 0.9) {
+                // Most or all frames were cut-off
+                errorMsg = `All ${cutOffFrameCount} frames were rejected because the object touches the frame edge. Please select "Surface" mode for close-up Moon/Sun images, or use a wider field of view.`;
+            }
+
+            addLog(`[DebayerReader] ${errorMsg}`);
+            emit('upload-error', errorMsg);
+            emit('stack-failed', { component: 'useDebayerReader', reason: 'no valid frames', details: { cutOffFrameCount, completedFrames } });
+            emit('stop-loading');
+            terminateGpuWorker();
+            return;
+        }
+
         // Stacking phase (automatic threshold mode)
         emit('set-caption', 'Stacking frames...');
         addLog(`[DebayerReader] Starting stacking of ${bestFramesForStacking.length} frames`);

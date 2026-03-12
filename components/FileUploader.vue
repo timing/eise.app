@@ -25,6 +25,7 @@
 			<p class="feedback-prompt">
 				Something went wrong? <a href="https://github.com/timing/eise.app/issues" @click="openErrorFeedback">Let me know what happened</a> so I can fix it.
 			</p>
+			<button class="reload-button" @click="reloadPage">Start over</button>
 		</div>
 
 		<!-- Cancelled message -->
@@ -1159,6 +1160,18 @@ async function processFiles(files) {
 .error-message .feedback-prompt a {
 	color: #D9534F;
 	text-decoration: underline;
+}
+.error-message .reload-button {
+	margin-top: 12px;
+	padding: 8px 16px;
+	background-color: #D9534F;
+	color: white;
+	border: none;
+	border-radius: 4px;
+	cursor: pointer;
+}
+.error-message .reload-button:hover {
+	background-color: #c9302c;
 }
 .cancelled-message {
 	background-color: #fff3cd;
