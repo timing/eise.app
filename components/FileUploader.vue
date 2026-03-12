@@ -380,7 +380,7 @@ watch([selectedFiles, isMobileDevice, liteMode], () => {
 }, { immediate: true });
 
 const { addLog, emit: eventBusEmit, on, logs } = useEventBus();
-const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatchSize } = useProcessingState();
+const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatchSize, getTrackingContext } = useProcessingState();
 
 // Sync stacking settings to shared state for stacker to use
 watch(minApQuality, (val) => setSharedMinApQuality(val), { immediate: true });
@@ -587,7 +587,7 @@ async function startProcessing() {
 			filename,
 			logs: logs.value
 		});
-		track('stack_failed');
+		track('stack_failed', getTrackingContext());
 		const errorMsg = error.message || 'An error occurred during processing';
 		// Set error and stop processing - FileUploader will show with error visible
 		isProcessing.value = false;
@@ -597,7 +597,7 @@ async function startProcessing() {
 }
 
 function cancelProcessing() {
-	track('stack_cancelled');
+	track('stack_cancelled', getTrackingContext());
 	isProcessing.value = false;
 	selectedFiles.value = [];
 	if (fileInput.value) {
@@ -621,7 +621,7 @@ const RAW_EXTENSIONS = ['.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2', 
 const isRawFile = (file) => RAW_EXTENSIONS.some(ext => file.name.toLowerCase().endsWith(ext));
 
 async function processFiles(files) {
-	const { setInputFilename } = useProcessingState();
+	const { setInputFilename, setTrackingContext } = useProcessingState();
 
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser') || file.name.endsWith('.avi'));
 	const imageFiles = files.filter(file => file.type.startsWith('image/'));
@@ -661,6 +661,7 @@ async function processFiles(files) {
 
 	// Handle multiple SER files (combined stacking)
 	if (serFiles.length > 1) {
+		setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: useGPU.value });
 		emit('processing-started');
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
 
@@ -698,6 +699,7 @@ async function processFiles(files) {
 
 		// Handle SER files with unified debayer reader
 		if (fileToProcess.name.endsWith('.ser')) {
+			setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: useGPU.value });
 			emit('processing-started');
 
 			// Use new unified debayer reader
@@ -742,6 +744,7 @@ async function processFiles(files) {
 
 				if (is8bitRaw) {
 					// Route 8-bit raw Bayer AVI through unified debayer reader
+					setTrackingContext({ file_type: 'avi', reader: 'debayer', gpu_enabled: useGPU.value });
 					emit('processing-started');
 					addLog('8-bit raw Bayer AVI detected. Using unified debayer reader.');
 
@@ -766,6 +769,7 @@ async function processFiles(files) {
 				}
 
 				// Non-Bayer AVI: use old reader for uncompressed BGR or MJPEG
+				setTrackingContext({ file_type: 'avi', reader: 'avi', gpu_enabled: useGPU.value });
 				emit('processing-started');
 				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, formatInfo.aviHeader);
 				return;
@@ -832,6 +836,9 @@ async function processFiles(files) {
 		addLog('Storing video in memory done');
 
 		// Only switch to processing view after we know the file loaded successfully
+		// Determine file type for tracking (could be AVI needing FFmpeg or other video format)
+		const ffmpegFileType = fileToProcess.name.endsWith('.avi') ? 'avi' : 'video';
+		setTrackingContext({ file_type: ffmpegFileType, reader: 'ffmpeg', gpu_enabled: useGPU.value });
 		emit('processing-started');
 
 		// Run pre-crop detection if enabled
@@ -991,6 +998,7 @@ async function processFiles(files) {
 			return;
 		}
 
+		setTrackingContext({ file_type: 'images', reader: 'image', gpu_enabled: useGPU.value });
 		emit('processing-started');
 		addLog(`${imageFiles.length} images selected for stacking`);
 

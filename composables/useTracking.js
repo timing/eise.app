@@ -3,12 +3,16 @@
 let humanInteractionTracked = false;
 
 export function useTracking() {
-    function track(event) {
+    function track(event, metadata = null) {
         if (typeof window === 'undefined') return;
 
         // Send to Simple Analytics (if loaded)
         if (typeof window.sa_event === 'function') {
-            window.sa_event(event);
+            if (metadata) {
+                window.sa_event(event, metadata);
+            } else {
+                window.sa_event(event);
+            }
         }
     }
 
