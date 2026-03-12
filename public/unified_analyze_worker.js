@@ -1978,11 +1978,23 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
     try {
         self.postMessage({ type: 'stack-progress', stage: 'Preparing frames...', progress: 0 });
 
-        // Filter frames that have valid float32Buffer and sharpness
-        let validFrames = frames.filter(f => f.float32Buffer && f.width && f.height && f.sharpness > 0);
+        // Filter frames that have valid buffer (uint8Buffer or float32Buffer) and sharpness
+        let validFrames = frames.filter(f => (f.float32Buffer || f.uint8Buffer) && f.width && f.height && f.sharpness > 0);
 
         if (validFrames.length === 0) {
-            throw new Error('No valid frames with float32 data for stacking');
+            throw new Error('No valid frames with buffer data for stacking');
+        }
+
+        // Convert uint8Buffer to float32Buffer if needed (CPU path expects float32)
+        for (const frame of validFrames) {
+            if (!frame.float32Buffer && frame.uint8Buffer) {
+                const uint8Data = new Uint8Array(frame.uint8Buffer);
+                const float32Data = new Float32Array(uint8Data.length);
+                for (let i = 0; i < uint8Data.length; i++) {
+                    float32Data[i] = uint8Data[i] / 255.0;
+                }
+                frame.float32Buffer = float32Data.buffer;
+            }
         }
 
         const { width, height } = validFrames[0];
