@@ -1305,7 +1305,7 @@ export function useStacker() {
                     };
                     gpuWorker.addEventListener('message', handler);
                     gpuWorker.postMessage({
-                        type: 'stack-frame-batch',
+                        type: 'stack-frame-batch-rgba',
                         frames: batchFrames,
                         shifts: batchShifts,
                         frameWeights: batchWeights
