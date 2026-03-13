@@ -369,7 +369,10 @@ export function useImageReader() {
 
             addLog(`Sampling ${sampleIndices.length} images for crop detection (GPU)...`);
 
-            const BATCH_SIZE = 8; // Smaller batches for memory efficiency
+            // Dynamic batch size based on frame dimensions to stay under GPU memory limit
+            const frameBytes = firstWidth * firstHeight * 16; // Float32 RGBA = 16 bytes/pixel
+            const targetBatchMemory = 512 * 1024 * 1024; // 512MB
+            const BATCH_SIZE = Math.max(4, Math.min(32, Math.floor(targetBatchMemory / frameBytes)));
             let canCropCount = 0;
             const detectedCenters = [];
             const detectedSizes = [];
@@ -441,12 +444,15 @@ export function useImageReader() {
         // Second pass: GPU analyze (loading frames on-demand)
         emit('set-caption', cropRegion ? 'Cropping and analyzing images (GPU)' : 'Analyzing images (GPU)');
 
-        const BATCH_SIZE = 8; // Smaller batches for memory efficiency
+        // Dynamic batch size based on frame dimensions to stay under GPU memory limit
+        const analyzeFrameBytes = firstWidth * firstHeight * 16; // Float32 RGBA
+        const analyzeTargetMemory = 512 * 1024 * 1024; // 512MB
+        const ANALYZE_BATCH_SIZE = Math.max(4, Math.min(32, Math.floor(analyzeTargetMemory / analyzeFrameBytes)));
         const frameCenters = new Map(); // Store centers for frameReReader
         let completedFrames = 0;
 
-        for (let batchStart = 0; batchStart < validIndices.length; batchStart += BATCH_SIZE) {
-            const batchEnd = Math.min(batchStart + BATCH_SIZE, validIndices.length);
+        for (let batchStart = 0; batchStart < validIndices.length; batchStart += ANALYZE_BATCH_SIZE) {
+            const batchEnd = Math.min(batchStart + ANALYZE_BATCH_SIZE, validIndices.length);
 
             // Load frames on-demand for this batch
             const batchFrames = [];

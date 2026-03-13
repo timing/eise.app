@@ -298,7 +298,10 @@ export function useFFmpegReader() {
 
         addLog(`Sampling ${sampleIndices.length} frames for crop detection (GPU)...`);
 
-        const BATCH_SIZE = 32;
+        // Dynamic batch size based on frame dimensions to stay under GPU memory limit
+        const frameBytes = header.width * header.height * 16; // Float32 RGBA = 16 bytes/pixel
+        const targetBatchMemory = 512 * 1024 * 1024; // 512MB
+        const BATCH_SIZE = Math.max(4, Math.min(32, Math.floor(targetBatchMemory / frameBytes)));
         let canCropCount = 0;
         const detectedCenters = [];
         const detectedSizes = [];

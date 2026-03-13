@@ -1,6 +1,6 @@
 import * as Sentry from '@sentry/vue';
 
-export default defineNuxtPlugin((nuxtApp) => {
+export default defineNuxtPlugin(async (nuxtApp) => {
     const router = useRouter();
 
     Sentry.init({
@@ -25,4 +25,22 @@ export default defineNuxtPlugin((nuxtApp) => {
         // Only report errors in production
         enabled: process.env.NODE_ENV === 'production',
     });
+
+    // Set WebGPU support tag
+    const hasWebGPU = !!navigator.gpu;
+    Sentry.setTag('webgpu_support', hasWebGPU ? 'yes' : 'no');
+
+    // Try to get adapter info for more detail
+    if (hasWebGPU) {
+        try {
+            const adapter = await navigator.gpu.requestAdapter();
+            if (adapter) {
+                Sentry.setTag('webgpu_adapter', 'available');
+            } else {
+                Sentry.setTag('webgpu_adapter', 'no_adapter');
+            }
+        } catch (e) {
+            Sentry.setTag('webgpu_adapter', 'error');
+        }
+    }
 });
