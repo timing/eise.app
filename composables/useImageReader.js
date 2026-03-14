@@ -314,6 +314,20 @@ export function useImageReader() {
             }
         }
 
+        // Load a batch of frames in parallel
+        async function loadBatchParallel(indices) {
+            const loadPromises = indices.map(async (idx) => {
+                try {
+                    const rgba = await loadFrameRgba(idx);
+                    return rgba ? { data: rgba.data, index: idx, width: rgba.width, height: rgba.height } : null;
+                } catch (e) {
+                    return null;
+                }
+            });
+            const results = await Promise.all(loadPromises);
+            return results.filter(r => r !== null);
+        }
+
         // Get dimensions from first frame
         try {
             const firstRgba = await loadFrameRgba(0);
@@ -351,19 +365,20 @@ export function useImageReader() {
             const detectedCenters = [];
             const detectedSizes = [];
 
+            // Prefetch first batch
+            let nextBatchPromise = loadBatchParallel(sampleIndices.slice(0, BATCH_SIZE));
+
             for (let batchStart = 0; batchStart < sampleIndices.length; batchStart += BATCH_SIZE) {
                 const batchEnd = Math.min(batchStart + BATCH_SIZE, sampleIndices.length);
-                const batchFrames = [];
 
-                // Load batch frames on-demand
-                for (let i = batchStart; i < batchEnd; i++) {
-                    const idx = sampleIndices[i];
-                    try {
-                        const rgba = await loadFrameRgba(idx);
-                        batchFrames.push({ data: rgba.data, index: idx });
-                    } catch (e) {
-                        // Skip failed frames
-                    }
+                // Wait for current batch (already loading or prefetched)
+                const batchFrames = await nextBatchPromise;
+
+                // Start loading next batch while GPU processes current
+                const nextStart = batchEnd;
+                if (nextStart < sampleIndices.length) {
+                    const nextEnd = Math.min(nextStart + BATCH_SIZE, sampleIndices.length);
+                    nextBatchPromise = loadBatchParallel(sampleIndices.slice(nextStart, nextEnd));
                 }
 
                 if (batchFrames.length > 0) {
@@ -416,7 +431,7 @@ export function useImageReader() {
         }
 
         // Second pass: GPU analyze (loading frames on-demand)
-        emit('set-caption', cropRegion ? 'Cropping and analyzing images (GPU)' : 'Analyzing images (GPU)');
+        emit('set-caption', cropRegion ? 'Cropping and analyzing images' : 'Analyzing images');
 
         // Dynamic batch size based on frame dimensions to stay under GPU memory limit
         const analyzeFrameBytes = firstWidth * firstHeight * 16; // Float32 RGBA
@@ -425,21 +440,28 @@ export function useImageReader() {
         const frameCenters = new Map(); // Store centers for frameReReader
         let completedFrames = 0;
 
+        // Generate all indices upfront
+        const allIndices = [];
+        for (let i = 0; i < frameCount; i++) {
+            if (!failedIndices.has(i)) allIndices.push(i);
+        }
+
+        // Prefetch first batch
+        let nextBatchPromise = loadBatchParallel(allIndices.slice(0, ANALYZE_BATCH_SIZE));
+
         for (let batchStart = 0; batchStart < frameCount; batchStart += ANALYZE_BATCH_SIZE) {
             const batchEnd = Math.min(batchStart + ANALYZE_BATCH_SIZE, frameCount);
 
-            // Load frames on-demand for this batch
-            const batchFrames = [];
-            const batchIndices = [];
-            for (let i = batchStart; i < batchEnd; i++) {
-                try {
-                    const rgba = await loadFrameRgba(i);
-                    if (!rgba) continue; // Skip failed frames
-                    batchFrames.push({ data: rgba.data, index: i });
-                    batchIndices.push(i);
-                } catch (e) {
-                    // Skip failed frames
-                }
+            // Wait for current batch (already loading or prefetched)
+            const batchFrames = await nextBatchPromise;
+            const batchIndices = batchFrames.map(f => f.index);
+
+            // Start loading next batch while GPU processes current
+            const nextStart = batchEnd;
+            if (nextStart < frameCount) {
+                const nextEnd = Math.min(nextStart + ANALYZE_BATCH_SIZE, frameCount);
+                const nextIndices = allIndices.filter(i => i >= nextStart && i < nextEnd);
+                nextBatchPromise = loadBatchParallel(nextIndices);
             }
 
             if (batchFrames.length === 0) {
