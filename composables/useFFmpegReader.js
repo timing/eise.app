@@ -430,7 +430,7 @@ export function useFFmpegReader() {
             addLog(`Frame size ${width}x${height} too small for auto-crop (min ${MIN_SIZE_FOR_CROP}x${MIN_SIZE_FOR_CROP})`);
         }
 
-        emit('set-caption', cropRegion ? 'Cropping and analyzing frames (GPU)' : 'Analyzing frames');
+        emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
 
         const bestFramesCapacity = Math.max(1, Math.floor(frameCount * stackPercentage / 100));
         const bestFramesForStacking = [];

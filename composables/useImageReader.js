@@ -224,7 +224,7 @@ export function useImageReader() {
         emit('start-loading', 'Processing images');
         emit('update-loading', 0);
 
-        addLog(`Processing ${files.length} images for stacking (GPU)...`);
+        addLog(`Processing ${files.length} images for stacking...`);
 
         const frameCount = files.length;
         const bestFramesCapacity = Math.max(1, Math.floor(frameCount * stackPercentage / 100));
@@ -341,7 +341,7 @@ export function useImageReader() {
                 sampleIndices.push(i);
             }
 
-            addLog(`Sampling ${sampleIndices.length} images for crop detection (GPU)...`);
+            addLog(`Sampling ${sampleIndices.length} images for crop detection...`);
 
             // Dynamic batch size based on frame dimensions to stay under GPU memory limit
             const frameBytes = firstWidth * firstHeight * 16; // Float32 RGBA = 16 bytes/pixel
