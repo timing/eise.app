@@ -267,23 +267,15 @@ export function useImageReader() {
         // - Native formats (PNG, JPEG, etc.): re-read from File on demand
         // - TIFF: re-read from File on demand
         // - FFmpeg-required formats: keep in memory (conversion is expensive, and rare)
-        emit('set-caption', 'Checking images...');
         const rgbaCache = new Map(); // index -> RGBA for FFmpeg-converted files only
-        const validIndices = []; // indices of valid files
+        const failedIndices = new Set(); // indices that failed to load
         let firstWidth = 0, firstHeight = 0;
 
-        // First pass: check dimensions, convert FFmpeg files (kept in memory)
+        // Convert FFmpeg files upfront (expensive, need to cache)
         for (let i = 0; i < frameCount; i++) {
             const file = files[i];
-            const isNative = NATIVE_FORMATS.includes(file.type);
-            const isTiff = isTiffFile(file);
-            const needsFFmpeg = requiresFFmpeg(file);
-
-            try {
-                let width, height;
-
-                if (needsFFmpeg) {
-                    // Convert and keep in memory (FFmpeg conversion is expensive)
+            if (requiresFFmpeg(file)) {
+                try {
                     if (!ffmpegLoaded) {
                         addLog(`Converting ${file.name} using FFmpeg...`);
                         await loadFFmpeg();
@@ -291,35 +283,11 @@ export function useImageReader() {
                     }
                     const pngData = await convertImageToPng(file, ffmpeg, loadFFmpeg);
                     const rgba = await decodeToRgba(pngData);
-                    rgbaCache.set(i, rgba); // Keep FFmpeg results in memory
-                    width = rgba.width;
-                    height = rgba.height;
-                } else if (isTiff) {
-                    // Just get dimensions, re-read later
-                    const rgba = await decodeTiffToRgba(file);
-                    width = rgba.width;
-                    height = rgba.height;
-                } else if (isNative) {
-                    // Just get dimensions, re-read later
-                    const rgba = await decodeFileToRgba(file);
-                    width = rgba.width;
-                    height = rgba.height;
-                } else {
-                    continue; // Unknown format
+                    rgbaCache.set(i, rgba);
+                } catch (error) {
+                    addLog(`Error converting ${file.name}: ${error.message}`);
+                    failedIndices.add(i);
                 }
-
-                if (i === 0) {
-                    firstWidth = width;
-                    firstHeight = height;
-                }
-                validIndices.push(i);
-
-                if (i % 10 === 0) {
-                    emit('update-loading', { progress: (i / frameCount) * 10, current: i, total: frameCount });
-                }
-            } catch (error) {
-                addLog(`Error checking ${file.name}: ${error.message}`);
-                reportError(error, { component: 'useImageReader', action: 'checkImage' });
             }
         }
 
@@ -328,17 +296,11 @@ export function useImageReader() {
             try { ffmpeg.exit(); } catch (e) {}
         }
 
-        const validCount = validIndices.length;
-        addLog(`Found ${validCount}/${frameCount} valid images`);
-
-        if (validCount === 0) {
-            emit('upload-error', 'Failed to load any images. The files may be corrupted or in unsupported formats.');
-            emit('stop-loading');
-            return;
-        }
+        addLog(`${frameCount} images to process`);
 
         // Helper to load a single frame on-demand
         async function loadFrameRgba(index) {
+            if (failedIndices.has(index)) return null;
             // FFmpeg files are cached in memory
             if (rgbaCache.has(index)) {
                 return rgbaCache.get(index);
@@ -352,6 +314,18 @@ export function useImageReader() {
             }
         }
 
+        // Get dimensions from first frame
+        try {
+            const firstRgba = await loadFrameRgba(0);
+            if (!firstRgba) throw new Error('First image failed to load');
+            firstWidth = firstRgba.width;
+            firstHeight = firstRgba.height;
+        } catch (error) {
+            emit('upload-error', `Failed to load first image: ${error.message}`);
+            emit('stop-loading');
+            return;
+        }
+
         // Detect crop region using GPU (loading frames on-demand)
         const MIN_SIZE_FOR_CROP = 300;
         let cropRegion = null;
@@ -361,10 +335,10 @@ export function useImageReader() {
 
             // Sample frames for crop detection
             emit('set-caption', 'Detecting planet position...');
-            const sampleInterval = Math.max(1, Math.floor(validIndices.length / 50));
+            const sampleInterval = Math.max(1, Math.floor(frameCount / 50));
             const sampleIndices = [];
-            for (let i = 0; i < validIndices.length; i += sampleInterval) {
-                sampleIndices.push(validIndices[i]);
+            for (let i = 0; i < frameCount; i += sampleInterval) {
+                sampleIndices.push(i);
             }
 
             addLog(`Sampling ${sampleIndices.length} images for crop detection (GPU)...`);
@@ -451,18 +425,18 @@ export function useImageReader() {
         const frameCenters = new Map(); // Store centers for frameReReader
         let completedFrames = 0;
 
-        for (let batchStart = 0; batchStart < validIndices.length; batchStart += ANALYZE_BATCH_SIZE) {
-            const batchEnd = Math.min(batchStart + ANALYZE_BATCH_SIZE, validIndices.length);
+        for (let batchStart = 0; batchStart < frameCount; batchStart += ANALYZE_BATCH_SIZE) {
+            const batchEnd = Math.min(batchStart + ANALYZE_BATCH_SIZE, frameCount);
 
             // Load frames on-demand for this batch
             const batchFrames = [];
             const batchIndices = [];
             for (let i = batchStart; i < batchEnd; i++) {
-                const idx = validIndices[i];
                 try {
-                    const rgba = await loadFrameRgba(idx);
-                    batchFrames.push({ data: rgba.data, index: idx });
-                    batchIndices.push(idx);
+                    const rgba = await loadFrameRgba(i);
+                    if (!rgba) continue; // Skip failed frames
+                    batchFrames.push({ data: rgba.data, index: i });
+                    batchIndices.push(i);
                 } catch (e) {
                     // Skip failed frames
                 }
@@ -595,9 +569,9 @@ export function useImageReader() {
             }
 
             emit('update-loading', {
-                progress: 30 + (completedFrames / validIndices.length) * 70,
+                progress: 30 + (completedFrames / frameCount) * 70,
                 current: completedFrames,
-                total: validIndices.length
+                total: frameCount
             });
 
             if (bestFrameSoFar && completedFrames % 50 === 0) {
