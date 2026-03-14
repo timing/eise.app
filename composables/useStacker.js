@@ -388,9 +388,8 @@ export function useStacker() {
      *
      * Supports both SER files (raw Bayer) and image files (RGBA)
      * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
-     * @param noiseRobustAlignment - If true, use two-phase alignment (coarse on blurred, fine on original)
      */
-    async function stackWithGpuPipelined(frameMetadata, frameReReader, drizzleScale, addLog, emit, surfaceMode = false, noiseRobustAlignment = false) {
+    async function stackWithGpuPipelined(frameMetadata, frameReReader, drizzleScale, addLog, emit, surfaceMode = false) {
         const frameCount = frameMetadata.length;
         resetStackingStats();
         stackingStats.analysisStartTime = frameReReader.analysisStartTime;
@@ -434,7 +433,7 @@ export function useStacker() {
         // 16-bit sources return float32Buffer from GPU analyze, 8-bit returns uint8Buffer
         const is16bit = isSerFile && frameReReader.header?.pixelDepth > 8;
 
-        addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}${is16bit ? ' (16-bit)' : ''}${noiseRobustAlignment ? ' (two-phase)' : ''}`);
+        addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}${is16bit ? ' (16-bit)' : ''}`);
         emit('set-caption', 'Initializing GPU workers...');
         cancelled = false; // Reset cancellation flag
 
@@ -797,8 +796,7 @@ export function useStacker() {
                             frameWeights: batchWeights,
                             refGrayData,
                             searchRadius,
-                            searchOffset,
-                            noiseRobustAlignment
+                            searchOffset
                         });
                     });
 
@@ -859,8 +857,7 @@ export function useStacker() {
                             alignmentPoints,
                             patchSize,
                             searchRadius,
-                            searchOffset,
-                            noiseRobustAlignment
+                            searchOffset
                         });
                     });
 
@@ -969,12 +966,11 @@ export function useStacker() {
      *                 For two-pass mode: frames may have only metadata (sharpness, centerX, centerY) with no buffer
      * @param existingWorker - Optional: reuse an existing initialized worker
      * @param drizzleScale - Output scale factor (1.0 = normal, 1.5 = drizzle)
-     * @param noiseRobustAlignment - Enable noise-robust alignment
      * @param useWebGPU - Use WebGPU for stacking
      * @param frameReReader - Optional: two-pass mode - re-read frames on demand instead of using pre-loaded buffers
      * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
      */
-    async function stackFramesLocally(frames, existingWorker = null, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, frameReReader = null, surfaceMode = false) {
+    async function stackFramesLocally(frames, existingWorker = null, drizzleScale = 1.5, useWebGPU = false, frameReReader = null, surfaceMode = false) {
         emit('set-caption', 'Preparing for stacking...');
         emit('update-loading', { progress: 0, current: 0, total: 0 });
 
@@ -985,7 +981,7 @@ export function useStacker() {
         if (hasTwoPassFrames && useWebGPU) {
             // Use pipelined approach: load batch → align → stack, while loading next batch
             // Will throw WebGPUUnavailableError if GPU not available - caller should handle
-            return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode, noiseRobustAlignment);
+            return await stackWithGpuPipelined(frames, frameReReader, drizzleScale, addLog, emit, surfaceMode);
         }
 
         // Filter frames that have valid buffer (uint8Buffer preferred, float32Buffer/rgbaBuffer for legacy) and sharpness
@@ -1083,19 +1079,18 @@ export function useStacker() {
         // WebGPU path: orchestrate GPU worker directly from main thread
         // Will throw WebGPUUnavailableError if GPU not available - caller should handle
         if (useWebGPU) {
-            return await stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode, noiseRobustAlignment);
+            return await stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode);
         }
 
         // CPU path: send everything to unified_analyze_worker
-        return await stackWithCPU(frameData, drizzleScale, noiseRobustAlignment, addLog, emit, surfaceMode);
+        return await stackWithCPU(frameData, drizzleScale, addLog, emit, surfaceMode);
     }
 
     /**
      * Stack using WebGPU for template matching (main thread orchestrates)
      * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
-     * @param noiseRobustAlignment - If true, use two-phase alignment (coarse on blurred, fine on original)
      */
-    async function stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode = false, noiseRobustAlignment = false) {
+    async function stackWithWebGPU(frameData, drizzleScale, addLog, emit, surfaceMode = false) {
         const { width, height } = frameData[0];
         resetStackingStats();
 
@@ -1160,7 +1155,7 @@ export function useStacker() {
             const inLiteModeStack = checkLiteModeStack();
             const maxBatchMemory = inLiteModeStack ? (256 * 1024 * 1024) : (512 * 1024 * 1024);
             let batchSize = Math.min(128, Math.max(8, Math.floor(maxBatchMemory / frameBytes)));
-            addLog(`Using batch size ${batchSize} for GPU template matching${inLiteModeStack ? ' (Lite mode)' : ''}${noiseRobustAlignment ? ' (two-phase)' : ''}`);
+            addLog(`Using batch size ${batchSize} for GPU template matching${inLiteModeStack ? ' (Lite mode)' : ''}`);
 
             // Pre-fill reference frame with zero shifts
             frameShifts[refIndex] = alignmentPoints.map(() => ({ dx: 0, dy: 0, quality: 1 }));
@@ -1230,8 +1225,7 @@ export function useStacker() {
                         alignmentPoints,
                         patchSize,
                         searchRadius,
-                        searchOffset,
-                        noiseRobustAlignment
+                        searchOffset
                     });
                 });
                 stackingStats.templateMatchMs.push(performance.now() - t0Match);
@@ -1426,7 +1420,7 @@ export function useStacker() {
      * Stack using CPU (OpenCV) for template matching
      * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
      */
-    async function stackWithCPU(frameData, drizzleScale, noiseRobustAlignment, addLog, emit, surfaceMode = false) {
+    async function stackWithCPU(frameData, drizzleScale, addLog, emit, surfaceMode = false) {
         cancelled = false; // Reset cancellation flag
         return new Promise((resolve, reject) => {
             addLog('Creating fresh worker for stacking...');
@@ -1505,7 +1499,6 @@ export function useStacker() {
                     type: 'stack-frames',
                     frames: frameData,
                     drizzleScale: drizzleScale,
-                    noiseRobustAlignment: noiseRobustAlignment,
                     surfaceMode: surfaceMode
                 }, transferables);
             }

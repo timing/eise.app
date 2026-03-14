@@ -273,14 +273,8 @@ const cropMarginPercent = ref(10);
 const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
-const noiseRobustAlignment = ref(false);
 const minApQuality = ref(0.3); // Alignment point quality threshold (NCC score)
 const apPatchSize = ref(30); // Alignment point patch size in pixels
-// Computed for checkbox binding - shows unchecked when GPU is on
-const noiseRobustAlignmentVisible = computed({
-	get: () => useGPU.value ? false : noiseRobustAlignment.value,
-	set: (val) => { noiseRobustAlignment.value = val; }
-});
 
 // Target type: 'planet' or 'sun-moon' - affects cut-off frame detection
 const targetType = ref('planet');
@@ -290,7 +284,6 @@ const surfaceMode = computed(() => targetType.value === 'sun-moon');
 const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMode.value === '1.5x' ? 1.5 : 1.0));
 const effectiveMaxFrames = computed(() => liteMode.value ? 100 : (enableMaxFrames.value ? selectedMaxFrames.value : -1));
 const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPercent.value);
-const effectiveNoiseRobust = computed(() => (liteMode.value || useGPU.value) ? false : noiseRobustAlignment.value);
 const effectiveQualityMode = computed(() => liteMode.value ? 'percentage' : qualityMode.value);
 const effectiveStackPercentage = computed(() => liteMode.value ? 30 : stackPercentage.value);
 
@@ -306,7 +299,6 @@ function loadSettings() {
 			if (settings.qualityMode) qualityMode.value = settings.qualityMode;
 			if (settings.stackPercentage) stackPercentage.value = settings.stackPercentage;
 			if (settings.drizzleMode) drizzleMode.value = settings.drizzleMode;
-			if (settings.noiseRobustAlignment !== undefined) noiseRobustAlignment.value = settings.noiseRobustAlignment;
 			if (settings.cropMarginPercent) cropMarginPercent.value = settings.cropMarginPercent;
 			if (settings.enableMaxFrames !== undefined) enableMaxFrames.value = settings.enableMaxFrames;
 			if (settings.selectedMaxFrames) selectedMaxFrames.value = settings.selectedMaxFrames;
@@ -326,7 +318,6 @@ function saveSettings() {
 			qualityMode: qualityMode.value,
 			stackPercentage: stackPercentage.value,
 			drizzleMode: drizzleMode.value,
-			noiseRobustAlignment: noiseRobustAlignment.value,
 			cropMarginPercent: cropMarginPercent.value,
 			enableMaxFrames: enableMaxFrames.value,
 			selectedMaxFrames: selectedMaxFrames.value,
@@ -341,7 +332,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMode, noiseRobustAlignment, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMode, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize], saveSettings);
 
 onMounted(async () => {
 	loadSettings();
@@ -717,8 +708,7 @@ async function processFiles(files) {
 			cropMarginPercent: effectiveCropMargin.value,
 			stackPercentage: effectiveStackPercentage.value,
 			drizzleScale: effectiveDrizzleScale.value,
-			noiseRobustAlignment: effectiveNoiseRobust.value,
-			surfaceMode: surfaceMode.value,
+						surfaceMode: surfaceMode.value,
 		});
 		return;
 	}
@@ -755,8 +745,7 @@ async function processFiles(files) {
 				cropMarginPercent: effectiveCropMargin.value,
 				stackPercentage: effectiveStackPercentage.value,
 				drizzleScale: effectiveDrizzleScale.value,
-				noiseRobustAlignment: effectiveNoiseRobust.value,
-				surfaceMode: surfaceMode.value,
+								surfaceMode: surfaceMode.value,
 			});
 			return;
 		}
@@ -800,8 +789,7 @@ async function processFiles(files) {
 						cropMarginPercent: effectiveCropMargin.value,
 						stackPercentage: effectiveStackPercentage.value,
 						drizzleScale: effectiveDrizzleScale.value,
-						noiseRobustAlignment: effectiveNoiseRobust.value,
-						surfaceMode: surfaceMode.value,
+												surfaceMode: surfaceMode.value,
 					});
 					return;
 				}
@@ -809,7 +797,7 @@ async function processFiles(files) {
 				// Non-Bayer AVI: use old reader for uncompressed BGR or MJPEG
 				setTrackingContext({ file_type: 'avi', reader: 'avi', gpu_enabled: useGPU.value });
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, null, surfaceMode.value, formatInfo.aviHeader);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, null, surfaceMode.value, formatInfo.aviHeader);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -968,8 +956,7 @@ async function processFiles(files) {
 				manualThreshold: effectiveQualityMode.value === 'manual',
 				stackPercentage: effectiveStackPercentage.value,
 				drizzleScale: effectiveDrizzleScale.value,
-				noiseRobustAlignment: effectiveNoiseRobust.value,
-				surfaceMode: surfaceMode.value
+								surfaceMode: surfaceMode.value
 			});
 
 		} else {
@@ -1024,7 +1011,7 @@ async function processFiles(files) {
 			// Route PNG frames through FFmpeg reader
 			const { processFFmpegFrames } = useFFmpegReader();
 
-			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
+			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, surfaceMode.value);
 		}
 	
 	} else if (imageFiles.length > 1) {
@@ -1041,7 +1028,7 @@ async function processFiles(files) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveNoiseRobust.value, useGPU.value, surfaceMode.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, surfaceMode.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing

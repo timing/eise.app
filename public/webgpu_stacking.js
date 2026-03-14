@@ -263,6 +263,115 @@ fn main(
 }
 `;
 
+// Gaussian blur shader for packed u8 grayscale - suppresses demosaic artifacts before template matching
+// 5x5 Gaussian kernel applied to packed u8 data (4 pixels per u32)
+// Skips blur near black pixels to preserve limb edges
+const blurPackedShaderCode = `
+struct BlurParams {
+    width: u32,
+    height: u32,
+    numFrames: u32,
+    padding: u32,
+}
+
+const BLACK_THRESHOLD: u32 = 12u;  // Skip blur if any neighbor is below this
+
+@group(0) @binding(0) var<uniform> params: BlurParams;
+@group(0) @binding(1) var<storage, read> inputPacked: array<u32>;
+@group(0) @binding(2) var<storage, read_write> outputPacked: array<u32>;
+
+fn sampleInput(frameIdx: u32, x: i32, y: i32) -> u32 {
+    let cx = clamp(x, 0, i32(params.width) - 1);
+    let cy = clamp(y, 0, i32(params.height) - 1);
+    let frameSize = params.width * params.height;
+    let pixelIdx = frameIdx * frameSize + u32(cy) * params.width + u32(cx);
+    let packedIdx = pixelIdx >> 2u;
+    let byteOffset = (pixelIdx & 3u) << 3u;
+    return (inputPacked[packedIdx] >> byteOffset) & 0xFFu;
+}
+
+// Check if 5x5 neighborhood has any near-black pixels
+fn hasNearBlack(frameIdx: u32, x: i32, y: i32) -> bool {
+    for (var dy: i32 = -2; dy <= 2; dy++) {
+        for (var dx: i32 = -2; dx <= 2; dx++) {
+            if (sampleInput(frameIdx, x + dx, y + dy) < BLACK_THRESHOLD) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Apply 5x5 Gaussian blur at a single pixel
+fn blurPixel(frameIdx: u32, x: i32, y: i32) -> u32 {
+    // Skip blur near black pixels (preserves limb edges)
+    if (hasNearBlack(frameIdx, x, y)) {
+        return sampleInput(frameIdx, x, y);
+    }
+
+    var sum: u32 = 0u;
+    // Row -2: [1, 4, 6, 4, 1]
+    sum += sampleInput(frameIdx, x - 2, y - 2) * 1u;
+    sum += sampleInput(frameIdx, x - 1, y - 2) * 4u;
+    sum += sampleInput(frameIdx, x,     y - 2) * 6u;
+    sum += sampleInput(frameIdx, x + 1, y - 2) * 4u;
+    sum += sampleInput(frameIdx, x + 2, y - 2) * 1u;
+    // Row -1: [4, 16, 24, 16, 4]
+    sum += sampleInput(frameIdx, x - 2, y - 1) * 4u;
+    sum += sampleInput(frameIdx, x - 1, y - 1) * 16u;
+    sum += sampleInput(frameIdx, x,     y - 1) * 24u;
+    sum += sampleInput(frameIdx, x + 1, y - 1) * 16u;
+    sum += sampleInput(frameIdx, x + 2, y - 1) * 4u;
+    // Row 0: [6, 24, 36, 24, 6]
+    sum += sampleInput(frameIdx, x - 2, y) * 6u;
+    sum += sampleInput(frameIdx, x - 1, y) * 24u;
+    sum += sampleInput(frameIdx, x,     y) * 36u;
+    sum += sampleInput(frameIdx, x + 1, y) * 24u;
+    sum += sampleInput(frameIdx, x + 2, y) * 6u;
+    // Row +1: [4, 16, 24, 16, 4]
+    sum += sampleInput(frameIdx, x - 2, y + 1) * 4u;
+    sum += sampleInput(frameIdx, x - 1, y + 1) * 16u;
+    sum += sampleInput(frameIdx, x,     y + 1) * 24u;
+    sum += sampleInput(frameIdx, x + 1, y + 1) * 16u;
+    sum += sampleInput(frameIdx, x + 2, y + 1) * 4u;
+    // Row +2: [1, 4, 6, 4, 1]
+    sum += sampleInput(frameIdx, x - 2, y + 2) * 1u;
+    sum += sampleInput(frameIdx, x - 1, y + 2) * 4u;
+    sum += sampleInput(frameIdx, x,     y + 2) * 6u;
+    sum += sampleInput(frameIdx, x + 1, y + 2) * 4u;
+    sum += sampleInput(frameIdx, x + 2, y + 2) * 1u;
+    return sum >> 8u;  // Divide by 256
+}
+
+@compute @workgroup_size(256, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let totalPacked = (params.width * params.height * params.numFrames + 3u) / 4u;
+    let packedIdx = gid.x;
+
+    if (packedIdx >= totalPacked) {
+        return;
+    }
+
+    let frameSize = params.width * params.height;
+    let pixelIdx0 = packedIdx * 4u;
+    let frameIdx = pixelIdx0 / frameSize;
+    let localIdx0 = pixelIdx0 % frameSize;
+
+    var result: u32 = 0u;
+    for (var i: u32 = 0u; i < 4u; i++) {
+        let localIdx = localIdx0 + i;
+        if (localIdx < frameSize) {
+            let x = i32(localIdx % params.width);
+            let y = i32(localIdx / params.width);
+            let blurred = blurPixel(frameIdx, x, y);
+            result |= (blurred & 0xFFu) << (i * 8u);
+        }
+    }
+
+    outputPacked[packedIdx] = result;
+}
+`;
+
 // Single-frame warp shader that reads shifts/brightness from GPU buffers
 // Fully GPU-resident: no CPU readback of shifts or brightness
 // Dispatched once per frame to avoid accumulator race conditions
@@ -453,6 +562,7 @@ let warpBatchPipeline = null;  // New: fully GPU-resident batch warp
 let accumulatePipeline = null;
 let nccBatchPipeline = null;  // Template matching on same device
 let brightnessPipeline = null;  // Brightness reduction on same device
+let blurPackedPipeline = null;  // Blur for suppressing demosaic artifacts
 let isStackingReady = false;
 let stackDeviceLost = false; // Track if GPU device was lost
 let stackReinitializing = false;
@@ -830,6 +940,16 @@ async function initStackingGPU() {
             compute: { module: brightnessShaderModule, entryPoint: 'main' }
         });
 
+        // Blur pipeline for suppressing demosaic artifacts in grayscale
+        const blurPackedShaderModule = stackDevice.createShaderModule({
+            code: blurPackedShaderCode
+        });
+
+        blurPackedPipeline = stackDevice.createComputePipeline({
+            layout: 'auto',
+            compute: { module: blurPackedShaderModule, entryPoint: 'main' }
+        });
+
         // Fully GPU-resident batch warp+accumulate pipeline
         const warpBatchShaderModule = stackDevice.createShaderModule({
             code: warpAccumulateBatchShader
@@ -842,7 +962,7 @@ async function initStackingGPU() {
 
         isStackingReady = true;
         stackDeviceLost = false;
-        console.log('WebGPU stacking initialized (with VNG demosaic + NCC matching + brightness + batch warp)');
+        console.log('WebGPU stacking initialized (with VNG demosaic + blur + NCC matching + brightness + batch warp)');
         return true;
     } catch (e) {
         console.error('WebGPU stacking init error:', e);
@@ -1722,6 +1842,12 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
     new Float32Array(paramsData)[6] = scale;
     stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
 
+    // Create blurred grayscale buffer (blur suppresses demosaic artifacts for template matching)
+    const blurredGrayBuffer = stackDevice.createBuffer({
+        size: grayOutputSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+
     // Run VNG demosaic
     const encoder = stackDevice.createCommandEncoder();
     encoder.clearBuffer(grayGpuBuffer, 0, grayOutputSize);
@@ -1737,25 +1863,53 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
         ]
     });
 
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(vngCropPipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(
+    const vngPass = encoder.beginComputePass();
+    vngPass.setPipeline(vngCropPipeline);
+    vngPass.setBindGroup(0, bindGroup);
+    vngPass.dispatchWorkgroups(
         Math.ceil(cropSize / 16),
         Math.ceil(cropSize / 16),
         batchSize
     );
-    pass.end();
+    vngPass.end();
+
+    // Apply 5x5 Gaussian blur to suppress demosaic artifacts before template matching
+    const blurParamsBuffer = stackDevice.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
+
+    const blurBindGroup = stackDevice.createBindGroup({
+        layout: blurPackedPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: blurParamsBuffer } },
+            { binding: 1, resource: { buffer: grayGpuBuffer } },
+            { binding: 2, resource: { buffer: blurredGrayBuffer } }
+        ]
+    });
+
+    const packedSize = Math.ceil((cropSize * cropSize * batchSize) / 4);
+    const blurWorkgroups = Math.ceil(packedSize / 256);
+
+    const blurPass = encoder.beginComputePass();
+    blurPass.setPipeline(blurPackedPipeline);
+    blurPass.setBindGroup(0, blurBindGroup);
+    blurPass.dispatchWorkgroups(blurWorkgroups, 1, 1);
+    blurPass.end();
 
     stackQueue.submit([encoder.finish()]);
 
-    // Cleanup temp buffers (but keep rgbaGpuBuffer and grayGpuBuffer!)
+    // Cleanup temp buffers (but keep rgbaGpuBuffer and blurredGrayBuffer!)
     paramsBuffer.destroy();
     inputBuffer.destroy();
     centersBuffer.destroy();
+    blurParamsBuffer.destroy();
+    grayGpuBuffer.destroy();  // Original unblurred - no longer needed
 
     // Return GPU buffer handles - caller must destroy after use
-    return { rgbaGpuBuffer, grayGpuBuffer, batchSize, cropSize };
+    // Note: grayGpuBuffer is now the BLURRED version for better template matching
+    return { rgbaGpuBuffer, grayGpuBuffer: blurredGrayBuffer, batchSize, cropSize };
 }
 
 /**

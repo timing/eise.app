@@ -212,7 +212,7 @@ export function useImageReader() {
         return data;
     }
 
-    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
+    async function readImageFiles(files, ffmpeg, loadFFmpeg, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, useWebGPU = false, surfaceMode = false) {
         // Initialize GPU worker
         const gpuOk = await initializeGpuWorker();
         if (!gpuOk) {
@@ -664,7 +664,6 @@ export function useImageReader() {
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: null, // Not using CPU workers
-                noiseRobustAlignment,
                 useWebGPU: true,
                 drizzleScale,
                 frameReReader
@@ -673,7 +672,7 @@ export function useImageReader() {
         }
 
         // Automatic stacking
-        const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, frameReReader, surfaceMode);
+        const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, true, frameReReader, surfaceMode);
 
         // Cleanup
         gpuWorker.terminate();

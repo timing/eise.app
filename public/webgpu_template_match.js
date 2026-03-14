@@ -844,9 +844,8 @@ reinitializeMatchGpu = async function() {
  * Much more efficient than calling matchTemplatesGPU for each frame
  * @param searchOffset - Optional {dx, dy} to offset search region in frames (for drift tracking)
  *                       Templates are always extracted from original AP positions in reference
- * @param noiseRobustAlignment - If true, use two-phase alignment (coarse on blurred, fine on original)
  */
-async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset = null, noiseRobustAlignment = false) {
+async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset = null) {
     if (!isInitialized) {
         const ok = await initWebGPU();
         if (!ok) return null;
@@ -860,8 +859,6 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
     const MAX_WORKGROUPS_X = 65535;
     const maxFramesPerBatch = Math.floor(MAX_WORKGROUPS_X / numAPs);
 
-    // noiseRobustAlignment currently disabled for GPU - no benefit observed in testing
-    // Just use standard matching
     const effectivePatchSize = patchSize;
     const matchFn = matchTemplatesBatchGPUSimple;
 
@@ -871,7 +868,7 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
     }
 
     // Need to batch frames to stay within workgroup limits
-    console.log(`Template matching: batching ${numFrames} frames into chunks of ${maxFramesPerBatch} (${numAPs} APs)${noiseRobustAlignment ? ' (larger patches)' : ''}`);
+    console.log(`Template matching: batching ${numFrames} frames into chunks of ${maxFramesPerBatch} (${numAPs} APs)`);
 
     const allShifts = [];
 

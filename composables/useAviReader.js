@@ -669,7 +669,7 @@ export function useAviReader() {
     }
 
 
-    async function readAviFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, preloadedBuffer = null, surfaceMode = false, preParsedHeader = null) {
+    async function readAviFile(file, maxFrames = -1, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, useWebGPU = false, preloadedBuffer = null, surfaceMode = false, preParsedHeader = null) {
         // Reset comparison export captures for new processing
         resetCaptures();
         cancelled = false; // Reset cancellation flag for new processing
@@ -703,7 +703,7 @@ export function useAviReader() {
         if (isMjpegFourCC(aviHeader.fourCC)) {
             // MJPEG uses GPU path with native JPEG decoding
             addLog(`MJPEG AVI detected. Using GPU processing with native JPEG decoding.`);
-            return await readMjpegAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode);
+            return await readMjpegAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, surfaceMode);
         }
 
         // Note: 8-bit raw Bayer (Y800, 8-bit DIB) is now handled by useDebayerReader
@@ -960,7 +960,6 @@ export function useAviReader() {
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: unifiedAnalyzeWorkers,
-                noiseRobustAlignment,
                 useWebGPU,
                 drizzleScale,
                 frameReReader: null // AVI frames already have uint8Buffer loaded
@@ -996,7 +995,7 @@ export function useAviReader() {
         addLog(`Starting client-side stacking of ${bestFramesForStacking.length} frames`);
 
         const stackingWorker = unifiedAnalyzeWorkers[0];
-        const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, noiseRobustAlignment, useWebGPU, null, surfaceMode);
+        const stackResult = await stackFramesLocally(bestFramesForStacking, stackingWorker, drizzleScale, useWebGPU, null, surfaceMode);
 
         if (stackResult && stackResult.blob) {
             addLog('Client-side stacking complete');
@@ -1127,7 +1126,7 @@ export function useAviReader() {
     // See useDebayerReader.js for the new unified implementation.
 
     // Process MJPEG AVI file with GPU acceleration
-    async function readMjpegAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, noiseRobustAlignment, surfaceMode = false) {
+    async function readMjpegAviFile(file, aviHeader, maxFrames, manualThreshold, cropMarginPercent, stackPercentage, drizzleScale, surfaceMode = false) {
         resetCaptures();
 
         // Initialize GPU worker
@@ -1441,7 +1440,6 @@ export function useAviReader() {
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: null,
-                noiseRobustAlignment,
                 useWebGPU: true,
                 drizzleScale,
                 frameReReader
@@ -1450,7 +1448,7 @@ export function useAviReader() {
         }
 
         // Automatic stacking
-        const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, noiseRobustAlignment, true, frameReReader, surfaceMode);
+        const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, true, frameReReader, surfaceMode);
 
         // Cleanup
         terminateGpuWorker();

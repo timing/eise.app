@@ -120,7 +120,7 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { requestId, refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset, noiseRobustAlignment } = e.data;
+        const { requestId, refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset } = e.data;
 
         try {
             const allShifts = await matchTemplatesBatchGPU(
@@ -131,8 +131,7 @@ self.addEventListener('message', async (e) => {
                 alignmentPoints,
                 patchSize,
                 searchRadius,
-                searchOffset,
-                noiseRobustAlignment
+                searchOffset
             );
 
             if (allShifts) {
@@ -242,9 +241,9 @@ self.addEventListener('message', async (e) => {
     //   - frames[].data (Uint8Array or Uint16Array) - full-size raw Bayer
     //   - centers[] - per-frame crop centers {x, y}
     //   - refGrayData - reference frame grayscale for template matching
-    //   - searchRadius, searchOffset, noiseRobustAlignment - template matching params
+    //   - searchRadius, searchOffset - template matching params
     if (type === 'stack-frame-batch') {
-        const { frames, centers, frameWeights, refGrayData, searchRadius, searchOffset, noiseRobustAlignment } = e.data;
+        const { frames, centers, frameWeights, refGrayData, searchRadius, searchOffset } = e.data;
         const ctx = stackingContext;
 
         if (!ctx) {

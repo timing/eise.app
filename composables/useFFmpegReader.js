@@ -375,7 +375,7 @@ export function useFFmpegReader() {
      * Process FFmpeg-extracted PNG frames using GPU (normal mode)
      * Called after FFmpeg has extracted all frames to PNG files
      */
-    async function processFFmpegFrames(ffmpeg, pngFilenames, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, noiseRobustAlignment = false, useWebGPU = false, surfaceMode = false) {
+    async function processFFmpegFrames(ffmpeg, pngFilenames, manualThreshold = false, cropMarginPercent = 10, stackPercentage = 30, drizzleScale = 1.5, useWebGPU = false, surfaceMode = false) {
         resetCaptures();
         cancelled = false; // Reset cancellation flag
 
@@ -670,7 +670,6 @@ export function useFFmpegReader() {
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: null, // GPU path doesn't use CPU workers
-                noiseRobustAlignment,
                 useWebGPU: true,
                 drizzleScale,
                 frameReReader: null,
@@ -711,7 +710,6 @@ export function useFFmpegReader() {
             bestFramesForStacking,
             null, // No CPU worker needed for GPU path
             drizzleScale,
-            noiseRobustAlignment,
             true, // Always use WebGPU since we're in GPU path
             cropRegion ? frameCenters : null,
             surfaceMode
@@ -745,7 +743,6 @@ export function useFFmpegReader() {
             manualThreshold = false,
             stackPercentage = 30,
             drizzleScale = 1.0,
-            noiseRobustAlignment = false,
             surfaceMode = false
         } = options;
 
@@ -1015,7 +1012,6 @@ export function useFFmpegReader() {
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: liteWorkers,
-                noiseRobustAlignment,
                 useWebGPU: false,
                 drizzleScale,
                 frameReReader: null
@@ -1026,7 +1022,7 @@ export function useFFmpegReader() {
         emit('set-caption', 'Stacking frames...');
         addLog(`Stacking ${bestFramesForStacking.length} frames`);
 
-        const stackResult = await stackFramesLocally(bestFramesForStacking, liteWorkers[0], drizzleScale, noiseRobustAlignment, false, null, surfaceMode);
+        const stackResult = await stackFramesLocally(bestFramesForStacking, liteWorkers[0], drizzleScale, false, null, surfaceMode);
 
         liteWorkers.forEach(w => w.terminate());
 

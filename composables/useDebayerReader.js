@@ -766,7 +766,6 @@ export function useDebayerReader() {
             cropMarginPercent = 10,
             stackPercentage = 30,
             drizzleScale = 1.5,
-            noiseRobustAlignment = false,
             surfaceMode = false,
         } = options;
 
@@ -1195,7 +1194,6 @@ export function useDebayerReader() {
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
                 workers: [], // GPU mode creates its own workers
-                noiseRobustAlignment,
                 useWebGPU: true,
                 drizzleScale,
                 frameReReader,
@@ -1235,7 +1233,6 @@ export function useDebayerReader() {
             bestFramesForStacking,
             null, // reference frame (auto)
             drizzleScale,
-            noiseRobustAlignment,
             true, // useWebGPU
             frameReReader,
             surfaceMode

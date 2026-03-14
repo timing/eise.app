@@ -30,7 +30,6 @@ const isSelectingColorProfile = ref(false);
 const isSelectingQuality = ref(false);
 const qualityFrames = ref([]);
 const qualityWorkers = ref(null);
-const qualityNoiseRobust = ref(false);
 const qualityUseWebGPU = ref(false);
 const qualityFrameReReader = ref(null);
 const qualityDrizzleScale = ref(1.5);
@@ -183,7 +182,6 @@ onMounted(async () => {
 function handleQualitySelectionReady(data) {
 	qualityFrames.value = data.frames;
 	qualityWorkers.value = data.workers;
-	qualityNoiseRobust.value = data.noiseRobustAlignment || false;
 	qualityUseWebGPU.value = data.useWebGPU || false;
 	qualityFrameReReader.value = data.frameReReader || null;
 	qualityDrizzleScale.value = data.drizzleScale || 1.0;
@@ -210,7 +208,7 @@ async function handleThresholdSelected(data) {
 		const stackingWorker = hasValidWorkers ? qualityWorkers.value[0] : null;
 
 		try {
-			const stackResult = await stackFramesLocally(data.frames, stackingWorker, qualityDrizzleScale.value, qualityNoiseRobust.value, qualityUseWebGPU.value, qualityFrameReReader.value);
+			const stackResult = await stackFramesLocally(data.frames, stackingWorker, qualityDrizzleScale.value, qualityUseWebGPU.value, qualityFrameReReader.value);
 
 			if (hasValidWorkers) {
 				qualityWorkers.value.forEach(worker => worker.terminate());
@@ -240,7 +238,6 @@ async function handleThresholdSelected(data) {
 					stackingWorker,
 					hasValidWorkers,
 					drizzleScale: qualityDrizzleScale.value,
-					noiseRobust: qualityNoiseRobust.value,
 					frameReReader: qualityFrameReReader.value
 				};
 				showWebGPUChoice.value = true;
@@ -277,7 +274,6 @@ async function handleWebGPUContinueCPU() {
 			data.frames,
 			data.stackingWorker,
 			data.drizzleScale,
-			data.noiseRobust,
 			false,
 			data.frameReReader
 		);

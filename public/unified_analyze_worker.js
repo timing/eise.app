@@ -105,9 +105,9 @@ async function handleMessage(e) {
 
         // Frame stacking with local alignment (CPU path)
         if (type === 'stack-frames') {
-            const { frames, drizzleScale = 1.0, noiseRobustAlignment = false, surfaceMode = false } = e.data;
+            const { frames, drizzleScale = 1.0, surfaceMode = false } = e.data;
             try {
-                const result = await stackFramesLocally(frames, drizzleScale, noiseRobustAlignment, surfaceMode);
+                const result = await stackFramesLocally(frames, drizzleScale, surfaceMode);
                 // Transfer float32Data buffer for zero-copy
                 const transferables = result.float32Data ? [result.float32Data.buffer] : [];
                 self.postMessage({
@@ -1971,9 +1971,9 @@ async function stackWithPrecomputedShifts(frames, frameShifts, alignmentPoints, 
  * @param drizzleScale - Output scale factor (1.0 = normal, 1.5 = drizzle)
  * @param surfaceMode - If true, use larger search radius for Moon/Sun surface alignment
  */
-async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignment = false, surfaceMode = false) {
+async function stackFramesLocally(frames, drizzleScale = 1.0, surfaceMode = false) {
     // Track resources for cleanup on error
-    let refMat = null, refGray = null, refGrayBlurred = null, mapX = null, mapY = null;
+    let refMat = null, refGray = null, mapX = null, mapY = null;
 
     try {
         self.postMessage({ type: 'stack-progress', stage: 'Preparing frames...', progress: 0 });
@@ -2082,13 +2082,6 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
                 refGray = new _cv.Mat();
                 _cv.cvtColor(refMat, refGray, _cv.COLOR_RGBA2GRAY);
 
-                // Create blurred version for noise-robust coarse alignment (PSS-style) - only if enabled
-                if (noiseRobustAlignment) {
-                    refGrayBlurred = new _cv.Mat();
-                    const ksize = new _cv.Size(5, 5); // 5x5 Gaussian kernel
-                    _cv.GaussianBlur(refGray, refGrayBlurred, ksize, 0);
-                }
-
                 lastError = null;
                 break; // Success!
             } catch (e) {
@@ -2160,7 +2153,7 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
             const frameData = float32ToUint8(frame.float32Buffer); // Convert for OpenCV
 
             // CPU path: OpenCV template matching
-            let frameMat = null, frameGray = null, frameGrayBlurred = null;
+            let frameMat = null, frameGray = null;
             try {
                 // Try to create Mat with fallback
                 try {
@@ -2176,21 +2169,13 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
                 frameGray = new _cv.Mat();
                 _cv.cvtColor(frameMat, frameGray, _cv.COLOR_RGBA2GRAY);
 
-                // Create blurred version for noise-robust coarse alignment - only if enabled
-                if (noiseRobustAlignment) {
-                    frameGrayBlurred = new _cv.Mat();
-                    const ksize = new _cv.Size(5, 5);
-                    _cv.GaussianBlur(frameGray, frameGrayBlurred, ksize, 0);
-                }
-
                 const shifts = [];
                 // Surface mode: pass expected drift to offset search regions
                 const expectedShift = surfaceMode ? cumulativeDrift : null;
 
                 for (let a = 0; a < activeAPs.length; a++) {
                     const ap = activeAPs[a];
-                    // Two-phase alignment: coarse on blurred, fine on original
-                    const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius, refGrayBlurred, frameGrayBlurred, expectedShift);
+                    const shift = findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius, expectedShift);
                     shifts.push(shift);
                 }
                 frameShifts[f] = shifts;
@@ -2221,7 +2206,6 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
                 throw new Error(`Frame ${f} alignment error: ${errMsg}`);
             } finally {
                 // Always clean up Mats
-                if (frameGrayBlurred) try { frameGrayBlurred.delete(); } catch(e) {}
                 if (frameGray) try { frameGray.delete(); } catch(e) {}
                 if (frameMat) try { frameMat.delete(); } catch(e) {}
             }
@@ -2236,13 +2220,9 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, noiseRobustAlignme
         }
 
         // Clean up reference Mats after alignment phase
-        if (refGrayBlurred) { refGrayBlurred.delete(); refGrayBlurred = null; }
         if (refGray) { refGray.delete(); refGray = null; }
         if (refMat) { refMat.delete(); refMat = null; }
-        const modeInfo = [
-            noiseRobustAlignment ? 'two-phase' : null,
-            surfaceMode ? `surface mode, total drift: ${cumulativeDrift.dx.toFixed(1)},${cumulativeDrift.dy.toFixed(1)}px` : null
-        ].filter(Boolean).join(', ');
+        const modeInfo = surfaceMode ? `surface mode, total drift: ${cumulativeDrift.dx.toFixed(1)},${cumulativeDrift.dy.toFixed(1)}px` : null;
         console.log(`Alignment complete${modeInfo ? ` (${modeInfo})` : ''}`);
 
         // === Stack with LOCAL de-warping ===
@@ -2611,12 +2591,10 @@ function buildDisplacementMaps(mapX, mapY, outWidth, outHeight, alignmentPoints,
 }
 
 /**
- * Two-phase AP alignment (PSS-style):
- * Phase 1: Match on blurred images (robust to noise, finds coarse shift)
- * Phase 2: Refine on original images (precise alignment)
+ * AP alignment using template matching
  * @param expectedShift - Optional {dx, dy} for surface mode drift tracking (offsets search region)
  */
-function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius, refGrayBlurred = null, frameGrayBlurred = null, expectedShift = null) {
+function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, searchRadius, expectedShift = null) {
     const halfPatch = Math.floor(patchSize / 2);
 
     // Apply expected shift offset for drift tracking (surface mode)
@@ -2640,50 +2618,15 @@ function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, se
     }
 
     let templateMat = null, searchMat = null, resultMat = null;
-    let templateMatBlur = null, searchMatBlur = null, resultMatBlur = null;
 
     try {
-        let coarseDx = 0, coarseDy = 0;
-
-        // PHASE 1: Coarse alignment on blurred images (if available)
-        if (refGrayBlurred && frameGrayBlurred) {
-            templateMatBlur = refGrayBlurred.roi(new _cv.Rect(templateX, templateY, patchSize, patchSize));
-            searchMatBlur = frameGrayBlurred.roi(new _cv.Rect(searchX, searchY, searchSize, searchSize));
-
-            resultMatBlur = new _cv.Mat();
-            _cv.matchTemplate(searchMatBlur, templateMatBlur, resultMatBlur, _cv.TM_CCOEFF_NORMED);
-
-            const minMaxBlur = _cv.minMaxLoc(resultMatBlur);
-            coarseDx = minMaxBlur.maxLoc.x - searchRadius;
-            coarseDy = minMaxBlur.maxLoc.y - searchRadius;
-
-            // Clean up phase 1
-            templateMatBlur.delete(); templateMatBlur = null;
-            searchMatBlur.delete(); searchMatBlur = null;
-            resultMatBlur.delete(); resultMatBlur = null;
-        }
-
-        // PHASE 2: Fine alignment on original images
-        // Use coarse shift to narrow search area (±2 pixels around coarse result)
-        const fineSearchRadius = refGrayBlurred ? 2 : searchRadius;
-        const fineSearchX = searchX + coarseDx + searchRadius - fineSearchRadius;
-        const fineSearchY = searchY + coarseDy + searchRadius - fineSearchRadius;
-        const fineSearchSize = patchSize + fineSearchRadius * 2;
-
-        // Bounds check for fine search
-        if (fineSearchX < 0 || fineSearchY < 0 ||
-            fineSearchX + fineSearchSize > width || fineSearchY + fineSearchSize > height) {
-            // Fall back to coarse result
-            return { dx: coarseDx, dy: coarseDy, quality: 0.5 };
-        }
-
         // Extract template from reference (the patch we're looking for)
         templateMat = refGray.roi(new _cv.Rect(templateX, templateY, patchSize, patchSize));
 
-        // Extract search region from frame (narrowed by coarse alignment)
-        searchMat = frameGray.roi(new _cv.Rect(fineSearchX, fineSearchY, fineSearchSize, fineSearchSize));
+        // Extract search region from frame
+        searchMat = frameGray.roi(new _cv.Rect(searchX, searchY, searchSize, searchSize));
 
-        // Run template matching on original (sharp) data
+        // Run template matching
         resultMat = new _cv.Mat();
         _cv.matchTemplate(searchMat, templateMat, resultMat, _cv.TM_CCOEFF_NORMED);
 
@@ -2692,11 +2635,9 @@ function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, se
         const bestLoc = minMax.maxLoc;
         const quality = minMax.maxVal;
 
-        // Calculate final shift (coarse + fine refinement)
-        const fineDx = bestLoc.x - fineSearchRadius;
-        const fineDy = bestLoc.y - fineSearchRadius;
-        const dx = coarseDx + fineDx;
-        const dy = coarseDy + fineDy;
+        // Calculate shift
+        const dx = bestLoc.x - searchRadius;
+        const dy = bestLoc.y - searchRadius;
 
         return { dx, dy, quality: Math.max(0, quality) };
 
@@ -2707,9 +2648,6 @@ function findLocalShiftFast(refGray, frameGray, width, height, ap, patchSize, se
         if (templateMat) try { templateMat.delete(); } catch(e) {}
         if (searchMat) try { searchMat.delete(); } catch(e) {}
         if (resultMat) try { resultMat.delete(); } catch(e) {}
-        if (templateMatBlur) try { templateMatBlur.delete(); } catch(e) {}
-        if (searchMatBlur) try { searchMatBlur.delete(); } catch(e) {}
-        if (resultMatBlur) try { resultMatBlur.delete(); } catch(e) {}
     }
 }
 
