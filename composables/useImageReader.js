@@ -440,32 +440,29 @@ export function useImageReader() {
         const frameCenters = new Map(); // Store centers for frameReReader
         let completedFrames = 0;
 
-        // Generate all indices upfront
+        // Generate all valid indices upfront (excludes failed FFmpeg conversions)
         const allIndices = [];
         for (let i = 0; i < frameCount; i++) {
             if (!failedIndices.has(i)) allIndices.push(i);
         }
 
-        // Prefetch first batch
+        // Prefetch first batch (position-based slicing on allIndices)
         let nextBatchPromise = loadBatchParallel(allIndices.slice(0, ANALYZE_BATCH_SIZE));
 
-        for (let batchStart = 0; batchStart < frameCount; batchStart += ANALYZE_BATCH_SIZE) {
-            const batchEnd = Math.min(batchStart + ANALYZE_BATCH_SIZE, frameCount);
+        for (let pos = 0; pos < allIndices.length; pos += ANALYZE_BATCH_SIZE) {
+            const posEnd = Math.min(pos + ANALYZE_BATCH_SIZE, allIndices.length);
 
             // Wait for current batch (already loading or prefetched)
             const batchFrames = await nextBatchPromise;
             const batchIndices = batchFrames.map(f => f.index);
 
             // Start loading next batch while GPU processes current
-            const nextStart = batchEnd;
-            if (nextStart < frameCount) {
-                const nextEnd = Math.min(nextStart + ANALYZE_BATCH_SIZE, frameCount);
-                const nextIndices = allIndices.filter(i => i >= nextStart && i < nextEnd);
-                nextBatchPromise = loadBatchParallel(nextIndices);
+            if (posEnd < allIndices.length) {
+                const nextPosEnd = Math.min(posEnd + ANALYZE_BATCH_SIZE, allIndices.length);
+                nextBatchPromise = loadBatchParallel(allIndices.slice(posEnd, nextPosEnd));
             }
 
             if (batchFrames.length === 0) {
-                completedFrames += (batchEnd - batchStart);
                 continue;
             }
 
