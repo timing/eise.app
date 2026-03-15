@@ -7,15 +7,19 @@
 			<nav class="tabs">
 				<NuxtLink to="/" :class="{ active: route.path === '/' }">Stack</NuxtLink>
 				<NuxtLink to="/post-processor/" :class="{ active: route.path.startsWith('/post-processor') }">Post Processor</NuxtLink>
-				<NuxtLink to="/tools/" :class="{ active: route.path.startsWith('/tools') }">Tools</NuxtLink>
-				<div class="dropdown" :class="{ active: route.path.startsWith('/about'), open: aboutDropdownOpen }">
-					<span class="dropdown-toggle" @click="aboutDropdownOpen = !aboutDropdownOpen">About <span class="dropdown-arrow">▾</span></span>
-					<div class="dropdown-backdrop" @click="aboutDropdownOpen = false"></div>
-					<div class="dropdown-menu">
-						<NuxtLink to="/about/" @click="aboutDropdownOpen = false">About eise.app</NuxtLink>
-						<NuxtLink to="/about/help/" @click="aboutDropdownOpen = false">Help & How it Works</NuxtLink>
-						<NuxtLink to="/about/architecture/" @click="aboutDropdownOpen = false">Technical Architecture</NuxtLink>
-						<NuxtLink to="/about/planetary-stacking-software-comparison/" @click="aboutDropdownOpen = false">Stacking Software Comparison</NuxtLink>
+				<NuxtLink to="/download/" :class="{ active: route.path.startsWith('/download') }">Download</NuxtLink>
+				<div class="hamburger-menu" :class="{ open: menuOpen }">
+					<button class="hamburger-toggle" @click="menuOpen = !menuOpen" aria-label="Menu">
+						<span class="hamburger-icon">☰</span>
+					</button>
+					<div class="menu-backdrop" @click="menuOpen = false"></div>
+					<div class="menu-dropdown">
+						<NuxtLink to="/about/" @click="menuOpen = false">About eise.app</NuxtLink>
+						<NuxtLink to="/about/help/" @click="menuOpen = false">Help & How it Works</NuxtLink>
+						<NuxtLink to="/about/architecture/" @click="menuOpen = false">Technical Architecture</NuxtLink>
+						<NuxtLink to="/about/planetary-stacking-software-comparison/" @click="menuOpen = false">Stacking Software Comparison</NuxtLink>
+						<div class="menu-divider"></div>
+						<NuxtLink to="/tools/" @click="menuOpen = false">SER Tools</NuxtLink>
 					</div>
 				</div>
 			</nav>
@@ -33,45 +37,38 @@
 import Logger from '@/components/Logger.vue';
 
 const route = useRoute();
-const aboutDropdownOpen = ref(false);
+const menuOpen = ref(false);
 
-// Close dropdown when route changes
+// Close menu when route changes
 watch(() => route.path, () => {
-	aboutDropdownOpen.value = false;
+	menuOpen.value = false;
 });
 </script>
 
 <style scoped>
-.dropdown {
+.hamburger-menu {
 	position: relative;
 	display: inline-block;
+	vertical-align: top;
 }
-.dropdown-toggle {
-	/* Match .tabs a styling from app.vue */
+.hamburger-toggle {
 	background-color: #fefefe;
 	border: none;
 	color: #333;
-	padding: 10px 20px;
+	padding: 8px 15px 10px 15px;
 	cursor: pointer;
 	transition: background-color 0.3s;
-	text-decoration: none;
-	border-radius: 0;
-	border-right: 1px solid #ccc;
-	font-weight: bold;
-	display: inline-block;
+	font-size: 18px;
+	line-height: 1;
+	vertical-align: top;
 }
-.dropdown-toggle:hover {
+.hamburger-toggle:hover {
 	background-color: #70f1ec;
 }
-.dropdown.active .dropdown-toggle {
-	background-color: #8CCF7E;
-	color: #111;
+.hamburger-menu.open .hamburger-toggle {
+	background-color: #70f1ec;
 }
-.dropdown-arrow {
-	font-size: 0.8em;
-	margin-left: 4px;
-}
-.dropdown-backdrop {
+.menu-backdrop {
 	position: fixed;
 	top: 0;
 	left: 0;
@@ -80,10 +77,10 @@ watch(() => route.path, () => {
 	z-index: 99;
 	display: none;
 }
-.dropdown.open .dropdown-backdrop {
+.hamburger-menu.open .menu-backdrop {
 	display: block;
 }
-.dropdown-menu {
+.menu-dropdown {
 	position: absolute;
 	top: 100%;
 	right: 0;
@@ -91,48 +88,41 @@ watch(() => route.path, () => {
 	border-radius: 6px;
 	box-shadow: 0 2px 10px rgba(0,0,0,0.2);
 	z-index: 100;
-	min-width: 200px;
+	min-width: 240px;
 	overflow: hidden;
 	margin-top: 4px;
 	display: none;
 }
-.dropdown.open .dropdown-menu {
+.hamburger-menu.open .menu-dropdown {
 	display: block;
 }
-.dropdown-menu a {
+.menu-dropdown a {
 	display: block;
-	padding: 10px 15px;
+	padding: 12px 16px;
 	color: #333;
 	text-decoration: none;
 	font-size: 14px;
 	background: none;
 }
-.dropdown-menu a:hover {
+.menu-dropdown a:hover {
 	background: #f5f5f5;
 	color: #333;
 }
+.menu-divider {
+	height: 1px;
+	background: #e0e0e0;
+	margin: 4px 0;
+}
 @media (max-width: 700px) {
-	.dropdown {
-		flex: 1;
-		display: flex;
+	.hamburger-menu {
+		flex: 0;
 	}
-	.dropdown-toggle {
-		flex: 1;
-		text-align: center;
-		padding: 8px 5px;
-		white-space: nowrap;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		box-sizing: border-box;
+	.hamburger-toggle {
+		padding: 8px 12px;
 	}
-	.dropdown-arrow {
-		font-size: 1em;
-	}
-	.dropdown-menu {
+	.menu-dropdown {
 		right: 0;
 		left: auto;
-		min-width: 200px;
 	}
 }
 </style>
