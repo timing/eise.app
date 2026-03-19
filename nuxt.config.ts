@@ -28,7 +28,7 @@ export default defineNuxtConfig({
 					src: 'https://api.eise.app/latest.js',
 					async: true,
 					defer: true,
-					'data-hostname': 'eise.app',
+					'data-hostname': isProduction ? 'eise.app' : 'localhost.eise.app',
 				}
 			],
 			noscript: [
