@@ -250,14 +250,20 @@ export function useStacker() {
      * PSS defaults: patchSize=20, searchRadius=8 (planets) or 34 (surface)
      */
     function createAPGrid(width, height, surfaceMode = false) {
-        const patchSize = getApPatchSize();
+        let patchSize = getApPatchSize();
         const searchRadius = surfaceMode ? 34 : 8;
 
-        // Adaptive spacing based on image size
+        // Cap patch size for small images - patch can't be larger than 1/3 of image
         const minDim = Math.min(width, height);
+        const maxPatchSize = Math.floor(minDim / 3);
+        if (patchSize > maxPatchSize && maxPatchSize >= 8) {
+            patchSize = maxPatchSize;
+        }
+
+        // Adaptive spacing based on image size
         let spacing;
         if (minDim < 300) {
-            spacing = 20;  // Was 30 - more APs on small crops for better alignment
+            spacing = Math.min(20, Math.floor(minDim / 3));
         } else if (minDim < 500) {
             spacing = 20;
         } else if (minDim < 800) {
@@ -274,6 +280,11 @@ export function useStacker() {
             for (let x = marginX; x < width - patchSize / 2; x += spacing) {
                 alignmentPoints.push({ x, y });
             }
+        }
+
+        // Ensure at least one center AP for very small images
+        if (alignmentPoints.length === 0 && minDim >= 8) {
+            alignmentPoints.push({ x: Math.floor(width / 2), y: Math.floor(height / 2) });
         }
 
         return { alignmentPoints, patchSize, searchRadius };
@@ -337,15 +348,18 @@ export function useStacker() {
         }
 
         const { width, height } = refFrame;
+        console.log(`[prepareAlignmentData] width=${width}, height=${height}, bufferSize=${buffer.byteLength || buffer.length}, isFloat32=${isFloat32}`);
 
         // Convert RGBA to grayscale
         const refGrayData = rgbaToGrayscale(buffer, width, height, isFloat32);
 
         // Create AP grid
         const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode);
+        console.log(`[prepareAlignmentData] createAPGrid returned ${alignmentPoints.length} APs (patchSize=${patchSize})`);
 
         // Filter APs by quality
         const filteredAPs = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
+        console.log(`[prepareAlignmentData] filterAPsByQuality: ${alignmentPoints.length} -> ${filteredAPs.length}`);
         const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
 
         return {

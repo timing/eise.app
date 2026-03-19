@@ -193,16 +193,19 @@ async function handleThresholdSelected(data) {
 	isSelectingQuality.value = false;
 
 	const hasValidWorkers = qualityWorkers.value && qualityWorkers.value.length > 0;
-	const hasFrameReReader = qualityFrameReReader.value !== null;
+	const isTwoPassMode = qualityFrameReReader.value !== null;
 	const canStack = qualityUseWebGPU.value || hasValidWorkers;
 
 	if (data.frames && data.frames.length > 0 && canStack) {
 		eventBusEmit('start-loading', 'Stacking selected frames...');
-		addLog(`Stacking ${data.frames.length} frames (${Math.round(data.percentage * 100)}% threshold)${hasFrameReReader ? ' (two-pass mode)' : ''}`);
+		addLog(`Stacking ${data.frames.length} frames (${Math.round(data.percentage * 100)}% threshold)${isTwoPassMode ? ' (two-pass mode)' : ''}`);
 
-		for (const frame of qualityFrames.value) {
-			delete frame.uint8Buffer;
-			delete frame.blob;
+		// In two-pass mode, frames are re-read from file during stacking, so we can free the buffers now
+		if (isTwoPassMode) {
+			for (const frame of qualityFrames.value) {
+				delete frame.uint8Buffer;
+				delete frame.blob;
+			}
 		}
 
 		const stackingWorker = hasValidWorkers ? qualityWorkers.value[0] : null;
