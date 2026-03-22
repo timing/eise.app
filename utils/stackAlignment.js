@@ -2,37 +2,34 @@
  * stackAlignment.js - Alignment transforms for batch stacked images
  *
  * Aligns multiple stacked images for wobble-free rotation animations.
- * Analyzes each stacked image to detect centroid, tilt angle, and size,
- * then applies transforms to align all images to a reference frame.
- *
- * Uses WebGPU for high-quality bicubic interpolation when available.
+ * Uses moment-based detection for robust center and scale alignment.
  */
 
-// WebGPU worker for alignment transforms
-let gpuWorker = null;
-let gpuWorkerReady = false;
+// Postprocessor worker for GPU transforms (float32 bicubic)
+let transformWorker = null;
+let transformWorkerReady = false;
 let requestIdCounter = 0;
 const pendingRequests = new Map();
 
-async function getGpuWorker() {
-    if (gpuWorker && gpuWorkerReady) return gpuWorker;
+async function getTransformWorker() {
+    if (transformWorker && transformWorkerReady) return transformWorker;
 
-    if (!gpuWorker) {
+    if (!transformWorker) {
         try {
-            gpuWorker = new Worker('/webgpu_postprocessor_worker.js');
+            transformWorker = new Worker('/webgpu_postprocessor_worker.js');
 
-            gpuWorker.onmessage = (e) => {
+            transformWorker.onmessage = (e) => {
                 const { type, requestId, result, error } = e.data;
 
                 if (type === 'ready') {
-                    gpuWorkerReady = true;
-                    console.log('[Alignment] GPU worker ready');
+                    transformWorkerReady = true;
+                    console.log('[Alignment] Transform worker ready');
                     return;
                 }
 
                 if (type === 'init-error') {
-                    console.warn('[Alignment] GPU worker init failed:', error);
-                    gpuWorkerReady = false;
+                    console.warn('[Alignment] Transform worker init failed:', error);
+                    transformWorkerReady = false;
                     return;
                 }
 
@@ -47,13 +44,12 @@ async function getGpuWorker() {
                 }
             };
 
-            gpuWorker.postMessage({ type: 'init' });
+            transformWorker.postMessage({ type: 'init' });
 
-            // Wait for ready
             await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => reject(new Error('GPU worker init timeout')), 5000);
+                const timeout = setTimeout(() => reject(new Error('Transform worker init timeout')), 5000);
                 const checkReady = setInterval(() => {
-                    if (gpuWorkerReady) {
+                    if (transformWorkerReady) {
                         clearTimeout(timeout);
                         clearInterval(checkReady);
                         resolve();
@@ -61,55 +57,27 @@ async function getGpuWorker() {
                 }, 10);
             });
         } catch (e) {
-            console.warn('[Alignment] WebGPU worker not available:', e);
-            gpuWorker = null;
-            gpuWorkerReady = false;
+            console.warn('[Alignment] Transform worker not available:', e);
+            transformWorker = null;
+            transformWorkerReady = false;
             return null;
         }
     }
 
-    return gpuWorker;
-}
-
-async function applyTransformViaWorker(inputData, width, height, transform, options) {
-    const worker = await getGpuWorker();
-    if (!worker) return null;
-
-    const requestId = ++requestIdCounter;
-
-    return new Promise((resolve, reject) => {
-        pendingRequests.set(requestId, { resolve, reject });
-
-        worker.postMessage({
-            type: 'apply-transform',
-            requestId,
-            inputData,
-            width,
-            height,
-            transform,
-            options
-        }, [inputData.buffer]);
-    });
+    return transformWorker;
 }
 
 /**
- * Analyze a stacked image to extract alignment parameters
- * Uses image moments for centroid, orientation, and size detection
- *
- * @param {Float32Array} float32Data - RGBA pixel data (0-1 range)
- * @param {number} width - Image width
- * @param {number} height - Image height
- * @param {number} threshold - Brightness threshold for planet detection (default 0.05)
- * @returns {Object} { centroid: {x, y}, tiltAngle, radius, area }
+ * Analyze image to find centroid, radius, and ellipse shape using image moments
+ * Returns centroid, radius, ellipse parameters, and image dimensions
  */
-export function analyzeStackedImage(float32Data, width, height, threshold = 0.05) {
-    // Compute image moments for bright pixels (planet)
-    let m00 = 0;  // Area (zeroth moment)
+function analyzeImage(float32Data, width, height, threshold = 0.05) {
+    let m00 = 0;  // Total weight (area)
     let m10 = 0;  // First moment X
     let m01 = 0;  // First moment Y
     let m20 = 0;  // Second moment XX
     let m02 = 0;  // Second moment YY
-    let m11 = 0;  // Second moment XY
+    let m11 = 0;  // Second moment XY (covariance)
 
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
@@ -117,12 +85,10 @@ export function analyzeStackedImage(float32Data, width, height, threshold = 0.05
             const r = float32Data[idx];
             const g = float32Data[idx + 1];
             const b = float32Data[idx + 2];
-
-            // Luminance as weight
             const lum = 0.299 * r + 0.587 * g + 0.114 * b;
 
             if (lum > threshold) {
-                const w = lum;  // Use luminance as weight
+                const w = lum;
                 m00 += w;
                 m10 += x * w;
                 m01 += y * w;
@@ -134,12 +100,12 @@ export function analyzeStackedImage(float32Data, width, height, threshold = 0.05
     }
 
     if (m00 <= 0) {
-        // No bright pixels found
         return {
             centroid: { x: width / 2, y: height / 2 },
-            tiltAngle: 0,
             radius: Math.min(width, height) / 4,
-            area: 0
+            ellipse: { angle: 0, axisRatio: 1, majorAxis: 1, minorAxis: 1 },
+            width,
+            height
         };
     }
 
@@ -147,113 +113,175 @@ export function analyzeStackedImage(float32Data, width, height, threshold = 0.05
     const cx = m10 / m00;
     const cy = m01 / m00;
 
-    // Central moments (translation invariant)
+    // Central moments (covariance matrix)
     const mu20 = m20 / m00 - cx * cx;
     const mu02 = m02 / m00 - cy * cy;
     const mu11 = m11 / m00 - cx * cy;
 
-    // Tilt angle from principal axis
-    const tiltAngle = 0.5 * Math.atan2(2 * mu11, mu20 - mu02);
-
     // Equivalent radius from second moments
-    // For a disk, mu20 = mu02 = r^2/4, so r = 2*sqrt(mu20)
     const avgMoment = (mu20 + mu02) / 2;
     const radius = 2 * Math.sqrt(Math.max(0, avgMoment));
 
+    // Ellipse parameters from eigenvalues of covariance matrix
+    // | mu20  mu11 |
+    // | mu11  mu02 |
+    // Eigenvalues: λ = (mu20 + mu02)/2 ± sqrt(((mu20 - mu02)/2)² + mu11²)
+    const trace = mu20 + mu02;
+    const det = mu20 * mu02 - mu11 * mu11;
+    const discriminant = Math.sqrt(Math.max(0, trace * trace / 4 - det));
+
+    const lambda1 = trace / 2 + discriminant;  // Larger eigenvalue
+    const lambda2 = trace / 2 - discriminant;  // Smaller eigenvalue
+
+    // Axis lengths (proportional to sqrt of eigenvalues)
+    const majorAxis = 2 * Math.sqrt(Math.max(0, lambda1));
+    const minorAxis = 2 * Math.sqrt(Math.max(0, lambda2));
+    const axisRatio = minorAxis > 0 ? majorAxis / minorAxis : 1;
+
+    // Angle of major axis (eigenvector direction)
+    // For eigenvector of lambda1: (mu20 - lambda1) * v1 + mu11 * v2 = 0
+    // So v2/v1 = -(mu20 - lambda1) / mu11 = (lambda1 - mu20) / mu11
+    let angle = 0;
+    if (Math.abs(mu11) > 1e-10) {
+        angle = Math.atan2(lambda1 - mu20, mu11);
+    } else if (mu20 > mu02) {
+        angle = 0;  // Major axis along X
+    } else {
+        angle = Math.PI / 2;  // Major axis along Y
+    }
+
     return {
         centroid: { x: cx, y: cy },
-        tiltAngle,
         radius,
-        area: m00
+        ellipse: { angle, axisRatio, majorAxis, minorAxis },
+        width,
+        height
     };
 }
 
 /**
- * Calculate alignment transforms for a batch of stacked results
+ * Calculate alignment transforms for center + scale alignment
  *
- * @param {Array} analysisResults - Array of analysis results from analyzeStackedImage
- * @param {Object} options - Alignment options
- *   - alignCenter: boolean - Align centers (default: true)
- *   - alignTilt: boolean - Correct tilt angle (default: true)
- *   - alignScale: boolean - Match sizes (default: true)
- *   - referenceIndex: number - Index of reference frame (default: 0)
- * @returns {Array} Array of transform objects { dx, dy, dTheta, scale }
+ * Transform order (applied in shader):
+ * 1. Translate so source centroid is at origin
+ * 2. Scale to match reference radius
+ * 3. Translate so origin moves to reference centroid
+ *
+ * Combined: dst = (src - srcCenter) * scale + refCenter
+ * Rearranged: dst = src * scale + (refCenter - srcCenter * scale)
+ * So: dx = refCenter.x - srcCenter.x * scale
+ *     dy = refCenter.y - srcCenter.y * scale
  */
-export function calculateAlignmentTransforms(analysisResults, options = {}) {
-    const {
-        alignCenter = true,
-        alignTilt = true,
-        alignScale = true,
-        referenceIndex = null  // null = use middle frame
-    } = options;
+export function calculateAlignmentTransforms(analyses, options = {}) {
+    const { referenceIndex = null } = options;
 
-    if (analysisResults.length === 0) return [];
+    if (analyses.length === 0) return [];
 
-    // Use middle frame as reference by default
+    // Use middle frame as reference
     const refIdx = referenceIndex !== null
-        ? Math.min(referenceIndex, analysisResults.length - 1)
-        : Math.floor(analysisResults.length / 2);
+        ? Math.min(referenceIndex, analyses.length - 1)
+        : Math.floor(analyses.length / 2);
 
-    console.log(`[Alignment] Using frame ${refIdx + 1}/${analysisResults.length} as reference (chained)`);
+    const ref = analyses[refIdx];
+    console.log(`[Alignment] Reference frame ${refIdx + 1}/${analyses.length}: center=(${ref.centroid.x.toFixed(1)}, ${ref.centroid.y.toFixed(1)}), radius=${ref.radius.toFixed(1)}`);
 
-    // Initialize transforms array
-    const transforms = new Array(analysisResults.length);
-
-    // Reference frame has no transform
-    transforms[refIdx] = { dx: 0, dy: 0, dTheta: 0, scale: 1 };
-
-    // Helper to compute pairwise transform from frame A to frame B
-    function pairwiseTransform(fromResult, toResult) {
-        const scale = (alignScale && fromResult.radius > 0 && toResult.radius > 0)
-            ? toResult.radius / fromResult.radius
+    return analyses.map((analysis, i) => {
+        // Scale to match reference radius
+        const uniformScale = (analysis.radius > 0 && ref.radius > 0)
+            ? ref.radius / analysis.radius
             : 1;
-        const dx = alignCenter ? toResult.centroid.x - fromResult.centroid.x * scale : 0;
-        const dy = alignCenter ? toResult.centroid.y - fromResult.centroid.y * scale : 0;
-        const dTheta = alignTilt ? toResult.tiltAngle - fromResult.tiltAngle : 0;
-        return { dx, dy, dTheta, scale };
-    }
 
-    // Helper to accumulate transforms: apply t1 then t2
-    function accumulateTransform(t1, t2) {
-        // Combined scale
-        const scale = t1.scale * t2.scale;
+        // Ellipse correction WITHOUT rotation:
+        // We want to fix the wobble (ellipse shape) but NOT rotate the planet.
+        // Strategy: Scale along the ellipse's own axes to match reference axis ratio,
+        // then rotate back by the SAME angle (not refAngle).
+        //
+        // A = R(srcAngle) * S * R(-srcAngle)
+        // This stretches the ellipse to match ref axis ratio, but preserves orientation.
 
-        // Combined rotation
-        const dTheta = t1.dTheta + t2.dTheta;
+        const srcAngle = analysis.ellipse.angle;
 
-        // t1's translation, then rotated/scaled by t2, plus t2's translation
-        const cos = Math.cos(t2.dTheta);
-        const sin = Math.sin(t2.dTheta);
-        const dx = (t1.dx * cos - t1.dy * sin) * t2.scale + t2.dx;
-        const dy = (t1.dx * sin + t1.dy * cos) * t2.scale + t2.dy;
+        // Target axis ratio from reference
+        const targetRatio = ref.ellipse.axisRatio;
+        const srcRatio = analysis.ellipse.axisRatio;
 
-        return { dx, dy, dTheta, scale };
-    }
+        // Scale factors: we want to transform src ellipse to have same axis ratio as ref
+        // Without rotation, we scale along src's own major/minor axes
+        // scaleX = along major axis, scaleY = along minor axis
+        // To match ratio: scaleY / scaleX should equal targetRatio / srcRatio
+        // We also apply uniform scale to match radius
 
-    // Chain forward: refIdx+1, refIdx+2, ... (each aligns to previous)
-    for (let i = refIdx + 1; i < analysisResults.length; i++) {
-        const pairwise = pairwiseTransform(analysisResults[i], analysisResults[i - 1]);
-        transforms[i] = accumulateTransform(pairwise, transforms[i - 1]);
-    }
+        // Make src ellipse have same axis ratio as ref
+        // In ellipse local coords: X = major axis, Y = minor axis
+        // After scaling: new_ratio = srcRatio * (scaleX / scaleY)
+        // We want: new_ratio = targetRatio
+        // So: scaleY / scaleX = srcRatio / targetRatio
+        const ratioCorrection = (srcRatio > 0 && targetRatio > 0)
+            ? srcRatio / targetRatio  // > 1 when src is more elliptical, stretches minor axis
+            : 1;
 
-    // Chain backward: refIdx-1, refIdx-2, ... (each aligns to next)
-    for (let i = refIdx - 1; i >= 0; i--) {
-        const pairwise = pairwiseTransform(analysisResults[i], analysisResults[i + 1]);
-        transforms[i] = accumulateTransform(pairwise, transforms[i + 1]);
-    }
+        // Scale along major axis (X in ellipse coords) = uniform scale
+        // Scale along minor axis (Y in ellipse coords) = uniform scale * ratio correction
+        const scaleX = uniformScale;
+        const scaleY = uniformScale * ratioCorrection;
 
-    return transforms;
+        // Build affine matrix: A = R(srcAngle) * S * R(-srcAngle)
+        // This applies scale in the ellipse's local coordinate system
+        const cosA = Math.cos(srcAngle);
+        const sinA = Math.sin(srcAngle);
+
+        // R(-srcAngle) rotates points into ellipse local coords
+        // S scales in local coords
+        // R(srcAngle) rotates back to image coords
+        //
+        // R(-θ) = | cos(-θ)  -sin(-θ) | = |  cos(θ)  sin(θ) |
+        //         | sin(-θ)   cos(-θ) |   | -sin(θ)  cos(θ) |
+        //
+        // R(θ)  = | cos(θ)  -sin(θ) |
+        //         | sin(θ)   cos(θ) |
+        //
+        // A = R(θ) * S * R(-θ)
+
+        // First: S * R(-θ) where S = diag(scaleX, scaleY)
+        const sr00 = scaleX * cosA;
+        const sr01 = scaleX * sinA;
+        const sr10 = scaleY * (-sinA);
+        const sr11 = scaleY * cosA;
+
+        // Then: R(θ) * (S * R(-θ))
+        const a00 = cosA * sr00 - sinA * sr10;
+        const a01 = cosA * sr01 - sinA * sr11;
+        const a10 = sinA * sr00 + cosA * sr10;
+        const a11 = sinA * sr01 + cosA * sr11;
+
+        // For translation, we need to account for the full affine transform
+        // dst = A * (src - imgCenter) + imgCenter + (dx, dy)
+        // We want srcCentroid -> refCentroid:
+        // refCentroid = A * (srcCentroid - imgCenter) + imgCenter + (dx, dy)
+        // (dx, dy) = refCentroid - A * (srcCentroid - imgCenter) - imgCenter
+
+        const imgCx = analysis.width / 2;
+        const imgCy = analysis.height / 2;
+
+        const srcRelX = analysis.centroid.x - imgCx;
+        const srcRelY = analysis.centroid.y - imgCy;
+
+        const transformedX = a00 * srcRelX + a01 * srcRelY;
+        const transformedY = a10 * srcRelX + a11 * srcRelY;
+
+        const dx = ref.centroid.x - transformedX - imgCx;
+        const dy = ref.centroid.y - transformedY - imgCy;
+
+        return {
+            dx, dy,
+            // Pass the full 2x2 affine matrix
+            affine: { a00, a01, a10, a11 }
+        };
+    });
 }
 
 /**
- * Apply alignment transform to an image using WebGPU (bicubic interpolation)
- *
- * @param {Object} result - Stacking result with float32Data, width, height
- * @param {Object} transform - Transform { dx, dy, dTheta, scale }
- * @param {Object} options - Output options
- *   - outputWidth: number - Output width (default: result.width)
- *   - outputHeight: number - Output height (default: result.height)
- * @returns {Promise<{blob: Blob, float32Data: Float32Array, width: number, height: number}>}
+ * Apply alignment transform using WebGPU (float32 bicubic)
  */
 export async function applyAlignmentTransform(result, transform, options = {}) {
     const {
@@ -261,32 +289,45 @@ export async function applyAlignmentTransform(result, transform, options = {}) {
         outputHeight = result.height
     } = options;
 
-    const { dx, dy, dTheta, scale = 1 } = transform;
+    const { dx, dy, affine } = transform;
+
+    // Check if affine is identity (or close to it)
+    const isIdentity = affine &&
+        Math.abs(affine.a00 - 1) < 0.0001 &&
+        Math.abs(affine.a01) < 0.0001 &&
+        Math.abs(affine.a10) < 0.0001 &&
+        Math.abs(affine.a11 - 1) < 0.0001;
 
     // Skip if no transform needed
     const needsTransform = Math.abs(dx) >= 0.5 ||
                            Math.abs(dy) >= 0.5 ||
-                           Math.abs(dTheta) >= 0.001 ||
-                           Math.abs(scale - 1) >= 0.001;
+                           !isIdentity;
 
     if (!needsTransform) {
         return result;
     }
 
-    // Try WebGPU first for high-quality bicubic interpolation
-    try {
-        // Clone the data since it will be transferred to the worker
-        const inputDataCopy = new Float32Array(result.float32Data);
-        const transformedData = await applyTransformViaWorker(
-            inputDataCopy,
-            result.width,
-            result.height,
-            transform,
-            { outputWidth, outputHeight }
-        );
+    // Try GPU transform (float32 bicubic)
+    const worker = await getTransformWorker();
+    if (worker) {
+        console.log('[Alignment] Using GPU transform:', { dx: dx.toFixed(2), dy: dy.toFixed(2), affine });
+        try {
+            const requestId = ++requestIdCounter;
+            const inputCopy = new Float32Array(result.float32Data);
 
-        if (transformedData) {
-            // Generate blob from transformed data
+            const transformedData = await new Promise((resolve, reject) => {
+                pendingRequests.set(requestId, { resolve, reject });
+                worker.postMessage({
+                    type: 'apply-transform',
+                    requestId,
+                    inputData: inputCopy,
+                    width: result.width,
+                    height: result.height,
+                    transform: { dx, dy, affine },
+                    options: { outputWidth, outputHeight }
+                }, [inputCopy.buffer]);
+            });
+
             const blob = await float32ToBlob(transformedData, outputWidth, outputHeight);
 
             return {
@@ -295,138 +336,120 @@ export async function applyAlignmentTransform(result, transform, options = {}) {
                 width: outputWidth,
                 height: outputHeight
             };
+        } catch (err) {
+            console.warn('[Alignment] GPU transform failed, falling back to canvas:', err);
         }
-    } catch (err) {
-        console.warn('[Alignment] WebGPU transform failed, falling back to canvas:', err);
+    } else {
+        console.warn('[Alignment] GPU worker not available, using canvas fallback');
     }
 
-    // Fallback to canvas (lower quality)
+    // Canvas fallback (8-bit precision loss - not ideal)
+    console.warn('[Alignment] Using canvas fallback (8-bit precision loss)');
     return applyAlignmentTransformCanvas(result, transform, options);
 }
 
 /**
- * Canvas fallback for alignment transform (lower quality bilinear interpolation)
+ * Canvas fallback (8-bit precision loss)
  */
 async function applyAlignmentTransformCanvas(result, transform, options = {}) {
-    const {
-        outputWidth = result.width,
-        outputHeight = result.height
-    } = options;
+    const { outputWidth = result.width, outputHeight = result.height } = options;
+    const { dx, dy, affine } = transform;
 
-    const { dx, dy, dTheta, scale = 1 } = transform;
-
-    // Create source canvas from float32Data
     const srcCanvas = new OffscreenCanvas(result.width, result.height);
     const srcCtx = srcCanvas.getContext('2d');
 
-    // Convert float32 to uint8 for canvas
     const uint8Data = new Uint8ClampedArray(result.float32Data.length);
     for (let i = 0; i < result.float32Data.length; i++) {
         uint8Data[i] = Math.round(Math.min(1, Math.max(0, result.float32Data[i])) * 255);
     }
-    const imageData = new ImageData(uint8Data, result.width, result.height);
-    srcCtx.putImageData(imageData, 0, 0);
+    srcCtx.putImageData(new ImageData(uint8Data, result.width, result.height), 0, 0);
 
-    // Create output canvas
     const dstCanvas = new OffscreenCanvas(outputWidth, outputHeight);
     const dstCtx = dstCanvas.getContext('2d');
+    dstCtx.imageSmoothingEnabled = true;
     dstCtx.imageSmoothingQuality = 'high';
 
-    // Apply transform: scale, rotate, then translate
-    const centerX = outputWidth / 2;
-    const centerY = outputHeight / 2;
+    const srcCenterX = result.width / 2;
+    const srcCenterY = result.height / 2;
 
     dstCtx.save();
-    dstCtx.translate(centerX + dx, centerY + dy);
-    dstCtx.rotate(dTheta);
-    dstCtx.scale(scale, scale);
-    dstCtx.drawImage(
-        srcCanvas,
-        -result.width / 2,
-        -result.height / 2
-    );
+    dstCtx.translate(srcCenterX + dx, srcCenterY + dy);
+    // Apply affine matrix using setTransform (a, b, c, d, e, f)
+    // Canvas: | a  c  e |   Our affine: | a00  a01 |
+    //         | b  d  f |               | a10  a11 |
+    if (affine) {
+        dstCtx.transform(affine.a00, affine.a10, affine.a01, affine.a11, 0, 0);
+    }
+    dstCtx.drawImage(srcCanvas, -srcCenterX, -srcCenterY);
     dstCtx.restore();
 
-    // Extract output data
     const outputImageData = dstCtx.getImageData(0, 0, outputWidth, outputHeight);
     const outputFloat32 = new Float32Array(outputImageData.data.length);
     for (let i = 0; i < outputImageData.data.length; i++) {
         outputFloat32[i] = outputImageData.data[i] / 255;
     }
 
-    // Generate blob
     const blob = await dstCanvas.convertToBlob({ type: 'image/png' });
-
-    return {
-        blob,
-        float32Data: outputFloat32,
-        width: outputWidth,
-        height: outputHeight
-    };
+    return { blob, float32Data: outputFloat32, width: outputWidth, height: outputHeight };
 }
 
 /**
- * Convert Float32Array RGBA data to PNG blob
+ * Convert float32 RGBA to PNG blob
  */
 async function float32ToBlob(float32Data, width, height) {
     const canvas = new OffscreenCanvas(width, height);
     const ctx = canvas.getContext('2d');
-
-    const uint8Data = new Uint8ClampedArray(float32Data.length);
+    const uint8 = new Uint8ClampedArray(float32Data.length);
     for (let i = 0; i < float32Data.length; i++) {
-        uint8Data[i] = Math.round(Math.min(1, Math.max(0, float32Data[i])) * 255);
+        uint8[i] = Math.round(Math.min(1, Math.max(0, float32Data[i])) * 255);
     }
-
-    const imageData = new ImageData(uint8Data, width, height);
-    ctx.putImageData(imageData, 0, 0);
-
+    ctx.putImageData(new ImageData(uint8, width, height), 0, 0);
     return canvas.convertToBlob({ type: 'image/png' });
 }
 
 /**
- * Align all stacked images in a batch
- *
- * @param {Array} stackedResults - Array of stacking results with float32Data, width, height
- * @param {Object} options - Alignment options
- *   - alignCenter: boolean - Align centers (default: true)
- *   - alignTilt: boolean - Correct tilt angle (default: true)
- *   - alignScale: boolean - Match sizes (default: true)
- *   - referenceIndex: number - Index of reference frame (default: 0)
- *   - threshold: number - Brightness threshold for detection (default: 0.05)
- *   - onProgress: function - Progress callback (index, total, message)
- * @returns {Promise<Array>} Aligned results
+ * Align all stacked images - center + scale alignment
  */
 export async function alignStackedImages(stackedResults, options = {}) {
-    const { threshold = 0.05, onProgress = null } = options;
+    const { onProgress = null, threshold = 0.05 } = options;
 
     if (stackedResults.length <= 1) {
         return stackedResults;
     }
 
-    // Step 1: Analyze all images
+    // Step 1: Analyze all images (find centroid + radius)
     if (onProgress) onProgress(0, stackedResults.length, 'Analyzing images...');
 
-    const analysisResults = stackedResults.map((result, i) => {
-        const analysis = analyzeStackedImage(
-            result.float32Data,
-            result.width,
-            result.height,
-            threshold
-        );
+    const analyses = stackedResults.map((result, i) => {
+        const analysis = analyzeImage(result.float32Data, result.width, result.height, threshold);
         if (onProgress) onProgress(i + 1, stackedResults.length, `Analyzed ${i + 1}/${stackedResults.length}`);
         return analysis;
     });
 
     // Step 2: Calculate transforms
-    const transforms = calculateAlignmentTransforms(analysisResults, options);
+    const transforms = calculateAlignmentTransforms(analyses, options);
 
-    // Log transforms for debugging
+    // Log transforms and ellipse info
+    const refIdx = Math.floor(analyses.length / 2);
+    console.log('[Alignment] Reference (middle frame):', {
+        cx: analyses[refIdx].centroid.x.toFixed(1),
+        cy: analyses[refIdx].centroid.y.toFixed(1),
+        radius: analyses[refIdx].radius.toFixed(1),
+        axisRatio: analyses[refIdx].ellipse.axisRatio.toFixed(3)
+    });
+    console.log('[Alignment] Analyses:', analyses.map((a, i) => ({
+        frame: i,
+        cx: a.centroid.x.toFixed(1),
+        cy: a.centroid.y.toFixed(1),
+        radius: a.radius.toFixed(1),
+        axisRatio: a.ellipse.axisRatio.toFixed(3)
+    })));
+
     console.log('[Alignment] Transforms:', transforms.map((t, i) => ({
         frame: i,
         dx: t.dx.toFixed(1),
         dy: t.dy.toFixed(1),
-        rotation: (t.dTheta * 180 / Math.PI).toFixed(2) + '°',
-        scale: t.scale.toFixed(3)
+        affine: t.affine ? `[${t.affine.a00.toFixed(3)}, ${t.affine.a01.toFixed(3)}; ${t.affine.a10.toFixed(3)}, ${t.affine.a11.toFixed(3)}]` : 'identity'
     })));
 
     // Step 3: Apply transforms
@@ -449,49 +472,9 @@ export async function alignStackedImages(stackedResults, options = {}) {
     return alignedResults;
 }
 
-/**
- * Calculate the maximum bounds needed to contain all aligned images
- * without cropping after rotation
- *
- * @param {Array} stackedResults - Array of stacking results
- * @param {Array} transforms - Array of transform objects from calculateAlignmentTransforms
- * @returns {Object} { width, height } - Maximum output dimensions needed
- */
-export function calculateAlignedBounds(stackedResults, transforms) {
-    let maxWidth = 0;
-    let maxHeight = 0;
-
-    for (let i = 0; i < stackedResults.length; i++) {
-        const result = stackedResults[i];
-        const transform = transforms[i];
-
-        // For rotation, calculate the bounding box of the rotated rectangle
-        const angle = Math.abs(transform.dTheta);
-        const cos = Math.cos(angle);
-        const sin = Math.sin(angle);
-
-        // Rotated bounding box dimensions
-        const rotatedWidth = Math.abs(result.width * cos) + Math.abs(result.height * sin);
-        const rotatedHeight = Math.abs(result.width * sin) + Math.abs(result.height * cos);
-
-        // Add translation offset
-        const totalWidth = rotatedWidth + Math.abs(transform.dx) * 2;
-        const totalHeight = rotatedHeight + Math.abs(transform.dy) * 2;
-
-        maxWidth = Math.max(maxWidth, totalWidth);
-        maxHeight = Math.max(maxHeight, totalHeight);
-    }
-
-    return {
-        width: Math.ceil(maxWidth),
-        height: Math.ceil(maxHeight)
-    };
-}
-
 export default {
-    analyzeStackedImage,
+    analyzeImage,
     calculateAlignmentTransforms,
     applyAlignmentTransform,
-    alignStackedImages,
-    calculateAlignedBounds
+    alignStackedImages
 };

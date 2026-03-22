@@ -462,8 +462,42 @@ on('upload-error', (message) => {
 
 function onFileChanged(event){
 	errorMessage.value = null; // Clear previous error
-	selectedFiles.value = Array.from(event.target.files);
+	const files = Array.from(event.target.files);
+	selectedFiles.value = files;
 	eventBusEmit('stop-loading');
+
+	// Categorize files
+	const videoFiles = files.filter(f => f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.ser') || f.name.toLowerCase().endsWith('.avi'));
+	const imageFiles = files.filter(f => f.type.startsWith('image/'));
+	const serFiles = files.filter(f => f.name.toLowerCase().endsWith('.ser'));
+	const aviFiles = files.filter(f => f.name.toLowerCase().endsWith('.avi'));
+	const batchableFiles = [...serFiles, ...aviFiles];
+	const nonSerVideos = videoFiles.filter(f => !f.name.toLowerCase().endsWith('.ser') && !f.name.toLowerCase().endsWith('.avi'));
+
+	// Validate file combinations upfront
+	if (batchableFiles.length > 0 && nonSerVideos.length > 0) {
+		alert('Please select either SER/AVI files or other video files, not both.');
+		clearSelection();
+		return;
+	}
+
+	if (nonSerVideos.length > 1) {
+		alert('Please select only one video file (multiple SER/AVI files are supported for batch processing).');
+		clearSelection();
+		return;
+	}
+
+	if (videoFiles.length >= 1 && imageFiles.length > 0) {
+		alert('Please select either video files or image files, not both.');
+		clearSelection();
+		return;
+	}
+
+	// Immediately show batch choice dialog if multiple SER/AVI files selected
+	if (batchableFiles.length > 1) {
+		pendingBatchFiles.value = batchableFiles;
+		showBatchChoice.value = true;
+	}
 }
 
 // Pre-crop detection: sample frames and find planet bounds
@@ -704,15 +738,37 @@ function processBatchMode() {
 	selectedFiles.value = [];
 }
 
-function processCombinedMode() {
+async function processCombinedMode() {
 	showBatchChoice.value = false;
-	// Continue with existing multi-SER combined processing
-	startProcessing();
+	pendingBatchFiles.value = [];
+	// Continue with existing multi-SER combined processing (skip batch dialog)
+	if (selectedFiles.value.length === 0) return;
+	errorMessage.value = null;
+	isProcessing.value = true;
+	eventBusEmit('start-loading', 'Preparing...');
+
+	try {
+		await processFiles(selectedFiles.value, { skipBatchChoice: true });
+	} catch (error) {
+		console.error('Processing error:', error);
+		const filename = selectedFiles.value?.[0]?.name;
+		reportError(error, {
+			component: 'FileUploader',
+			action: 'processFiles',
+			filename,
+			logs: logs.value
+		});
+		track('stack_failed', getTrackingContext());
+		const errorMsg = error.message || 'An error occurred during processing';
+		isProcessing.value = false;
+		errorMessage.value = errorMsg;
+		eventBusEmit('show-error');
+	}
 }
 
 function cancelBatchChoice() {
-	showBatchChoice.value = false;
-	pendingBatchFiles.value = [];
+	// Clear file selection so user can start fresh
+	clearSelection();
 }
 
 function handleBatchStart() {
@@ -729,7 +785,8 @@ function handleBatchClear() {
 const RAW_EXTENSIONS = ['.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2', '.raf'];
 const isRawFile = (file) => RAW_EXTENSIONS.some(ext => file.name.toLowerCase().endsWith(ext));
 
-async function processFiles(files) {
+async function processFiles(files, options = {}) {
+	const { skipBatchChoice = false } = options;
 	const { setInputFilename, setTrackingContext } = useProcessingState();
 
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser') || file.name.endsWith('.avi'));
@@ -742,45 +799,18 @@ async function processFiles(files) {
 		addLog(`File: ${primaryFile.name}`);
 	}
 
-	// Multiple SER/AVI files - offer batch mode choice
+	// Multiple SER/AVI files - offer batch mode choice (unless already chosen)
 	const serFiles = videoFiles.filter(f => f.name.toLowerCase().endsWith('.ser'));
 	const aviFiles = videoFiles.filter(f => f.name.toLowerCase().endsWith('.avi'));
 	const batchableFiles = [...serFiles, ...aviFiles];
-	const nonSerVideos = videoFiles.filter(f => !f.name.toLowerCase().endsWith('.ser') && !f.name.toLowerCase().endsWith('.avi'));
 
-	// Can't mix SER/AVI with other video types
-	if (batchableFiles.length > 0 && nonSerVideos.length > 0) {
-		alert('Please select either SER/AVI files or other video files, not both.');
+	// Show batch choice dialog if multiple SER/AVI and user hasn't already chosen
+	if (batchableFiles.length > 1 && !skipBatchChoice && !isBatchMode.value) {
+		pendingBatchFiles.value = batchableFiles;
+		showBatchChoice.value = true;
 		isProcessing.value = false;
 		eventBusEmit('stop-loading');
 		return;
-	}
-
-	if (nonSerVideos.length > 1) {
-		alert('Please select only one video file (multiple SER/AVI files are supported for batch processing).');
-		isProcessing.value = false;
-		eventBusEmit('stop-loading');
-		return;
-	}
-
-	if (videoFiles.length >= 1 && imageFiles.length > 0) {
-		alert('Please select either video files or image files, not both.');
-		isProcessing.value = false;
-		eventBusEmit('stop-loading');
-		return;
-	}
-
-	// Multiple SER or AVI files - show batch choice dialog
-	if (batchableFiles.length > 1) {
-		// If already in batch mode (from batch choice dialog), skip to combined processing
-		if (!isBatchMode.value) {
-			// Show choice dialog
-			pendingBatchFiles.value = batchableFiles;
-			showBatchChoice.value = true;
-			isProcessing.value = false;
-			eventBusEmit('stop-loading');
-			return;
-		}
 	}
 
 	// Handle multiple SER files (combined stacking) - when user chose "Combine" option

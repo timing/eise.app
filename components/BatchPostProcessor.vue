@@ -2,12 +2,17 @@
 <div class="batch-post-processor">
 	<!-- Navigation header -->
 	<div class="batch-nav-header">
-		<button class="nav-btn" @click="prevImage" :disabled="currentIndex <= 0">&larr;</button>
-		<span class="nav-title">
-			{{ currentResult?.name || 'Image' }}
-			<span class="nav-index">({{ currentIndex + 1 }}/{{ results.length }})</span>
-		</span>
-		<button class="nav-btn" @click="nextImage" :disabled="currentIndex >= results.length - 1">&rarr;</button>
+		<div class="nav-controls">
+			<button class="nav-btn" @click="prevImage" :disabled="currentIndex <= 0">&larr;</button>
+			<span class="nav-title">
+				{{ currentResult?.name || 'Image' }}
+				<span class="nav-index">({{ currentIndex + 1 }}/{{ results.length }})</span>
+			</span>
+			<button class="nav-btn" @click="nextImage" :disabled="currentIndex >= results.length - 1">&rarr;</button>
+		</div>
+		<button class="btn-secondary btn-small" @click="alignAllStacks" :disabled="isAligning || results.length < 2">
+			{{ isAligning ? 'Aligning...' : 'Align Stacks' }}
+		</button>
 	</div>
 
 	<!-- Main post processor wrapper (grows to fill space) -->
@@ -39,12 +44,6 @@
 
 		<!-- Batch actions -->
 		<div class="batch-actions">
-			<button class="btn-secondary" @click="alignAllStacks" :disabled="isAligning || results.length < 2">
-				{{ isAligning ? 'Aligning...' : 'Align Stacks' }}
-			</button>
-			<button class="btn-secondary" @click="exportCurrentImage">
-				Download Current
-			</button>
 			<button class="btn-primary" @click="exportAllImages" :disabled="isExporting">
 				{{ isExporting ? 'Downloading...' : 'Download All' }}
 			</button>
@@ -57,6 +56,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import PostProcessor from '@/components/PostProcessor.vue';
 import { alignStackedImages } from '@/utils/stackAlignment.js';
+import { useProcessingState } from '@/composables/useProcessingState.js';
 
 const props = defineProps({
 	results: {
@@ -67,6 +67,9 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close']);
+
+// Get setInputFilename to update export filename when navigating
+const { setInputFilename } = useProcessingState();
 
 // State
 const currentIndex = ref(0);
@@ -158,23 +161,6 @@ async function generateThumbnails() {
 }
 
 // Export current image
-function exportCurrentImage() {
-	const result = currentResult.value;
-	if (!result?.result?.blob) return;
-
-	const baseName = result.name.replace(/\.[^/.]+$/, '');
-	const filename = `${baseName}_eise_stacked.png`;
-
-	const url = URL.createObjectURL(result.result.blob);
-	const a = document.createElement('a');
-	a.href = url;
-	a.download = filename;
-	document.body.appendChild(a);
-	a.click();
-	document.body.removeChild(a);
-	URL.revokeObjectURL(url);
-}
-
 // Export all images (sequential downloads)
 async function exportAllImages() {
 	isExporting.value = true;
@@ -233,9 +219,6 @@ async function alignAllStacks() {
 
 		// Run alignment
 		const aligned = await alignStackedImages(stackedResults, {
-			alignCenter: true,
-			alignTilt: true,
-			alignScale: true,
 			onProgress: (current, total, message) => {
 				console.log(`[Alignment] ${message}`);
 			}
@@ -301,6 +284,15 @@ onUnmounted(() => {
 watch(() => props.results, () => {
 	generateThumbnails();
 }, { deep: true });
+
+// Update export filename when navigating between images
+watch(currentResult, (result) => {
+	if (result?.name) {
+		// Remove extension for cleaner export filename
+		const baseName = result.name.replace(/\.[^/.]+$/, '');
+		setInputFilename(baseName);
+	}
+}, { immediate: true });
 </script>
 
 <style scoped>
@@ -313,9 +305,8 @@ watch(() => props.results, () => {
 
 .batch-nav-header {
 	display: flex;
-	justify-content: center;
+	justify-content: space-between;
 	align-items: center;
-	gap: 15px;
 	padding: 10px 15px;
 	background: #1a1a2e;
 	border-bottom: 1px solid #333;
@@ -323,6 +314,19 @@ watch(() => props.results, () => {
 	top: 0;
 	z-index: 100;
 	flex-shrink: 0;
+}
+
+.nav-controls {
+	display: flex;
+	align-items: center;
+	gap: 15px;
+	flex: 1;
+	justify-content: center;
+}
+
+.btn-small {
+	padding: 6px 12px;
+	font-size: 13px;
 }
 
 .nav-btn {

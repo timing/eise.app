@@ -210,6 +210,15 @@ onMounted(async () => {
 		await processImageFrames(props.frames);
 	}
 
+	// Reset frame previews when a new batch file starts processing
+	on('batch-file-status', ({ status }) => {
+		if (status === 'analyzing') {
+			bestFrame.value = null;
+			referenceFrame.value = null;
+			refCandidate.value = null;
+		}
+	});
+
 	on('best-frame-updated', (frame) => {
 		if (processingStage.value !== 'analyzing') {
 			uploadError.value = null; // Reset error
