@@ -37,8 +37,16 @@
 			<button class="reload-button" @click="reloadPage">Start over</button>
 		</div>
 
+		<!-- Batch info panel - always visible when in batch mode (even during processing) -->
+		<BatchInfoPanel
+			v-if="isBatchMode"
+			:settings="batchSettings"
+			@start="handleBatchStart"
+			@clear="handleBatchClear"
+		/>
+
 		<!-- Initial state: file selection and settings (hidden during processing) -->
-		<template v-if="!isProcessing">
+		<template v-if="!isProcessing && !isBatchMode">
 			<h3>Select file(s) for stacking and/or post processing</h3>
 			<div class="file-input-wrapper">
 				<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
@@ -52,7 +60,24 @@
 				Stacking on mobile devices will likely not work due to memory limitations. For best results, use eise.app on a laptop or desktop computer.
 			</div>
 
-			<div v-if="selectedFiles.length > 0" class="selected-files">
+			<!-- Batch choice dialog -->
+			<div v-if="showBatchChoice" class="batch-choice-dialog">
+				<h4>{{ pendingBatchFiles.length }} files selected</h4>
+				<p>How would you like to process them?</p>
+				<div class="batch-choice-buttons">
+					<button class="btn-primary" @click="processBatchMode">
+						Stack separately (batch)
+						<small>Each file becomes its own stack</small>
+					</button>
+					<button class="btn-secondary" @click="processCombinedMode">
+						Combine into one
+						<small>All frames merged together</small>
+					</button>
+				</div>
+				<button class="btn-text" @click="cancelBatchChoice">Cancel</button>
+			</div>
+
+			<div v-if="selectedFiles.length > 0 && !showBatchChoice && !isBatchMode" class="selected-files">
 				<div v-if="showMemoryOptimization" class="memory-optimization-box">
 					<p class="optimization-hint">
 						Memory optimization options:
@@ -199,6 +224,7 @@ import { useAviReader } from '@/composables/useAviReader';
 import { useFFmpegReader } from '@/composables/useFFmpegReader';
 import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
+import { useBatchProcessing } from '@/composables/useBatchProcessing';
 import { reportError } from '@/composables/useSentryReporting';
 import { useFeedback } from '@/composables/useFeedback';
 import { useTracking } from '@/composables/useTracking';
@@ -349,6 +375,24 @@ onMounted(async () => {
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
 const fileInput = ref(null);
+
+// Batch mode state
+const isBatchMode = ref(false);
+const showBatchChoice = ref(false);
+const pendingBatchFiles = ref([]);
+
+// Batch processing composable
+const { addFiles: addBatchFiles, clearBatch, isActive: isBatchActive } = useBatchProcessing();
+
+// Batch settings computed from current UI settings
+const batchSettings = computed(() => ({
+	stackPercentage: effectiveStackPercentage.value,
+	drizzleScale: effectiveDrizzleScale.value,
+	cropMarginPercent: effectiveCropMargin.value,
+	surfaceMode: surfaceMode.value,
+	manualThreshold: false, // Batch mode uses automatic threshold
+	maxFrames: effectiveMaxFrames.value
+}));
 
 const emit = defineEmits(['postProcessing', 'processing-started']);
 
@@ -643,6 +687,42 @@ function clearSelection() {
 		fileInput.value.value = '';
 	}
 	errorMessage.value = null;
+	// Also clear batch mode
+	isBatchMode.value = false;
+	showBatchChoice.value = false;
+	pendingBatchFiles.value = [];
+}
+
+// Batch mode handlers
+function processBatchMode() {
+	showBatchChoice.value = false;
+	isBatchMode.value = true;
+	// Add files to batch queue
+	addBatchFiles(pendingBatchFiles.value);
+	pendingBatchFiles.value = [];
+	// Clear the main file selection since batch panel handles it
+	selectedFiles.value = [];
+}
+
+function processCombinedMode() {
+	showBatchChoice.value = false;
+	// Continue with existing multi-SER combined processing
+	startProcessing();
+}
+
+function cancelBatchChoice() {
+	showBatchChoice.value = false;
+	pendingBatchFiles.value = [];
+}
+
+function handleBatchStart() {
+	isProcessing.value = true;
+	emit('processing-started');
+}
+
+function handleBatchClear() {
+	isBatchMode.value = false;
+	clearBatch();
 }
 
 // Unsupported RAW camera formats
@@ -662,33 +742,48 @@ async function processFiles(files) {
 		addLog(`File: ${primaryFile.name}`);
 	}
 
-	// Multiple SER files are allowed - they'll be combined for stacking
-	// But mixing video types or mixing videos with images is not allowed
-	const serFiles = videoFiles.filter(f => f.name.endsWith('.ser'));
-	const nonSerVideos = videoFiles.filter(f => !f.name.endsWith('.ser'));
+	// Multiple SER/AVI files - offer batch mode choice
+	const serFiles = videoFiles.filter(f => f.name.toLowerCase().endsWith('.ser'));
+	const aviFiles = videoFiles.filter(f => f.name.toLowerCase().endsWith('.avi'));
+	const batchableFiles = [...serFiles, ...aviFiles];
+	const nonSerVideos = videoFiles.filter(f => !f.name.toLowerCase().endsWith('.ser') && !f.name.toLowerCase().endsWith('.avi'));
 
-	if (serFiles.length > 0 && nonSerVideos.length > 0) {
-		alert('Please select either SER files or other video files, not both.');
+	// Can't mix SER/AVI with other video types
+	if (batchableFiles.length > 0 && nonSerVideos.length > 0) {
+		alert('Please select either SER/AVI files or other video files, not both.');
 		isProcessing.value = false;
 		eventBusEmit('stop-loading');
 		return;
 	}
 
 	if (nonSerVideos.length > 1) {
-		alert('Please select only one video file (multiple SER files are supported).');
+		alert('Please select only one video file (multiple SER/AVI files are supported for batch processing).');
 		isProcessing.value = false;
 		eventBusEmit('stop-loading');
 		return;
 	}
 
 	if (videoFiles.length >= 1 && imageFiles.length > 0) {
-		alert('Please select either a video file or image files, not both.');
+		alert('Please select either video files or image files, not both.');
 		isProcessing.value = false;
 		eventBusEmit('stop-loading');
 		return;
 	}
 
-	// Handle multiple SER files (combined stacking)
+	// Multiple SER or AVI files - show batch choice dialog
+	if (batchableFiles.length > 1) {
+		// If already in batch mode (from batch choice dialog), skip to combined processing
+		if (!isBatchMode.value) {
+			// Show choice dialog
+			pendingBatchFiles.value = batchableFiles;
+			showBatchChoice.value = true;
+			isProcessing.value = false;
+			eventBusEmit('stop-loading');
+			return;
+		}
+	}
+
+	// Handle multiple SER files (combined stacking) - when user chose "Combine" option
 	if (serFiles.length > 1) {
 		setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: useGPU.value });
 		emit('processing-started');
@@ -1109,6 +1204,52 @@ async function processFiles(files) {
 </script>
 
 <style>
+/* Batch choice dialog */
+.batch-choice-dialog {
+	background: #f9f9f9;
+	border: 1px solid #ddd;
+	border-radius: 8px;
+	padding: 15px;
+	margin: 15px 0;
+	text-align: center;
+}
+.batch-choice-dialog h4 {
+	margin: 0 0 8px 0;
+}
+.batch-choice-dialog p {
+	margin: 0 0 15px 0;
+	color: #666;
+}
+.batch-choice-buttons {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin-bottom: 10px;
+}
+.batch-choice-buttons button {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 12px 15px;
+}
+.batch-choice-buttons button small {
+	font-weight: normal;
+	font-size: 11px;
+	opacity: 0.8;
+	margin-top: 4px;
+}
+.btn-text {
+	background: none;
+	border: none;
+	color: #666;
+	cursor: pointer;
+	font-size: 13px;
+	text-decoration: underline;
+}
+.btn-text:hover {
+	color: #333;
+}
+
 .status-indicators {
 	display: flex;
 	gap: 12px;

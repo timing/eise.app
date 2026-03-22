@@ -655,9 +655,32 @@ onUnmounted(() => {
 
 watch(() => props.file, (newVal) => {
 	if (newVal) {
-		loadImage(newVal);
+		// If we already have a canvas and float32Data, just update the image data
+		// This is the fast path for batch mode - no loading states needed
+		if (ctx && props.float32Data && props.imageDimensions?.width) {
+			updateImageData();
+		} else {
+			loadImage(newVal);
+		}
 	}
 });
+
+// Fast path for batch mode: update image data without full reload
+function updateImageData() {
+	const width = props.imageDimensions.width;
+	const height = props.imageDimensions.height;
+
+	// Update image16 with new data
+	image16 = Image16.fromFloat32Array(props.float32Data, width, height);
+	sharpenedImage16 = null;
+
+	// Store dimensions in case canvas needs resizing
+	pendingCanvasDimensions = { width, height };
+
+	// Re-apply processing with current settings
+	applyProcessing.cancel();
+	applyProcessingInternal();
+}
 
 let workingMat;
 let initCanvas;
@@ -666,6 +689,7 @@ let gainedImageData;
 let preNoiseReducedImageData;
 let sharpenedImageData;
 let ctx = null;
+let pendingCanvasDimensions = null; // Store dimensions to apply right before rendering
 
 let prevGain;
 
@@ -739,16 +763,25 @@ async function loadImage(file) {
 
 	// Helper to finalize image loading
 	function finalizeImageLoad(width, height, imageDataForCanvas) {
-		canvas.value.width = width;
-		canvas.value.height = height;
-		ctx = canvas.value.getContext('2d', { willReadFrequently: true });
-		ctx.putImageData(imageDataForCanvas, 0, 0);
+		// Don't resize canvas yet - store dimensions to apply right before rendering
+		// This prevents the canvas from going blank while processing
+		pendingCanvasDimensions = { width, height };
+
+		// Only get context if canvas needs to be initialized
+		if (!ctx) {
+			ctx = canvas.value.getContext('2d', { willReadFrequently: true });
+		}
 
 		initCanvas = canvas;
-		initCanvasImageData = ctx.getImageData(0, 0, width, height);
-		gainedImageData = ctx.getImageData(0, 0, width, height);
-		preNoiseReducedImageData = ctx.getImageData(0, 0, width, height);
-		sharpenedImageData = ctx.getImageData(0, 0, width, height);
+		// Copy imageDataForCanvas directly instead of reading from canvas
+		initCanvasImageData = new ImageData(
+			new Uint8ClampedArray(imageDataForCanvas.data),
+			width,
+			height
+		);
+		gainedImageData = new ImageData(width, height);
+		preNoiseReducedImageData = new ImageData(width, height);
+		sharpenedImageData = new ImageData(width, height);
 
 		// Initialize 16-bit image container
 		if (hasFloat32Data) {
@@ -773,7 +806,9 @@ async function loadImage(file) {
 			zoomableCanvasRef.value?.centerCanvas();
 		});
 
-		applyProcessing();
+		// Run processing immediately (skip debounce) so the processed image appears quickly
+		applyProcessing.cancel();
+		applyProcessingInternal();
 	}
 
 	// If we decoded the image ourselves (TIFF or 16-bit PNG), create canvas from decoded data
@@ -923,8 +958,9 @@ const applyProcessingInternal = async() => {
 
 	isProcessing.value = true;
 
-	const width = canvas.value.width;
-	const height = canvas.value.height;
+	// Use pending dimensions if available (new image loading), otherwise current canvas size
+	const width = pendingCanvasDimensions?.width ?? canvas.value.width;
+	const height = pendingCanvasDimensions?.height ?? canvas.value.height;
 
 	let workingData = new Float32Array(image16.data); // Copy for processing
 
@@ -1025,6 +1061,20 @@ const applyProcessingInternal = async() => {
 
 	// Convert to 8-bit for display
 	sharpenedImageData = sharpenedImage16.toImageData();
+
+	// Apply pending canvas dimensions only if size actually changed
+	if (pendingCanvasDimensions) {
+		const needsResize = canvas.value.width !== pendingCanvasDimensions.width ||
+		                    canvas.value.height !== pendingCanvasDimensions.height;
+		if (needsResize) {
+			canvas.value.width = pendingCanvasDimensions.width;
+			canvas.value.height = pendingCanvasDimensions.height;
+			ctx = canvas.value.getContext('2d', { willReadFrequently: true });
+		}
+		pendingCanvasDimensions = null;
+	}
+
+	// Render processed image
 	ctx.putImageData(sharpenedImageData, 0, 0);
 
 	// Draw green circle overlay when in edge mask mode

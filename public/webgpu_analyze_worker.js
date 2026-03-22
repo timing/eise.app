@@ -49,10 +49,10 @@ const MAX_CONCURRENT_BATCHES = 2;
 let activeBatchCount = 0;
 let batchWaiters = [];
 
-// Calculate circularity from image moments using eigenvalue ratio
-// Returns value 0-1 where 1 = perfect circle
+// Calculate circularity and tilt angle from image moments using eigenvalue ratio
+// Returns object { circularity: 0-1 where 1 = perfect circle, tiltAngle: radians }
 function calculateCircularityFromMoments(m00, m10, m01, m20, m11, m02) {
-    if (m00 <= 0) return 0;
+    if (m00 <= 0) return { circularity: 0, tiltAngle: 0 };
 
     const cx = m10 / m00;
     const cy = m01 / m00;
@@ -69,11 +69,17 @@ function calculateCircularityFromMoments(m00, m10, m01, m20, m11, m02) {
     const lambda1 = (trace + discriminant) / 2;
     const lambda2 = (trace - discriminant) / 2;
 
+    // Tilt angle from principal axis orientation (radians)
+    const tiltAngle = 0.5 * Math.atan2(2 * mu11, mu20 - mu02);
+
     // Circularity = ratio of eigenvalues (1 = perfect circle)
     if (lambda1 > 0) {
-        return Math.min(lambda2, lambda1) / Math.max(lambda2, lambda1);
+        return {
+            circularity: Math.min(lambda2, lambda1) / Math.max(lambda2, lambda1),
+            tiltAngle
+        };
     }
-    return 0;
+    return { circularity: 0, tiltAngle };
 }
 
 // Forward declaration - will be set after init() is defined
@@ -578,10 +584,10 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         momentsParamsBuffer: uniformBuffer(device, 16),
         reductionReadback: readbackBuffer(device, reductionSize),
         momentsReadback: readbackBuffer(device, momentsReductionSize),
-        // Circularity + centroid: computed on GPU from moments (3 floats per frame: circ, cx, cy)
-        circularityBuffer: storageBuffer(device, batchSize * 3 * 4, { copySrc: true }),
+        // Circularity + centroid + tilt: computed on GPU from moments (4 floats per frame: circ, cx, cy, tiltAngle)
+        circularityBuffer: storageBuffer(device, batchSize * 4 * 4, { copySrc: true }),
         circularityParamsBuffer: uniformBuffer(device, 16),
-        circularityReadback: readbackBuffer(device, batchSize * 3 * 4),
+        circularityReadback: readbackBuffer(device, batchSize * 4 * 4),
         // RGBA readback: matches rgbaBuffer size for 16-bit Float32 support
         rgbaReadback: readbackBuffer(device, rgbaBufferSize),
         boundsBuffer: storageBuffer(device, boundsPixelSize),
@@ -875,7 +881,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
 
     // Copy results for readback
     const reductionCopySize = batchSize * numWorkgroups * 2 * 4;
-    const circularityCopySize = batchSize * 3 * 4;  // 3 floats per frame: circ, cx, cy (computed on GPU)
+    const circularityCopySize = batchSize * 4 * 4;  // 4 floats per frame: circ, cx, cy, tiltAngle (computed on GPU)
     const boundsCopySize = batchSize * numWorkgroups * 4 * 4;
     // RGBA copy size: 4x larger for 16-bit (Float32 output vs packed Uint8)
     const rgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
@@ -949,11 +955,12 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         // Geometric mean naturally balances metrics regardless of their absolute scales
         const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
-        // Get circularity and centroid from GPU (computed in circularityFinalShader)
-        const circIdx = i * 3;
+        // Get circularity, centroid, and tilt angle from GPU (computed in circularityFinalShader)
+        const circIdx = i * 4;
         const circularity = circularityData[circIdx];
         const centroidX = circularityData[circIdx + 1];
         const centroidY = circularityData[circIdx + 2];
+        const tiltAngle = circularityData[circIdx + 3];
 
         // Calculate bounds from partial reductions
         let minX = width, minY = height, maxX = 0, maxY = 0;
@@ -988,6 +995,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
             tenengrad: tenengradMean,
             laplacian: laplacianMean,
             circularity,
+            tiltAngle,
             bounds,
             width,
             height,

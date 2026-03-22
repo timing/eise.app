@@ -35,6 +35,10 @@ const qualityFrameReReader = ref(null);
 const qualityDrizzleScale = ref(1.5);
 const croppedSerData = ref(null);
 
+// Batch processing state
+const batchResults = ref([]);
+const isBatchProcessing = ref(false);
+
 // WebGPU state
 const showWebGPUChoice = ref(false);
 const webGPUChoiceData = ref(null);
@@ -73,6 +77,8 @@ provide('qualityFrames', qualityFrames);
 provide('qualityFrameReReader', qualityFrameReReader);
 provide('showWebGPUChoice', showWebGPUChoice);
 provide('croppedSerData', croppedSerData);
+provide('batchResults', batchResults);
+provide('isBatchProcessing', isBatchProcessing);
 
 provide('liteMode', liteMode);
 provide('useGPU', useGPU);
@@ -158,6 +164,8 @@ onMounted(async () => {
 
 	on('postProcessing', handlePostProcessing);
 	on('stacked-image-ready', handleStackedImageReady);
+	on('batch-started', handleBatchStarted);
+	on('batch-complete', handleBatchComplete);
 	on('show-color-profile-selector', () => {
 		isSelectingColorProfile.value = true;
 	});
@@ -169,6 +177,10 @@ onMounted(async () => {
 		croppedSerData.value = data;
 	});
 	on('stack-failed', (data) => {
+		// In batch mode, batch processing handles individual failures
+		if (isBatchProcessing.value) {
+			return;
+		}
 		track('stack_failed', getTrackingContext());
 		isProcessing.value = false;
 		const error = data?.error || new Error(`Stacking failed: ${data?.reason || 'unknown reason'}`);
@@ -330,12 +342,34 @@ function handleWebGPUCancel() {
 }
 
 async function handleStackedImageReady(data) {
+	// Skip if batch processing is active - batch handles its own events
+	if (isBatchProcessing.value) {
+		return;
+	}
+
 	selectedFile.value = data.blob;
 	stackedFloat32Data.value = data.float32Data || null;
 	stackedImageDimensions.value = (data.width && data.height) ? { width: data.width, height: data.height } : null;
 	isProcessing.value = false;
 	track('stack_finished', getTrackingContext());
 	navigateTo('/post-processor/');
+}
+
+// Batch processing handlers
+function handleBatchStarted() {
+	isBatchProcessing.value = true;
+}
+
+function handleBatchComplete(data) {
+	isBatchProcessing.value = false;
+	batchResults.value = data.results || [];
+	isProcessing.value = false;
+	track('batch_stack_finished', {
+		...getTrackingContext(),
+		file_count: data.totalCount,
+		success_count: data.successCount
+	});
+	navigateTo('/batch-post-processor/');
 }
 
 function handleProcessingStarted() {

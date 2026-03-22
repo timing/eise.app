@@ -1316,7 +1316,7 @@ fn main(
 }
 `;
 
-// Final moments shader - sums partial moments and computes circularity + centroid on GPU
+// Final moments shader - sums partial moments and computes circularity + centroid + tilt on GPU
 export const circularityFinalShader = `
 struct Params {
     numWorkgroups: u32,  // Number of workgroups from moments reduction
@@ -1327,7 +1327,7 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> partialMoments: array<f32>;  // 6 floats per workgroup per frame
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // 3 floats per frame: [circ, cx, cy]
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // 4 floats per frame: [circ, cx, cy, tiltAngle]
 
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -1354,8 +1354,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         m02 += partialMoments[idx + 5u];
     }
 
-    // Compute circularity and centroid from moments
+    // Compute circularity, centroid, and tilt angle from moments
     var circ: f32 = 0.0;
+    var tiltAngle: f32 = 0.0;
     var centroidX: f32 = params.defaultCenterX;
     var centroidY: f32 = params.defaultCenterY;
 
@@ -1379,12 +1380,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (lambda1 > 0.0) {
             circ = min(lambda2, lambda1) / max(lambda2, lambda1);
         }
+
+        // Tilt angle from principal axis orientation (radians)
+        tiltAngle = 0.5 * atan2(2.0 * mu11, mu20 - mu02);
     }
 
-    let outIdx = frameIdx * 3u;
+    let outIdx = frameIdx * 4u;
     output[outIdx] = circ;
     output[outIdx + 1u] = centroidX;
     output[outIdx + 2u] = centroidY;
+    output[outIdx + 3u] = tiltAngle;
 }
 `;
 

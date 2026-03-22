@@ -767,6 +767,7 @@ export function useDebayerReader() {
             stackPercentage = 30,
             drizzleScale = 1.5,
             surfaceMode = false,
+            forceBayerPattern = null,  // Force specific bayer pattern, skip selector if set
         } = options;
 
         console.log('[useDebayerReader] processFile called - full pipeline');
@@ -833,9 +834,15 @@ export function useDebayerReader() {
             }
         }
 
-        // Show color profile selector with cropped preview
-        emit('set-caption', 'Select color profile');
-        await showColorProfileSelector(previewBuffer, previewWidth, previewHeight);
+        // Show color profile selector with cropped preview (skip if pattern is forced)
+        if (forceBayerPattern) {
+            bayerChoice = forceBayerPattern;
+            bayerPattern = bayerChoiceToGpuPattern(forceBayerPattern);
+            addLog(`[DebayerReader] Using forced bayer pattern: ${bayerChoice} (GPU: ${bayerPattern})`);
+        } else {
+            emit('set-caption', 'Select color profile');
+            await showColorProfileSelector(previewBuffer, previewWidth, previewHeight);
+        }
 
         // Detect full crop region
         let cropRegion = null;
@@ -1244,7 +1251,8 @@ export function useDebayerReader() {
                 blob: stackResult.blob,
                 float32Data: stackResult.float32Data,
                 width: stackResult.width,
-                height: stackResult.height
+                height: stackResult.height,
+                bayerPattern: bayerChoice  // Include pattern for batch mode
             });
         } else {
             addLog('[DebayerReader] Stacking failed - no valid result');

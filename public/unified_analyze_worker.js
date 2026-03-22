@@ -2435,17 +2435,23 @@ async function stackFramesLocally(frames, drizzleScale = 1.0, surfaceMode = fals
  */
 function createAPGrid(width, height, surfaceMode = false) {
     // PSS default: alignment box width = 20px
-    const patchSize = 20;
+    let patchSize = 20;
     // PSS default: max alignment search width = 8px for planets, 34px for surface (Moon/Sun)
     const searchRadius = surfaceMode ? 34 : 8;
+
+    // Cap patch size for small images - patch can't be larger than 1/3 of image
+    const minDim = Math.min(width, height);
+    const maxPatchSize = Math.floor(minDim / 3);
+    if (patchSize > maxPatchSize && maxPatchSize >= 8) {
+        patchSize = maxPatchSize;
+    }
 
     // Adaptive spacing based on image size
     // For small images (<500px), use larger spacing to avoid too many APs
     // Target ~100-200 APs for good coverage without excessive computation
-    const minDim = Math.min(width, height);
     let spacing;
     if (minDim < 300) {
-        spacing = 30; // ~100 APs for 300x300
+        spacing = Math.min(30, Math.floor(minDim / 3));
     } else if (minDim < 500) {
         spacing = 25; // ~150 APs for 400x400
     } else if (minDim < 800) {
@@ -2462,6 +2468,11 @@ function createAPGrid(width, height, surfaceMode = false) {
         for (let x = marginX; x < width - patchSize / 2; x += spacing) {
             alignmentPoints.push({ x, y });
         }
+    }
+
+    // Ensure at least one center AP for very small images
+    if (alignmentPoints.length === 0 && minDim >= 8) {
+        alignmentPoints.push({ x: Math.floor(width / 2), y: Math.floor(height / 2) });
     }
 
     return { alignmentPoints, patchSize, searchRadius };

@@ -348,18 +348,15 @@ export function useStacker() {
         }
 
         const { width, height } = refFrame;
-        console.log(`[prepareAlignmentData] width=${width}, height=${height}, bufferSize=${buffer.byteLength || buffer.length}, isFloat32=${isFloat32}`);
 
         // Convert RGBA to grayscale
         const refGrayData = rgbaToGrayscale(buffer, width, height, isFloat32);
 
         // Create AP grid
         const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode);
-        console.log(`[prepareAlignmentData] createAPGrid returned ${alignmentPoints.length} APs (patchSize=${patchSize})`);
 
         // Filter APs by quality
         const filteredAPs = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
-        console.log(`[prepareAlignmentData] filterAPsByQuality: ${alignmentPoints.length} -> ${filteredAPs.length}`);
         const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
 
         return {
