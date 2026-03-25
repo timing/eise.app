@@ -407,24 +407,26 @@ export function useImageReader() {
                 const marginMultiplier = 1 + (cropMarginPercent / 100);
                 const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
                 const maxAllowedSize = Math.min(firstWidth, firstHeight);
-                const finalSize = Math.min(desiredSize, maxAllowedSize);
 
-                if (detectedCenters.length > 0) {
+                // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
+                if (desiredSize >= maxAllowedSize) {
+                    addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+                } else if (detectedCenters.length > 0) {
                     const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
                     const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
                     cropRegion = {
-                        size: finalSize,
+                        size: desiredSize,
                         referenceCenter: {
                             x: sortedX[Math.floor(sortedX.length / 2)],
                             y: sortedY[Math.floor(sortedY.length / 2)]
                         },
                         medianObjectSize: medianSize
                     };
+                    addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
                 } else {
-                    cropRegion = { size: finalSize, medianObjectSize: medianSize };
+                    cropRegion = { size: desiredSize, medianObjectSize: medianSize };
+                    addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
                 }
-
-                addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
             } else {
                 addLog(`Only ${canCropCount}/${sampleIndices.length} images can be cropped. Skipping auto-crop.`);
             }

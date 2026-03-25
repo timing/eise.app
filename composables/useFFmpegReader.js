@@ -234,7 +234,7 @@ export function useFFmpegReader() {
     /**
      * Detect crop region from PNG data buffers (for lite mode)
      */
-    async function detectCropRegionFromPngData(pngDataArray, width, height) {
+    async function detectCropRegionFromPngData(pngDataArray, width, height, cropMarginPercent = 10) {
         const decodeCanvas = document.createElement('canvas');
         decodeCanvas.width = width;
         decodeCanvas.height = height;
@@ -276,9 +276,16 @@ export function useFFmpegReader() {
         detectedCenters.sort((a, b) => a.y - b.y);
         const medianY = detectedCenters[Math.floor(detectedCenters.length / 2)].y;
 
-        const finalSize = Math.min(Math.ceil(maxSize * 1.2), Math.min(width, height));
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        const desiredSize = Math.ceil(maxSize * marginMultiplier);
+        const maxAllowedSize = Math.min(width, height);
 
-        return { size: finalSize, referenceCenter: { x: medianX, y: medianY } };
+        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
+        if (desiredSize >= maxAllowedSize) {
+            return null;
+        }
+
+        return { size: desiredSize, referenceCenter: { x: medianX, y: medianY } };
     }
 
     /**
@@ -354,10 +361,11 @@ export function useFFmpegReader() {
         const marginMultiplier = 1 + (cropMarginPercent / 100);
         const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(header.width, header.height);
-        let finalSize = Math.min(desiredSize, maxAllowedSize);
 
-        if (desiredSize > maxAllowedSize) {
-            addLog(`Crop size ${desiredSize} exceeds frame size ${maxAllowedSize}, clamping`);
+        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
+        if (desiredSize >= maxAllowedSize) {
+            addLog(`Skipping crop: desired size ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+            return null;
         }
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -365,10 +373,11 @@ export function useFFmpegReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+        addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)}), frame center: (${Math.round(header.width/2)}, ${Math.round(header.height/2)})`);
 
         // GPU detection is consistent - medianObjectSize can be used for oversized frame filtering
-        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+        return { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
     /**
@@ -743,7 +752,8 @@ export function useFFmpegReader() {
             manualThreshold = false,
             stackPercentage = 30,
             drizzleScale = 1.0,
-            surfaceMode = false
+            surfaceMode = false,
+            cropMarginPercent = 10
         } = options;
 
         resetCaptures();
@@ -974,9 +984,9 @@ export function useFFmpegReader() {
                                 ffmpeg.FS('unlink', sampleFile);
                             } catch (_) {}
                         }
-                        cropRegion = await detectCropRegionFromPngData(cropSampleData, frameWidth, frameHeight);
+                        cropRegion = await detectCropRegionFromPngData(cropSampleData, frameWidth, frameHeight, cropMarginPercent);
                         if (cropRegion) {
-                            addLog(`Auto-crop: ${cropRegion.size}x${cropRegion.size}`);
+                            addLog(`Auto-crop: ${cropRegion.size}x${cropRegion.size}, margin: ${cropMarginPercent}%`);
 
                             const { detectPlatform, calculateMaxFrames } = useLiteMemoryLimits();
                             const platform = detectPlatform();

@@ -61,11 +61,11 @@
 				<h4>Color Balance</h4>
 				<label class="checkbox-label">
 					<input type="checkbox" v-model="autoColorBalance" @change="applyProcessing" />
-					Auto (gray world)
+					Auto colors (gray world)
 				</label>
 				<label class="checkbox-label">
 					<input type="checkbox" v-model="autoStretch" @change="applyProcessing" />
-					Auto stretch (levels)
+					Auto levels (stretch)
 				</label>
 			</div>
 

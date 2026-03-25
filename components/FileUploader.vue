@@ -195,13 +195,15 @@
 		<h3>An easy image stacker for planetary astrophotography</h3>
 		<p>Turn your blurry and shaky videos of planets, Moon, or Sun into one stacked and sharp image using <em>lucky imaging</em> - a classic astrophotography technique.</p>
 		<ul>
-			<li>Select one or more SER files for stacking followed by post processing. (Multiple SER files will be combined)</li>
+			<li>Select one or more SER or raw AVI files for stacking followed by post processing. Multiple video filees allow you to open batch stacking mode.</li>
 			<li>Select one video file (AVI, MP4, etc.) for stacking followed by post processing.</li>
 			<li>Select multiple image files (TIFF, PNG, JPG, etc.) for stacking and post processing.</li>
-			<li>Select one image file for <NuxtLink to="/post-processor/">post processing</NuxtLink> only.</li>
+			<li>Select one image file to directly open the <NuxtLink to="/post-processor/">post processing</NuxtLink> with that file.</li>
 		</ul>
-		<p>When stacking, eise.app analyzes, crops, centers and ranks all frames by sharpness and circularity, and it drops frames that are (almost) cut-off. No need for PIPP!</p>
+		<p>When stacking, eise.app analyzes, crops, centers and ranks all frames by sharpness and circularity, and it drops frames automatically that are (almost) cut-off.</p>
 		<p><strong>Tip:</strong> For Moon or Sun surface closeups, select "Surface" mode above to handle larger frame-to-frame drift.</p>
+		<h3>Beta: Batch stacking and post processing workflow</h3>
+		<p>Batch stacking and processing is now in beta. Select multiple SER or raw AVI files, and Eise asks you how you want to stack it. The post processor applies all settings to all stacked images at once.</p>
 		<h3>More information, bugs and feature requests?</h3>
 		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
 
@@ -1081,7 +1083,8 @@ async function processFiles(files, options = {}) {
 				manualThreshold: effectiveQualityMode.value === 'manual',
 				stackPercentage: effectiveStackPercentage.value,
 				drizzleScale: effectiveDrizzleScale.value,
-								surfaceMode: surfaceMode.value
+				surfaceMode: surfaceMode.value,
+				cropMarginPercent: effectiveCropMargin.value
 			});
 
 		} else {

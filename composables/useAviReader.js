@@ -400,14 +400,15 @@ export function useAviReader() {
         const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
         const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
 
-        // Use median size with margin, capped at frame dimensions
+        // Use median size with margin
         const marginMultiplier = 1 + (cropMarginPercent / 100);
         const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(aviHeader.width, aviHeader.height);
-        let finalSize = Math.min(desiredSize, maxAllowedSize);
 
-        if (desiredSize > maxAllowedSize) {
-            addLog(`Crop size ${desiredSize} (from median ${medianSize}) exceeds frame size ${maxAllowedSize}, clamping`);
+        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
+        if (desiredSize >= maxAllowedSize) {
+            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+            return null;
         }
 
         // Calculate median center position as fallback reference
@@ -416,9 +417,9 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${medianSize}, margin: ${cropMarginPercent}% (${canCropCount}/${sampleIndices.length} frames croppable)`);
+        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${medianSize}, margin: ${cropMarginPercent}% (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
-        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+        return { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
     // Robust AVI header parser
@@ -1104,10 +1105,11 @@ export function useAviReader() {
         const marginMultiplier = 1 + (cropMarginPercent / 100);
         const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(width, height);
-        let finalSize = Math.min(desiredSize, maxAllowedSize);
 
-        if (desiredSize > maxAllowedSize) {
-            addLog(`Crop size ${desiredSize} exceeds frame size ${maxAllowedSize}, clamping`);
+        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
+        if (desiredSize >= maxAllowedSize) {
+            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+            return null;
         }
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -1115,9 +1117,9 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        addLog(`Detected crop size: ${finalSize}x${finalSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
 
-        return { size: finalSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+        return { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
 
     // Note: readRawBayerAviFile removed (~400 lines) - now handled by useDebayerReader.

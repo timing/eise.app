@@ -718,14 +718,17 @@ export function useDebayerReader() {
         const margin = 1 + (cropMarginPercent / 100);
         const cropSize = Math.ceil(medianSize * margin / 2) * 2;
 
-        // Clamp to frame size
+        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
         const maxSize = Math.min(metadata.width, metadata.height);
-        const finalSize = Math.min(cropSize, maxSize);
+        if (cropSize >= maxSize) {
+            addLog(`[DebayerReader] Skipping crop: desired ${cropSize}px exceeds frame ${maxSize}px. Stacking alignment will handle centering.`);
+            return null;
+        }
 
-        addLog(`[DebayerReader] Detected crop size: ${finalSize}x${finalSize} (median object: ${medianSize})`);
+        addLog(`[DebayerReader] Detected crop size: ${cropSize}x${cropSize} (median object: ${medianSize})`);
 
         return {
-            size: finalSize,
+            size: cropSize,
             medianSize,
         };
     }
