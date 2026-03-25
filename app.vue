@@ -369,7 +369,7 @@ function handleBatchComplete(data) {
 		file_count: data.totalCount,
 		success_count: data.successCount
 	});
-	navigateTo('/batch-post-processor/');
+	navigateTo('/post-processor/');
 }
 
 function handleProcessingStarted() {

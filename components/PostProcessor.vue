@@ -9,26 +9,9 @@
 />
 
 <div class="page-layout" :class="{ 'page-layout-wide': imageLoaded }">
-	<div class="card">
-		<!-- Intro state when no image loaded -->
-		<template v-if="!imageLoaded">
-			<h3>Select file for post processing</h3>
-			<div class="file-input-wrapper">
-				<input
-					type="file"
-					accept="image/*"
-					id="post-processor-file-input"
-					@change="handleDirectFileSelect"
-				/>
-				<label for="post-processor-file-input" class="file-label">
-					Select image...
-				</label>
-			</div>
-			<p class="supported-formats">PNG, TIFF, JPEG</p>
-		</template>
-
-		<!-- Controls shown when image is loaded -->
-		<div v-else class="controls">
+	<div class="card" :class="{ 'controls-disabled': !imageLoaded }">
+		<!-- Controls always visible, but disabled when no image -->
+		<div class="controls">
 			<div class="processing-indicator" v-if="isProcessing">
 				<div class="spinner"></div>
 			</div>
@@ -187,14 +170,29 @@
 		</div>
 	</div>
 	<div class="content">
-		<template v-if="!imageLoaded">
+		<!-- Intro with file select when no image loaded -->
+		<div v-if="!imageLoaded" class="intro-content">
+			<div class="file-input-wrapper">
+				<input
+					type="file"
+					accept="image/*"
+					id="post-processor-file-input"
+					@change="handleDirectFileSelect"
+				/>
+				<label for="post-processor-file-input" class="file-label btn-primary">
+					Select image to process...
+				</label>
+				<p class="supported-formats">PNG, TIFF, JPEG</p>
+			</div>
+
 			<h2>Post processor</h2>
 			<h3>Sharpen your planetary images</h3>
 			<p>The post-processor helps you bring out detail in your astrophotography. Works great on stacked planetary images, but you can also load any image directly. All processing runs locally in your browser.</p>
 
 			<h4>Features</h4>
 			<p v-for="feature in features" :key="feature.title"><strong>{{ feature.title }}</strong><br/>{{ feature.desc }}</p>
-		</template>
+		</div>
+		<!-- Canvas when image loaded -->
 		<template v-else>
 			<ZoomableCanvas ref="zoomableCanvasRef" id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode || edgeMaskMode" :previewRotation="previewRotationAngle">
 				<template #overlay>
@@ -330,7 +328,7 @@ const features = [
 	{ title: 'Unsharp mask', desc: 'Another sharpening option. Sometimes works better than wavelets, sometimes worse. Try both!' },
 	{ title: 'Color adjustments', desc: 'Tweak brightness, contrast, gamma, and saturation. Vibrance is like saturation but gentler on already-colorful areas.' },
 	{ title: 'RGB alignment', desc: 'Fixes the colored fringes you get from atmospheric dispersion. Auto-detect usually works, or nudge the channels manually.' },
-	{ title: 'Auto stretch', desc: 'Automatically adjusts black and white points to use the full brightness range. Great starting point before manual tweaking.' },
+	{ title: 'Auto levels', desc: 'Automatically adjusts black and white points to use the full brightness range. Great starting point before manual tweaking.' },
 	{ title: 'Rotation and crop', desc: 'Straighten things up and cut off the messy edges.' },
 	{ title: 'Edge mask', desc: 'Removes chromatic aberration fringes around planets by masking everything outside a circle with the true background color.' },
 	{ title: '16-bit processing', desc: 'Every image is processed in 16-bit, so adjustments are more precise and you won\'t lose detail.' }
@@ -2170,6 +2168,32 @@ canvas {
 }
 .content {
 	max-width: none;
+}
+
+/* Disabled controls state when no image loaded */
+.controls-disabled {
+	opacity: 0.5;
+	pointer-events: none;
+	user-select: none;
+}
+
+/* Intro content styling */
+.intro-content {
+	max-width: 600px;
+}
+.intro-content .file-input-wrapper {
+	margin-bottom: 30px;
+}
+.intro-content .file-label {
+	display: inline-block;
+	padding: 12px 24px;
+	font-size: 16px;
+	cursor: pointer;
+}
+.intro-content .supported-formats {
+	margin-top: 8px;
+	color: #888;
+	font-size: 13px;
 }
 
 /* Toolbar actions wrapper */
