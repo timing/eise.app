@@ -2,7 +2,7 @@
 <div class="design-system">
 	<div class="ds-header">
 		<h1>Design System</h1>
-		<p>An inventory of all UI patterns and styles used in eise.app</p>
+		<p>An inventory of all UI patterns and styles used in Eise.app</p>
 	</div>
 
 	<!-- TYPOGRAPHY -->
@@ -55,7 +55,7 @@
 		<div class="ds-group">
 			<h3>Header & Navigation</h3>
 			<div class="ds-examples text-on-gradient">
-				<h1 class="header-demo"><a href="#">eise.app</a> <span class="subtitle-demo">- Easy (planetary) Image Stacker Engine</span></h1>
+				<h1 class="header-demo"><a href="#">Eise.app</a> <span class="subtitle-demo">- Easy Image Stacker Engine</span></h1>
 			</div>
 			<div class="ds-variants">
 				<strong>Logo link:</strong> #8CCF7E (green)<br>

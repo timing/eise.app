@@ -15,11 +15,11 @@ export default defineNuxtConfig({
 			meta: [
 				{ name: 'robots', content: robotsContent },
 				{ property: 'og:type', content: 'website' },
-				{ property: 'og:site_name', content: 'eise.app' },
+				{ property: 'og:site_name', content: 'Eise.app' },
 				{ property: 'og:image', content: 'https://eise.app/screenshot-1.png' },
 				{ property: 'og:image:width', content: '1928' },
 				{ property: 'og:image:height', content: '1500' },
-				{ property: 'og:image:alt', content: 'eise.app - Browser-based planetary image stacker for astrophotography' },
+				{ property: 'og:image:alt', content: 'Eise.app - Browser-based planetary image stacker for astrophotography' },
 				{ name: 'twitter:card', content: 'summary_large_image' },
 				{ name: 'twitter:image', content: 'https://eise.app/screenshot-1.png' },
 			],

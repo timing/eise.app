@@ -171,6 +171,16 @@ onMounted(async () => {
 	});
 	on('color-profile-selected', () => {
 		isSelectingColorProfile.value = false;
+		isProcessing.value = true;
+		// Emit start-loading immediately so VideoFrameProcessor shows loading state
+		eventBusEmit('start-loading', 'Preparing to analyze...');
+		track('stack_start', getTrackingContext());
+	});
+	on('debayer-processing-started', () => {
+		// For SER files where color profile selector was skipped (e.g., forced pattern)
+		isProcessing.value = true;
+		eventBusEmit('start-loading', 'Preparing to analyze...');
+		track('stack_start', getTrackingContext());
 	});
 	on('quality-selection-ready', handleQualitySelectionReady);
 	on('cropped-ser-ready', (data) => {
@@ -626,6 +636,7 @@ canvas {
 	width: 100%;
 	height: 100%;
 	cursor: pointer;
+	z-index: 2;
 }
 .file-label {
 	display: block;
@@ -645,6 +656,47 @@ canvas {
 .file-input-wrapper:hover .file-label {
 	border-color: #8CCF7E;
 	background: #f0fff0;
+}
+/* Enhanced drop zone styling */
+.file-input-wrapper:not(.has-files) .file-label {
+	padding: 25px 15px;
+	white-space: normal;
+}
+.drop-zone-content {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 8px;
+}
+.drop-icon {
+	font-size: 28px;
+	line-height: 1;
+}
+.drop-text {
+	font-size: 14px;
+	color: #666;
+}
+.drop-button {
+	display: inline-block;
+	background-color: #8CCF7E;
+	color: #111;
+	padding: 8px 20px;
+	border-radius: 5px;
+	font-weight: bold;
+	font-size: 14px;
+	margin: 4px 0;
+}
+.file-input-wrapper:hover .drop-button {
+	background-color: #7ABF6E;
+}
+.drop-formats {
+	font-size: 12px;
+	color: #888;
+}
+.drop-privacy {
+	font-size: 11px;
+	color: #999;
+	font-style: italic;
 }
 .supported-formats {
 	font-size: 12px;

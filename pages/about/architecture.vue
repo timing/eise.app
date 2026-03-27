@@ -2,7 +2,7 @@
 	<div class="page-layout page-layout-wide">
 		<div class="content architecture-page">
 			<h2>Technical Architecture</h2>
-			<p >This page documents the internal processing pipelines and algorithms used by eise.app. Useful for contributors or anyone curious about how it works.</p>
+			<p >This page documents the internal processing pipelines and algorithms used by Eise.app. Useful for contributors or anyone curious about how it works.</p>
 
 			<h3>High-Level Overview</h3>
 			<pre class="diagram">
@@ -376,9 +376,9 @@ Final = accumulator / weight_sum
 
 <script setup>
 useHead({
-	title: 'Technical Architecture - eise.app Processing Pipeline',
+	title: 'Technical Architecture - Eise.app Processing Pipeline',
 	meta: [
-		{ name: 'description', content: 'Technical documentation of eise.app\'s processing pipeline, algorithms, and architecture. For contributors and curious users.' },
+		{ name: 'description', content: 'Technical documentation of Eise.app\'s processing pipeline, algorithms, and architecture. For contributors and curious users.' },
 	],
 });
 </script>

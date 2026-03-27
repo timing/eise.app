@@ -4,7 +4,7 @@
 			<h2>Planetary Stacking Software Comparison 2026</h2>
 			<p >
 				Choosing the right stacking software for planetary astrophotography can be confusing.
-				This guide compares the most popular options: AutoStakkert!, Planetary System Stacker (PSS), Planet Stacker X, Registax, PIPP, and eise.app.
+				This guide compares the most popular options: AutoStakkert!, Planetary System Stacker (PSS), Planet Stacker X, Registax, PIPP, and Eise.app.
 			</p>
 
 			<h3>What is Planetary Stacking Software?</h3>
@@ -21,7 +21,7 @@
 					<thead>
 						<tr>
 							<th>Feature</th>
-							<th>eise.app</th>
+							<th>Eise.app</th>
 							<th>AutoStakkert!</th>
 							<th>PSS</th>
 							<th>Planet Stacker X</th>
@@ -153,9 +153,9 @@
 
 			<h3>When to Use Each Tool</h3>
 
-			<h4>eise.app - Best for: Quick results, Mac/Linux users, beginners</h4>
+			<h4>Eise.app - Best for: Quick results, Mac/Linux users, beginners</h4>
 			<p>
-				eise.app is the only planetary stacking tool that runs entirely in your browser.
+				Eise.app is the only planetary stacking tool that runs entirely in your browser.
 				No installation, no dependencies, works on any operating system.
 				It provides an integrated pipeline from raw video to finished image, including wavelet sharpening and RGB alignment.
 				Ideal for beginners or anyone who wants fast results without software hassles.
@@ -198,10 +198,10 @@
 			<p>
 				PIPP (Planetary Imaging PreProcessor) is a pre-processing tool, not a stacker.
 				It's commonly used to center planets, crop frames, and convert between formats before stacking.
-				With eise.app's automatic cropping and centering, PIPP is often unnecessary.
+				With Eise.app's automatic cropping and centering, PIPP is often unnecessary.
 			</p>
 
-			<h3>The eise.app Advantage</h3>
+			<h3>The Eise.app Advantage</h3>
 			<ul>
 				<li><strong>Works everywhere:</strong> Mac, Windows, Linux, even tablets - any device with a modern browser</li>
 				<li><strong>No installation:</strong> Just open the website and start processing</li>
@@ -210,7 +210,7 @@
 				<li><strong>GPU accelerated:</strong> WebGPU provides fast processing on modern browsers</li>
 			</ul>
 
-			<h3>Ready to try eise.app?</h3>
+			<h3>Ready to try Eise.app?</h3>
 			<p>
 				<NuxtLink to="/" class="cta-link">Start stacking now</NuxtLink> - no account or download required.
 			</p>
@@ -220,9 +220,9 @@
 
 <script setup>
 useHead({
-	title: 'Planetary Stacking Software Comparison 2026 - AutoStakkert vs PSS vs Planet Stacker X vs eise.app',
+	title: 'Planetary Stacking Software Comparison 2026 - AutoStakkert vs PSS vs Planet Stacker X vs Eise.app',
 	meta: [
-		{ name: 'description', content: 'Compare planetary astrophotography stacking software: AutoStakkert!, Planetary System Stacker (PSS), Planet Stacker X, Registax, PIPP, and eise.app. Find the best tool for your needs.' },
+		{ name: 'description', content: 'Compare planetary astrophotography stacking software: AutoStakkert!, Planetary System Stacker (PSS), Planet Stacker X, Registax, PIPP, and Eise.app. Find the best tool for your needs.' },
 		{ name: 'keywords', content: 'planetary stacking software, autostakkert alternative, planetary system stacker, planet stacker x, registax alternative, astrophotography software comparison, planetary imaging software, mac stacking software' },
 	],
 });

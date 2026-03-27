@@ -1,14 +1,14 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content">
-			<h2>How to Use eise.app - Planetary Image Stacking Guide</h2>
-			<p >This guide explains how eise.app processes your astrophotography videos and images to create sharp, detailed results.</p>
+			<h2>How to Use Eise.app - Planetary Image Stacking Guide</h2>
+			<p >This guide explains how Eise.app processes your astrophotography videos and images to create sharp, detailed results.</p>
 
 			<h3>Getting Started</h3>
 			<ol>
 				<li><strong>Capture your video</strong> - Use your telescope and camera to record a video of a planet, the Moon, or Sun. SER format is recommended, but AVI or MP4 also work.</li>
-				<li><strong>Upload to eise.app</strong> - Drag and drop your file onto the Stack page. Multiple SER files can be combined.</li>
-				<li><strong>Wait for analysis</strong> - eise.app analyzes each frame for sharpness and automatically crops and centers your target.</li>
+				<li><strong>Upload to Eise.app</strong> - Drag and drop your file onto the Stack page. Multiple SER files can be combined.</li>
+				<li><strong>Wait for analysis</strong> - Eise.app analyzes each frame for sharpness and automatically crops and centers your target.</li>
 				<li><strong>Select quality threshold</strong> - Use the slider to choose how many of the best frames to stack (typically 10-50%).</li>
 				<li><strong>Stack and process</strong> - Click "Stack" and then use the Post Processor to sharpen and enhance your result.</li>
 			</ol>
@@ -36,11 +36,11 @@
 			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image - just open a PNG or TIFF for wavelet sharpening without stacking.</p>
 
 			<h3>Technology</h3>
-			<p>eise.app is built with Nuxt/Vue, OpenCV.js (WebAssembly), Web Workers for parallel processing, and FFmpeg.js for video decoding.
+			<p>Eise.app is built with Nuxt/Vue, OpenCV.js (WebAssembly), Web Workers for parallel processing, and FFmpeg.js for video decoding.
 			All processing happens in your browser - works on any operating system without installation.</p>
 
 			<h3>Browser Requirements</h3>
-			<p>eise.app uses WebGPU for fast GPU-accelerated stacking and image processing. Here are the minimum browser versions:</p>
+			<p>Eise.app uses WebGPU for fast GPU-accelerated stacking and image processing. Here are the minimum browser versions:</p>
 			<table class="compat-table">
 				<tr><th>Platform</th><th>Minimum Version</th></tr>
 				<tr><td>Chrome</td><td>113+ (Android: 121+)</td></tr>
@@ -82,10 +82,10 @@
 			</dl>
 
 			<h3>Technical Details</h3>
-			<p>Want to understand how eise.app works under the hood? Check out the <NuxtLink to="/about/architecture/">technical architecture</NuxtLink> page with detailed pipeline diagrams and algorithm explanations.</p>
+			<p>Want to understand how Eise.app works under the hood? Check out the <NuxtLink to="/about/architecture/">technical architecture</NuxtLink> page with detailed pipeline diagrams and algorithm explanations.</p>
 
 			<h3>Need more help?</h3>
-			<p>Head over to <a href="https://github.com/timing/eise.app" target="_blank">eise.app on GitHub</a> to ask questions or report issues.</p>
+			<p>Head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on GitHub</a> to ask questions or report issues.</p>
 		</div>
 	</div>
 </template>
@@ -95,9 +95,9 @@ const webGPUSupported = inject('webGPUSupported');
 const detectedBrowser = inject('detectedBrowser');
 
 useHead({
-	title: 'Help & How it Works - eise.app Planetary Image Stacking Guide',
+	title: 'Help & How it Works - Eise.app Planetary Image Stacking Guide',
 	meta: [
-		{ name: 'description', content: 'Learn how to use eise.app for planetary astrophotography. Step-by-step guide to stacking videos of planets, Moon, and Sun in your browser.' },
+		{ name: 'description', content: 'Learn how to use Eise.app for planetary astrophotography. Step-by-step guide to stacking videos of planets, Moon, and Sun in your browser.' },
 	],
 });
 </script>

@@ -4,7 +4,7 @@
 			<strong>Lite Mode</strong><span v-if="forceLiteMode"> (forced)</span><span v-else-if="isMobile"> ({{ useGPU ? 'GPU' : 'CPU' }})</span><span v-else> (no WebGPU)</span> · Frame limit auto-adjusted for memory.
 		</div>
 
-		<FileUploader v-show="!isProcessing && !isSelectingQuality" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
+		<FileUploader v-show="!isProcessing && !isSelectingQuality && !isSelectingColorProfile" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
 		<ColorProfileSelector v-show="isSelectingColorProfile" />
 		<QualitySelector v-show="isSelectingQuality" :frames="qualityFrames" :frameReReader="qualityFrameReReader" @threshold-selected="handleThresholdSelected" />
 		<VideoFrameProcessor ref="videoProcessorRef" v-show="isProcessing && !isSelectingColorProfile && !isSelectingQuality"
@@ -56,9 +56,9 @@ const handleWebGPUCancel = inject('handleWebGPUCancel');
 const videoProcessorRef = ref(null);
 
 useHead({
-	title: 'eise.app - Easy (planetary) Image Stacker in your browser for your Astrophotography',
+	title: 'Eise.app - Planetary Image Stacker - Browser-Based and fast',
 	meta: [
-		{ name: 'description', content: 'Easy (planetary) Image Stacker Engine, made to work in your browser. Turn your blurry videos of planets into sharp images. Perfect for beginners in Astrophotography.' },
+		{ name: 'description', content: 'Planetary image stacker that runs in your browser. Turn your videos of planets, Moon, and Sun into sharp images. For astrophotographers of all levels.' },
 	],
 });
 </script>

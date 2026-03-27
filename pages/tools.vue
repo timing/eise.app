@@ -6,7 +6,7 @@
 import Tools from '@/components/Tools.vue';
 
 useHead({
-	title: 'SER Tools - eise.app',
+	title: 'SER Tools - Eise.app',
 	meta: [
 		{ name: 'description', content: 'SER file analyzer, player, and trimmer tools for astrophotography.' },
 	],

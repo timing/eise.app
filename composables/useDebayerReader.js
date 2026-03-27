@@ -153,7 +153,7 @@ function computePreCropRegion(bounds, srcWidth, srcHeight, marginFactor = 1.5) {
  * Create a debayer reader instance for processing demosaic formats
  */
 export function useDebayerReader() {
-    const { addLog, emit } = useEventBus();
+    const { addLog, emit, on } = useEventBus();
     const { workerUrl } = useWorkerUrl();
     const { stackFramesLocally } = useStacker();
 
@@ -175,6 +175,31 @@ export function useDebayerReader() {
     let bayerChoice = 'MONO';
     let bayerPattern = -1;
     let scaleFactor = 1;
+    let cancelled = false;
+
+    // Cancel processing and terminate workers
+    function cancelProcessing() {
+        cancelled = true;
+        addLog('[DebayerReader] Cancelling processing...');
+
+        // Terminate GPU worker
+        if (gpuWorker) {
+            try { gpuWorker.terminate(); } catch (e) { /* ignore */ }
+            gpuWorker = null;
+            gpuWorkerReady = false;
+        }
+
+        // Terminate pre-crop worker
+        if (preCropWorker) {
+            try { preCropWorker.terminate(); } catch (e) { /* ignore */ }
+            preCropWorker = null;
+        }
+
+        addLog('[DebayerReader] Workers terminated');
+    }
+
+    // Listen for cancel event from UI
+    on('cancel-processing', cancelProcessing);
 
     /**
      * Initialize reader with file and parser
@@ -775,9 +800,9 @@ export function useDebayerReader() {
         } = options;
 
         console.log('[useDebayerReader] processFile called - full pipeline');
+        cancelled = false; // Reset cancellation flag
 
-        emit('start-loading', 'Initializing...');
-        emit('update-loading', 0);
+        // Note: Don't emit start-loading here - FileUploader should stay static until color profile selection
 
         // Initialize GPU
         const gpuReady = await initGpuWorker();
@@ -843,9 +868,12 @@ export function useDebayerReader() {
             bayerChoice = forceBayerPattern;
             bayerPattern = bayerChoiceToGpuPattern(forceBayerPattern);
             addLog(`[DebayerReader] Using forced bayer pattern: ${bayerChoice} (GPU: ${bayerPattern})`);
+            // Emit processing-started since color profile selector was skipped
+            emit('debayer-processing-started');
         } else {
             emit('set-caption', 'Select color profile');
             await showColorProfileSelector(previewBuffer, previewWidth, previewHeight);
+            // Note: color-profile-selected event triggers isProcessing in app.vue
         }
 
         // Detect full crop region
@@ -854,8 +882,8 @@ export function useDebayerReader() {
             cropRegion = await detectCropRegion(cropMarginPercent);
         }
 
-        // Analysis phase
-        emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
+        // Analysis phase - now show loading indicator (after color profile selection)
+        emit('start-loading', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
         emit('update-loading', { progress: 0, current: 0, total: frameCount });
 
         const bestFramesCapacity = Math.max(1, Math.floor(frameCount * stackPercentage / 100));
@@ -1070,6 +1098,12 @@ export function useDebayerReader() {
         }
 
         for (let batchStart = 0; batchStart < frameCount; batchStart += BATCH_SIZE) {
+            // Check for cancellation at start of each batch
+            if (cancelled) {
+                addLog('[DebayerReader] Processing cancelled by user');
+                return;
+            }
+
             const t0Load = performance.now();
             let frames = currentFrames;
             analysisStats.frameLoadMs.push(performance.now() - t0Load);
@@ -1226,6 +1260,13 @@ export function useDebayerReader() {
             emit('upload-error', errorMsg);
             emit('stack-failed', { component: 'useDebayerReader', reason: 'no valid frames', details: { cutOffFrameCount, completedFrames } });
             emit('stop-loading');
+            terminateGpuWorker();
+            return;
+        }
+
+        // Check for cancellation before stacking
+        if (cancelled) {
+            addLog('[DebayerReader] Processing cancelled before stacking');
             terminateGpuWorker();
             return;
         }

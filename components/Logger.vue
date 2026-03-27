@@ -53,7 +53,7 @@ onMounted(() => {
 	const hasGPU = !!navigator.gpu;
 	const lite = isLiteMode();
 	const mode = (hasGPU ? 'GPU' : 'CPU') + (lite ? ', Lite' : '');
-	logContent.value.innerHTML += (new Date()).toLocaleString() + `: Welcome to eise.app! (${mode})\n`;
+	logContent.value.innerHTML += (new Date()).toLocaleString() + `: Welcome to Eise.app! (${mode})\n`;
 
 	onLogAdded(handleLogAdded);
 

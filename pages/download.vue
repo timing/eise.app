@@ -1,7 +1,7 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content">
-			<h2>Download eise.app</h2>
+			<h2>Download Eise.app</h2>
 			<h3>Native app coming soon</h3>
 
 			<p>
@@ -57,7 +57,7 @@
 			</div>
 
 			<div class="current-option">
-				<h3>Use eise.app now</h3>
+				<h3>Use Eise.app now</h3>
 				<p>
 					The web version is fully functional and free to use.
 					<NuxtLink to="/">Start stacking</NuxtLink> right in your browser -
@@ -70,9 +70,9 @@
 
 <script setup>
 useHead({
-	title: 'Download eise.app - Native App Coming Soon',
+	title: 'Download Eise.app - Native App Coming Soon',
 	meta: [
-		{ name: 'description', content: 'Sign up to be notified when the native eise.app becomes available for desktop (Windows, macOS, Linux) and mobile (Android, iOS).' },
+		{ name: 'description', content: 'Sign up to be notified when the native Eise.app becomes available for desktop (Windows, macOS, Linux) and mobile (Android, iOS).' },
 	],
 });
 </script>

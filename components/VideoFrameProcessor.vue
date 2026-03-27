@@ -3,8 +3,9 @@
 		<div class="card">
 			<LoadingIndicator />
 
-			<div class="action-buttons processing-actions">
+			<div v-if="!showCancelledMessage && !uploadError" class="action-buttons processing-actions">
 				<button class="btn-danger" @click="cancelProcessing">Cancel</button>
+				<p class="processing-hint">Stacking can take a while, but the results are hopefully worth the wait!</p>
 			</div>
 
 			<div v-if="skippedFrames > 0" class="skipped-info">
@@ -517,8 +518,15 @@ async function processImageFrames(files) {
 		margin-top: 10px;
 	}
 	.processing-actions {
-		justify-content: center;
+		flex-direction: column;
+		align-items: center;
 		margin-top: 20px;
+	}
+	.processing-hint {
+		font-size: 12px;
+		color: #888;
+		margin: 8px 0 0 0;
+		text-align: center;
 	}
 	/* Side-by-side grayscale/color preview */
 	.dual-preview {

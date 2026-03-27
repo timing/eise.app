@@ -1,10 +1,10 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content">
-			<h2>About eise.app - Image Stacker for Planets, Moon & Sun</h2>
+			<h2>About Eise.app - Image Stacker for Planets, Moon & Sun</h2>
 			<h3>100% browser-based - no uploads, no installs</h3>
-			<p>eise.app is the first fully browser-based planetary image stacking tool for astrophotography.
-			Everything runs locally on your machine using WebAssembly and Web Workers - your data never leaves your computer.
+			<p>Eise.app is the first fully browser-based planetary image stacking tool for astrophotography.
+			Everything runs locally on your machine using WebGPU for fast GPU-accelerated processing, WebAssembly, and Web Workers - your data never leaves your computer.
 			</p>
 			<p>
 			The name is an ode to <a href="https://en.wikipedia.org/wiki/Eise_Eisinga" target="_blank">Eise Eisinga</a>, a Frisian amateur astronomer who built a planetarium in his living room.
@@ -15,7 +15,7 @@
 				The stacking pipeline includes automatic frame ranking, per-frame cropping and centering, local alignment with de-warping,
 				drizzle upscaling, and quality-weighted frame accumulation. The integrated post-processor offers wavelet sharpening,
 				RGB alignment, and color correction.
-				<NuxtLink to="/about/help/">Learn how eise.app works</NuxtLink>,
+				<NuxtLink to="/about/help/">Learn how Eise.app works</NuxtLink>,
 				<NuxtLink to="/about/architecture/">explore the technical architecture</NuxtLink>, or
 				<NuxtLink to="/about/planetary-stacking-software-comparison/">compare it to other stacking software</NuxtLink>.
 			</p>
@@ -25,7 +25,7 @@
 			<div class="screenshot-carousel">
 				<button class="carousel-btn prev" @click="prevScreenshot">&lsaquo;</button>
 				<div class="carousel-container" @click="showLightbox = true">
-					<img :src="screenshots[currentScreenshot]" :alt="'eise.app screenshot ' + (currentScreenshot + 1)" />
+					<img :src="screenshots[currentScreenshot]" :alt="'Eise.app screenshot ' + (currentScreenshot + 1)" />
 				</div>
 				<button class="carousel-btn next" @click="nextScreenshot">&rsaquo;</button>
 				<div class="carousel-dots">
@@ -42,7 +42,7 @@
 			<!-- Lightbox popup -->
 			<div v-if="showLightbox" class="lightbox-overlay" @click="showLightbox = false">
 				<button class="lightbox-btn prev" @click.stop="prevScreenshot">&lsaquo;</button>
-				<img :src="screenshots[currentScreenshot]" :alt="'eise.app screenshot ' + (currentScreenshot + 1)" @click.stop />
+				<img :src="screenshots[currentScreenshot]" :alt="'Eise.app screenshot ' + (currentScreenshot + 1)" @click.stop />
 				<button class="lightbox-btn next" @click.stop="nextScreenshot">&rsaquo;</button>
 				<button class="lightbox-close" @click="showLightbox = false">&times;</button>
 			</div>
@@ -52,7 +52,7 @@
 			All processing happens in your browser - works on any OS without installation.</p>
 
 			<h3>Browser Requirements</h3>
-			<p>eise.app uses WebGPU for fast GPU-accelerated processing. See <NuxtLink to="/about/help/">browser requirements</NuxtLink> for minimum versions.</p>
+			<p>Eise.app uses WebGPU for fast GPU-accelerated processing. See <NuxtLink to="/about/help/">browser requirements</NuxtLink> for minimum versions.</p>
 			<ClientOnly>
 				<div class="compat-status" :class="{ compatible: webGPUSupported === true, incompatible: webGPUSupported === false, checking: webGPUSupported === null }">
 					<strong>Your browser:</strong> {{ detectedBrowser }}<br/>
@@ -64,7 +64,7 @@
 
 			<h3>Alternative software</h3>
 			<p>
-				eise.app works well for quick astrophotography results without installing anything.
+				Eise.app works well for quick astrophotography results without installing anything.
 				For a detailed comparison with AutoStakkert!, Planetary System Stacker, Registax, and other tools,
 				see our <NuxtLink to="/about/planetary-stacking-software-comparison/">stacking software comparison</NuxtLink>.
 			</p>
@@ -77,7 +77,7 @@
 			</p>
 
 			<h3>Bugs or feature requests?</h3>
-			<p>Head over to <a href="https://github.com/timing/eise.app" target="_blank">eise.app on GitHub</a> for suggestions or bug reports.</p>
+			<p>Head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on GitHub</a> for suggestions or bug reports.</p>
 			<p>Or <a href="#" @click.prevent="openFeedback()">send me feedback directly</a> - I'd love to hear about your experience!</p>
 
 			<p>Happy Stacking,<br/> Tijmen</p>
@@ -112,9 +112,9 @@ function prevScreenshot() {
 }
 
 useHead({
-	title: 'About eise.app - Browser-Based Planetary Image Stacking',
+	title: 'About Eise.app - Browser-Based Planetary Image Stacking',
 	meta: [
-		{ name: 'description', content: 'eise.app is the first fully browser-based planetary image stacking tool for astrophotography. Process planets, Moon, and Sun images without installation - works on Mac, Windows, and Linux.' },
+		{ name: 'description', content: 'Eise.app is the first fully browser-based planetary image stacking tool for astrophotography. Process planets, Moon, and Sun images without installation - works on Mac, Windows, and Linux.' },
 		{ name: 'keywords', content: 'planetary image stacking, astrophotography software, browser-based stacking, lucky imaging, planetary photography' },
 	],
 });

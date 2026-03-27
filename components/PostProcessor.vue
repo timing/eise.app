@@ -255,7 +255,7 @@
 				</button>
 			</div>
 
-			<p class="share-note">If you share this image, a mention of eise.app is appreciated!</p>
+			<p class="share-note">If you share this image, a mention of Eise.app is appreciated!</p>
 
 			<div class="export-popup-footer">
 				<a href="https://github.com/timing/eise.app/issues" target="_blank" class="btn-primary" @click="handleFeedbackClick">

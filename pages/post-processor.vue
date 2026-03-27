@@ -26,7 +26,7 @@ const batchResults = inject('batchResults');
 const isBatchMode = computed(() => batchResults?.value?.length > 0);
 
 useHead({
-	title: computed(() => isBatchMode.value ? 'Batch Post Processing - eise.app' : 'Post Processing - eise.app'),
+	title: computed(() => isBatchMode.value ? 'Batch Post Processing - Eise.app' : 'Post Processing - Eise.app'),
 	meta: [
 		{ name: 'description', content: 'Post-process your stacked astrophotography images with wavelet sharpening and more.' },
 	],

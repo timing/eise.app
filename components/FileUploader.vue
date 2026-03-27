@@ -17,6 +17,7 @@
 		<!-- Cancel button during processing -->
 		<div v-if="isProcessing" class="action-buttons processing-actions">
 			<button class="btn-danger" @click="cancelProcessing">Cancel</button>
+			<p class="processing-hint">Stacking can take a while, but the results are hopefully worth the wait!</p>
 		</div>
 
 		<!-- Error message - always visible when set, regardless of processing state -->
@@ -48,16 +49,26 @@
 		<!-- Initial state: file selection and settings (hidden during processing) -->
 		<template v-if="!isProcessing && !isBatchMode">
 			<h3>Select file(s) for stacking and/or post processing</h3>
-			<div class="file-input-wrapper">
-				<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" />
+			<div class="file-input-wrapper" :class="{ 'has-files': selectedFiles.length > 0 }">
+				<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" title="" />
 				<label for="file-upload" class="file-label">
-					{{ selectedFiles.length > 0 ? selectedFilesDescription : 'Choose files...' }}
+					<template v-if="selectedFiles.length > 0">
+						{{ selectedFilesDescription }}
+					</template>
+					<template v-else>
+						<span class="drop-zone-content">
+							<span class="drop-icon">📂</span>
+							<span class="drop-text">Drag files here</span>
+							<span class="drop-button">Choose files</span>
+							<span class="drop-formats">SER, AVI, MP4, PNG, TIFF, JPEG</span>
+							<span class="drop-privacy">Nothing is uploaded.</span>
+						</span>
+					</template>
 				</label>
 			</div>
-			<p class="supported-formats">SER, AVI, MP4, PNG, TIFF, JPEG</p>
 
 			<div v-if="liteModeClient" class="lite-mode-warning">
-				Stacking on mobile devices will likely not work due to memory limitations. For best results, use eise.app on a laptop or desktop computer.
+				Stacking on mobile devices will likely not work due to memory limitations. For best results, use Eise.app on a laptop or desktop computer.
 			</div>
 
 			<!-- Batch choice dialog -->
@@ -191,16 +202,16 @@
 
 	<!-- Welcome content: only show when not processing -->
 	<div class="content" v-if="!isProcessing">
-		<h2>Welcome to eise.app</h2>
-		<h3>An easy image stacker for planetary astrophotography</h3>
+		<h2>Welcome to Eise.app</h2>
+		<h3>A planetary image stacker for lucky imaging</h3>
 		<p>Turn your blurry and shaky videos of planets, Moon, or Sun into one stacked and sharp image using <em>lucky imaging</em> - a classic astrophotography technique.</p>
 		<ul>
-			<li>Select one or more SER or raw AVI files for stacking followed by post processing. Multiple video filees allow you to open batch stacking mode.</li>
+			<li>Select one or more SER or raw AVI files for stacking followed by post processing. Multiple video files allow you to open batch stacking mode.</li>
 			<li>Select one video file (AVI, MP4, etc.) for stacking followed by post processing.</li>
 			<li>Select multiple image files (TIFF, PNG, JPG, etc.) for stacking and post processing.</li>
 			<li>Select one image file to directly open the <NuxtLink to="/post-processor/">post processing</NuxtLink> with that file.</li>
 		</ul>
-		<p>When stacking, eise.app analyzes, crops, centers and ranks all frames by sharpness and circularity, and it drops frames automatically that are (almost) cut-off.</p>
+		<p>When stacking, Eise.app analyzes, crops, centers and ranks all frames by sharpness and circularity, and it drops frames automatically that are (almost) cut-off.</p>
 		<p><strong>Tip:</strong> For Moon or Sun surface closeups, select "Surface" mode above to handle larger frame-to-frame drift.</p>
 		<h3>Beta: Batch stacking and post processing workflow</h3>
 		<p>Batch stacking and processing is now in beta. Select multiple SER or raw AVI files, and Eise asks you how you want to stack it. The post processor applies all settings to all stacked images at once.</p>
@@ -674,8 +685,6 @@ function detectBrightObjectBounds(pixels, width, height) {
 async function startProcessing() {
 	if (selectedFiles.value.length === 0) return;
 	errorMessage.value = null;
-	isProcessing.value = true;
-	eventBusEmit('start-loading', 'Preparing...');
 
 	if (liteMode.value) {
 		addLog('Lite Mode: max 100 frames, best 30%, 1x stacking, CPU processing');
@@ -746,8 +755,6 @@ async function processCombinedMode() {
 	// Continue with existing multi-SER combined processing (skip batch dialog)
 	if (selectedFiles.value.length === 0) return;
 	errorMessage.value = null;
-	isProcessing.value = true;
-	eventBusEmit('start-loading', 'Preparing...');
 
 	try {
 		await processFiles(selectedFiles.value, { skipBatchChoice: true });
@@ -818,7 +825,7 @@ async function processFiles(files, options = {}) {
 	// Handle multiple SER files (combined stacking) - when user chose "Combine" option
 	if (serFiles.length > 1) {
 		setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: useGPU.value });
-		emit('processing-started');
+		// Note: processing-started is emitted via eventBus after color profile selection
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
 
 		const { useMultiSerParser } = await import('@/composables/useSerParser');
@@ -855,7 +862,7 @@ async function processFiles(files, options = {}) {
 		// Handle SER files with unified debayer reader
 		if (fileToProcess.name.endsWith('.ser')) {
 			setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: useGPU.value });
-			emit('processing-started');
+			// Note: processing-started is emitted via eventBus after color profile selection (if needed)
 
 			// Use new unified debayer reader
 			const { useSerParser } = await import('@/composables/useSerParser');
@@ -899,7 +906,7 @@ async function processFiles(files, options = {}) {
 				if (is8bitRaw) {
 					// Route 8-bit raw Bayer AVI through unified debayer reader
 					setTrackingContext({ file_type: 'avi', reader: 'debayer', gpu_enabled: useGPU.value });
-					emit('processing-started');
+					// Note: processing-started is emitted via eventBus after color profile selection
 					addLog('8-bit raw Bayer AVI detected. Using unified debayer reader.');
 
 					const { useAviParser } = await import('@/composables/useAviParser');
@@ -939,7 +946,8 @@ async function processFiles(files, options = {}) {
 
 		if (!needsFfmpeg) return;
 
-		eventBusEmit('set-caption', 'Loading FFmpeg...');
+		// Show loading indicator for FFmpeg path (SER files handle this after color profile selection)
+		eventBusEmit('start-loading', 'Loading FFmpeg...');
 		try {
 			await $loadFFmpeg();
 		} catch (err) {
@@ -1393,8 +1401,15 @@ async function processFiles(files, options = {}) {
 	margin-top: 10px;
 }
 .processing-actions {
-	justify-content: center;
+	flex-direction: column;
+	align-items: center;
 	margin-top: 20px;
+}
+.processing-hint {
+	font-size: 12px;
+	color: #888;
+	margin: 8px 0 0 0;
+	text-align: center;
 }
 .info-icon {
 	cursor: pointer;

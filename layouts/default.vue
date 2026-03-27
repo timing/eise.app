@@ -2,7 +2,7 @@
 	<div>
 		<div class="top-bar">
 			<header>
-				<h1><a href="/">eise.app</a> <span class="subtitle">- Easy (planetary) Image Stacker Engine</span></h1>
+				<h1><a href="/">Eise.app</a> <span class="subtitle">- Easy Image Stacker Engine</span></h1>
 			</header>
 			<nav class="tabs">
 				<NuxtLink to="/" :class="{ active: route.path === '/' }">Stack</NuxtLink>
@@ -14,7 +14,7 @@
 					</button>
 					<div class="menu-backdrop" @click="menuOpen = false"></div>
 					<div class="menu-dropdown">
-						<NuxtLink to="/about/" @click="menuOpen = false">About eise.app</NuxtLink>
+						<NuxtLink to="/about/" @click="menuOpen = false">About Eise.app</NuxtLink>
 						<NuxtLink to="/about/help/" @click="menuOpen = false">Help & How it Works</NuxtLink>
 						<NuxtLink to="/about/architecture/" @click="menuOpen = false">Technical Architecture</NuxtLink>
 						<NuxtLink to="/about/planetary-stacking-software-comparison/" @click="menuOpen = false">Stacking Software Comparison</NuxtLink>

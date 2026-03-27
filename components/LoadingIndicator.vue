@@ -6,7 +6,7 @@
 		</div>
 		<div v-else class="loading-content">
 			<div class="caption" v-if="caption">{{ caption }}</div>
-			<div class="frame-counter" v-if="currentFrame > 0">{{ currentFrame }} / {{ totalFrames }}</div>
+			<div class="frame-counter" v-if="totalFrames > 0">{{ currentFrame }} / {{ totalFrames }}</div>
 			<div class="loading-indicator">
 				<div v-if="isIndeterminate" class="indeterminate"></div>
 				<div v-else class="determinate" :style="{ width: progress + '%' }"></div>

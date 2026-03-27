@@ -1,11 +1,10 @@
 <template>
-	<div v-if="visible" class="page-layout">
+	<div class="page-layout">
 		<div class="card">
 			<h3>Select Color Profile</h3>
 			<p>Your SER file contains raw Bayer data that needs to be converted to color.</p>
 			<p>Click on the thumbnail that shows the <strong>correct colors</strong> for your subject.</p>
 			<p>The auto-detected profile is highlighted with a blue border, but this may not always be correct.</p>
-			<LoadingIndicator />
 		</div>
 		<div class="content">
 			<h2>Select Bayer Pattern</h2>
@@ -35,7 +34,6 @@
 import { ref, onMounted, nextTick, onUnmounted } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
-import LoadingIndicator from '@/components/LoadingIndicator.vue';
 
 const { on, emit: eventBusEmit } = useEventBus();
 const { workerUrl } = useWorkerUrl();
