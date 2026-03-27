@@ -109,9 +109,9 @@ export function useAviReader() {
                         reject(new Error(e.data.message || 'Worker initialization error'));
                     }
                 };
-                worker.onerror = (e) => {
+                worker.onerror = (event) => {
                     clearTimeout(timeout);
-                    reject(e);
+                    reject(event.error || new Error(event.message || 'Worker initialization error'));
                 };
                 worker.postMessage({ type: 'init' });
             });
@@ -160,9 +160,9 @@ export function useAviReader() {
                         reject(new Error(e.data.message || 'Worker recycle error'));
                     }
                 };
-                worker.onerror = (e) => {
+                worker.onerror = (event) => {
                     clearTimeout(timeout);
-                    reject(e);
+                    reject(event.error || new Error(event.message || 'Worker recycle error'));
                 };
                 worker.postMessage({ type: 'init' });
             });
@@ -196,9 +196,9 @@ export function useAviReader() {
                     resolve();
                 }
             };
-            newWorker.onerror = (e) => {
+            newWorker.onerror = (event) => {
                 clearTimeout(timeout);
-                reject(e);
+                reject(event.error || new Error(event.message || 'Worker recycle error'));
             };
             newWorker.postMessage({ type: 'init' });
         });

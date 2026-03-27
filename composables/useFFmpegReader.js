@@ -81,9 +81,9 @@ export function useFFmpegReader() {
                         reject(new Error(e.data.message || 'Worker initialization error'));
                     }
                 };
-                worker.onerror = (e) => {
+                worker.onerror = (event) => {
                     clearTimeout(timeout);
-                    reject(e);
+                    reject(event.error || new Error(event.message || 'Worker initialization error'));
                 };
                 worker.postMessage({ type: 'init' });
             });
