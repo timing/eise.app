@@ -954,11 +954,16 @@ const applyProcessingInternal = async() => {
 		return;
 	}
 
-	isProcessing.value = true;
-
 	// Use pending dimensions if available (new image loading), otherwise current canvas size
-	const width = pendingCanvasDimensions?.width ?? canvas.value.width;
-	const height = pendingCanvasDimensions?.height ?? canvas.value.height;
+	const width = pendingCanvasDimensions?.width ?? canvas?.value?.width;
+	const height = pendingCanvasDimensions?.height ?? canvas?.value?.height;
+
+	if (!width || !height) {
+		console.warn('Canvas not available for processing');
+		return;
+	}
+
+	isProcessing.value = true;
 
 	let workingData = new Float32Array(image16.data); // Copy for processing
 
