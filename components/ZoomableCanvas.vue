@@ -180,8 +180,18 @@ const centerCanvas = () => {
 	};
 };
 
+// Adjust position after crop so the cropped area stays in the same screen location
+const adjustPositionForCrop = (sel) => {
+	// Before crop: selection at (sel.x, sel.y) appears at screen position (position + sel * zoom)
+	// After crop: new canvas top-left should appear at that same screen position
+	position.value = {
+		x: position.value.x + sel.x * zoomLevel.value,
+		y: position.value.y + sel.y * zoomLevel.value
+	};
+};
+
 // Expose centerCanvas so parent can call it after loading an image
-defineExpose({ centerCanvas });
+defineExpose({ centerCanvas, adjustPositionForCrop });
 
 </script>
 

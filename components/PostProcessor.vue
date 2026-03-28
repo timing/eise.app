@@ -1592,6 +1592,9 @@ function applyCrop() {
 	// Reinitialize WebGL2 for new dimensions
 	useWebGL2 = initWebGL2(sel.width, sel.height);
 
+	// Adjust canvas position so cropped area stays in the same screen location
+	zoomableCanvasRef.value?.adjustPositionForCrop(sel);
+
 	// Exit crop mode
 	cropMode.value = false;
 	cropSelection.value = null;
@@ -1651,6 +1654,9 @@ function undoCrop() {
 
 	// Reprocess with existing alignment settings
 	applyProcessing();
+
+	// Recenter the canvas since the image is now larger
+	zoomableCanvasRef.value?.centerCanvas();
 }
 
 // Rotation functions
