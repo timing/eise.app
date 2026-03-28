@@ -266,7 +266,15 @@ export function useDebayerReader() {
             }, 10000);
 
             gpuWorker.onmessage = (e) => {
-                if (!e.data) return;
+                if (!e.data) {
+                    clearTimeout(timeout);
+                    addLog('[DebayerReader] GPU worker crashed');
+                    gpuWorker.terminate();
+                    gpuWorker = null;
+                    gpuInitFailed = true;
+                    resolve(false);
+                    return;
+                }
                 if (e.data.type === 'ready') {
                     clearTimeout(timeout);
                     gpuWorkerReady = true;
@@ -456,6 +464,11 @@ export function useDebayerReader() {
 
         return new Promise((resolve, reject) => {
             const handler = (e) => {
+                if (!e.data) {
+                    gpuWorker.removeEventListener('message', handler);
+                    reject(new Error('GPU worker crashed - try reloading the page'));
+                    return;
+                }
                 if (e.data.requestId !== requestId) return;
                 gpuWorker.removeEventListener('message', handler);
 
@@ -502,6 +515,11 @@ export function useDebayerReader() {
 
         return new Promise((resolve) => {
             const handler = async (e) => {
+                if (!e.data) {
+                    gpuWorker.removeEventListener('message', handler);
+                    resolve(null);
+                    return;
+                }
                 if (e.data.requestId !== requestId) return;
                 gpuWorker.removeEventListener('message', handler);
 
@@ -620,6 +638,11 @@ export function useDebayerReader() {
 
         return new Promise((resolve, reject) => {
             const handler = (e) => {
+                if (!e.data) {
+                    gpuWorker.removeEventListener('message', handler);
+                    reject(new Error('GPU worker crashed - try reloading the page'));
+                    return;
+                }
                 if (e.data.requestId !== requestId) return;
                 gpuWorker.removeEventListener('message', handler);
 
@@ -673,6 +696,11 @@ export function useDebayerReader() {
 
         return new Promise((resolve, reject) => {
             const handler = (e) => {
+                if (!e.data) {
+                    gpuWorker.removeEventListener('message', handler);
+                    reject(new Error('GPU worker crashed - try reloading the page'));
+                    return;
+                }
                 if (e.data.requestId !== requestId) return;
                 gpuWorker.removeEventListener('message', handler);
 
@@ -942,8 +970,13 @@ export function useDebayerReader() {
             }
 
             const requestId = ++preCropRequestId;
-            return new Promise((resolve) => {
+            return new Promise((resolve, reject) => {
                 const handler = (e) => {
+                    if (!e.data) {
+                        preCropWorker.removeEventListener('message', handler);
+                        reject(new Error('Worker crashed - try reloading the page'));
+                        return;
+                    }
                     if (e.data.requestId !== requestId) return;
                     preCropWorker.removeEventListener('message', handler);
                     resolve({ frames: e.data.frames, offset: e.data.offset });

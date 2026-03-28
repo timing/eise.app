@@ -279,6 +279,7 @@ export function useComparisonExport() {
             await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error('GPU worker timeout')), 10000);
                 worker.onmessage = (e) => {
+                    if (!e.data) { clearTimeout(timeout); reject(new Error('GPU worker crashed - try reloading the page')); return; }
                     if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
                     else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
                 };
@@ -292,6 +293,11 @@ export function useComparisonExport() {
                 const rgba = await new Promise((resolve, reject) => {
                     const requestId = Date.now() + Math.random();
                     const handler = (e) => {
+                        if (!e.data) {
+                            worker.removeEventListener('message', handler);
+                            reject(new Error('GPU worker crashed - try reloading the page'));
+                            return;
+                        }
                         if (e.data.requestId !== requestId) return;
                         worker.removeEventListener('message', handler);
                         if (e.data.type === 'demosaic-scaled-result') {

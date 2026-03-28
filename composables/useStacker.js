@@ -458,6 +458,7 @@ export function useStacker() {
                 new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => reject(new Error('GPU analyze worker timeout')), 30000);
                     gpuAnalyzeWorker.onmessage = (e) => {
+                        if (!e.data) { clearTimeout(timeout); reject(new Error('GPU worker crashed - try reloading the page')); return; }
                         if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
                         else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
                     };
@@ -471,6 +472,7 @@ export function useStacker() {
                         reject(new Error(`GPU stack worker load error: ${e.message}`));
                     };
                     gpuStackWorker.onmessage = (e) => {
+                        if (!e.data) { clearTimeout(timeout); reject(new Error('GPU worker crashed - try reloading the page')); return; }
                         if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
                         else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
                     };
@@ -551,6 +553,11 @@ export function useStacker() {
                 return new Promise((resolve, reject) => {
                     const requestId = Date.now() + Math.random();
                     const handler = (e) => {
+                        if (!e.data) {
+                            gpuAnalyzeWorker.removeEventListener('message', handler);
+                            reject(new Error('GPU worker crashed - try reloading the page'));
+                            return;
+                        }
                         if (e.data.requestId !== requestId) return;
                         gpuAnalyzeWorker.removeEventListener('message', handler);
                         if (e.data.type === 'crop-analyze-result') {
@@ -852,6 +859,11 @@ export function useStacker() {
                     const batchShifts = await new Promise((resolve, reject) => {
                         const requestId = batchStart;
                         const handler = (e) => {
+                            if (!e.data) {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                reject(new Error('GPU worker crashed - try reloading the page'));
+                                return;
+                            }
                             if (e.data.requestId !== requestId) return;
                             gpuStackWorker.removeEventListener('message', handler);
                             if (e.data.type === 'batch-result') resolve(e.data.allShifts);
@@ -1117,6 +1129,7 @@ export function useStacker() {
             await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error('WebGPU worker timeout')), 10000);
                 gpuWorker.onmessage = (e) => {
+                    if (!e.data) { clearTimeout(timeout); reject(new Error('GPU worker crashed - try reloading the page')); return; }
                     if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
                     else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
                 };
@@ -1220,6 +1233,11 @@ export function useStacker() {
                 const batchShifts = await new Promise((resolve, reject) => {
                     const requestId = batchStart;
                     const handler = (e) => {
+                        if (!e.data) {
+                            gpuWorker.removeEventListener('message', handler);
+                            reject(new Error('GPU worker crashed - try reloading the page'));
+                            return;
+                        }
                         if (e.data.requestId !== requestId) return;
                         gpuWorker.removeEventListener('message', handler);
                         if (e.data.type === 'batch-result') resolve(e.data.allShifts);
@@ -1438,6 +1456,11 @@ export function useStacker() {
             const worker = trackWorker(new Worker(workerUrl('/unified_analyze_worker.js')));
 
             const initHandler = (e) => {
+                if (!e.data) {
+                    worker.removeEventListener('message', initHandler);
+                    reject(new Error('Worker crashed - try reloading the page'));
+                    return;
+                }
                 if (e.data.type === 'ready') {
                     addLog('Fresh stacking worker ready');
                     worker.removeEventListener('message', initHandler);
@@ -1454,6 +1477,13 @@ export function useStacker() {
             function proceedWithStacking() {
                 let lastLoggedStage = '';
                 const messageHandler = (e) => {
+                    if (!e.data) {
+                        worker.removeEventListener('message', messageHandler);
+                        untrackWorker(worker);
+                        worker.terminate();
+                        reject(new Error('Worker crashed - try reloading the page'));
+                        return;
+                    }
                     const { type } = e.data;
 
                     if (type === 'stack-progress') {

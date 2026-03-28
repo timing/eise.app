@@ -71,6 +71,12 @@ export function useFFmpegReader() {
             return new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 30000);
                 worker.onmessage = (e) => {
+                    if (!e.data) {
+                        clearTimeout(timeout);
+                        worker.onmessage = null;
+                        reject(new Error('Worker crashed - try reloading the page'));
+                        return;
+                    }
                     if (e.data.type === 'ready') {
                         clearTimeout(timeout);
                         worker.onmessage = null;
@@ -117,6 +123,12 @@ export function useFFmpegReader() {
             await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error('Recycle timeout')), 30000);
                 newWorker.onmessage = (e) => {
+                    if (!e.data) {
+                        clearTimeout(timeout);
+                        newWorker.onmessage = null;
+                        reject(new Error('Worker crashed - try reloading the page'));
+                        return;
+                    }
                     if (e.data.type === 'ready') {
                         clearTimeout(timeout);
                         newWorker.onmessage = null;
@@ -163,6 +175,10 @@ export function useFFmpegReader() {
                 clearTimeout(timeout);
                 worker.removeEventListener('message', messageHandler);
                 worker.removeEventListener('error', errorHandler);
+                if (!e.data) {
+                    reject(new Error('Worker crashed - try reloading the page'));
+                    return;
+                }
                 if (e.data.error) {
                     reject(e.data.error);
                 } else if (e.data.type === 'bounds') {
@@ -774,6 +790,7 @@ export function useFFmpegReader() {
                 new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => reject(new Error(`Worker ${i} timeout`)), 30000);
                     worker.onmessage = (e) => {
+                        if (!e.data) { clearTimeout(timeout); reject(new Error('Worker crashed - try reloading the page')); return; }
                         if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
                         else if (e.data.type === 'error') { clearTimeout(timeout); reject(new Error(e.data.message)); }
                     };

@@ -99,6 +99,12 @@ export function useAviReader() {
                 // 30 second timeout - OpenCV WASM can take a while to initialize
                 const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 30000);
                 worker.onmessage = (e) => {
+                    if (!e.data) {
+                        clearTimeout(timeout);
+                        worker.onmessage = null;
+                        reject(new Error('Worker crashed - try reloading the page'));
+                        return;
+                    }
                     if (e.data.type === 'ready') {
                         clearTimeout(timeout);
                         worker.onmessage = null;
@@ -150,6 +156,12 @@ export function useAviReader() {
             return new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error(`Worker ${i} recycle init timed out.`)), 30000);
                 worker.onmessage = (e) => {
+                    if (!e.data) {
+                        clearTimeout(timeout);
+                        worker.onmessage = null;
+                        reject(new Error('Worker crashed - try reloading the page'));
+                        return;
+                    }
                     if (e.data.type === 'ready') {
                         clearTimeout(timeout);
                         worker.onmessage = null;
@@ -190,6 +202,12 @@ export function useAviReader() {
         await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => reject(new Error(`Worker ${workerIndex} recycling timed out.`)), 30000);
             newWorker.onmessage = (e) => {
+                if (!e.data) {
+                    clearTimeout(timeout);
+                    newWorker.onmessage = null;
+                    reject(new Error('Worker crashed - try reloading the page'));
+                    return;
+                }
                 if (e.data.type === 'ready') {
                     clearTimeout(timeout);
                     newWorker.onmessage = null;
@@ -241,6 +259,10 @@ export function useAviReader() {
                 clearTimeout(timeout);
                 worker.removeEventListener('message', messageHandler);
                 worker.removeEventListener('error', errorHandler);
+                if (!e.data) {
+                    reject(new Error('Worker crashed - try reloading the page'));
+                    return;
+                }
                 if (e.data.error) {
                     reject(e.data.error);
                 } else if (e.data.type === 'bounds') {

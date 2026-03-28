@@ -136,6 +136,12 @@ async function initializeWorkers() {
 		return new Promise((resolve, reject) => {
 			const timeout = setTimeout(() => reject(new Error(`Worker ${i} initialization timed out.`)), 10000);
 			const handler = (e) => {
+				if (!e.data) {
+					clearTimeout(timeout);
+					worker.removeEventListener('message', handler);
+					reject(new Error('Worker crashed - try reloading the page'));
+					return;
+				}
 				if (e.data.type === 'ready') {
 					clearTimeout(timeout);
 					worker.removeEventListener('message', handler);

@@ -39,6 +39,11 @@ export function useImageReader() {
             await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error('GPU worker timeout')), 30000);
                 gpuWorker.onmessage = (e) => {
+                    if (!e.data) {
+                        clearTimeout(timeout);
+                        reject(new Error('GPU worker crashed - try reloading the page'));
+                        return;
+                    }
                     if (e.data.type === 'ready') {
                         clearTimeout(timeout);
                         resolve();
@@ -135,6 +140,11 @@ export function useImageReader() {
         return new Promise((resolve, reject) => {
             const requestId = Date.now() + Math.random();
             const handler = (e) => {
+                if (!e.data) {
+                    gpuWorker.removeEventListener('message', handler);
+                    reject(new Error('GPU worker crashed - try reloading the page'));
+                    return;
+                }
                 if (e.data.requestId !== requestId) return;
                 gpuWorker.removeEventListener('message', handler);
                 if (e.data.type === 'analyze-result') {
@@ -161,6 +171,11 @@ export function useImageReader() {
         return new Promise((resolve, reject) => {
             const requestId = Date.now() + Math.random();
             const handler = (e) => {
+                if (!e.data) {
+                    gpuWorker.removeEventListener('message', handler);
+                    reject(new Error('GPU worker crashed - try reloading the page'));
+                    return;
+                }
                 if (e.data.requestId !== requestId) return;
                 gpuWorker.removeEventListener('message', handler);
                 if (e.data.type === 'crop-analyze-result') {
