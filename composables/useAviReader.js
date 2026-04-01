@@ -298,7 +298,8 @@ export function useAviReader() {
     }
 
     // Detect bounds for a sample of frames to determine crop region
-    async function detectCropRegion(file, aviHeader, frameCount, cropMarginPercent = 10, frameIndex = null) {
+    // @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
+    async function detectCropRegion(file, aviHeader, frameCount, cropMarginPercent = 10, frameIndex = null, surfaceMode = false) {
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: frameCount });
 
@@ -427,17 +428,23 @@ export function useAviReader() {
         const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(aviHeader.width, aviHeader.height);
 
-        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
-        if (desiredSize >= maxAllowedSize) {
-            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
-            return null;
-        }
-
         // Calculate median center position as fallback reference
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
         const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        // Handle cropSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        if (desiredSize >= maxAllowedSize) {
+            if (surfaceMode) {
+                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+            }
+            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+            return null;
+        }
 
         addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${medianSize}, margin: ${cropMarginPercent}% (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
@@ -769,7 +776,7 @@ export function useAviReader() {
 
         if (aviHeader.width >= MIN_SIZE_FOR_CROP && aviHeader.height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${aviHeader.width}x${aviHeader.height} qualifies for auto-crop`);
-            cropRegion = await detectCropRegion(file, aviHeader, frameCount, 10, frameIndex);
+            cropRegion = await detectCropRegion(file, aviHeader, frameCount, 10, frameIndex, surfaceMode);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
@@ -1048,7 +1055,8 @@ export function useAviReader() {
     }
 
     // Detect crop region for MJPEG using GPU
-    async function detectCropRegionMjpegGpu(file, frameIndex, width, height, cropMarginPercent = 10) {
+    // @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
+    async function detectCropRegionMjpegGpu(file, frameIndex, width, height, cropMarginPercent = 10, surfaceMode = false) {
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: frameIndex.length });
 
@@ -1128,16 +1136,22 @@ export function useAviReader() {
         const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(width, height);
 
-        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
-        if (desiredSize >= maxAllowedSize) {
-            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
-            return null;
-        }
-
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
         const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        // Handle cropSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        if (desiredSize >= maxAllowedSize) {
+            if (surfaceMode) {
+                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+            }
+            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+            return null;
+        }
 
         addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
 
@@ -1182,7 +1196,7 @@ export function useAviReader() {
 
         if (width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${width}x${height} qualifies for auto-crop`);
-            cropRegion = await detectCropRegionMjpegGpu(file, frameIndex, width, height, cropMarginPercent);
+            cropRegion = await detectCropRegionMjpegGpu(file, frameIndex, width, height, cropMarginPercent, surfaceMode);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);

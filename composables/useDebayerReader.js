@@ -730,8 +730,10 @@ export function useDebayerReader() {
 
     /**
      * Detect crop region by sampling frames
+     * @param {number} cropMarginPercent - Margin to add around detected object
+     * @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
      */
-    async function detectCropRegion(cropMarginPercent = 10) {
+    async function detectCropRegion(cropMarginPercent = 10, surfaceMode = false) {
         const MIN_SIZE_FOR_CROP = 300;
         if (metadata.width < MIN_SIZE_FOR_CROP || metadata.height < MIN_SIZE_FOR_CROP) {
             addLog(`[DebayerReader] Frame size too small for auto-crop`);
@@ -772,11 +774,22 @@ export function useDebayerReader() {
         const margin = 1 + (cropMarginPercent / 100);
         const cropSize = Math.ceil(medianSize * margin / 2) * 2;
 
-        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
         const maxSize = Math.min(metadata.width, metadata.height);
+
+        // Handle cropSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
         if (cropSize >= maxSize) {
-            addLog(`[DebayerReader] Skipping crop: desired ${cropSize}px exceeds frame ${maxSize}px. Stacking alignment will handle centering.`);
-            return null;
+            if (surfaceMode) {
+                addLog(`[DebayerReader] Surface mode: using full frame ${maxSize}x${maxSize} with per-frame centering`);
+                return {
+                    size: maxSize,
+                    medianSize,
+                };
+            } else {
+                addLog(`[DebayerReader] Skipping crop: desired ${cropSize}px exceeds frame ${maxSize}px`);
+                return null;
+            }
         }
 
         addLog(`[DebayerReader] Detected crop size: ${cropSize}x${cropSize} (median object: ${medianSize})`);
@@ -907,7 +920,7 @@ export function useDebayerReader() {
         // Detect full crop region
         let cropRegion = null;
         if (metadata.width >= MIN_SIZE_FOR_CROP && metadata.height >= MIN_SIZE_FOR_CROP) {
-            cropRegion = await detectCropRegion(cropMarginPercent);
+            cropRegion = await detectCropRegion(cropMarginPercent, surfaceMode);
         }
 
         // Analysis phase - now show loading indicator (after color profile selection)

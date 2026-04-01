@@ -423,18 +423,30 @@ export function useImageReader() {
                 const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
                 const maxAllowedSize = Math.min(firstWidth, firstHeight);
 
-                // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
+                // Calculate median center position
+                const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+                const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+                const medianX = sortedX.length > 0 ? sortedX[Math.floor(sortedX.length / 2)] : firstWidth / 2;
+                const medianY = sortedY.length > 0 ? sortedY[Math.floor(sortedY.length / 2)] : firstHeight / 2;
+
+                // Handle cropSize >= frameSize differently based on mode:
+                // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+                // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
                 if (desiredSize >= maxAllowedSize) {
-                    addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+                    if (surfaceMode) {
+                        cropRegion = {
+                            size: maxAllowedSize,
+                            referenceCenter: { x: medianX, y: medianY },
+                            medianObjectSize: medianSize
+                        };
+                        addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                    } else {
+                        addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+                    }
                 } else if (detectedCenters.length > 0) {
-                    const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
-                    const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
                     cropRegion = {
                         size: desiredSize,
-                        referenceCenter: {
-                            x: sortedX[Math.floor(sortedX.length / 2)],
-                            y: sortedY[Math.floor(sortedY.length / 2)]
-                        },
+                        referenceCenter: { x: medianX, y: medianY },
                         medianObjectSize: medianSize
                     };
                     addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);

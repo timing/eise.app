@@ -249,8 +249,9 @@ export function useFFmpegReader() {
 
     /**
      * Detect crop region from PNG data buffers (for lite mode)
+     * @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
      */
-    async function detectCropRegionFromPngData(pngDataArray, width, height, cropMarginPercent = 10) {
+    async function detectCropRegionFromPngData(pngDataArray, width, height, cropMarginPercent = 10, surfaceMode = false) {
         const decodeCanvas = document.createElement('canvas');
         decodeCanvas.width = width;
         decodeCanvas.height = height;
@@ -296,8 +297,13 @@ export function useFFmpegReader() {
         const desiredSize = Math.ceil(maxSize * marginMultiplier);
         const maxAllowedSize = Math.min(width, height);
 
-        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
+        // Handle cropSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
         if (desiredSize >= maxAllowedSize) {
+            if (surfaceMode) {
+                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY } };
+            }
             return null;
         }
 
@@ -306,8 +312,9 @@ export function useFFmpegReader() {
 
     /**
      * Detect crop region from PNG filenames in FFmpeg FS using GPU (for normal mode)
+     * @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
      */
-    async function detectCropRegionFromPngs(ffmpeg, pngFilenames, header, cropMarginPercent = 10) {
+    async function detectCropRegionFromPngs(ffmpeg, pngFilenames, header, cropMarginPercent = 10, surfaceMode = false) {
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: pngFilenames.length });
 
@@ -378,16 +385,23 @@ export function useFFmpegReader() {
         const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(header.width, header.height);
 
-        // Skip cropping if desired size exceeds frame - let stacking alignment handle centering
-        if (desiredSize >= maxAllowedSize) {
-            addLog(`Skipping crop: desired size ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
-            return null;
-        }
-
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
         const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        // Handle desiredSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        if (desiredSize >= maxAllowedSize) {
+            if (surfaceMode) {
+                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+            } else {
+                addLog(`Skipping crop: desired size ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+                return null;
+            }
+        }
 
         addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
         addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)}), frame center: (${Math.round(header.width/2)}, ${Math.round(header.height/2)})`);
@@ -444,7 +458,7 @@ export function useFFmpegReader() {
 
         if (useGpu && width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
             addLog(`Frame size ${width}x${height} qualifies for auto-crop`);
-            cropRegion = await detectCropRegionFromPngs(ffmpeg, pngFilenames, header, cropMarginPercent);
+            cropRegion = await detectCropRegionFromPngs(ffmpeg, pngFilenames, header, cropMarginPercent, surfaceMode);
 
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
@@ -1001,7 +1015,7 @@ export function useFFmpegReader() {
                                 ffmpeg.FS('unlink', sampleFile);
                             } catch (_) {}
                         }
-                        cropRegion = await detectCropRegionFromPngData(cropSampleData, frameWidth, frameHeight, cropMarginPercent);
+                        cropRegion = await detectCropRegionFromPngData(cropSampleData, frameWidth, frameHeight, cropMarginPercent, surfaceMode);
                         if (cropRegion) {
                             addLog(`Auto-crop: ${cropRegion.size}x${cropRegion.size}, margin: ${cropMarginPercent}%`);
 
