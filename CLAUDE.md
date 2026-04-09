@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-eise.app is a fully browser-based planetary image stacking tool for astrophotography. All processing happens client-side using WebAssembly and WebWorkers - no server required for stacking.
+eise.app is a fully browser-based planetary image stacking tool for astrophotography. All processing happens client-side using WebGPU, WebAssembly and WebWorkers - no server required for stacking.
 
 ## Development Commands
 
@@ -64,6 +64,7 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 - **Design System Reference**: See `/design-system` page for inventory of UI components and styles.
 - **Reuse existing styles**: Check `app.vue` for global styles before adding new CSS.
 - **Avoid duplication**: Check the design system before creating new button styles, message styles, or form controls.
+- **Dropdowns/Menus**: Use the kebab-dropdown pattern from `PostProcessor.vue`. Light theme: `background: #fefefe`, `box-shadow: 0 2px 10px rgba(0,0,0,0.2)`, `border-radius: 6px`. Buttons: `color: #333`, `font-weight: bold`, hover `background: #f0f0f0`.
 
 ## Key Technical Details
 
@@ -119,6 +120,8 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 UI settings in FileUploader.vue sync to this shared state via watchers, and useStacker.js reads from it via getter functions (`getMinApQuality()`, `getApPatchSize()`).
 
 **SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`.
+
+**Float32 Data is Source of Truth (CRITICAL)**: All image processing and exports use float32 data stored in memory, NOT the canvas. The canvas is display-only. When exporting/downloading images, always use the underlying `float32Data` and convert to the target format (PNG, TIFF, etc.) - never use `canvas.toDataURL()` or `canvas.toBlob()` on the display canvas. This preserves 16-bit precision. When applying transforms (alignment, etc.), modify the float32 data directly using GPU shaders, not canvas 2D transforms.
 
 ## WebGPU Helper Functions (MUST USE)
 

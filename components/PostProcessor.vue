@@ -553,6 +553,8 @@ const props = defineProps({
 	croppedSerData: Object
 });
 
+const emit = defineEmits(['processed']);
+
 const gain = ref(1);
 const contrast = ref(1);
 const gamma = ref(1);
@@ -574,6 +576,37 @@ const bilateralRange = ref(50);
 const postNoiseReduction = ref(0);
 const blueDown = ref(0);
 const isProcessing = ref(false);
+
+// Expose processed data and state for batch export
+defineExpose({
+	getProcessedData: () => {
+		if (sharpenedImage16) {
+			return {
+				float32Data: sharpenedImage16.data,
+				width: sharpenedImage16.width,
+				height: sharpenedImage16.height
+			};
+		}
+		return null;
+	},
+	isProcessing,
+	// Wait for processing to complete (returns Promise)
+	waitForProcessing: () => {
+		return new Promise((resolve) => {
+			if (!isProcessing.value) {
+				resolve();
+				return;
+			}
+			const unwatch = watch(isProcessing, (processing) => {
+				if (!processing) {
+					unwatch();
+					resolve();
+				}
+			});
+		});
+	}
+});
+
 const isLoadingImage = ref(false);
 const imageLoaded = ref(false);
 const sharpeningMethod = ref('wavelets'); // 'usm', 'wavelets', or 'none'
@@ -1087,6 +1120,15 @@ const applyProcessingInternal = async() => {
 		ctx.beginPath();
 		ctx.arc(edgeMaskCenterX.value, edgeMaskCenterY.value, edgeMaskRadius.value, 0, Math.PI * 2);
 		ctx.stroke();
+	}
+
+	// Emit processed data for batch export
+	if (sharpenedImage16) {
+		emit('processed', {
+			float32Data: sharpenedImage16.data,
+			width: sharpenedImage16.width,
+			height: sharpenedImage16.height
+		});
 	}
 
 	isProcessing.value = false;

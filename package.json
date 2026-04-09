@@ -16,6 +16,7 @@
     "@sentry/vue": "^10.33.0",
     "fast-png": "^8.0.0",
     "lodash": "^4.17.21",
+    "mediabunny": "^1.40.1",
     "nuxt": "^3.10.3",
     "socket.io-client": "^4.7.4",
     "utif2": "^4.1.0",

@@ -42,10 +42,6 @@ fn sampleBicubic(x: f32, y: f32) -> vec4<f32> {
     let w = i32(params.inWidth);
     let h = i32(params.inHeight);
 
-    if (x < -1.0 || x > f32(w) || y < -1.0 || y > f32(h)) {
-        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    }
-
     let wx0 = cubicWeight(fx + 1.0);
     let wx1 = cubicWeight(fx);
     let wx2 = cubicWeight(fx - 1.0);
@@ -59,13 +55,13 @@ fn sampleBicubic(x: f32, y: f32) -> vec4<f32> {
     var totalWeight: f32 = 0.0;
 
     for (var j: i32 = -1; j <= 2; j++) {
-        let cy = y0 + j;
-        if (cy < 0 || cy >= h) { continue; }
+        // Clamp to edge (BORDER_REPLICATE) instead of skipping
+        let cy = clamp(y0 + j, 0, h - 1);
         let wy = select(select(select(wy3, wy2, j == 1), wy1, j == 0), wy0, j == -1);
 
         for (var i: i32 = -1; i <= 2; i++) {
-            let cx = x0 + i;
-            if (cx < 0 || cx >= w) { continue; }
+            // Clamp to edge (BORDER_REPLICATE) instead of skipping
+            let cx = clamp(x0 + i, 0, w - 1);
             let wx = select(select(select(wx3, wx2, i == 1), wx1, i == 0), wx0, i == -1);
 
             let idx = u32(cy * w + cx) * 4u;

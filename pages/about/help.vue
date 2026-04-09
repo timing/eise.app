@@ -79,6 +79,19 @@
 
 				<dt>Colors look wrong</dt>
 				<dd>Enable "Auto color balance" in the Post Processor, or manually adjust saturation and RGB alignment.</dd>
+
+				<dt>Batch export "Select folder" doesn't work</dt>
+				<dd>
+					<p>The folder selection feature uses the File System Access API to save multiple files without prompting for each one.</p>
+					<ClientOnly>
+						<p v-if="isBrave" class="brave-tip">
+							<strong>Brave users:</strong> This API is disabled by default. Enable it at
+							<a href="brave://flags/#file-system-access-api" @click.prevent="copyBraveFlag">brave://flags/#file-system-access-api</a>
+							(click to copy, then paste in address bar).
+						</p>
+					</ClientOnly>
+					<p>If folder selection isn't available, exports will download normally with a prompt for each file.</p>
+				</dd>
 			</dl>
 
 			<h3>Technical Details</h3>
@@ -91,8 +104,24 @@
 </template>
 
 <script setup>
+import { ref, onMounted } from 'vue';
+
 const webGPUSupported = inject('webGPUSupported');
 const detectedBrowser = inject('detectedBrowser');
+
+// Detect Brave browser
+const isBrave = ref(false);
+onMounted(async () => {
+	// Brave exposes navigator.brave.isBrave()
+	if (navigator.brave && typeof navigator.brave.isBrave === 'function') {
+		isBrave.value = await navigator.brave.isBrave();
+	}
+});
+
+function copyBraveFlag() {
+	navigator.clipboard.writeText('brave://flags/#file-system-access-api');
+	alert('Copied! Paste this in your address bar: brave://flags/#file-system-access-api');
+}
 
 useHead({
 	title: 'Help & How it Works - Eise.app Planetary Image Stacking Guide',
@@ -121,5 +150,16 @@ dd {
 	margin: 0.5rem 0;
 	border-radius: 4px;
 	border: 1px solid #444;
+}
+.brave-tip {
+	background: #fff3cd;
+	border: 1px solid #ffcc80;
+	border-radius: 5px;
+	padding: 10px;
+	color: #856404;
+}
+.brave-tip a {
+	color: #856404;
+	font-family: monospace;
 }
 </style>

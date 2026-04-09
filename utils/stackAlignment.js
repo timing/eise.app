@@ -5,6 +5,8 @@
  * Uses moment-based detection for robust center and scale alignment.
  */
 
+import { encode16BitPNG } from './png16Encoder.js';
+
 // Postprocessor worker for GPU transforms (float32 bicubic)
 let transformWorker = null;
 let transformWorkerReady = false;
@@ -304,7 +306,9 @@ export async function applyAlignmentTransform(result, transform, options = {}) {
                            !isIdentity;
 
     if (!needsTransform) {
-        return result;
+        // Still need to return a blob for export
+        const blob = result.blob || await float32ToBlob(result.float32Data, result.width, result.height);
+        return { ...result, blob };
     }
 
     // Try GPU transform (float32 bicubic)
@@ -397,14 +401,8 @@ async function applyAlignmentTransformCanvas(result, transform, options = {}) {
  * Convert float32 RGBA to PNG blob
  */
 async function float32ToBlob(float32Data, width, height) {
-    const canvas = new OffscreenCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-    const uint8 = new Uint8ClampedArray(float32Data.length);
-    for (let i = 0; i < float32Data.length; i++) {
-        uint8[i] = Math.round(Math.min(1, Math.max(0, float32Data[i])) * 255);
-    }
-    ctx.putImageData(new ImageData(uint8, width, height), 0, 0);
-    return canvas.convertToBlob({ type: 'image/png' });
+    // Use 16-bit PNG encoder to preserve full precision
+    return encode16BitPNG(float32Data, width, height);
 }
 
 /**
@@ -472,9 +470,12 @@ export async function alignStackedImages(stackedResults, options = {}) {
     return alignedResults;
 }
 
+export { float32ToBlob };
+
 export default {
     analyzeImage,
     calculateAlignmentTransforms,
     applyAlignmentTransform,
-    alignStackedImages
+    alignStackedImages,
+    float32ToBlob
 };
