@@ -27,6 +27,10 @@
                     <span class="value">{{ serHeader.pixelDepth }}-bit</span>
                 </div>
                 <div class="info-row">
+                    <span class="label">Color format:</span>
+                    <span class="value">{{ colorFormatLabel }}</span>
+                </div>
+                <div class="info-row">
                     <span class="label">Frames:</span>
                     <span class="value">{{ serHeader.frameCount }}</span>
                 </div>
@@ -95,7 +99,7 @@
                     </div>
                 </div>
 
-                <div class="bayer-thumbnails">
+                <div class="bayer-thumbnails" v-if="!isRgbSer">
                     <h4>Bayer Pattern Preview</h4>
                     <div v-if="!thumbnailsReady" class="loading-thumbnails">
                         <p>Rendering previews...</p>
@@ -112,6 +116,9 @@
                             <div class="thumbnail-label">{{ profile.label }}</div>
                         </div>
                     </div>
+                </div>
+                <div v-else class="rgb-info">
+                    <p>{{ isBgrSer ? 'BGR' : 'RGB' }} color format — frames are already decoded color, no Bayer demosaicing needed.</p>
                 </div>
             </template>
 
@@ -239,7 +246,7 @@
 
 <script setup>
 import { ref, computed, onUnmounted, onMounted } from 'vue';
-import { parseSerHeader, SER_HEADER_SIZE } from '@/composables/useSerParser';
+import { parseSerHeader, SER_HEADER_SIZE, getChannels, isRgbColor, SER_COLOR_BGR } from '@/composables/useSerParser';
 import { useFeedback } from '@/composables/useFeedback';
 
 const { openFeedback } = useFeedback();
@@ -308,6 +315,16 @@ const isDefaultObserver = computed(() => {
     return obs === 'observer name' || obs === 'observer' || obs === 'unknown';
 });
 
+const isRgbSer = computed(() => serHeader.value ? isRgbColor(serHeader.value.colorID) : false);
+const isBgrSer = computed(() => serHeader.value?.colorID === SER_COLOR_BGR);
+
+const colorFormatLabel = computed(() => {
+    if (!serHeader.value) return '';
+    const id = serHeader.value.colorID;
+    const names = { 0: 'MONO', 8: 'RGGB', 9: 'GRBG', 10: 'GBRG', 11: 'BGGR', 100: 'RGB', 101: 'BGR' };
+    return names[id] ?? `Unknown (${id})`;
+});
+
 async function handleFileSelect(event) {
     const file = event.target.files[0];
     if (!file) return;
@@ -323,9 +340,10 @@ async function handleFileSelect(event) {
     const header = parseSerHeader(headerBuf);
     serHeader.value = header;
 
-    // Analyze file size
-    const frameSize16 = header.width * header.height * 2;
-    const frameSize8 = header.width * header.height * 1;
+    // Analyze file size (account for multi-channel RGB/BGR)
+    const channels = getChannels(header.colorID);
+    const frameSize16 = header.width * header.height * 2 * channels;
+    const frameSize8 = header.width * header.height * 1 * channels;
     const dataSize = file.size - SER_HEADER_SIZE;
     const frameCount16 = Math.floor(dataSize / frameSize16);
     const frameCount8 = Math.floor(dataSize / frameSize8);
@@ -334,9 +352,9 @@ async function handleFileSelect(event) {
     // Set initial bit depth based on header
     forcedBitDepth.value = header.pixelDepth > 8 ? 16 : 8;
 
-    // Calculate and store frame size
+    // Calculate and store frame size (bytes per frame, including all channels)
     const bpp = header.pixelDepth > 8 ? 2 : 1;
-    frameSize.value = header.width * header.height * bpp;
+    frameSize.value = header.width * header.height * bpp * channels;
 
     // Read first frame for analyzer (slice, not full file)
     const firstFrameSlice = file.slice(SER_HEADER_SIZE, SER_HEADER_SIZE + frameSize.value);
@@ -544,33 +562,14 @@ async function renderCurrentFrame() {
     if (!header.width || !header.height || header.width <= 0 || header.height <= 0) return;
 
     const bpp = forcedBitDepth.value === 16 ? 2 : 1;
-    const currentFrameSize = header.width * header.height * bpp;
+    const channels = getChannels(header.colorID);
+    const currentFrameSize = header.width * header.height * bpp * channels;
     const frameOffset = SER_HEADER_SIZE + (currentFrame.value - 1) * currentFrameSize;
 
     // Read frame data from file slice (not full buffer)
     const frameSlice = selectedFile.value.slice(frameOffset, frameOffset + currentFrameSize);
     const frameBuffer = await frameSlice.arrayBuffer();
 
-    // Apply byte offset
-    const rawBytes = new Uint8Array(frameBuffer);
-    const offsetBytes = rawBytes.slice(byteOffset.value);
-
-    let src;
-    if (forcedBitDepth.value === 16) {
-        const u16 = new Uint16Array(Math.floor(offsetBytes.length / 2));
-        for (let i = 0; i < u16.length; i++) {
-            if (byteSwap.value) {
-                u16[i] = (offsetBytes[i * 2] << 8) | offsetBytes[i * 2 + 1];
-            } else {
-                u16[i] = offsetBytes[i * 2] | (offsetBytes[i * 2 + 1] << 8);
-            }
-        }
-        src = u16;
-    } else {
-        src = offsetBytes;
-    }
-
-    const srcScale = forcedBitDepth.value === 16 ? 1/256 : 1;
     const width = header.width;
     const height = header.height;
 
@@ -591,65 +590,134 @@ async function renderCurrentFrame() {
     const xRatio = width / canvas.width;
     const yRatio = height / canvas.height;
 
-    // Get Bayer config
-    const patternConfigs = {
-        'RGGB': { rX: 0, rY: 0, bX: 1, bY: 1 },
-        'BGGR': { rX: 1, rY: 1, bX: 0, bY: 0 },
-        'GBRG': { rX: 0, rY: 1, bX: 1, bY: 0 },
-        'GRBG': { rX: 1, rY: 0, bX: 0, bY: 1 },
-        'MONO': { mono: true }
-    };
-    const config = patternConfigs[selectedBayerProfile.value] || patternConfigs['RGGB'];
-
-    let minVal = 255, maxVal = 0;
-    const tempRgb = new Float32Array(canvas.width * canvas.height * 3);
-
-    // First pass: demosaic and find min/max
-    for (let ty = 0; ty < canvas.height; ty++) {
-        for (let tx = 0; tx < canvas.width; tx++) {
-            const sx = Math.floor(tx * xRatio);
-            const sy = Math.floor(ty * yRatio);
-            const tidx = (ty * canvas.width + tx) * 3;
-
-            if (config.mono) {
-                const idx = sy * width + sx;
-                const v = (idx < src.length ? src[idx] : 0) * srcScale;
-                tempRgb[tidx] = tempRgb[tidx + 1] = tempRgb[tidx + 2] = v;
-            } else {
-                const bx = sx & ~1;
-                const by = sy & ~1;
-                const getVal = (x, y) => {
-                    const idx = Math.min(y, height-1) * width + Math.min(x, width-1);
-                    return (idx < src.length ? src[idx] : 0) * srcScale;
-                };
-
-                const rPos = { x: bx + config.rX, y: by + config.rY };
-                const bPos = { x: bx + config.bX, y: by + config.bY };
-                const g1 = { x: bx + (1 - config.rX), y: by + config.rY };
-                const g2 = { x: bx + config.rX, y: by + (1 - config.rY) };
-
-                tempRgb[tidx] = getVal(rPos.x, rPos.y);
-                tempRgb[tidx + 1] = (getVal(g1.x, g1.y) + getVal(g2.x, g2.y)) / 2;
-                tempRgb[tidx + 2] = getVal(bPos.x, bPos.y);
+    if (isRgbSer.value) {
+        // RGB / BGR SER: packed 3-channel data, no demosaicing needed
+        const rawBytes = new Uint8Array(frameBuffer);
+        let src;
+        if (forcedBitDepth.value === 16) {
+            const u16 = new Uint16Array(Math.floor(rawBytes.length / 2));
+            for (let i = 0; i < u16.length; i++) {
+                u16[i] = byteSwap.value
+                    ? (rawBytes[i * 2] << 8) | rawBytes[i * 2 + 1]
+                    : rawBytes[i * 2] | (rawBytes[i * 2 + 1] << 8);
             }
-
-            const lum = (tempRgb[tidx] + tempRgb[tidx + 1] + tempRgb[tidx + 2]) / 3;
-            minVal = Math.min(minVal, lum);
-            maxVal = Math.max(maxVal, lum);
+            src = u16;
+        } else {
+            src = rawBytes;
         }
-    }
+        const srcScale = forcedBitDepth.value === 16 ? 1 / 256 : 1;
+        const bgr = isBgrSer.value;
 
-    // Second pass: auto-stretch
-    const range = maxVal - minVal || 1;
-    const stretchScale = 255 / range;
+        // First pass: find min/max luminance for auto-stretch
+        let minVal = Infinity, maxVal = 0;
+        const tempRgb = new Float32Array(canvas.width * canvas.height * 3);
+        for (let ty = 0; ty < canvas.height; ty++) {
+            for (let tx = 0; tx < canvas.width; tx++) {
+                const sx = Math.floor(tx * xRatio);
+                const sy = Math.floor(ty * yRatio);
+                const srcBase = (sy * width + sx) * 3;
+                const tidx = (ty * canvas.width + tx) * 3;
+                const s0 = (srcBase < src.length ? src[srcBase]     : 0) * srcScale;
+                const s1 = (srcBase + 1 < src.length ? src[srcBase + 1] : 0) * srcScale;
+                const s2 = (srcBase + 2 < src.length ? src[srcBase + 2] : 0) * srcScale;
+                tempRgb[tidx]     = bgr ? s2 : s0;  // R
+                tempRgb[tidx + 1] = s1;              // G
+                tempRgb[tidx + 2] = bgr ? s0 : s2;  // B
+                const lum = (tempRgb[tidx] + tempRgb[tidx + 1] + tempRgb[tidx + 2]) / 3;
+                if (lum < minVal) minVal = lum;
+                if (lum > maxVal) maxVal = lum;
+            }
+        }
+        const range = maxVal - minVal || 1;
+        const stretchScale = 255 / range;
+        for (let i = 0; i < canvas.width * canvas.height; i++) {
+            const tidx = i * 3;
+            const didx = i * 4;
+            data[didx]     = Math.min(255, Math.max(0, Math.round((tempRgb[tidx]     - minVal) * stretchScale)));
+            data[didx + 1] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 1] - minVal) * stretchScale)));
+            data[didx + 2] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 2] - minVal) * stretchScale)));
+            data[didx + 3] = 255;
+        }
+    } else {
+        // Bayer / MONO: apply byte offset and demosaic
+        const rawBytes = new Uint8Array(frameBuffer);
+        const offsetBytes = rawBytes.slice(byteOffset.value);
 
-    for (let i = 0; i < canvas.width * canvas.height; i++) {
-        const tidx = i * 3;
-        const didx = i * 4;
-        data[didx] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx] - minVal) * stretchScale)));
-        data[didx + 1] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 1] - minVal) * stretchScale)));
-        data[didx + 2] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 2] - minVal) * stretchScale)));
-        data[didx + 3] = 255;
+        let src;
+        if (forcedBitDepth.value === 16) {
+            const u16 = new Uint16Array(Math.floor(offsetBytes.length / 2));
+            for (let i = 0; i < u16.length; i++) {
+                u16[i] = byteSwap.value
+                    ? (offsetBytes[i * 2] << 8) | offsetBytes[i * 2 + 1]
+                    : offsetBytes[i * 2] | (offsetBytes[i * 2 + 1] << 8);
+            }
+            src = u16;
+        } else {
+            src = offsetBytes;
+        }
+
+        const srcScale = forcedBitDepth.value === 16 ? 1/256 : 1;
+
+        // Get Bayer config
+        const patternConfigs = {
+            'RGGB': { rX: 0, rY: 0, bX: 1, bY: 1 },
+            'BGGR': { rX: 1, rY: 1, bX: 0, bY: 0 },
+            'GBRG': { rX: 0, rY: 1, bX: 1, bY: 0 },
+            'GRBG': { rX: 1, rY: 0, bX: 0, bY: 1 },
+            'MONO': { mono: true }
+        };
+        const config = patternConfigs[selectedBayerProfile.value] || patternConfigs['RGGB'];
+
+        let minVal = 255, maxVal = 0;
+        const tempRgb = new Float32Array(canvas.width * canvas.height * 3);
+
+        // First pass: demosaic and find min/max
+        for (let ty = 0; ty < canvas.height; ty++) {
+            for (let tx = 0; tx < canvas.width; tx++) {
+                const sx = Math.floor(tx * xRatio);
+                const sy = Math.floor(ty * yRatio);
+                const tidx = (ty * canvas.width + tx) * 3;
+
+                if (config.mono) {
+                    const idx = sy * width + sx;
+                    const v = (idx < src.length ? src[idx] : 0) * srcScale;
+                    tempRgb[tidx] = tempRgb[tidx + 1] = tempRgb[tidx + 2] = v;
+                } else {
+                    const bx = sx & ~1;
+                    const by = sy & ~1;
+                    const getVal = (x, y) => {
+                        const idx = Math.min(y, height-1) * width + Math.min(x, width-1);
+                        return (idx < src.length ? src[idx] : 0) * srcScale;
+                    };
+
+                    const rPos = { x: bx + config.rX, y: by + config.rY };
+                    const bPos = { x: bx + config.bX, y: by + config.bY };
+                    const g1 = { x: bx + (1 - config.rX), y: by + config.rY };
+                    const g2 = { x: bx + config.rX, y: by + (1 - config.rY) };
+
+                    tempRgb[tidx] = getVal(rPos.x, rPos.y);
+                    tempRgb[tidx + 1] = (getVal(g1.x, g1.y) + getVal(g2.x, g2.y)) / 2;
+                    tempRgb[tidx + 2] = getVal(bPos.x, bPos.y);
+                }
+
+                const lum = (tempRgb[tidx] + tempRgb[tidx + 1] + tempRgb[tidx + 2]) / 3;
+                minVal = Math.min(minVal, lum);
+                maxVal = Math.max(maxVal, lum);
+            }
+        }
+
+        // Second pass: auto-stretch
+        const range = maxVal - minVal || 1;
+        const stretchScale = 255 / range;
+
+        for (let i = 0; i < canvas.width * canvas.height; i++) {
+            const tidx = i * 3;
+            const didx = i * 4;
+            data[didx] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx] - minVal) * stretchScale)));
+            data[didx + 1] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 1] - minVal) * stretchScale)));
+            data[didx + 2] = Math.min(255, Math.max(0, Math.round((tempRgb[tidx + 2] - minVal) * stretchScale)));
+            data[didx + 3] = 255;
+        }
     }
 
     ctx.putImageData(imageData, 0, 0);
@@ -674,7 +742,8 @@ async function downloadRawFrame() {
 
     const header = serHeader.value;
     const bpp = forcedBitDepth.value === 16 ? 2 : 1;
-    const currentFrameSize = header.width * header.height * bpp;
+    const channels = getChannels(header.colorID);
+    const currentFrameSize = header.width * header.height * bpp * channels;
     const frameOffset = SER_HEADER_SIZE + (currentFrame.value - 1) * currentFrameSize;
 
     // Read raw frame data from file
@@ -772,7 +841,7 @@ async function trimAndDownload() {
 async function createTrimmedSerFile() {
     const header = serHeader.value;
     const file = selectedFile.value;
-    const bytesPerPixel = header.pixelDepth > 8 ? 2 : 1;
+    const bytesPerPixel = (header.pixelDepth > 8 ? 2 : 1) * getChannels(header.colorID);
     const singleFrameSize = header.width * header.height * bytesPerPixel;
 
     // Calculate frame indices (0-based internally)
@@ -1094,6 +1163,19 @@ onUnmounted(() => {
     text-align: center;
     padding: 20px;
     color: #666;
+}
+
+.rgb-info {
+    margin: 10px 0;
+    padding: 10px 12px;
+    background: #e8f5e9;
+    border-radius: 5px;
+    font-size: 12px;
+    color: #2e7d32;
+}
+
+.rgb-info p {
+    margin: 0;
 }
 
 /* Player styles */

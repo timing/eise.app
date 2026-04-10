@@ -17,6 +17,8 @@ export const SER_COLOR_RGGB = 8;
 export const SER_COLOR_GRBG = 9;
 export const SER_COLOR_GBRG = 10;
 export const SER_COLOR_BGGR = 11;
+export const SER_COLOR_RGB = 100;
+export const SER_COLOR_BGR = 101;
 
 // Map SER colorID to OpenCV Bayer patterns
 // OpenCV uses inverted naming convention (see CLAUDE.md)
@@ -26,16 +28,20 @@ const COLOR_ID_TO_OPENCV = {
     [SER_COLOR_GRBG]: 'COLOR_BayerGB2RGB',  // Industry GRBG → OpenCV GB
     [SER_COLOR_GBRG]: 'COLOR_BayerGR2RGB',  // Industry GBRG → OpenCV GR
     [SER_COLOR_BGGR]: 'COLOR_BayerRG2RGB',  // Industry BGGR → OpenCV RG
+    [SER_COLOR_RGB]:  'MONO',               // Already RGB — no demosaic
+    [SER_COLOR_BGR]:  'MONO',               // Already BGR — no demosaic
 };
 
 // Map SER colorID to GPU shader pattern indices
-// GPU: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG, -1=MONO
+// GPU: 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG, -1=MONO/passthrough
 const COLOR_ID_TO_GPU = {
     [SER_COLOR_MONO]: -1,
     [SER_COLOR_RGGB]: 0,
     [SER_COLOR_GRBG]: 2,
     [SER_COLOR_GBRG]: 3,
     [SER_COLOR_BGGR]: 1,
+    [SER_COLOR_RGB]:  -1,  // Already RGB — no demosaic
+    [SER_COLOR_BGR]:  -1,  // Already BGR — no demosaic
 };
 
 /**
@@ -110,17 +116,32 @@ function decodeString(buffer, offset, length) {
 }
 
 /**
- * Calculate bytes per pixel based on bit depth
+ * Calculate bytes per channel based on bit depth
  */
 export function getBytesPerPixel(pixelDepth) {
     return pixelDepth > 8 ? 2 : 1;
 }
 
 /**
- * Calculate frame size in bytes
+ * Get number of color channels for a SER colorID
+ * RGB/BGR formats have 3 channels; all others (Bayer, MONO) have 1
  */
-export function getFrameSize(width, height, pixelDepth) {
-    return width * height * getBytesPerPixel(pixelDepth);
+export function getChannels(colorID) {
+    return (colorID === SER_COLOR_RGB || colorID === SER_COLOR_BGR) ? 3 : 1;
+}
+
+/**
+ * Check if colorID is an already-decoded RGB or BGR format (no demosaicing needed)
+ */
+export function isRgbColor(colorID) {
+    return colorID === SER_COLOR_RGB || colorID === SER_COLOR_BGR;
+}
+
+/**
+ * Calculate frame size in bytes (accounts for multi-channel RGB/BGR)
+ */
+export function getFrameSize(width, height, pixelDepth, colorID = 0) {
+    return width * height * getBytesPerPixel(pixelDepth) * getChannels(colorID);
 }
 
 /**
@@ -150,10 +171,11 @@ export function getGpuBayerPattern(colorID) {
 }
 
 /**
- * Check if colorID requires demosaicing
+ * Check if colorID requires Bayer demosaicing
+ * RGB/BGR and MONO do not need demosaicing
  */
 export function needsDemosaic(colorID) {
-    return colorID !== SER_COLOR_MONO;
+    return colorID !== SER_COLOR_MONO && !isRgbColor(colorID);
 }
 
 /**
@@ -169,9 +191,13 @@ export function needsDemosaic(colorID) {
 export function detectActualBitDepth(header, fileSize) {
     console.log('[useSerParser] detectActualBitDepth called - validating bit depth');
     let bpp = getBytesPerPixel(header.pixelDepth);
-    let frameSize = getFrameSize(header.width, header.height, header.pixelDepth);
+    const channels = getChannels(header.colorID);
+    let frameSize = getFrameSize(header.width, header.height, header.pixelDepth, header.colorID);
 
-    if (header.pixelDepth > 8) {
+    // Only apply bit-depth correction for single-channel (Bayer/MONO) data.
+    // Multi-channel (RGB/BGR) frames are 3 bytes/pixel so the single-channel
+    // frame size checks below would produce wrong results.
+    if (header.pixelDepth > 8 && channels === 1) {
         const frameSize16 = header.width * header.height * 2;
         const frameSize8 = header.width * header.height * 1;
         const dataSize = fileSize - SER_HEADER_SIZE;
@@ -338,11 +364,14 @@ export function useSerParser() {
             frameCount: header.frameCount,
             pixelDepth: header.pixelDepth,
             bytesPerPixel: bpp,
+            channels: getChannels(header.colorID),
             frameSize,
             colorID: header.colorID,
             bayerPattern,
             scaleFactor,
             needsDemosaic: needsDemosaic(header.colorID),
+            isRgbPassthrough: isRgbColor(header.colorID),
+            isBgr: header.colorID === SER_COLOR_BGR,
             littleEndian: header.littleEndian !== 0,
             observer: header.observer,
             instrument: header.instrument,

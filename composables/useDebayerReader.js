@@ -19,7 +19,7 @@ import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
 
 // Import parser helpers for Bayer pattern conversion
-import { getGpuBayerPattern as serGetGpuBayerPattern } from '@/composables/useSerParser';
+import { getGpuBayerPattern as serGetGpuBayerPattern, isRgbColor, SER_COLOR_BGR } from '@/composables/useSerParser';
 import { opencvToGpuPattern } from '@/composables/useAviParser';
 
 /**
@@ -176,6 +176,8 @@ export function useDebayerReader() {
     let bayerPattern = -1;
     let scaleFactor = 1;
     let cancelled = false;
+    let isRgbPassthrough = false;  // true for SER colorID 100 (RGB) or 101 (BGR)
+    let isBgr = false;             // true for SER colorID 101 (BGR) - swap R/B channels
 
     // Cancel processing and terminate workers
     function cancelProcessing() {
@@ -216,8 +218,20 @@ export function useDebayerReader() {
         bayerChoice = metadata.bayerPattern?.opencv || 'MONO';
         bayerPattern = metadata.bayerPattern?.gpu ?? -1;
 
+        // Detect RGB/BGR passthrough (no demosaicing needed)
+        isRgbPassthrough = metadata.isRgbPassthrough || isRgbColor(metadata.colorID) || false;
+        isBgr = metadata.isBgr || metadata.colorID === SER_COLOR_BGR || false;
+        if (isRgbPassthrough) {
+            bayerChoice = 'MONO';
+            bayerPattern = -1;
+        }
+
         addLog(`[DebayerReader] Initialized: ${metadata.width}x${metadata.height}, ${metadata.frameCount} frames`);
-        addLog(`[DebayerReader] Bayer pattern: ${bayerChoice} (GPU index: ${bayerPattern})`);
+        if (isRgbPassthrough) {
+            addLog(`[DebayerReader] ${isBgr ? 'BGR' : 'RGB'} format: passthrough mode (no demosaicing)`);
+        } else {
+            addLog(`[DebayerReader] Bayer pattern: ${bayerChoice} (GPU index: ${bayerPattern})`);
+        }
 
         // Log detailed SER header info
         const colorNames = {
@@ -233,7 +247,8 @@ export function useDebayerReader() {
         addLog(`─── SER File Details ───`);
         addLog(`Resolution: ${metadata.width} x ${metadata.height}`);
         addLog(`Frames: ${metadata.frameCount}`);
-        addLog(`Bit depth: ${metadata.pixelDepth}-bit (${metadata.bytesPerPixel} bytes/pixel)`);
+        const totalBytesPerPixel = (metadata.bytesPerPixel || 1) * (metadata.channels || 1);
+        addLog(`Bit depth: ${metadata.pixelDepth}-bit (${totalBytesPerPixel} bytes/pixel)`);
         addLog(`Color format: ${colorName} (colorID: ${metadata.colorID})`);
         addLog(`Endianness: ${metadata.littleEndian ? 'Little-endian' : 'Big-endian'}`);
         if (metadata.scaleFactor && metadata.scaleFactor > 1) {
@@ -318,11 +333,17 @@ export function useDebayerReader() {
     }
 
     /**
-     * Read a single frame from the file
+     * Read a single frame from the file.
+     * For RGB/BGR SER files, converts packed 3-channel data → RGBA (4 bytes/pixel)
+     * so it can be fed directly to the GPU's no-demosaic RGBA path.
      */
     async function readFrame(frameIndex) {
         let frameData;
-        if (parser.readFrameScaled) {
+
+        if (isRgbPassthrough) {
+            // For RGB/BGR, read raw bytes without pre-scaling (we do our own conversion below)
+            frameData = await parser.readFrame(frameIndex);
+        } else if (parser.readFrameScaled) {
             frameData = await parser.readFrameScaled(frameIndex);
         } else if (parser.readFrameFlipped) {
             frameData = await parser.readFrameFlipped(frameIndex);
@@ -330,7 +351,44 @@ export function useDebayerReader() {
             frameData = await parser.readFrame(frameIndex);
         }
 
-        // Convert to typed array
+        if (isRgbPassthrough) {
+            // Convert packed RGB or BGR → RGBA (Uint8, 4 bytes/pixel)
+            // The GPU's no-demosaic path expects RGBA: frame.data.length === pixelCount * 4
+            const pixelCount = metadata.width * metadata.height;
+            const bytesPerChannel = metadata.bytesPerPixel || 1;
+            const rgba = new Uint8Array(pixelCount * 4);
+
+            if (bytesPerChannel === 1) {
+                // 8-bit RGB/BGR: simple channel rearrangement
+                const src = new Uint8Array(frameData instanceof ArrayBuffer ? frameData : frameData.buffer || frameData);
+                for (let i = 0; i < pixelCount; i++) {
+                    const s = i * 3;
+                    rgba[i * 4]     = isBgr ? src[s + 2] : src[s];      // R
+                    rgba[i * 4 + 1] = src[s + 1];                        // G
+                    rgba[i * 4 + 2] = isBgr ? src[s]     : src[s + 2];  // B
+                    rgba[i * 4 + 3] = 255;
+                }
+            } else {
+                // 16-bit RGB/BGR: sample max across all channels, scale to 8-bit
+                const src16 = new Uint16Array(frameData instanceof ArrayBuffer ? frameData : frameData.buffer);
+                let maxVal = 0;
+                const step = Math.max(1, Math.floor(src16.length / 5000));
+                for (let i = 0; i < src16.length; i += step) {
+                    if (src16[i] > maxVal) maxVal = src16[i];
+                }
+                const scale = maxVal > 0 ? 255 / maxVal : 1;
+                for (let i = 0; i < pixelCount; i++) {
+                    const s = i * 3;
+                    rgba[i * 4]     = Math.min(255, Math.round((isBgr ? src16[s + 2] : src16[s])     * scale));
+                    rgba[i * 4 + 1] = Math.min(255, Math.round(src16[s + 1]                           * scale));
+                    rgba[i * 4 + 2] = Math.min(255, Math.round((isBgr ? src16[s]     : src16[s + 2]) * scale));
+                    rgba[i * 4 + 3] = 255;
+                }
+            }
+            return rgba;
+        }
+
+        // Single-channel (Bayer / MONO) path: return as typed array matching bit depth
         // Handle different parser metadata formats (SER: bytesPerPixel/pixelDepth, AVI: bpp)
         const bytesPerPixel = metadata.bytesPerPixel || (metadata.bpp ? metadata.bpp / 8 : (metadata.pixelDepth > 8 ? 2 : 1));
         return bytesPerPixel === 2
@@ -352,7 +410,9 @@ export function useDebayerReader() {
         const header = {
             width: metadata.width,
             height: metadata.height,
-            pixelDepth: metadata.pixelDepth || metadata.bpp || 8,
+            // RGB/BGR passthrough always outputs 8-bit RGBA regardless of source bit depth,
+            // so signal 8-bit to the stacker so it uses uint8Buffer not float32Buffer.
+            pixelDepth: isRgbPassthrough ? 8 : (metadata.pixelDepth || metadata.bpp || 8),
             colorID: metadata.colorID,
         };
 
@@ -395,33 +455,37 @@ export function useDebayerReader() {
                     if (!frameData) return null;
 
                     const { width, height } = metadata;
-                    const is16bit = header.pixelDepth > 8;
+                    let rgba;
 
-                    // Handle 16-bit data: read as Uint16Array and scale to 8-bit for CPU demosaic
-                    let src;
-                    if (is16bit) {
-                        const src16 = new Uint16Array(frameData.frameBuffer);
-                        src = new Uint8Array(src16.length);
-                        // Find max value for scaling (sample for speed)
-                        let maxVal = 0;
-                        const step = Math.max(1, Math.floor(src16.length / 5000));
-                        for (let i = 0; i < src16.length; i += step) {
-                            if (src16[i] > maxVal) maxVal = src16[i];
-                        }
-                        // Scale 16-bit to 8-bit with auto-stretch
-                        const scale = maxVal > 0 ? 255 / maxVal : 1;
-                        for (let i = 0; i < src16.length; i++) {
-                            src[i] = Math.min(255, Math.round(src16[i] * scale));
-                        }
+                    if (isRgbPassthrough) {
+                        // readFrame already converted to 8-bit RGBA — use directly
+                        rgba = new Uint8ClampedArray(frameData.frameBuffer);
                     } else {
-                        src = new Uint8Array(frameData.frameBuffer);
+                        const is16bit = header.pixelDepth > 8;
+
+                        // Handle 16-bit data: read as Uint16Array and scale to 8-bit for CPU demosaic
+                        let src;
+                        if (is16bit) {
+                            const src16 = new Uint16Array(frameData.frameBuffer);
+                            src = new Uint8Array(src16.length);
+                            // Find max value for scaling (sample for speed)
+                            let maxVal = 0;
+                            const step = Math.max(1, Math.floor(src16.length / 5000));
+                            for (let i = 0; i < src16.length; i += step) {
+                                if (src16[i] > maxVal) maxVal = src16[i];
+                            }
+                            const scale = maxVal > 0 ? 255 / maxVal : 1;
+                            for (let i = 0; i < src16.length; i++) {
+                                src[i] = Math.min(255, Math.round(src16[i] * scale));
+                            }
+                        } else {
+                            src = new Uint8Array(frameData.frameBuffer);
+                        }
+
+                        rgba = new Uint8ClampedArray(width * height * 4);
+                        demosaicBayerToRgba(src, rgba, width, height, bayerChoice);
+                        autoStretchRgba(rgba);
                     }
-
-                    const rgba = new Uint8ClampedArray(width * height * 4);
-
-                    // Demosaic to color
-                    demosaicBayerToRgba(src, rgba, width, height, bayerChoice);
-                    autoStretchRgba(rgba);
 
                     // Create canvas and render
                     const canvas = new OffscreenCanvas(width, height);
@@ -854,67 +918,75 @@ export function useDebayerReader() {
         const frameCount = maxFrames > 0 ? Math.min(maxFrames, metadata.frameCount) : metadata.frameCount;
         addLog(`[DebayerReader] Processing ${frameCount} frames`);
 
-        // Read first frame for preview
-        const firstFrameData = await readFrame(0);
-
-        // Detect crop region for preview and crop the preview buffer
-        let previewBuffer = firstFrameData.buffer || firstFrameData;
-        let previewWidth = metadata.width;
-        let previewHeight = metadata.height;
         const MIN_SIZE_FOR_CROP = 300;
 
-        if (metadata.width >= MIN_SIZE_FOR_CROP && metadata.height >= MIN_SIZE_FOR_CROP) {
-            emit('set-caption', 'Detecting object for preview...');
-            const frames = [{ data: firstFrameData, index: 0 }];
-            const results = await analyzeFrameBatchGpu(frames, 0.1, true);
-
-            if (results?.[0]?.bounds?.width > 0) {
-                const size = Math.max(results[0].bounds.width, results[0].bounds.height);
-                const margin = 1 + (cropMarginPercent / 100);
-                const cropSize = Math.min(
-                    Math.ceil(size * margin / 2) * 2,
-                    Math.min(metadata.width, metadata.height)
-                );
-                const centerX = results[0].bounds.centroidX;
-                const centerY = results[0].bounds.centroidY;
-
-                // Crop the preview buffer
-                const bpp = metadata.bytesPerPixel || (metadata.bpp ? metadata.bpp / 8 : 1);
-                const halfSize = Math.floor(cropSize / 2);
-                let startX = Math.max(0, Math.min(metadata.width - cropSize, Math.round(centerX) - halfSize));
-                let startY = Math.max(0, Math.min(metadata.height - cropSize, Math.round(centerY) - halfSize));
-                // Align to even pixels for Bayer pattern
-                startX = Math.floor(startX / 2) * 2;
-                startY = Math.floor(startY / 2) * 2;
-
-                const croppedBuffer = new ArrayBuffer(cropSize * cropSize * bpp);
-                const srcView = bpp === 2 ? new Uint16Array(previewBuffer) : new Uint8Array(previewBuffer);
-                const dstView = bpp === 2 ? new Uint16Array(croppedBuffer) : new Uint8Array(croppedBuffer);
-
-                for (let y = 0; y < cropSize; y++) {
-                    const srcOffset = (startY + y) * metadata.width + startX;
-                    const dstOffset = y * cropSize;
-                    dstView.set(srcView.subarray(srcOffset, srcOffset + cropSize), dstOffset);
-                }
-
-                previewBuffer = croppedBuffer;
-                previewWidth = cropSize;
-                previewHeight = cropSize;
-                addLog(`[DebayerReader] Cropped preview to ${cropSize}x${cropSize} for color selector`);
-            }
-        }
-
-        // Show color profile selector with cropped preview (skip if pattern is forced)
-        if (forceBayerPattern) {
-            bayerChoice = forceBayerPattern;
-            bayerPattern = bayerChoiceToGpuPattern(forceBayerPattern);
-            addLog(`[DebayerReader] Using forced bayer pattern: ${bayerChoice} (GPU: ${bayerPattern})`);
-            // Emit processing-started since color profile selector was skipped
+        if (isRgbPassthrough) {
+            // RGB/BGR SER: skip the color profile selector entirely —
+            // frames are already decoded RGB, no Bayer pattern needed.
+            addLog(`[DebayerReader] RGB SER: skipping color profile selector`);
             emit('debayer-processing-started');
         } else {
-            emit('set-caption', 'Select color profile');
-            await showColorProfileSelector(previewBuffer, previewWidth, previewHeight);
-            // Note: color-profile-selected event triggers isProcessing in app.vue
+            // Read first frame for preview (used by the Bayer color profile selector)
+            const firstFrameData = await readFrame(0);
+
+            // Detect crop region for preview and crop the preview buffer
+            let previewBuffer = firstFrameData.buffer || firstFrameData;
+            let previewWidth = metadata.width;
+            let previewHeight = metadata.height;
+
+            if (metadata.width >= MIN_SIZE_FOR_CROP && metadata.height >= MIN_SIZE_FOR_CROP) {
+                emit('set-caption', 'Detecting object for preview...');
+                const frames = [{ data: firstFrameData, index: 0 }];
+                const results = await analyzeFrameBatchGpu(frames, 0.1, true);
+
+                if (results?.[0]?.bounds?.width > 0) {
+                    const size = Math.max(results[0].bounds.width, results[0].bounds.height);
+                    const margin = 1 + (cropMarginPercent / 100);
+                    const cropSize = Math.min(
+                        Math.ceil(size * margin / 2) * 2,
+                        Math.min(metadata.width, metadata.height)
+                    );
+                    const centerX = results[0].bounds.centroidX;
+                    const centerY = results[0].bounds.centroidY;
+
+                    // Crop the preview buffer (single-channel Bayer, 1 or 2 bytes/pixel)
+                    const bpp = metadata.bytesPerPixel || (metadata.bpp ? metadata.bpp / 8 : 1);
+                    const halfSize = Math.floor(cropSize / 2);
+                    let startX = Math.max(0, Math.min(metadata.width - cropSize, Math.round(centerX) - halfSize));
+                    let startY = Math.max(0, Math.min(metadata.height - cropSize, Math.round(centerY) - halfSize));
+                    // Align to even pixels for Bayer pattern integrity
+                    startX = Math.floor(startX / 2) * 2;
+                    startY = Math.floor(startY / 2) * 2;
+
+                    const croppedBuffer = new ArrayBuffer(cropSize * cropSize * bpp);
+                    const srcView = bpp === 2 ? new Uint16Array(previewBuffer) : new Uint8Array(previewBuffer);
+                    const dstView = bpp === 2 ? new Uint16Array(croppedBuffer) : new Uint8Array(croppedBuffer);
+
+                    for (let y = 0; y < cropSize; y++) {
+                        const srcOffset = (startY + y) * metadata.width + startX;
+                        const dstOffset = y * cropSize;
+                        dstView.set(srcView.subarray(srcOffset, srcOffset + cropSize), dstOffset);
+                    }
+
+                    previewBuffer = croppedBuffer;
+                    previewWidth = cropSize;
+                    previewHeight = cropSize;
+                    addLog(`[DebayerReader] Cropped preview to ${cropSize}x${cropSize} for color selector`);
+                }
+            }
+
+            // Show color profile selector with cropped preview (skip if pattern is forced)
+            if (forceBayerPattern) {
+                bayerChoice = forceBayerPattern;
+                bayerPattern = bayerChoiceToGpuPattern(forceBayerPattern);
+                addLog(`[DebayerReader] Using forced bayer pattern: ${bayerChoice} (GPU: ${bayerPattern})`);
+                // Emit processing-started since color profile selector was skipped
+                emit('debayer-processing-started');
+            } else {
+                emit('set-caption', 'Select color profile');
+                await showColorProfileSelector(previewBuffer, previewWidth, previewHeight);
+                // Note: color-profile-selected event triggers isProcessing in app.vue
+            }
         }
 
         // Detect full crop region
@@ -1115,7 +1187,8 @@ export function useDebayerReader() {
             // Update CPU pre-crop region based on detected bounds from this batch
             // This tracks the planet as it drifts across frames
             // Skip in surface mode (whole frame is target, pre-crop makes no sense)
-            if (cropRegion && !surfaceMode && results.length > 0) {
+            // Skip for RGB passthrough (pre-crop worker expects single-channel Bayer data)
+            if (cropRegion && !surfaceMode && !isRgbPassthrough && results.length > 0) {
                 const batchBounds = results.map(r => r.bounds).filter(b => b && !b.cutOff);
                 const newRegion = computePreCropRegion(batchBounds, metadata.width, metadata.height, 1.5);
                 if (newRegion) {
@@ -1188,8 +1261,9 @@ export function useDebayerReader() {
             }
 
             // Start pre-cropping next batch async (runs on separate CPU core while GPU works)
-            // Skip in surface mode (whole frame is target)
-            if (preCropRegion && cropRegion && !surfaceMode && nextBatchFrames) {
+            // Skip in surface mode (whole frame is target) and for RGB passthrough
+            // (pre-crop worker assumes 1 byte/pixel Bayer stride; RGB frames are 4-byte RGBA)
+            if (preCropRegion && cropRegion && !surfaceMode && !isRgbPassthrough && nextBatchFrames) {
                 pendingPreCrop = preCropAsync(nextBatchFrames, preCropRegion);
             }
 
