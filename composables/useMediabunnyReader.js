@@ -181,17 +181,23 @@ export function useMediabunnyReader() {
 						return;
 					}
 
-					// Get actual dimensions from first frame (use displayWidth/Height to avoid codec padding)
+					// Get actual dimensions from first frame, clamped to track-declared dimensions.
+					// H.264 pads height to macroblock boundaries (e.g. 1080 → 1088). Those extra
+					// rows often contain replicated content from the last real row, spanning the full
+					// width — which confuses the GPU bounds detector into treating the whole frame as
+					// a bright object. Strip them by capping to the container-declared size.
 					if (actualWidth === 0) {
-						actualWidth = frame.displayWidth || frame.codedWidth;
-						actualHeight = frame.displayHeight || frame.codedHeight;
-						if (actualWidth !== trackWidth || actualHeight !== trackHeight) {
-							addLog(`Actual frame size: ${actualWidth}x${actualHeight} (track reported ${trackWidth}x${trackHeight})`);
+						const rawWidth = frame.displayWidth || frame.codedWidth;
+						const rawHeight = frame.displayHeight || frame.codedHeight;
+						actualWidth = Math.min(rawWidth, trackWidth);
+						actualHeight = Math.min(rawHeight, trackHeight);
+						if (rawWidth !== trackWidth || rawHeight !== trackHeight) {
+							addLog(`Codec frame size: ${rawWidth}x${rawHeight}, clamped to ${actualWidth}x${actualHeight} (track: ${trackWidth}x${trackHeight})`);
 						}
 					}
 
-					// Convert VideoFrame to RGBA Uint8ClampedArray
-					const rgba = videoFrameToRgba(frame);
+					// Convert VideoFrame to RGBA Uint8ClampedArray, cropped to actualWidth×actualHeight
+					const rgba = videoFrameToRgba(frame, actualWidth, actualHeight);
 					decodedFrames.push({
 						data: rgba,
 						index: frameIndex++,
@@ -278,12 +284,14 @@ export function useMediabunnyReader() {
 	}
 
 	/**
-	 * Convert VideoFrame to RGBA Uint8ClampedArray
-	 * Uses displayWidth/Height to get actual visible pixels (avoids codec padding)
+	 * Convert VideoFrame to RGBA Uint8ClampedArray, cropped to maxWidth×maxHeight.
+	 * Pass maxWidth/maxHeight to strip H.264 macroblock-alignment padding rows.
 	 */
-	function videoFrameToRgba(frame) {
-		const width = frame.displayWidth || frame.codedWidth;
-		const height = frame.displayHeight || frame.codedHeight;
+	function videoFrameToRgba(frame, maxWidth, maxHeight) {
+		const frameW = frame.displayWidth || frame.codedWidth;
+		const frameH = frame.displayHeight || frame.codedHeight;
+		const width = maxWidth ? Math.min(frameW, maxWidth) : frameW;
+		const height = maxHeight ? Math.min(frameH, maxHeight) : frameH;
 
 		// Try direct copyTo for RGBA/BGRA formats (faster, no canvas needed)
 		const format = frame.format;
@@ -305,10 +313,11 @@ export function useMediabunnyReader() {
 			return buffer;
 		}
 
-		// For YUV formats (I420, NV12, etc.), use canvas for color conversion
+		// For YUV formats (I420, NV12, etc.), use canvas for color conversion.
+		// drawImage with explicit src rect crops padding rows (e.g. H.264 1088 → 1080).
 		const canvas = new OffscreenCanvas(width, height);
 		const ctx = canvas.getContext('2d');
-		ctx.drawImage(frame, 0, 0, width, height);
+		ctx.drawImage(frame, 0, 0, width, height, 0, 0, width, height);
 		return ctx.getImageData(0, 0, width, height).data;
 	}
 
@@ -338,6 +347,7 @@ export function useMediabunnyReader() {
 		if (width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
 			// Sample frames for crop detection
 			const sampleIndices = getSampleIndices(frameCount, Math.min(50, frameCount));
+			addLog(`Sampling ${sampleIndices.length} frames for crop detection...`);
 			const sampleFrames = sampleIndices.map(i => ({ data: frames[i].data, index: frames[i].index }));
 
 			// Analyze sample frames to detect bounds
@@ -353,7 +363,10 @@ export function useMediabunnyReader() {
 				}
 			}
 
-			if (detectedCenters.length >= sampleIndices.length * 0.5) {
+			const cropThreshold = sampleIndices.length * 0.5;
+			if (detectedCenters.length < cropThreshold) {
+				addLog(`Only ${detectedCenters.length}/${sampleIndices.length} frames detected a bright object. Skipping auto-crop.`);
+			} else {
 				// Calculate median size and center
 				const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
 				const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
@@ -367,13 +380,21 @@ export function useMediabunnyReader() {
 				const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
 				const maxAllowedSize = Math.min(width, height);
 
-				if (desiredSize < maxAllowedSize || surfaceMode) {
+				if (desiredSize >= maxAllowedSize) {
+					if (surfaceMode) {
+						addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+						cropRegion = { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+					} else {
+						addLog(`Skipping crop: detected size ${desiredSize}px (median object: ${Math.round(medianSize)}px) exceeds frame ${maxAllowedSize}px`);
+					}
+				} else {
 					cropRegion = {
-						size: Math.min(desiredSize, maxAllowedSize),
+						size: desiredSize,
 						referenceCenter: { x: medianX, y: medianY },
 						medianObjectSize: medianSize
 					};
-					addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
+					addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}px`);
+					addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)}), frame center: (${Math.round(width/2)}, ${Math.round(height/2)})`);
 				}
 			}
 		}
