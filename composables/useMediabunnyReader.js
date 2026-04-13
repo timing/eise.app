@@ -85,6 +85,34 @@ export function useMediabunnyReader() {
 	}
 
 	/**
+	 * Detect bit depth from codec string.
+	 * For H.264: profile_idc byte encodes 10-bit profiles (0x6e = High 10, 0x86 = High 10 Intra).
+	 * For HEVC/H.265: hev1/hvc1 profiles similarly encode bit depth.
+	 */
+	function detectBitDepthFromCodec(codecString) {
+		if (!codecString) return '?';
+		// H.264: avc1.PPCCLL — PP = profile_idc hex
+		const avcMatch = codecString.match(/^avc[13]\.([0-9a-fA-F]{2})/);
+		if (avcMatch) {
+			const profileIdc = parseInt(avcMatch[1], 16);
+			// High 10 = 0x6e (110), High 10 Intra = 0x86 (134)
+			if (profileIdc === 0x6e || profileIdc === 0x86) return '10';
+			return '8';
+		}
+		// HEVC: hev1/hvc1 — bit depth encoded in constraint bytes, harder to parse
+		// but main10 profiles are detectable
+		if (/^he[vc]1\.2/.test(codecString)) return '10'; // Main 10 profile
+		if (/^hev1|^hvc1/.test(codecString)) return '8';
+		// VP9: vp09.PP.LL.BB — BB = bit depth
+		const vp9Match = codecString.match(/^vp09\.\d+\.\d+\.(\d+)/);
+		if (vp9Match) return vp9Match[1];
+		// AV1: av01.P.LLT.DD — DD = bit depth
+		const av1Match = codecString.match(/^av01\.\d+\.\d+\w\.(\d+)/);
+		if (av1Match) return av1Match[1];
+		return '?';
+	}
+
+	/**
 	 * Map Mediabunny codec names to WebCodecs codec strings
 	 */
 	function getWebCodecsCodecString(codec, track) {
@@ -115,7 +143,10 @@ export function useMediabunnyReader() {
 	}
 
 	/**
-	 * Process video frames using Mediabunny + WebCodecs
+	 * Process video frames using Mediabunny + WebCodecs — two-pass streaming pipeline:
+	 *   Pass 1: decode all packets, keep ~50 reservoir samples → detect crop region → free samples
+	 *   Pass 2: decode packets in groups of BATCH_SIZE, flush → GPU analyze → free RGBA → keep only
+	 *           small cropped uint8Buffer for ranked frames. Peak RGBA in memory: BATCH_SIZE × frame_size.
 	 */
 	async function processVideoFrames(file, options = {}) {
 		const {
@@ -156,124 +187,328 @@ export function useMediabunnyReader() {
 			const trackHeight = videoTrack.codedHeight;
 			const codec = videoTrack.codec;
 			const decoderConfig = await videoTrack.getDecoderConfig();
-			const totalFrames = maxFrames > 0 ? maxFrames : 1000; // frameCount not always available
 
-			addLog(`Video: ${trackWidth}x${trackHeight}, codec: ${codec}`);
-			addLog(`Target frames: ${totalFrames}`);
+			const fullCodecString = decoderConfig?.codec || getWebCodecsCodecString(codec, videoTrack);
+			const bitDepth = detectBitDepthFromCodec(fullCodecString);
+			addLog(`Video: ${trackWidth}x${trackHeight}, codec: ${codec} (${fullCodecString}), bit depth: ${bitDepth}-bit`);
 
-			// Set up WebCodecs decoder
 			const codecString = decoderConfig?.codec || getWebCodecsCodecString(codec, videoTrack);
 			if (!codecString) {
 				throw new Error(`Cannot determine WebCodecs codec string for: ${codec}`);
 			}
+			const baseConfig = decoderConfig || { codec: codecString, codedWidth: trackWidth, codedHeight: trackHeight };
 
-			// Collect decoded frames - actual dimensions determined from first frame
-			// (may differ from track metadata due to codec padding, e.g. 1080 -> 1088 for H.264)
-			const decodedFrames = [];
-			let frameIndex = 0;
-			let actualWidth = 0;
-			let actualHeight = 0;
+			let actualWidth = 0, actualHeight = 0;
 
-			const decoder = new VideoDecoder({
-				output: (frame) => {
-					if (cancelled) {
-						frame.close();
-						return;
-					}
+			// Helper: create and configure a fresh decoder
+			function makeDecoder(outputFn) {
+				const dec = new VideoDecoder({
+					output: outputFn,
+					error: (e) => console.error('[WebCodecs] Decoder error:', e)
+				});
+				dec.configure(baseConfig);
+				return dec;
+			}
 
-					// Get actual dimensions from first frame, clamped to track-declared dimensions.
-					// H.264 pads height to macroblock boundaries (e.g. 1080 → 1088). Those extra
-					// rows often contain replicated content from the last real row, spanning the full
-					// width — which confuses the GPU bounds detector into treating the whole frame as
-					// a bright object. Strip them by capping to the container-declared size.
-					if (actualWidth === 0) {
-						const rawWidth = frame.displayWidth || frame.codedWidth;
-						const rawHeight = frame.displayHeight || frame.codedHeight;
-						actualWidth = Math.min(rawWidth, trackWidth);
-						actualHeight = Math.min(rawHeight, trackHeight);
-						if (rawWidth !== trackWidth || rawHeight !== trackHeight) {
-							addLog(`Codec frame size: ${rawWidth}x${rawHeight}, clamped to ${actualWidth}x${actualHeight} (track: ${trackWidth}x${trackHeight})`);
-						}
-					}
-
-					// Convert VideoFrame to RGBA Uint8ClampedArray, cropped to actualWidth×actualHeight
-					const rgba = videoFrameToRgba(frame, actualWidth, actualHeight);
-					decodedFrames.push({
-						data: rgba,
-						index: frameIndex++,
-						width: actualWidth,
-						height: actualHeight
-					});
-
-					frame.close();
-
-					// Progress update
-					if (frameIndex % 50 === 0) {
-						emit('update-loading', {
-							progress: Math.min((frameIndex / totalFrames) * 50, 50),
-							current: frameIndex,
-							total: totalFrames
-						});
-					}
-				},
-				error: (e) => {
-					console.error('[WebCodecs] Decoder error:', e);
+			// Helper: set actual dimensions from first VideoFrame (clamped to strip codec padding)
+			function initDims(frame) {
+				if (actualWidth !== 0) return;
+				const rawW = frame.displayWidth || frame.codedWidth;
+				const rawH = frame.displayHeight || frame.codedHeight;
+				actualWidth = Math.min(rawW, trackWidth);
+				actualHeight = Math.min(rawH, trackHeight);
+				const cs = frame.colorSpace;
+			addLog(`Frame pixel format: ${frame.format || 'unknown'}, declared full range: ${cs?.fullRange ?? 'unknown'}, matrix: ${cs?.matrix ?? '?'}`);
+				if (rawW !== trackWidth || rawH !== trackHeight) {
+					addLog(`Codec frame size: ${rawW}x${rawH}, clamped to ${actualWidth}x${actualHeight} (track: ${trackWidth}x${trackHeight})`);
 				}
+			}
+
+			// Get first key packet — reused for both passes
+			const sink1 = new EncodedPacketSink(videoTrack);
+			const firstKeyPacket = await sink1.getFirstKeyPacket({ verifyKeyPackets: true });
+			if (!firstKeyPacket) throw new Error('No key frame found in video');
+
+			// ══════════════════════════════════════════════════════════════
+			// PASS 1 — Crop detection
+			// Decode all packets but only convert ~50 reservoir-sampled frames
+			// to RGBA. Non-sampled frames are decoded and immediately closed,
+			// so only ≤50 × frameSize bytes live in memory at once.
+			// ══════════════════════════════════════════════════════════════
+			emit('set-caption', 'Detecting crop region...');
+
+			const SAMPLE_SIZE = 50;
+			const rawSamples = [];  // { frame: VideoFrame, index: number } — kept alive until converted
+			let pass1Count = 0;
+
+			const decoder1 = makeDecoder((frame) => {
+				if (cancelled) { frame.close(); return; }
+				initDims(frame);
+
+				// Reservoir sampling — uniform random sample without knowing total count upfront.
+				// Keeps VideoFrame objects alive; non-selected frames are closed immediately.
+				if (rawSamples.length < SAMPLE_SIZE) {
+					rawSamples.push({ frame, index: pass1Count });
+				} else {
+					const j = Math.floor(Math.random() * (pass1Count + 1));
+					if (j < SAMPLE_SIZE) {
+						rawSamples[j].frame.close(); // release replaced frame
+						rawSamples[j] = { frame, index: pass1Count };
+					} else {
+						frame.close();
+					}
+				}
+				pass1Count++;
 			});
 
-			// Configure decoder (use config from track, or build a basic one)
-			const config = decoderConfig || {
-				codec: codecString,
-				codedWidth: width,
-				codedHeight: height
-			};
-			decoder.configure(config);
+			for await (const packet of sink1.packets(firstKeyPacket, undefined, { verifyKeyPackets: true })) {
+				if (cancelled) break;
+				if (maxFrames > 0 && pass1Count >= maxFrames) break;
+				decoder1.decode(packet.toEncodedVideoChunk());
+			}
+			await decoder1.flush();
+			decoder1.close();
 
-			emit('set-caption', 'Decoding frames...');
+			// Convert sampled VideoFrames to RGBA async (no canvas, preserves source bit depth)
+			const reservoir = await Promise.all(
+				rawSamples.map(async ({ frame, index }) => {
+					const data = await videoFrameToRgba(frame, actualWidth, actualHeight);
+					frame.close();
+					return { data, index };
+				})
+			);
+
+
+			const totalFrames = maxFrames > 0 ? Math.min(pass1Count, maxFrames) : pass1Count;
+			const detectedFullRange = reservoir.length > 0 && !isLimitedRange(reservoir[0].data);
+			addLog(`Pass 1: ${totalFrames} frames, ${reservoir.length} samples for crop detection, detected range: ${detectedFullRange ? 'full (expansion skipped)' : 'limited (expansion applied)'}`);
+			if (totalFrames === 0) throw new Error('No frames decoded from video');
+
+			// Detect crop region from reservoir samples
+			let cropRegion = null;
+			const MIN_SIZE_FOR_CROP = 300;
+			if (actualWidth >= MIN_SIZE_FOR_CROP && actualHeight >= MIN_SIZE_FOR_CROP && reservoir.length > 0) {
+				const sampleResults = await analyzeRgbaBatchGpu(reservoir, actualWidth, actualHeight);
+				const detectedCenters = [], detectedSizes = [];
+				for (const r of sampleResults) {
+					if (r.bounds) {
+						detectedCenters.push({ x: r.bounds.centroidX, y: r.bounds.centroidY });
+						detectedSizes.push(Math.max(r.bounds.width, r.bounds.height));
+					}
+				}
+
+				if (detectedCenters.length < reservoir.length * 0.5) {
+					addLog(`Only ${detectedCenters.length}/${reservoir.length} samples detected a bright object. Skipping auto-crop.`);
+				} else {
+					const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+					const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
+					const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+					const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+					const medianX = sortedX[Math.floor(sortedX.length / 2)];
+					const medianY = sortedY[Math.floor(sortedY.length / 2)];
+					const desiredSize = Math.ceil(medianSize * (1 + cropMarginPercent / 100) / 2) * 2;
+					const maxAllowedSize = Math.min(actualWidth, actualHeight);
+
+					if (desiredSize >= maxAllowedSize) {
+						if (surfaceMode) {
+							addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize}`);
+							cropRegion = { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+						} else {
+							addLog(`Skipping crop: detected size ${desiredSize}px (median: ${Math.round(medianSize)}px) exceeds frame ${maxAllowedSize}px`);
+						}
+					} else {
+						cropRegion = { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+						addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object: ${Math.round(medianSize)}px`);
+						addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)})`);
+					}
+				}
+			}
+
+			// Free sample RGBA — no longer needed
+			reservoir.length = 0;
+
+			// ══════════════════════════════════════════════════════════════
+			// PASS 2 — Streaming batch analysis
+			// Decode packets in groups of BATCH_SIZE. After each group, flush
+			// the decoder and GPU-analyze the batch. RGBA is freed after each
+			// batch; only the small cropped uint8Buffer is kept for ranked frames.
+			// For manual threshold mode ALL frames' uint8Buffers are retained
+			// (they are the small cropped region, not the full RGBA frame).
+			// ══════════════════════════════════════════════════════════════
+			emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
 			emit('update-loading', { progress: 0, current: 0, total: totalFrames });
 
-			// Decode frames from video track - must start from a key frame
-			let packetCount = 0;
-			const packetSink = new EncodedPacketSink(videoTrack);
+			const BATCH_SIZE = 32;
+			const bestFramesCapacity = Math.max(1, Math.floor(totalFrames * stackPercentage / 100));
+			const bestFramesForStacking = [];
+			const allAnalyzedFrames = manualThreshold ? [] : null;
+			const frameCenters = new Map();
+			let skippedFrames = 0, cutOffFrames = 0, oversizedFrames = 0;
+			let pass2FrameIndex = 0;
 
-			// Get first key frame to start decoding (WebCodecs requirement)
-			// Use verifyKeyPackets to inspect bitstream and ensure it's a real key frame
-			const firstKeyPacket = await packetSink.getFirstKeyPacket({ verifyKeyPackets: true });
-			if (!firstKeyPacket) {
-				throw new Error('No key frame found in video');
+			function rankFrame(frame) {
+				if (frame.uint8Buffer && frame.width && frame.height) {
+					capturePostCropFrame(frame.uint8Buffer, frame.width, frame.height, frame.index, totalFrames);
+				}
+				if (manualThreshold) allAnalyzedFrames.push(frame);
+
+				if (bestFramesForStacking.length < bestFramesCapacity) {
+					bestFramesForStacking.push(frame);
+				} else {
+					const minIdx = bestFramesForStacking.reduce((minI, f, i, arr) =>
+						f.sharpness < arr[minI].sharpness ? i : minI, 0);
+					if (frame.sharpness > bestFramesForStacking[minIdx].sharpness) {
+						bestFramesForStacking[minIdx] = frame;
+					}
+				}
 			}
 
-			for await (const packet of packetSink.packets(firstKeyPacket, undefined, { verifyKeyPackets: true })) {
+			// Called after each decoder flush — converts VideoFrames to RGBA, then GPU-analyzes.
+			// Frames are closed after conversion; RGBA is freed after GPU processing.
+			async function processBatch(batch) {
+				if (batch.length === 0) return;
+
+				// Convert VideoFrames to RGBA async (no canvas, preserves source bit depth)
+				const rgbaBatch = await Promise.all(
+					batch.map(async ({ frame, index }) => {
+						const data = await videoFrameToRgba(frame, actualWidth, actualHeight);
+						frame.close();
+						return { data, index };
+					})
+				);
+
+				if (cropRegion) {
+					const combinedResults = await detectCropAnalyzeRgbaGpu(
+						rgbaBatch, actualWidth, actualHeight, cropRegion.size, 0.1, true
+					);
+					for (let j = 0; j < combinedResults.length; j++) {
+						const gpuResult = combinedResults[j];
+						if (!gpuResult.bounds) { skippedFrames++; continue; }
+
+						if (!surfaceMode) {
+							const halfCrop = cropRegion.size / 2;
+							if (gpuResult.centerX - halfCrop < 0 || gpuResult.centerY - halfCrop < 0 ||
+								gpuResult.centerX + halfCrop > actualWidth || gpuResult.centerY + halfCrop > actualHeight) {
+								cutOffFrames++; continue;
+							}
+						}
+						if (cropRegion.medianObjectSize) {
+							if (Math.max(gpuResult.bounds.width, gpuResult.bounds.height) / cropRegion.medianObjectSize > 1.3) {
+								oversizedFrames++; continue;
+							}
+						}
+						frameCenters.set(rgbaBatch[j].index, { x: gpuResult.centerX, y: gpuResult.centerY });
+						rankFrame({
+							sharpness: gpuResult.sharpness,
+							width: cropRegion.size, height: cropRegion.size,
+							index: rgbaBatch[j].index,
+							centerX: gpuResult.centerX, centerY: gpuResult.centerY,
+							circularity: gpuResult.circularity || 0,
+							uint8Buffer: gpuResult.uint8Buffer
+						});
+					}
+				} else {
+					const results = await analyzeRgbaBatchGpu(rgbaBatch, actualWidth, actualHeight);
+					for (const result of results) {
+						rankFrame({
+							sharpness: result.sharpness || 0,
+							width: actualWidth, height: actualHeight,
+							index: result.index,
+							centerX: actualWidth / 2, centerY: actualHeight / 2,
+							circularity: result.circularity || 0,
+							uint8Buffer: result.uint8Buffer
+						});
+					}
+				}
+
+				emit('update-loading', {
+					progress: 50 + (pass2FrameIndex / totalFrames) * 40,
+					current: pass2FrameIndex,
+					total: totalFrames
+				});
+			}
+
+			let currentBatch = [];
+
+			const decoder2 = makeDecoder((frame) => {
+				if (cancelled) { frame.close(); return; }
+				// Store raw VideoFrame — conversion to RGBA happens async in processBatch
+				currentBatch.push({ frame, index: pass2FrameIndex++ });
+			});
+
+			const sink2 = new EncodedPacketSink(videoTrack);
+			const firstKeyPacket2 = await sink2.getFirstKeyPacket({ verifyKeyPackets: true });
+			let packetsSinceFlush = 0;
+
+			for await (const packet of sink2.packets(firstKeyPacket2, undefined, { verifyKeyPackets: true })) {
 				if (cancelled) break;
-				if (maxFrames > 0 && frameIndex >= maxFrames) break;
+				if (maxFrames > 0 && pass2FrameIndex >= maxFrames) break;
 
 				const chunk = packet.toEncodedVideoChunk();
-				decoder.decode(chunk);
-				packetCount++;
-			}
 
-			// Final flush
-			await decoder.flush();
-			decoder.close();
+				// Flush and process at keyframe boundaries only — after flush(), WebCodecs requires
+				// the next packet to be a keyframe (same as after configure()). Camera H.264 places
+				// keyframes every GOP (typically 30–120 frames), so we batch at those boundaries
+				// once we've accumulated at least BATCH_SIZE frames.
+				if (packetsSinceFlush >= BATCH_SIZE && chunk.type === 'key') {
+					await decoder2.flush();
+					const batch = currentBatch;
+					currentBatch = [];
+					await processBatch(batch);
+					packetsSinceFlush = 0;
+				}
+
+				decoder2.decode(chunk);
+				packetsSinceFlush++;
+			}
+			// Drain remaining
+			await decoder2.flush();
+			await processBatch(currentBatch);
+			currentBatch = [];
+
+			decoder2.close();
 			input.dispose();
 
-			addLog(`Decoded ${decodedFrames.length} frames`);
+			if (cancelled) { addLog('Processing cancelled'); emit('stop-loading'); return; }
 
-			if (decodedFrames.length === 0) {
-				throw new Error('No frames decoded from video');
+			const skipMsgs = [];
+			if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
+			if (oversizedFrames > 0) skipMsgs.push(`${oversizedFrames} oversized`);
+			if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} skipped`);
+			if (skipMsgs.length > 0) addLog(`Skipped: ${skipMsgs.join(', ')}`);
+
+			// Manual threshold mode: keep all uint8Buffers for quality selector
+			if (manualThreshold) {
+				const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
+				emit('quality-selection-ready', {
+					frames: allFramesSorted,
+					useWebGPU: true,
+					drizzleScale,
+					frameCenters,
+					frameReReader: null
+				});
+				return;
 			}
 
-			// Now process frames through GPU analyzer (same as FFmpeg path)
-			// Use actual decoded frame dimensions (may differ from track metadata)
-			await processDecodedFrames(decodedFrames, {
-				width: actualWidth,
-				height: actualHeight,
-				manualThreshold,
-				cropMarginPercent,
-				stackPercentage,
+			// Stack best frames
+			emit('set-caption', 'Stacking frames...');
+			addLog(`Stacking ${bestFramesForStacking.length} frames`);
+
+			const stackResult = await stackFramesLocally(
+				bestFramesForStacking,
+				null,
 				drizzleScale,
+				true,
+				frameCenters,
 				surfaceMode
-			});
+			);
+
+			if (stackResult) {
+				emit('postProcessing', stackResult.blob, stackResult.float32Data, stackResult.width, stackResult.height);
+			} else {
+				addLog('Stacking failed');
+				emit('upload-error', 'Stacking failed. Please try again.');
+			}
 
 		} catch (err) {
 			console.error('[Mediabunny] Processing failed:', err);
@@ -284,302 +519,56 @@ export function useMediabunnyReader() {
 	}
 
 	/**
-	 * Convert VideoFrame to RGBA Uint8ClampedArray, cropped to maxWidth×maxHeight.
-	 * Pass maxWidth/maxHeight to strip H.264 macroblock-alignment padding rows.
+	 * Heuristic: check whether RGBA buffer actually contains limited-range data.
+	 * Full-range video will have pixel values below 16 (valid dark pixels).
+	 * Limited-range video should never have values below 16 (16 = black level).
+	 * Samples a spread of pixels to avoid false positives from padding rows.
 	 */
-	function videoFrameToRgba(frame, maxWidth, maxHeight) {
+	function isLimitedRange(buffer) {
+		const step = Math.max(4, Math.floor(buffer.length / 4000)) * 4; // ~1000 samples
+		for (let i = 0; i < buffer.length - 3; i += step) {
+			if (buffer[i] < 16 || buffer[i + 1] < 16 || buffer[i + 2] < 16) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Convert VideoFrame to RGBA Uint8ClampedArray, cropped to maxWidth×maxHeight.
+	 * Uses frame.copyTo() with explicit RGBA format for all pixel formats — avoids
+	 * OffscreenCanvas which always quantizes to 8-bit and loses 10-bit source data.
+	 *
+	 * WebCodecs copyTo() does the YUV→RGB matrix conversion but does NOT apply
+	 * limited→full-range expansion for broadcast-range video (luma 16–235).
+	 * Camera H.264 is almost always limited range, so we expand manually.
+	 */
+	async function videoFrameToRgba(frame, maxWidth, maxHeight) {
 		const frameW = frame.displayWidth || frame.codedWidth;
 		const frameH = frame.displayHeight || frame.codedHeight;
 		const width = maxWidth ? Math.min(frameW, maxWidth) : frameW;
 		const height = maxHeight ? Math.min(frameH, maxHeight) : frameH;
 
-		// Try direct copyTo for RGBA/BGRA formats (faster, no canvas needed)
-		const format = frame.format;
-		if (format === 'RGBA' || format === 'RGBX') {
-			const buffer = new Uint8ClampedArray(width * height * 4);
-			frame.copyTo(buffer, { rect: { x: 0, y: 0, width, height } });
-			return buffer;
-		}
+		const buffer = new Uint8ClampedArray(width * height * 4);
+		await frame.copyTo(buffer, {
+			format: 'RGBA',
+			rect: { x: 0, y: 0, width, height },
+			layout: [{ offset: 0, stride: width * 4 }]
+		});
 
-		if (format === 'BGRA' || format === 'BGRX') {
-			const buffer = new Uint8ClampedArray(width * height * 4);
-			frame.copyTo(buffer, { rect: { x: 0, y: 0, width, height } });
-			// Swap B and R channels
-			for (let i = 0; i < buffer.length; i += 4) {
-				const b = buffer[i];
-				buffer[i] = buffer[i + 2];
-				buffer[i + 2] = b;
-			}
-			return buffer;
-		}
-
-		// For YUV formats (I420, NV12, etc.), use canvas for color conversion.
-		// drawImage with explicit src rect crops padding rows (e.g. H.264 1088 → 1080).
-		const canvas = new OffscreenCanvas(width, height);
-		const ctx = canvas.getContext('2d');
-		ctx.drawImage(frame, 0, 0, width, height, 0, 0, width, height);
-		return ctx.getImageData(0, 0, width, height).data;
-	}
-
-	/**
-	 * Process decoded RGBA frames through GPU analyzer and stacker
-	 * (Same logic as processFFmpegFrames but takes RGBA frames directly)
-	 */
-	async function processDecodedFrames(frames, options) {
-		const {
-			width,
-			height,
-			manualThreshold,
-			cropMarginPercent,
-			stackPercentage,
-			drizzleScale,
-			surfaceMode
-		} = options;
-
-		const frameCount = frames.length;
-
-		// Detect crop region by sampling frames and analyzing bounds
-		emit('set-caption', 'Detecting crop region...');
-
-		const MIN_SIZE_FOR_CROP = 300;
-		let cropRegion = null;
-
-		if (width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
-			// Sample frames for crop detection
-			const sampleIndices = getSampleIndices(frameCount, Math.min(50, frameCount));
-			addLog(`Sampling ${sampleIndices.length} frames for crop detection...`);
-			const sampleFrames = sampleIndices.map(i => ({ data: frames[i].data, index: frames[i].index }));
-
-			// Analyze sample frames to detect bounds
-			const sampleResults = await analyzeRgbaBatchGpu(sampleFrames, width, height);
-
-			const detectedCenters = [];
-			const detectedSizes = [];
-
-			for (const result of sampleResults) {
-				if (result.bounds) {
-					detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
-					detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
-				}
-			}
-
-			const cropThreshold = sampleIndices.length * 0.5;
-			if (detectedCenters.length < cropThreshold) {
-				addLog(`Only ${detectedCenters.length}/${sampleIndices.length} frames detected a bright object. Skipping auto-crop.`);
-			} else {
-				// Calculate median size and center
-				const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
-				const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
-
-				const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
-				const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
-				const medianX = sortedX[Math.floor(sortedX.length / 2)];
-				const medianY = sortedY[Math.floor(sortedY.length / 2)];
-
-				const marginMultiplier = 1 + (cropMarginPercent / 100);
-				const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
-				const maxAllowedSize = Math.min(width, height);
-
-				if (desiredSize >= maxAllowedSize) {
-					if (surfaceMode) {
-						addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-						cropRegion = { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-					} else {
-						addLog(`Skipping crop: detected size ${desiredSize}px (median object: ${Math.round(medianSize)}px) exceeds frame ${maxAllowedSize}px`);
-					}
-				} else {
-					cropRegion = {
-						size: desiredSize,
-						referenceCenter: { x: medianX, y: medianY },
-						medianObjectSize: medianSize
-					};
-					addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}px`);
-					addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)}), frame center: (${Math.round(width/2)}, ${Math.round(height/2)})`);
-				}
+		// Limited range (luma 16–235) → full range (0–255) expansion, only if needed.
+		// Some cameras (e.g. iOS MOV) encode full-range YUV (yuvj420p / pc range) but the
+		// container metadata incorrectly declares limited range, causing WebCodecs to report
+		// fullRange=false when the data is actually 0–255. Applying expansion in that case
+		// clips and distorts the gradient. Detect the actual range by checking for sub-16 values.
+		if (frame.colorSpace?.fullRange === false && isLimitedRange(buffer)) {
+			for (let i = 0; i < buffer.length - 3; i += 4) {
+				buffer[i]     = Math.min(255, Math.max(0, (buffer[i]     - 16) * 255 / 219 + 0.5) | 0);
+				buffer[i + 1] = Math.min(255, Math.max(0, (buffer[i + 1] - 16) * 255 / 219 + 0.5) | 0);
+				buffer[i + 2] = Math.min(255, Math.max(0, (buffer[i + 2] - 16) * 255 / 219 + 0.5) | 0);
+				// alpha unchanged
 			}
 		}
 
-		// Analyze all frames
-		emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
-
-		const bestFramesCapacity = Math.max(1, Math.floor(frameCount * stackPercentage / 100));
-		const bestFramesForStacking = [];
-		let bestFrameSoFar = null;
-		let refCandidateSoFar = null;
-		const allAnalyzedFrames = [];
-		const frameCenters = new Map();
-		let skippedFrames = 0;
-		let cutOffFrames = 0;
-		let oversizedFrames = 0;
-
-		function rankFrame(frame) {
-			if (frame.uint8Buffer && frame.width && frame.height) {
-				capturePostCropFrame(frame.uint8Buffer, frame.width, frame.height, frame.index, frameCount);
-			}
-
-			if (manualThreshold) {
-				allAnalyzedFrames.push(frame);
-			}
-
-			if (!bestFrameSoFar || frame.sharpness > bestFrameSoFar.sharpness) {
-				bestFrameSoFar = frame;
-			}
-
-			if (!refCandidateSoFar || (frame.circularity || 0) > (refCandidateSoFar.circularity || 0)) {
-				refCandidateSoFar = frame;
-			}
-
-			if (bestFramesForStacking.length < bestFramesCapacity) {
-				bestFramesForStacking.push(frame);
-			} else {
-				const minIdx = bestFramesForStacking.reduce((minI, f, i, arr) =>
-					f.sharpness < arr[minI].sharpness ? i : minI, 0);
-				if (frame.sharpness > bestFramesForStacking[minIdx].sharpness) {
-					bestFramesForStacking[minIdx] = frame;
-				}
-			}
-		}
-
-		// Process frames in batches
-		const batchSize = 32;
-		for (let i = 0; i < frameCount && !cancelled; i += batchSize) {
-			const batchEnd = Math.min(i + batchSize, frameCount);
-			const batch = frames.slice(i, batchEnd).map(f => ({ data: f.data, index: f.index }));
-
-			if (cropRegion) {
-				// Combined detect + crop + analyze in ONE GPU pass (same as FFmpeg path)
-				const combinedResults = await detectCropAnalyzeRgbaGpu(
-					batch, width, height, cropRegion.size, 0.1, true
-				);
-
-				for (let j = 0; j < combinedResults.length; j++) {
-					const gpuResult = combinedResults[j];
-					const frameIdx = batch[j].index;
-
-					// Check if bounds were detected
-					if (!gpuResult.bounds) {
-						skippedFrames++;
-						continue;
-					}
-
-					// Check for cut-off (crop region would exceed frame bounds) - skip for Sun/Moon
-					if (!surfaceMode) {
-						const halfCrop = cropRegion.size / 2;
-						const cx = gpuResult.centerX;
-						const cy = gpuResult.centerY;
-						if (cx - halfCrop < 0 || cy - halfCrop < 0 ||
-							cx + halfCrop > width || cy + halfCrop > height) {
-							cutOffFrames++;
-							continue;
-						}
-					}
-
-					// Check oversized
-					if (cropRegion.medianObjectSize) {
-						const size = Math.max(gpuResult.bounds.width, gpuResult.bounds.height);
-						if (size / cropRegion.medianObjectSize > 1.3) {
-							oversizedFrames++;
-							continue;
-						}
-					}
-
-					const center = { x: gpuResult.centerX, y: gpuResult.centerY };
-					frameCenters.set(frameIdx, center);
-
-					const currentFrame = {
-						sharpness: gpuResult.sharpness,
-						width: cropRegion.size,
-						height: cropRegion.size,
-						index: frameIdx,
-						centerX: center.x,
-						centerY: center.y,
-						circularity: gpuResult.circularity || 0,
-						uint8Buffer: gpuResult.uint8Buffer
-					};
-
-					rankFrame(currentFrame);
-				}
-			} else {
-				// No crop - analyze full frames
-				const results = await analyzeRgbaBatchGpu(batch, width, height);
-
-				for (const result of results) {
-					const currentFrame = {
-						sharpness: result.sharpness || 0,
-						width: width,
-						height: height,
-						index: result.index,
-						centerX: width / 2,
-						centerY: height / 2,
-						circularity: result.circularity || 0,
-						uint8Buffer: result.uint8Buffer
-					};
-
-					rankFrame(currentFrame);
-				}
-			}
-
-			const progress = 50 + (batchEnd / frameCount) * 40;
-			emit('update-loading', { progress, current: batchEnd, total: frameCount });
-		}
-
-		const skipMsgs = [];
-		if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
-		if (oversizedFrames > 0) skipMsgs.push(`${oversizedFrames} oversized`);
-		if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} skipped`);
-		if (skipMsgs.length > 0) {
-			addLog(`Skipped: ${skipMsgs.join(', ')}`);
-		}
-
-		if (cancelled) {
-			addLog('Processing cancelled');
-			emit('stop-loading');
-			return;
-		}
-
-		// Manual threshold mode: emit frames for user selection
-		if (manualThreshold) {
-			const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
-			emit('quality-selection-ready', {
-				frames: allFramesSorted,
-				useWebGPU: true,
-				drizzleScale,
-				frameCenters,
-				frameReReader: null
-			});
-			return;
-		}
-
-		// Stack best frames
-		emit('set-caption', 'Stacking frames...');
-		addLog(`Stacking ${bestFramesForStacking.length} frames`);
-
-		const stackResult = await stackFramesLocally(
-			bestFramesForStacking,
-			null, // No CPU worker needed for GPU path
-			drizzleScale,
-			true, // useWebGPU
-			frameCenters,
-			surfaceMode
-		);
-
-		if (stackResult) {
-			emit('postProcessing', stackResult.blob, stackResult.float32Data, stackResult.width, stackResult.height);
-		} else {
-			addLog('Stacking failed');
-			emit('upload-error', 'Stacking failed. Please try again.');
-		}
-	}
-
-	/**
-	 * Get evenly spaced sample indices
-	 */
-	function getSampleIndices(total, numSamples) {
-		if (total <= numSamples) {
-			return Array.from({ length: total }, (_, i) => i);
-		}
-		const step = (total - 1) / (numSamples - 1);
-		return Array.from({ length: numSamples }, (_, i) => Math.round(i * step));
+		return buffer;
 	}
 
 	return {
