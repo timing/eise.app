@@ -356,6 +356,63 @@ self.addEventListener('message', async (e) => {
         }
     }
 
+    // Get intermediate stack result without clearing context
+    if (type === 'get-stack-snapshot') {
+        const ctx = stackingContext;
+        if (!ctx) {
+            self.postMessage({ type: 'finalize-error', error: 'Stacking not initialized' });
+            return;
+        }
+
+        try {
+            // Read back accumulated results
+            const { accumR, accumG, accumB, accumW } = await readAccumulators(ctx.outWidth, ctx.outHeight);
+
+            // Create final image (Float32Array for 16-bit post-processing)
+            const float32Data = new Float32Array(ctx.outWidth * ctx.outHeight * 4);
+            const result8bit = new Uint8ClampedArray(ctx.outWidth * ctx.outHeight * 4);
+
+            for (let i = 0; i < ctx.outWidth * ctx.outHeight; i++) {
+                const w = accumW[i];
+                if (w > 0) {
+                    const r = accumR[i] / w / 255.0;
+                    const g = accumG[i] / w / 255.0;
+                    const b = accumB[i] / w / 255.0;
+
+                    float32Data[i * 4 + 0] = r;
+                    float32Data[i * 4 + 1] = g;
+                    float32Data[i * 4 + 2] = b;
+                    float32Data[i * 4 + 3] = 1.0;
+
+                    result8bit[i * 4 + 0] = Math.min(255, Math.max(0, Math.round(r * 255)));
+                    result8bit[i * 4 + 1] = Math.min(255, Math.max(0, Math.round(g * 255)));
+                    result8bit[i * 4 + 2] = Math.min(255, Math.max(0, Math.round(b * 255)));
+                } else {
+                    float32Data[i * 4 + 3] = 1.0;
+                }
+                result8bit[i * 4 + 3] = 255;
+            }
+
+            // Convert to PNG blob
+            const canvas = new OffscreenCanvas(ctx.outWidth, ctx.outHeight);
+            const ctxCanvas = canvas.getContext('2d');
+            ctxCanvas.putImageData(new ImageData(result8bit, ctx.outWidth, ctx.outHeight), 0, 0);
+            const blob = await canvas.convertToBlob({ type: 'image/png' });
+
+            self.postMessage({
+                type: 'stack-snapshot-complete',
+                blob,
+                width: ctx.outWidth,
+                height: ctx.outHeight,
+                bitDepth: ctx.bitDepth,
+                float32Buffer: float32Data.buffer
+            }, [float32Data.buffer]);
+
+        } catch (err) {
+            self.postMessage({ type: 'snapshot-error', error: err.message });
+        }
+    }
+
     // Step 3: Finalize stacking
     if (type === 'finalize-stacking') {
         const ctx = stackingContext;

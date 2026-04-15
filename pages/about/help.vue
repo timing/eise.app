@@ -9,7 +9,7 @@
 				<li><strong>Capture your video</strong> - Use your telescope and camera to record a video of a planet, the Moon, or Sun. SER format is recommended, but AVI or MP4 also work.</li>
 				<li><strong>Upload to Eise.app</strong> - Drag and drop your file onto the Stack page. Multiple SER files can be combined.</li>
 				<li><strong>Wait for analysis</strong> - Eise.app analyzes each frame for sharpness and automatically crops and centers your target.</li>
-				<li><strong>Select quality threshold</strong> - Use the slider to choose how many of the best frames to stack (typically 10-50%).</li>
+				<li><strong>Select quality threshold</strong> - Choose a frame selection mode: manually set a threshold, pick a percentage, or use continuous stacking to try multiple percentages automatically.</li>
 				<li><strong>Stack and process</strong> - Click "Stack" and then use the Post Processor to sharpen and enhance your result.</li>
 			</ol>
 
@@ -25,6 +25,18 @@
 				<li><strong>Drizzle:</strong> Creates 1.5x output resolution by using sub-pixel frame offsets.</li>
 				<li><strong>Stacking:</strong> Quality-weighted averaging combines frames, with brightness normalization to handle exposure variations.</li>
 			</ul>
+
+			<h3>Frame Selection Modes</h3>
+			<p>After analysis, Eise.app needs to decide which frames to stack. There are three modes:</p>
+			<ul>
+				<li><strong>Manual</strong> - You see a quality histogram and drag a slider to set the threshold. Best for fine-tuning.</li>
+				<li><strong>Percentage</strong> - Automatically stacks the best N% of frames. Quick and simple.</li>
+				<li><strong>Continuous</strong> - Stacks the same file multiple times using increasing percentages (5%, 10%, 15%, ... up to 90%). This lets you compare results and find the sweet spot between detail and noise without trial and error.</li>
+			</ul>
+
+			<h3>Batch Processing</h3>
+			<p>Batch processing is a separate feature for handling <strong>multiple files</strong>. When you select two or more SER or AVI files, Eise.app asks whether to process them separately (batch) or combine them into one stack. In batch mode, each file is stacked independently with the same settings.</p>
+			<p>Batch processing and continuous stacking are independent features — batch processes multiple files, continuous explores different frame percentages on a single file.</p>
 
 			<h3>Post-Processing Tips</h3>
 			<ul>

@@ -75,6 +75,7 @@
 			<div v-if="showBatchChoice" class="batch-choice-dialog">
 				<h4>{{ pendingBatchFiles.length }} files selected</h4>
 				<p>How would you like to process them?</p>
+				<div v-if="qualityMode === 'continuous'" class="lite-mode-warning">Continuous stacking is not available in batch mode. Batch files will be stacked using the percentage method instead.</div>
 				<div class="batch-choice-buttons">
 					<button class="btn-primary" @click="processBatchMode">
 						Stack separately (batch)
@@ -142,8 +143,16 @@
 						Stack best
 						<input type="number" v-model.number="stackPercentage" min="1" max="100" class="number-input" :disabled="qualityMode !== 'percentage'" />%
 					</label>
+					<label class="radio-option">
+						<input type="radio" v-model="qualityMode" value="continuous" />
+						Continuous stacking (5% to 90%) <b>new+beta</b>
+					</label>
 				</div>
-				<p v-if="showFrameSelectionInfo" class="info-text"><strong>Manual:</strong> After analysis, you'll see a quality graph and can choose which frames to stack.<br><strong>Percentage:</strong> Automatically selects the sharpest frames. Recommended if you run into memory issues.</p>
+				<p v-if="showFrameSelectionInfo" class="info-text">
+					<strong>Manual:</strong> After analysis, you'll see a quality graph and can choose which frames to stack.<br>
+					<strong>Percentage:</strong> Automatically selects the sharpest frames. Recommended if you run into memory issues.<br>
+					<strong>Continuous:</strong> Stacks the same file multiple times, each time using more frames (5%, 10%, 15%, ... up to 90%). Helps you find the sweet spot between detail and noise without trial and error. Not the same as batch processing, which processes multiple files.
+				</p>
 			</template>
 
 			<!-- Advanced options hidden in lite mode -->
@@ -304,11 +313,12 @@ const showPreCropInfo = ref(false);
 const showTargetInfo = ref(false);
 const showFrameSelectionInfo = ref(false);
 const showStackingModeInfo = ref(false);
+const showContinuousInfo = ref(false);
 
 // Crop margin setting (percentage of detected object size to add as margin)
 const cropMarginPercent = ref(10);
 
-// Quality threshold mode: 'manual' for interactive selection, 'percentage' for automatic
+// Quality threshold mode: 'manual' for interactive selection, 'percentage' for automatic, 'continuous' for batch
 const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
@@ -323,7 +333,10 @@ const surfaceMode = computed(() => targetType.value === 'sun-moon');
 const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMode.value === '1.5x' ? 1.5 : 1.0));
 const effectiveMaxFrames = computed(() => liteMode.value ? 100 : (enableMaxFrames.value ? selectedMaxFrames.value : -1));
 const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPercent.value);
-const effectiveQualityMode = computed(() => liteMode.value ? 'percentage' : qualityMode.value);
+const effectiveQualityMode = computed(() => {
+	if (liteMode.value) return 'percentage';
+	return qualityMode.value;
+});
 const effectiveStackPercentage = computed(() => liteMode.value ? 30 : stackPercentage.value);
 
 // Memory optimized pre-crop for mobile videos
@@ -796,7 +809,9 @@ const isRawFile = (file) => RAW_EXTENSIONS.some(ext => file.name.toLowerCase().e
 
 async function processFiles(files, options = {}) {
 	const { skipBatchChoice = false } = options;
-	const { setInputFilename, setTrackingContext } = useProcessingState();
+	const { setInputFilename, setTrackingContext, setStackingMode } = useProcessingState();
+
+	setStackingMode(qualityMode.value === 'continuous' ? 'continuous' : 'single');
 
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser') || file.name.endsWith('.avi'));
 	const imageFiles = files.filter(file => file.type.startsWith('image/'));
@@ -838,11 +853,11 @@ async function processFiles(files, options = {}) {
 		await reader.init(serFiles[0], parser);  // First file for reference, parser handles all
 		await reader.processFile({
 			maxFrames: effectiveMaxFrames.value,
-			manualThreshold: effectiveQualityMode.value === 'manual',
+			manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
 			cropMarginPercent: effectiveCropMargin.value,
 			stackPercentage: effectiveStackPercentage.value,
 			drizzleScale: effectiveDrizzleScale.value,
-						surfaceMode: surfaceMode.value,
+			surfaceMode: surfaceMode.value,
 		});
 		return;
 	}
@@ -875,7 +890,7 @@ async function processFiles(files, options = {}) {
 			await reader.init(fileToProcess, parser);
 			await reader.processFile({
 				maxFrames: effectiveMaxFrames.value,
-				manualThreshold: effectiveQualityMode.value === 'manual',
+				manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
 				cropMarginPercent: effectiveCropMargin.value,
 				stackPercentage: effectiveStackPercentage.value,
 				drizzleScale: effectiveDrizzleScale.value,
@@ -919,7 +934,7 @@ async function processFiles(files, options = {}) {
 					await reader.init(fileToProcess, parser);
 					await reader.processFile({
 						maxFrames: effectiveMaxFrames.value,
-						manualThreshold: effectiveQualityMode.value === 'manual',
+						manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
 						cropMarginPercent: effectiveCropMargin.value,
 						stackPercentage: effectiveStackPercentage.value,
 						drizzleScale: effectiveDrizzleScale.value,
@@ -931,7 +946,7 @@ async function processFiles(files, options = {}) {
 				// Non-Bayer AVI: use old reader for uncompressed BGR or MJPEG
 				setTrackingContext({ file_type: 'avi', reader: 'avi', gpu_enabled: useGPU.value });
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, null, surfaceMode.value, formatInfo.aviHeader);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, null, surfaceMode.value, formatInfo.aviHeader);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -1088,7 +1103,7 @@ async function processFiles(files, options = {}) {
 
 			await processBatchedVideoFrames($ffmpeg, fileToProcess.name, totalFrames, videoDuration, {
 				preCropRegion,
-				manualThreshold: effectiveQualityMode.value === 'manual',
+				manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
 				stackPercentage: effectiveStackPercentage.value,
 				drizzleScale: effectiveDrizzleScale.value,
 				surfaceMode: surfaceMode.value,
@@ -1147,7 +1162,7 @@ async function processFiles(files, options = {}) {
 			// Route PNG frames through FFmpeg reader
 			const { processFFmpegFrames } = useFFmpegReader();
 
-			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, surfaceMode.value);
+			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, surfaceMode.value);
 		}
 	
 	} else if (imageFiles.length > 1) {
@@ -1164,7 +1179,7 @@ async function processFiles(files, options = {}) {
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, surfaceMode.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, surfaceMode.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing

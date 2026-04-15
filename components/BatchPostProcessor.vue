@@ -8,11 +8,18 @@
 				{{ currentResult?.name || 'Image' }}
 				<span class="nav-index">({{ currentIndex + 1 }}/{{ results.length }})</span>
 				<span v-if="isNavigating" class="nav-saving">saving...</span>
+                
+                <!-- Continuous stacking sharpness info -->
+                <div v-if="isContinuousMode && currentResult" class="sharpness-info">
+                    S: <span class="score">{{ formatScore(currentResult.sharpness) }}</span> 
+                    (T: <span class="score">{{ formatScore(currentResult.tenengrad) }}</span>, 
+                    L: <span class="score">{{ formatScore(currentResult.laplacian) }}</span>)
+                </div>
 			</span>
 			<button class="nav-btn" @click="nextImage" :disabled="currentIndex >= results.length - 1 || isNavigating">&rarr;</button>
 		</div>
 		<div class="header-actions">
-			<button class="btn-secondary btn-small" @click="alignAllStacks" :disabled="isAligning || results.length < 2">
+			<button v-if="!isContinuousMode" class="btn-secondary btn-small" @click="alignAllStacks" :disabled="isAligning || results.length < 2">
 				{{ isAligning ? 'Aligning...' : 'Align Stacks' }}
 			</button>
 			<div class="export-dropdown" ref="exportDropdownRef">
@@ -27,7 +34,7 @@
 						Export all unprocessed (PNG)
 					</button>
 					<button
-						v-if="videoEncodingSupported"
+						v-if="videoEncodingSupported && !isContinuousMode"
 						@click="exportVideo"
 						:disabled="isEncodingVideo || isProcessingAll || results.length < 2"
 					>
@@ -76,10 +83,31 @@ const props = defineProps({
 const emit = defineEmits(['close']);
 
 // Get setInputFilename to update export filename when navigating
-const { setInputFilename } = useProcessingState();
+const { setInputFilename, getBatchStartIndex, setBatchStartIndex } = useProcessingState();
 
 // State
 const currentIndex = ref(0);
+
+onMounted(() => {
+    // Set initial index if provided via state
+    const startIndex = getBatchStartIndex();
+    if (startIndex >= 0 && startIndex < props.results.length) {
+        currentIndex.value = startIndex;
+        // Reset it so it doesn't affect future sessions
+        setBatchStartIndex(0);
+    }
+});
+
+// Check if we are in continuous stacking mode (filenames like "5% Stack")
+const isContinuousMode = computed(() => {
+    return props.results.some(r => r.name && r.name.includes('% Stack'));
+});
+
+function formatScore(val) {
+    if (val === undefined || val === null) return 'N/A';
+    return typeof val === 'number' ? val.toFixed(4) : val;
+}
+
 const isExporting = ref(false);
 const isAligning = ref(false);
 const isEncodingVideo = ref(false);
@@ -587,6 +615,19 @@ watch(currentResult, (result) => {
 	color: #f0ad4e;
 	margin-left: 8px;
 	font-size: 12px;
+}
+
+.sharpness-info {
+    font-size: 12px;
+    color: #888;
+    margin-top: 2px;
+    font-weight: normal;
+}
+
+.sharpness-info .score {
+    color: #4caf50;
+    font-weight: bold;
+    font-family: monospace;
 }
 
 .header-actions {

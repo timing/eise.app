@@ -1546,5 +1546,409 @@ export function useStacker() {
         });
     }
 
-    return { stackFramesLocally, cancelProcessing };
+    /**
+     * Incremental GPU stacking for Continuous mode
+     * Avoids re-processing frames by keeping the accumulator state
+     */
+    async function stackContinuousLocally(frameMetadata, frameReReader, drizzleScale, useWebGPU, surfaceMode, snapshots, onSnapshot) {
+        if (!useWebGPU) {
+            throw new Error('Continuous stacking is only supported on WebGPU');
+        }
+        if (!frameReReader) {
+            throw new Error('Continuous stacking requires a frameReReader to re-read frames from disk');
+        }
+
+        const frameCount = frameMetadata.length;
+        resetStackingStats();
+        stackingStats.analysisStartTime = frameReReader.analysisStartTime;
+
+        const isSerFile = frameReReader.fileType === 'ser' || frameReReader.header;
+        const isImageFile = frameReReader.fileType === 'image' || frameReReader.rgbaFrames;
+
+        let cropSize, srcWidth, srcHeight, bayerPattern;
+        if (isSerFile) {
+            const { header, bayerChoice, cropRegion } = frameReReader;
+            cropSize = cropRegion?.size || header.width;
+            srcWidth = header.width;
+            srcHeight = header.height;
+            if (frameReReader.bayerPattern !== undefined) {
+                bayerPattern = frameReReader.bayerPattern;
+            } else {
+                const bayerMap = {
+                    'COLOR_BayerBG2RGB': 0, 'COLOR_BayerRG2RGB': 1,
+                    'COLOR_BayerGB2RGB': 2, 'COLOR_BayerGR2RGB': 3,
+                    'MONO': -1
+                };
+                bayerPattern = bayerMap[bayerChoice] ?? -1;
+            }
+        } else if (isImageFile) {
+            cropSize = frameReReader.cropRegion?.size || frameReReader.srcWidth;
+            srcWidth = frameReReader.srcWidth;
+            srcHeight = frameReReader.srcHeight;
+            bayerPattern = -1;
+        }
+
+        const is16bit = isSerFile && frameReReader.header?.pixelDepth > 8;
+        addLog(`Incremental GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}`);
+        cancelled = false;
+
+        const gpuAnalyzeWorker = trackWorker(new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' }));
+        const gpuStackWorker = trackWorker(new Worker(workerUrl('/webgpu_stacking_worker.js'), { type: 'module' }));
+
+        try {
+            // Init workers
+            await Promise.all([
+                new Promise((resolve, reject) => {
+                    gpuAnalyzeWorker.onmessage = (e) => { if (e.data.type === 'ready') resolve(); };
+                    gpuAnalyzeWorker.postMessage({ type: 'init' });
+                }),
+                new Promise((resolve, reject) => {
+                    gpuStackWorker.onmessage = (e) => { if (e.data.type === 'ready') resolve(); };
+                    gpuStackWorker.postMessage({ type: 'init' });
+                })
+            ]);
+
+            // Helper to load batch (reused from stackWithGpuPipelined logic)
+            async function loadRawBatch(batchFrames) {
+                const frames = [];
+                const centers = [];
+                if (isSerFile && frameReReader.getFrame) {
+                    const results = await Promise.all(batchFrames.map(f => frameReReader.getFrame(f)));
+                    for (let i = 0; i < results.length; i++) {
+                        if (results[i]) {
+                            const data = frameReReader.header.pixelDepth > 8 ? new Uint16Array(results[i].frameBuffer) : new Uint8Array(results[i].frameBuffer);
+                            frames.push({ data, index: batchFrames[i].index });
+                            centers.push({ x: results[i].centerX, y: results[i].centerY });
+                        }
+                    }
+                } else if (isImageFile && frameReReader.getFrame) {
+                    const results = await Promise.all(batchFrames.map(f => frameReReader.getFrame(f.index)));
+                    for (let i = 0; i < results.length; i++) {
+                        if (results[i]) {
+                            frames.push({ data: results[i].data, index: batchFrames[i].index });
+                            // Use centers from getFrame() result if available (needed for
+                            // pre-cropped in-memory frames), fall back to frame metadata
+                            const cx = results[i].centerX ?? batchFrames[i].centerX;
+                            const cy = results[i].centerY ?? batchFrames[i].centerY;
+                            centers.push({ x: cx, y: cy });
+                        }
+                    }
+                }
+                return { frames, centers };
+            }
+
+            const isRawBayer = bayerPattern >= 0;
+
+            // Helper to process RGBA batch via GPU analyze worker (crop + grayscale)
+            async function processGpuBatch(frames, centers) {
+                return new Promise((resolve, reject) => {
+                    const requestId = Date.now() + Math.random();
+                    const handler = (e) => {
+                        if (!e.data) {
+                            gpuAnalyzeWorker.removeEventListener('message', handler);
+                            reject(new Error('GPU worker crashed'));
+                            return;
+                        }
+                        if (e.data.requestId !== requestId) return;
+                        gpuAnalyzeWorker.removeEventListener('message', handler);
+                        if (e.data.type === 'crop-analyze-result') resolve(e.data.results);
+                        else if (e.data.type === 'crop-analyze-error') reject(new Error(e.data.error));
+                    };
+                    gpuAnalyzeWorker.addEventListener('message', handler);
+                    gpuAnalyzeWorker.postMessage({
+                        type: 'crop-analyze-batch',
+                        frames,
+                        srcWidth, srcHeight, cropSize, centers,
+                        bayerPattern,
+                        threshold: 0.1,
+                        requestId,
+                        metadataOnly: false
+                    });
+                });
+            }
+
+            // Reference frame handling
+            const sortedBySharpness = [...frameMetadata].sort((a, b) => b.sharpness - a.sharpness);
+            const refFrameMeta = sortedBySharpness[0];
+            const { frames: refFrames, centers: refCenters } = await loadRawBatch([refFrameMeta]);
+
+            let refBrightness, refGrayData;
+
+            if (isRawBayer) {
+                // VNG demosaic reference
+                const vngResult = await new Promise((resolve) => {
+                    const handler = (e) => { if (e.data.type === 'vng-demosaic-ref-done') resolve(e.data); };
+                    gpuStackWorker.addEventListener('message', handler);
+                    gpuStackWorker.postMessage({
+                        type: 'vng-demosaic-ref',
+                        bayerData: refFrames[0].data,
+                        srcWidth, srcHeight, cropSize, center: refCenters[0],
+                        bayerPattern, bitDepth: is16bit ? 16 : 8
+                    });
+                });
+                refBrightness = calcMeanBrightness(vngResult.rgbaBuffer, cropSize, cropSize, true);
+                refGrayData = new Uint8Array(vngResult.grayBuffer);
+            } else {
+                // RGBA: crop via analyze worker
+                const refResults = await processGpuBatch(refFrames, refCenters);
+                const refBuffer = is16bit ? refResults[0].float32Buffer : refResults[0].uint8Buffer;
+                refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, is16bit);
+                refGrayData = rgbaToGrayscale(refBuffer, cropSize, cropSize, is16bit);
+            }
+
+            // Prepare alignment points
+            const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropSize, cropSize, surfaceMode);
+            const { alignmentPoints, patchSize, searchRadius } = alignmentData;
+
+            // Init stacking
+            await new Promise((resolve) => {
+                const handler = (e) => { if (e.data.type === 'init-stacking-done') resolve(); };
+                gpuStackWorker.addEventListener('message', handler);
+                gpuStackWorker.postMessage({
+                    type: 'init-stacking',
+                    width: cropSize, height: cropSize, srcWidth, srcHeight, drizzleScale, alignmentPoints, patchSize, refBrightness, bayerPattern, bitDepth: is16bit ? 16 : 8
+                });
+            });
+
+            // Process frames in batches and take snapshots
+            const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
+            let processedCount = 0;
+            const batchSize = 20;
+
+            for (let i = 0; i < frameCount; i += batchSize) {
+                if (cancelled) break;
+
+                const batchEnd = Math.min(i + batchSize, frameCount);
+                const batchFrames = frameMetadata.slice(i, batchEnd);
+                const { frames: rawFrames, centers: batchCenters } = await loadRawBatch(batchFrames);
+
+                const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
+
+                if (isRawBayer) {
+                    // RAW BAYER: VNG demosaic + crop + match + accumulate all on stack worker
+                    const transferables = rawFrames.map(f => f.data.buffer).filter(b => b);
+                    await new Promise((resolve, reject) => {
+                        const handler = (e) => {
+                            if (e.data.type === 'stack-batch-done') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                resolve();
+                            } else if (e.data.type === 'stack-frame-error') {
+                                gpuStackWorker.removeEventListener('message', handler);
+                                reject(new Error(e.data.error));
+                            }
+                        };
+                        gpuStackWorker.addEventListener('message', handler);
+                        gpuStackWorker.postMessage({
+                            type: 'stack-frame-batch',
+                            frames: rawFrames.map((f, idx) => ({ data: f.data, sharpness: batchFrames[idx].sharpness })),
+                            centers: batchCenters,
+                            frameWeights: batchWeights,
+                            refGrayData, searchRadius
+                        }, transferables);
+                    });
+                } else {
+                    // RGBA PATH: crop via analyze worker, then match + accumulate
+                    const gpuResults = await processGpuBatch(rawFrames, batchCenters);
+                    const frameGrayDatas = gpuResults.map(r => new Uint8Array(r.packedGrayBuffer || r.grayBuffer));
+
+                    // Template matching
+                    const batchShifts = await new Promise((resolve, reject) => {
+                        const requestId = i;
+                        const handler = (e) => {
+                            if (!e.data) { gpuStackWorker.removeEventListener('message', handler); reject(new Error('GPU worker crashed')); return; }
+                            if (e.data.requestId !== requestId) return;
+                            gpuStackWorker.removeEventListener('message', handler);
+                            if (e.data.type === 'batch-result') resolve(e.data.allShifts);
+                            else if (e.data.type === 'batch-error') reject(new Error(e.data.error));
+                        };
+                        gpuStackWorker.addEventListener('message', handler);
+                        gpuStackWorker.postMessage({
+                            type: 'match-templates-batch',
+                            requestId,
+                            refGrayData,
+                            frameGrayDatas,
+                            width: cropSize, height: cropSize,
+                            alignmentPoints, patchSize, searchRadius
+                        });
+                    });
+
+                    // Accumulate
+                    const rgbaFrames = gpuResults.map((r, idx) => ({
+                        rgbaBuffer: is16bit ? new Float32Array(r.float32Buffer) : new Uint8Array(r.uint8Buffer),
+                        sharpness: batchFrames[idx].sharpness
+                    }));
+                    await new Promise((resolve, reject) => {
+                        const handler = (e) => {
+                            if (e.data.type === 'stack-batch-done') { gpuStackWorker.removeEventListener('message', handler); resolve(); }
+                            else if (e.data.type === 'stack-frame-error') { gpuStackWorker.removeEventListener('message', handler); reject(new Error(e.data.error)); }
+                        };
+                        gpuStackWorker.addEventListener('message', handler);
+                        gpuStackWorker.postMessage({
+                            type: 'stack-frame-batch-rgba',
+                            frames: rgbaFrames,
+                            shifts: batchShifts,
+                            frameWeights: batchWeights
+                        });
+                    });
+                }
+
+                processedCount = batchEnd;
+                const currentPct = (processedCount / frameCount) * 100;
+
+                // Check if we need to take a snapshot for any of the requested percentages
+                for (const snapPct of snapshots) {
+                    const prevPct = ((processedCount - batchFrames.length) / frameCount) * 100;
+                    if (currentPct >= snapPct && prevPct < snapPct) {
+                        addLog(`Taking snapshot at ${snapPct}%...`);
+                        const snapshot = await new Promise((resolve, reject) => {
+                            const handler = (e) => {
+                                if (e.data.type === 'stack-snapshot-complete') {
+                                    gpuStackWorker.removeEventListener('message', handler);
+                                    resolve(e.data);
+                                } else if (e.data.type === 'snapshot-error') {
+                                    gpuStackWorker.removeEventListener('message', handler);
+                                    reject(new Error(e.data.error));
+                                }
+                            };
+                            gpuStackWorker.addEventListener('message', handler);
+                            gpuStackWorker.postMessage({ type: 'get-stack-snapshot' });
+                        });
+
+                        await onSnapshot({
+                            percentage: snapPct,
+                            frameCount: processedCount,
+                            blob: snapshot.blob,
+                            float32Data: new Float32Array(snapshot.float32Buffer),
+                            width: snapshot.width,
+                            height: snapshot.height
+                        });
+                    }
+                }
+
+                emit('update-loading', { progress: (processedCount / frameCount) * 100, current: processedCount, total: frameCount });
+            }
+
+            // Finalize
+            const finalResult = await new Promise((resolve) => {
+                const handler = (e) => { if (e.data.type === 'stack-complete') resolve(e.data); };
+                gpuStackWorker.addEventListener('message', handler);
+                gpuStackWorker.postMessage({ type: 'finalize-stacking' });
+            });
+
+            untrackWorker(gpuAnalyzeWorker);
+            untrackWorker(gpuStackWorker);
+            gpuAnalyzeWorker.terminate();
+            gpuStackWorker.terminate();
+
+            return {
+                blob: finalResult.blob,
+                float32Data: new Float32Array(finalResult.float32Buffer),
+                width: finalResult.width,
+                height: finalResult.height
+            };
+
+        } catch (error) {
+            gpuAnalyzeWorker.terminate();
+            gpuStackWorker.terminate();
+            throw error;
+        }
+    }
+
+    /**
+     * Calculate sharpness metrics (Tenengrad, Laplacian) for a single image buffer
+     * Reuses the webgpu_analyze_worker for consistent results with frame ranking
+     */
+    async function calculateSharpness(buffer, width, height) {
+        return new Promise((resolve, reject) => {
+            const worker = new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' });
+            
+            worker.onmessage = (e) => {
+                if (!e.data) {
+                    worker.terminate();
+                    reject(new Error('Sharpness worker crashed'));
+                    return;
+                }
+                
+                if (e.data.type === 'ready') {
+                    // Convert Float32 (0-1) to Uint8 (0-255) and compute Grayscale immediately
+                    const float32Data = new Float32Array(buffer);
+                    const pixelCount = width * height;
+                    
+                    // Temp buffer for grayscale to avoid per-pixel RGB math in the blur loop
+                    const grayBuffer = new Uint8Array(pixelCount);
+                    for (let i = 0; i < pixelCount; i++) {
+                        const r = float32Data[i * 4];
+                        const g = float32Data[i * 4 + 1];
+                        const b = float32Data[i * 4 + 2];
+                        // Standard Luminance weights: 0.299R + 0.587G + 0.114B
+                        grayBuffer[i] = Math.round((0.299 * r + 0.587 * g + 0.114 * b) * 255);
+                    }
+
+                    // Apply a weighted 3x3 Gaussian-like blur to the grayscale channel
+                    // Kernel: [1 2 1, 2 4 2, 1 2 1] / 16
+                    const analyzedRgba = new Uint8Array(pixelCount * 4);
+                    for (let y = 0; y < height; y++) {
+                        for (let x = 0; x < width; x++) {
+                            let sum = 0;
+                            let weightSum = 0;
+                            
+                            for (let dy = -1; dy <= 1; dy++) {
+                                const ny = y + dy;
+                                if (ny < 0 || ny >= height) continue;
+                                
+                                for (let dx = -1; dx <= 1; dx++) {
+                                    const nx = x + dx;
+                                    if (nx < 0 || nx >= width) continue;
+                                    
+                                    // Calculate kernel weight
+                                    const kWeight = (dx === 0 && dy === 0) ? 4 : 
+                                                   (dx === 0 || dy === 0) ? 2 : 1;
+                                    
+                                    sum += grayBuffer[ny * width + nx] * kWeight;
+                                    weightSum += kWeight;
+                                }
+                            }
+                            
+                            const blurredGray = Math.round(sum / weightSum);
+                            const idx = (y * width + x) * 4;
+                            analyzedRgba[idx] = blurredGray;     // R
+                            analyzedRgba[idx + 1] = blurredGray; // G
+                            analyzedRgba[idx + 2] = blurredGray; // B
+                            analyzedRgba[idx + 3] = 255;         // A
+                        }
+                    }
+
+                    worker.postMessage({
+                        type: 'analyze-batch',
+                        frames: [{
+                            data: analyzedRgba.buffer,
+                            index: 0
+                        }],
+                        width,
+                        height,
+                        bayerPattern: -1, 
+                        threshold: 0.1,
+                        metadataOnly: true
+                    }, [analyzedRgba.buffer]);
+                }
+ else if (e.data.type === 'analyze-result') {
+                    worker.terminate();
+                    // Results is an array, we sent 1 frame
+                    resolve(e.data.results[0]);
+                } else if (e.data.type === 'error' || e.data.type === 'init-error') {
+                    worker.terminate();
+                    reject(new Error(e.data.error || 'Sharpness analysis failed'));
+                }
+            };
+
+            worker.onerror = (err) => {
+                worker.terminate();
+                reject(err);
+            };
+
+            worker.postMessage({ type: 'init' });
+        });
+    }
+
+    return { stackFramesLocally, stackContinuousLocally, cancelProcessing, calculateSharpness };
 }

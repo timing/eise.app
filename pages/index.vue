@@ -4,11 +4,18 @@
 			<strong>Lite Mode</strong><span v-if="forceLiteMode"> (forced)</span><span v-else-if="isMobile"> ({{ useGPU ? 'GPU' : 'CPU' }})</span><span v-else> (no WebGPU)</span> · Frame limit auto-adjusted for memory.
 		</div>
 
-		<FileUploader v-show="!isProcessing && !isSelectingQuality && !isSelectingColorProfile" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
+		<FileUploader v-show="!isProcessing && !isSelectingQuality && !isSelectingColorProfile && !isShowingContinuousResults" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
 		<ColorProfileSelector v-show="isSelectingColorProfile" />
 		<QualitySelector v-show="isSelectingQuality" :frames="qualityFrames" :frameReReader="qualityFrameReReader" @threshold-selected="handleThresholdSelected" />
-		<VideoFrameProcessor ref="videoProcessorRef" v-show="isProcessing && !isSelectingColorProfile && !isSelectingQuality"
+		<VideoFrameProcessor ref="videoProcessorRef" v-show="isProcessing && !isSelectingColorProfile && !isSelectingQuality && !isShowingContinuousResults"
 			:currentFrame="currentFrame" :frames="frames" @postProcessing="handlePostProcessing" />
+		<ContinuousStackingResults v-if="isShowingContinuousResults" 
+			:results="continuousResults" 
+			:isProcessing="isContinuousProcessing"
+			:currentPercentage="continuousPercentage"
+			@selected="handleContinuousSelected"
+			@cancel="handleCancelContinuous"
+            @abort="handleAbortContinuous" />
 
 		<!-- WebGPU Unavailable Choice Dialog -->
 		<div v-if="showWebGPUChoice" class="webgpu-dialog-overlay">
@@ -31,6 +38,7 @@ import FileUploader from '@/components/FileUploader.vue';
 import VideoFrameProcessor from '@/components/VideoFrameProcessor.vue';
 import ColorProfileSelector from '@/components/ColorProfileSelector.vue';
 import QualitySelector from '@/components/QualitySelector.vue';
+import ContinuousStackingResults from '@/components/ContinuousStackingResults.vue';
 
 const liteMode = inject('liteMode');
 const useGPU = inject('useGPU');
@@ -43,6 +51,10 @@ const currentFrame = inject('currentFrame');
 const isProcessing = inject('isProcessing');
 const isSelectingColorProfile = inject('isSelectingColorProfile');
 const isSelectingQuality = inject('isSelectingQuality');
+const isShowingContinuousResults = inject('isShowingContinuousResults');
+const continuousResults = inject('continuousResults');
+const isContinuousProcessing = inject('isContinuousProcessing');
+const continuousPercentage = inject('continuousPercentage');
 const qualityFrames = inject('qualityFrames');
 const qualityFrameReReader = inject('qualityFrameReReader');
 const showWebGPUChoice = inject('showWebGPUChoice');
@@ -52,6 +64,9 @@ const handleProcessingStarted = inject('handleProcessingStarted');
 const handleThresholdSelected = inject('handleThresholdSelected');
 const handleWebGPUContinueCPU = inject('handleWebGPUContinueCPU');
 const handleWebGPUCancel = inject('handleWebGPUCancel');
+const handleContinuousSelected = inject('handleContinuousSelected');
+const handleCancelContinuous = inject('handleCancelContinuous');
+const handleAbortContinuous = inject('handleAbortContinuous');
 
 const videoProcessorRef = ref(null);
 

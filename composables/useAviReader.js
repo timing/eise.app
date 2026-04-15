@@ -983,6 +983,73 @@ export function useAviReader() {
         addLog(`Finished analyzing ${frameCount} AVI frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
         emit('crop-stats-updated', { skipped: skippedFrames, cutOff: cutOffFrames, total: frameCount, done: true });
 
+        // Create frameReReader for two-pass / continuous stacking
+        const aviFrameReReader = {
+            fileType: 'image',
+            file,
+            frameIndex,
+            cropRegion,
+            srcWidth: aviHeader.width,
+            srcHeight: aviHeader.height,
+            needsVerticalFlip: aviHeader.needsVerticalFlip,
+            bpp: aviHeader.bpp,
+
+            async getFrame(frameObj) {
+                const frameIdx = frameObj.index ?? frameObj;
+                const frameInfo = this.frameIndex[frameIdx];
+                if (!frameInfo) return null;
+
+                try {
+                    const raw = new Uint8Array(await this.file.slice(frameInfo.offset, frameInfo.offset + frameInfo.size).arrayBuffer());
+                    const w = this.srcWidth;
+                    const h = this.srcHeight;
+                    const pixelCount = w * h;
+                    const rgba = new Uint8Array(pixelCount * 4);
+
+                    if (this.bpp === 24) {
+                        // BGR 24-bit → RGBA
+                        const rowBytes = w * 3;
+                        for (let y = 0; y < h; y++) {
+                            const srcRow = this.needsVerticalFlip ? (h - 1 - y) : y;
+                            const srcOff = srcRow * rowBytes;
+                            const dstOff = y * w * 4;
+                            for (let x = 0; x < w; x++) {
+                                const s = srcOff + x * 3;
+                                const d = dstOff + x * 4;
+                                rgba[d]     = raw[s + 2]; // R
+                                rgba[d + 1] = raw[s + 1]; // G
+                                rgba[d + 2] = raw[s];     // B
+                                rgba[d + 3] = 255;
+                            }
+                        }
+                    } else if (this.bpp === 8) {
+                        // Grayscale 8-bit → RGBA
+                        for (let y = 0; y < h; y++) {
+                            const srcRow = this.needsVerticalFlip ? (h - 1 - y) : y;
+                            const srcOff = srcRow * w;
+                            const dstOff = y * w * 4;
+                            for (let x = 0; x < w; x++) {
+                                const v = raw[srcOff + x];
+                                const d = dstOff + x * 4;
+                                rgba[d] = v; rgba[d + 1] = v; rgba[d + 2] = v; rgba[d + 3] = 255;
+                            }
+                        }
+                    }
+
+                    return {
+                        data: rgba,
+                        width: w,
+                        height: h,
+                        centerX: frameObj.centerX ?? w / 2,
+                        centerY: frameObj.centerY ?? h / 2
+                    };
+                } catch (e) {
+                    console.warn(`Failed to re-read AVI frame ${frameIdx}:`, e);
+                    return null;
+                }
+            }
+        };
+
         // Manual threshold: let user select frames
         if (manualThreshold) {
             const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
@@ -992,7 +1059,7 @@ export function useAviReader() {
                 workers: unifiedAnalyzeWorkers,
                 useWebGPU,
                 drizzleScale,
-                frameReReader: null // AVI frames already have uint8Buffer loaded
+                frameReReader: aviFrameReReader
             });
             return; // Don't terminate workers yet - they'll be used for stacking
         }

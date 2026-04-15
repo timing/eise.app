@@ -640,14 +640,14 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     // Memory safeguard: prevent allocations that would likely fail
     // Mono input (bayerPattern < 0): much lower memory - just grayBuffer + optional RGBA
     // Bayer/demosaic: needs input buffers + RGBA output
-    // metadataOnly: Uint8 RGBA only (4 bytes/px)
-    // full mode with demosaic: Float32 RGBA (16 bytes/px) + Uint8 RGBA copy (4 bytes/px) = 20 bytes/px
-    // mono grayOnly: just 1 byte/px for grayscale
-    // mono non-grayOnly: 1 + 4 = 5 bytes/px (gray + RGBA)
+    // 16-bit Bayer needs significantly more: Float32 RGBA (16 bytes/px) vs Uint8 (4 bytes/px)
+    const estBitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
     let bytesPerPixel;
     if (!needsDemosaic) {
-        // Mono/RGBA input - much lower memory requirements
         bytesPerPixel = grayOnly ? 1 : 5;
+    } else if (estBitDepth === 16) {
+        // 16-bit: input(4) + rgba(16) + gray(4) + tenengrad(4) + laplacian(4) + moments(24) + bounds(16)
+        bytesPerPixel = 72;
     } else {
         bytesPerPixel = metadataOnly ? 4 : 20;
     }

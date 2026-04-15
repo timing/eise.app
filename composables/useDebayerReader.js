@@ -1016,15 +1016,15 @@ export function useDebayerReader() {
             startTime: performance.now()
         };
 
-        // Dynamic batch size based on frame dimensions
-        // grayOnly mode uses ~4 bytes/pixel (grayscale float32) vs 16 bytes/pixel (RGBA float32)
-        // So we can fit ~4x more frames per batch in grayOnly mode
-        const bytesPerPixel = 4; // grayscale float32 for analysis
+        // Dynamic batch size based on frame dimensions and GPU worker memory usage.
+        // 8-bit grayOnly: ~4 bytes/px (grayscale float32 for analysis)
+        // 16-bit needs much more: input(4) + rgba(16) + gray(4) + tenengrad(4) + laplacian(4) + moments(24) + bounds(16) = 72 bytes/px
+        const is16bit = metadata.pixelDepth > 8;
+        const bytesPerPixel = is16bit ? 72 : 4;
         const frameBytes = metadata.width * metadata.height * bytesPerPixel;
-        const targetBatchMemory = 512 * 1024 * 1024; // 512MB target
-        const maxBatchSize = Math.max(1, Math.min(256, Math.floor(targetBatchMemory / frameBytes)));
-        const BATCH_SIZE = maxBatchSize;
-        addLog(`[DebayerReader] Using batch size ${BATCH_SIZE} for ${metadata.width}x${metadata.height} frames (grayOnly analysis)`);
+        const maxMemory = 512 * 1024 * 1024;
+        const BATCH_SIZE = Math.max(1, Math.min(256, Math.floor(maxMemory / frameBytes)));
+        addLog(`[DebayerReader] Using batch size ${BATCH_SIZE} for ${metadata.width}x${metadata.height} ${is16bit ? '16-bit' : '8-bit'} frames`);
 
         let completedFrames = 0;
 

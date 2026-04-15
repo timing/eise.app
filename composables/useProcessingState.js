@@ -15,6 +15,10 @@ const trackingContext = ref({
     gpu_enabled: null // true/false
 });
 
+const stackingMode = ref('single'); // 'single' or 'continuous'
+const continuousStackingResults = ref([]); // Stores [pct, blob, sharpness] for comparison
+const batchStartIndex = ref(0); // Initial index for BatchPostProcessor
+
 export function useProcessingState() {
     function setInputFilename(filename) {
         // Store full filename for error reporting
@@ -48,6 +52,30 @@ export function useProcessingState() {
         return apPatchSize.value;
     }
 
+    function setStackingMode(mode) {
+        stackingMode.value = mode;
+    }
+
+    function getStackingMode() {
+        return stackingMode.value;
+    }
+
+    function setContinuousResults(results) {
+        continuousStackingResults.value = results;
+    }
+
+    function getContinuousResults() {
+        return continuousStackingResults.value;
+    }
+
+    function setBatchStartIndex(index) {
+        batchStartIndex.value = index;
+    }
+
+    function getBatchStartIndex() {
+        return batchStartIndex.value;
+    }
+
     function setTrackingContext({ file_type, reader, gpu_enabled }) {
         trackingContext.value = { file_type, reader, gpu_enabled };
     }
@@ -71,6 +99,15 @@ export function useProcessingState() {
         apPatchSize,
         setApPatchSize,
         getApPatchSize,
+        stackingMode,
+        setStackingMode,
+        getStackingMode,
+        continuousStackingResults,
+        setContinuousResults,
+        getContinuousResults,
+        batchStartIndex,
+        setBatchStartIndex,
+        getBatchStartIndex,
         setTrackingContext,
         getTrackingContext,
         clearTrackingContext

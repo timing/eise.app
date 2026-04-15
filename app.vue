@@ -12,9 +12,18 @@ import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
 import { useLiteMode } from '@/composables/useLiteMode';
+import { useContinuousStacking } from '@/composables/useContinuousStacking';
 
 const { on, emit: eventBusEmit, addLog } = useEventBus();
 const { stackFramesLocally } = useStacker();
+const {
+	runContinuousStacking,
+	cancel: cancelContinuous,
+	results: continuousResults,
+	isProcessing: isContinuousProcessing,
+	currentPercentage: continuousPercentage
+} = useContinuousStacking();
+
 const { track, trackHumanInteraction } = useTracking();
 const { getTrackingContext } = useProcessingState();
 const router = useRouter();
@@ -28,11 +37,13 @@ const stackedImageDimensions = ref(null);
 const isProcessing = ref(false);
 const isSelectingColorProfile = ref(false);
 const isSelectingQuality = ref(false);
+const isShowingContinuousResults = ref(false);
 const qualityFrames = ref([]);
 const qualityWorkers = ref(null);
 const qualityUseWebGPU = ref(false);
 const qualityFrameReReader = ref(null);
 const qualityDrizzleScale = ref(1.5);
+const qualitySurfaceMode = ref(false);
 const croppedSerData = ref(null);
 
 // Batch processing state
@@ -73,8 +84,15 @@ provide('stackedImageDimensions', stackedImageDimensions);
 provide('isProcessing', isProcessing);
 provide('isSelectingColorProfile', isSelectingColorProfile);
 provide('isSelectingQuality', isSelectingQuality);
+provide('isShowingContinuousResults', isShowingContinuousResults);
+provide('continuousResults', continuousResults);
+provide('isContinuousProcessing', isContinuousProcessing);
+provide('continuousPercentage', continuousPercentage);
 provide('qualityFrames', qualityFrames);
 provide('qualityFrameReReader', qualityFrameReReader);
+provide('qualityDrizzleScale', qualityDrizzleScale);
+provide('qualitySurfaceMode', qualitySurfaceMode);
+provide('qualityUseWebGPU', qualityUseWebGPU);
 provide('showWebGPUChoice', showWebGPUChoice);
 provide('croppedSerData', croppedSerData);
 provide('batchResults', batchResults);
@@ -94,6 +112,9 @@ provide('handleProcessingStarted', handleProcessingStarted);
 provide('handleThresholdSelected', handleThresholdSelected);
 provide('handleWebGPUContinueCPU', handleWebGPUContinueCPU);
 provide('handleWebGPUCancel', handleWebGPUCancel);
+provide('handleContinuousSelected', handleContinuousSelected);
+provide('handleCancelContinuous', handleCancelContinuous);
+provide('handleAbortContinuous', handleAbortContinuous);
 
 // Browser detection
 function detectBrowser() {
@@ -201,15 +222,115 @@ onMounted(async () => {
 	});
 });
 
+const { getStackingMode, setContinuousResults } = useProcessingState();
+
 function handleQualitySelectionReady(data) {
 	qualityFrames.value = data.frames;
 	qualityWorkers.value = data.workers;
 	qualityUseWebGPU.value = data.useWebGPU || false;
 	qualityFrameReReader.value = data.frameReReader || null;
-	qualityDrizzleScale.value = data.drizzleScale || 1.0;
-	isSelectingQuality.value = true;
+	qualityDrizzleScale.value = data.drizzleScale || 1.5;
+	qualitySurfaceMode.value = data.surfaceMode || false;
+
+	// Reset results when starting new selection
+	setContinuousResults([]);
+
+	if (getStackingMode() === 'continuous') {
+		isShowingContinuousResults.value = true;
+	} else {
+		isSelectingQuality.value = true;
+	}
 	eventBusEmit('stop-loading');
 }
+
+// Watcher for starting continuous stacking process
+watch(isShowingContinuousResults, (newValue) => {
+	if (newValue && continuousResults.value.length === 0 && !isContinuousProcessing.value) {
+		runContinuousStacking(qualityFrames.value, {
+			drizzleScale: qualityDrizzleScale.value,
+			useWebGPU: qualityUseWebGPU.value,
+			frameReReader: qualityFrameReReader.value,
+			surfaceMode: qualitySurfaceMode.value
+		});
+	}
+});
+
+// Auto-navigate when complete
+watch(isContinuousProcessing, (isNowProcessing) => {
+    if (!isNowProcessing && isShowingContinuousResults.value && continuousResults.value.length > 0) {
+        addLog('Continuous Stacking: Complete, transitioning to post-processor');
+        
+        // Find the result closest to 50%
+        let targetResult = continuousResults.value[0];
+        let minDiff = Math.abs(targetResult.percentage - 50);
+        
+        for (const res of continuousResults.value) {
+            const diff = Math.abs(res.percentage - 50);
+            if (diff < minDiff) {
+                minDiff = diff;
+                targetResult = res;
+            }
+        }
+        
+        addLog(`Continuous Stacking: Defaulting to ${targetResult.percentage}% stack`);
+        handleContinuousSelected(targetResult);
+    }
+});
+
+function handleContinuousSelected(result) {
+	isShowingContinuousResults.value = false;
+    
+    // Transform all results into the format used by the Batch Post Processor
+    // Match the { id, name, result: { blob, float32Data, width, height } } structure
+    const formattedResults = continuousResults.value.map(res => ({
+        id: `continuous-${res.percentage}`,
+        name: `${res.percentage}% Stack`,
+        sharpness: res.combined,
+        tenengrad: res.tenengrad,
+        laplacian: res.laplacian,
+        frameCount: res.frameCount,
+        result: {
+            blob: res.blob,
+            float32Data: res.float32Data,
+            width: res.width,
+            height: res.height
+        }
+    }));
+
+    // Sort by percentage so they appear in order in the selector
+    formattedResults.sort((a, b) => {
+        const pctA = parseInt(a.name);
+        const pctB = parseInt(b.name);
+        return pctA - pctB;
+    });
+
+    batchResults.value = formattedResults;
+    isBatchProcessing.value = true;
+    
+    // Find the index of the clicked result to start there
+    const selectedIndex = formattedResults.findIndex(r => r.id === `continuous-${result.percentage}`);
+    const { setBatchStartIndex } = useProcessingState();
+    setBatchStartIndex(selectedIndex >= 0 ? selectedIndex : 0);
+    
+    // Also set the current 'primary' file to the one the user clicked on
+    stackedFloat32Data.value = result.float32Data || null;
+    stackedImageDimensions.value = { width: result.width, height: result.height };
+    
+	navigateTo('/post-processor/');
+}
+
+function handleCancelContinuous() {
+	isShowingContinuousResults.value = false;
+	isProcessing.value = false;
+	// Go back to main menu
+	router.push('/');
+}
+
+function handleAbortContinuous() {
+    addLog('Continuous Stacking: User requested abort');
+    cancelContinuous();
+}
+
 
 async function handleThresholdSelected(data) {
 	isSelectingQuality.value = false;
@@ -352,8 +473,8 @@ function handleWebGPUCancel() {
 }
 
 async function handleStackedImageReady(data) {
-	// Skip if batch processing is active - batch handles its own events
-	if (isBatchProcessing.value) {
+	// Skip if batch processing or continuous stacking is active
+	if (isBatchProcessing.value || isShowingContinuousResults.value) {
 		return;
 	}
 
@@ -388,6 +509,9 @@ function handleProcessingStarted() {
 }
 
 async function handlePostProcessing(data) {
+	if (isShowingContinuousResults.value) {
+		return;
+	}
 	selectedFile.value = data;
 	isProcessing.value = false;
 	navigateTo('/post-processor/');
