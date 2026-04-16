@@ -116,7 +116,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, inject, onMounted } from 'vue';
 
 const webGPUSupported = inject('webGPUSupported');
 const detectedBrowser = inject('detectedBrowser');
