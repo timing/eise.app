@@ -157,14 +157,15 @@ export function useMediabunnyReader() {
 			cropMarginPercent = 10,
 			stackPercentage = 30,
 			drizzleScale = 1.5,
-			surfaceMode = false
+			surfaceMode = false,
+			useWebGPU = true
 		} = options;
 
 		resetCaptures();
 		cancelled = false;
 
-		// Try GPU first, fall back to CPU workers
-		const useGPU = await initializeGpuWorker();
+		// Use GPU if available and requested, otherwise CPU workers
+		const useGPU = useWebGPU ? await initializeGpuWorker() : false;
 		let cpuWorkers = [];
 
 		if (!useGPU) {

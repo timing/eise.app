@@ -980,7 +980,8 @@ async function processFiles(files, options = {}) {
 					cropMarginPercent: effectiveCropMargin.value,
 					stackPercentage: effectiveStackPercentage.value,
 					drizzleScale: effectiveDrizzleScale.value,
-					surfaceMode: surfaceMode.value
+					surfaceMode: surfaceMode.value,
+					useWebGPU: useGPU.value
 				});
 				return;
 			} catch (mediabunnyErr) {
