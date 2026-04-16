@@ -306,7 +306,33 @@ export function useMediabunnyReader() {
 			let cropRegion = null;
 			const MIN_SIZE_FOR_CROP = 300;
 			if (actualWidth >= MIN_SIZE_FOR_CROP && actualHeight >= MIN_SIZE_FOR_CROP && reservoir.length > 0) {
-				const sampleResults = await analyzeRgbaBatchGpu(reservoir, actualWidth, actualHeight);
+				let sampleResults;
+				if (useGPU) {
+					sampleResults = await analyzeRgbaBatchGpu(reservoir, actualWidth, actualHeight);
+				} else {
+					// CPU: detect bounds via workers
+					const promises = reservoir.map((frame, i) => {
+						const worker = cpuWorkers[i % cpuWorkers.length];
+						return new Promise((resolve) => {
+							const handler = (e) => {
+								if (e.data.type === 'bounds') {
+									worker.removeEventListener('message', handler);
+									resolve({ bounds: e.data.bounds.canCrop ? e.data.bounds : null, index: frame.index });
+								}
+							};
+							worker.addEventListener('message', handler);
+							const buffer = frame.data.buffer.slice(0);
+							worker.postMessage({
+								type: 'detect-bounds-rgba',
+								rgbaBuffer: buffer,
+								width: actualWidth,
+								height: actualHeight,
+								index: frame.index
+							}, [buffer]);
+						});
+					});
+					sampleResults = await Promise.all(promises);
+				}
 				const detectedCenters = [], detectedSizes = [];
 				for (const r of sampleResults) {
 					if (r.bounds) {
@@ -379,6 +405,35 @@ export function useMediabunnyReader() {
 						bestFramesForStacking[minIdx] = frame;
 					}
 				}
+			}
+
+			// Crop RGBA buffer around a center point
+			function cropRgba(rgbaData, srcWidth, srcHeight, cropSize, centerX, centerY) {
+				const halfSize = cropSize / 2;
+				const startX = Math.max(0, Math.min(srcWidth - cropSize, Math.floor(centerX - halfSize)));
+				const startY = Math.max(0, Math.min(srcHeight - cropSize, Math.floor(centerY - halfSize)));
+				const cropped = new Uint8ClampedArray(cropSize * cropSize * 4);
+				for (let y = 0; y < cropSize; y++) {
+					const srcOff = ((startY + y) * srcWidth + startX) * 4;
+					const dstOff = y * cropSize * 4;
+					cropped.set(rgbaData.subarray(srcOff, srcOff + cropSize * 4), dstOff);
+				}
+				return cropped;
+			}
+
+			// Detect bounds for a single RGBA frame via CPU worker
+			function detectBoundsCpu(worker, rgbaData, width, height, index) {
+				return new Promise((resolve) => {
+					const handler = (e) => {
+						if (e.data.type === 'bounds') {
+							worker.removeEventListener('message', handler);
+							resolve({ bounds: e.data.bounds.canCrop ? e.data.bounds : null, index });
+						}
+					};
+					worker.addEventListener('message', handler);
+					const buffer = rgbaData.buffer.slice(0);
+					worker.postMessage({ type: 'detect-bounds-rgba', rgbaBuffer: buffer, width, height, index }, [buffer]);
+				});
 			}
 
 			// Analyze a single RGBA frame via CPU worker, returns a promise
@@ -466,22 +521,66 @@ export function useMediabunnyReader() {
 						}
 					}
 				} else {
-					// CPU path — distribute frames across workers
-					const promises = rgbaBatch.map((frame, i) => {
-						const worker = cpuWorkers[i % cpuWorkers.length];
-						return analyzeCpuFrame(worker, frame.data, actualWidth, actualHeight, frame.index);
-					});
-					const results = await Promise.all(promises);
-					for (const result of results) {
-						if (result.skipped) { skippedFrames++; continue; }
-						rankFrame({
-							sharpness: result.sharpness,
-							width: result.width, height: result.height,
-							index: result.index,
-							centerX: result.width / 2, centerY: result.height / 2,
-							circularity: 0,
-							uint8Buffer: result.uint8Buffer
+					// CPU path
+					if (cropRegion) {
+						// Detect bounds, crop, then analyze each frame
+						for (let j = 0; j < rgbaBatch.length; j++) {
+							const frame = rgbaBatch[j];
+							const worker = cpuWorkers[j % cpuWorkers.length];
+
+							// Detect object center
+							const boundsResult = await detectBoundsCpu(worker, frame.data, actualWidth, actualHeight, frame.index);
+							if (!boundsResult.bounds) { skippedFrames++; continue; }
+
+							const cx = boundsResult.bounds.centroidX;
+							const cy = boundsResult.bounds.centroidY;
+
+							if (!surfaceMode) {
+								const halfCrop = cropRegion.size / 2;
+								if (cx - halfCrop < 0 || cy - halfCrop < 0 ||
+									cx + halfCrop > actualWidth || cy + halfCrop > actualHeight) {
+									cutOffFrames++; continue;
+								}
+							}
+							if (cropRegion.medianObjectSize) {
+								if (Math.max(boundsResult.bounds.width, boundsResult.bounds.height) / cropRegion.medianObjectSize > 1.3) {
+									oversizedFrames++; continue;
+								}
+							}
+
+							// Crop and analyze
+							const cropped = cropRgba(frame.data, actualWidth, actualHeight, cropRegion.size, cx, cy);
+							const result = await analyzeCpuFrame(worker, cropped, cropRegion.size, cropRegion.size, frame.index);
+							if (result.skipped) { skippedFrames++; continue; }
+
+							frameCenters.set(frame.index, { x: cx, y: cy });
+							rankFrame({
+								sharpness: result.sharpness,
+								width: cropRegion.size, height: cropRegion.size,
+								index: frame.index,
+								centerX: cx, centerY: cy,
+								circularity: 0,
+								uint8Buffer: result.uint8Buffer
+							});
+						}
+					} else {
+						// No crop — analyze full frames in parallel
+						const promises = rgbaBatch.map((frame, i) => {
+							const worker = cpuWorkers[i % cpuWorkers.length];
+							return analyzeCpuFrame(worker, frame.data, actualWidth, actualHeight, frame.index);
 						});
+						const results = await Promise.all(promises);
+						for (const result of results) {
+							if (result.skipped) { skippedFrames++; continue; }
+							rankFrame({
+								sharpness: result.sharpness,
+								width: result.width, height: result.height,
+								index: result.index,
+								centerX: result.width / 2, centerY: result.height / 2,
+								circularity: 0,
+								uint8Buffer: result.uint8Buffer
+							});
+						}
 					}
 				}
 

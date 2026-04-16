@@ -182,6 +182,64 @@ async function handleMessage(e) {
             return;
         }
 
+        // Bounding box detection from raw RGBA data (for Mediabunny CPU path)
+        if (type === 'detect-bounds-rgba') {
+            const { rgbaBuffer, width, height } = e.data;
+            try {
+                const imageData = new ImageData(new Uint8ClampedArray(rgbaBuffer), width, height);
+                const rawMat = _cv.matFromImageData(imageData);
+                const grayMat = new _cv.Mat();
+                _cv.cvtColor(rawMat, grayMat, _cv.COLOR_RGBA2GRAY);
+
+                const blurred = new _cv.Mat();
+                _cv.GaussianBlur(grayMat, blurred, new _cv.Size(5, 5), 0);
+
+                const binary = new _cv.Mat();
+                _cv.threshold(blurred, binary, 25, 255, _cv.THRESH_BINARY);
+
+                const contours = new _cv.MatVector();
+                const hierarchy = new _cv.Mat();
+                _cv.findContours(binary, contours, hierarchy, _cv.RETR_EXTERNAL, _cv.CHAIN_APPROX_SIMPLE);
+
+                let minX = width, minY = height, maxX = 0, maxY = 0;
+                let hasObjects = false;
+                const minContourArea = (width * height) * 0.0001;
+
+                for (let i = 0; i < contours.size(); i++) {
+                    const contour = contours.get(i);
+                    const area = _cv.contourArea(contour);
+                    if (area < minContourArea) continue;
+                    hasObjects = true;
+                    const rect = _cv.boundingRect(contour);
+                    minX = Math.min(minX, rect.x);
+                    minY = Math.min(minY, rect.y);
+                    maxX = Math.max(maxX, rect.x + rect.width);
+                    maxY = Math.max(maxY, rect.y + rect.height);
+                }
+
+                rawMat.delete(); grayMat.delete(); blurred.delete();
+                binary.delete(); contours.delete(); hierarchy.delete();
+
+                if (!hasObjects) {
+                    self.postMessage({ type: 'bounds', bounds: { canCrop: false, reason: 'no-objects' }, index });
+                } else {
+                    const centroidX = (minX + maxX) / 2;
+                    const centroidY = (minY + maxY) / 2;
+                    const objWidth = maxX - minX;
+                    const objHeight = maxY - minY;
+                    self.postMessage({ type: 'bounds', bounds: {
+                        canCrop: true,
+                        centroidX, centroidY,
+                        width: objWidth, height: objHeight,
+                        x: minX, y: minY
+                    }, index });
+                }
+            } catch (err) {
+                self.postMessage({ type: 'bounds', bounds: { canCrop: false, reason: 'error' }, index });
+            }
+            return;
+        }
+
         // =====================================================
         // TWO-PASS MEMORY OPTIMIZATION HANDLERS
         // =====================================================
