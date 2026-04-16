@@ -219,10 +219,15 @@ export function useMediabunnyReader() {
 			let actualWidth = 0, actualHeight = 0;
 
 			// Helper: create and configure a fresh decoder
+			let decoderError = null;
 			function makeDecoder(outputFn) {
 				const dec = new VideoDecoder({
 					output: outputFn,
-					error: (e) => console.error('[WebCodecs] Decoder error:', e)
+					error: (e) => {
+						console.error('[WebCodecs] Decoder error:', e);
+						addLog(`Decoder error: ${e.message}`);
+						decoderError = e;
+					}
 				});
 				dec.configure(baseConfig);
 				return dec;
@@ -279,8 +284,9 @@ export function useMediabunnyReader() {
 				pass1Count++;
 			});
 
+			decoderError = null;
 			for await (const packet of sink1.packets(firstKeyPacket, undefined, { verifyKeyPackets: true })) {
-				if (cancelled) break;
+				if (cancelled || decoderError) break;
 				if (maxFrames > 0 && pass1Count >= maxFrames) break;
 				decoder1.decode(packet.toEncodedVideoChunk());
 			}
@@ -603,8 +609,9 @@ export function useMediabunnyReader() {
 			const firstKeyPacket2 = await sink2.getFirstKeyPacket({ verifyKeyPackets: true });
 			let packetsSinceFlush = 0;
 
+			decoderError = null;
 			for await (const packet of sink2.packets(firstKeyPacket2, undefined, { verifyKeyPackets: true })) {
-				if (cancelled) break;
+				if (cancelled || decoderError) break;
 				if (maxFrames > 0 && pass2FrameIndex >= maxFrames) break;
 
 				const chunk = packet.toEncodedVideoChunk();
