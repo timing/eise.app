@@ -382,7 +382,7 @@ export function useMediabunnyReader() {
 			emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
 			emit('update-loading', { progress: 0, current: 0, total: totalFrames });
 
-			const BATCH_SIZE = 32;
+			const BATCH_SIZE = useGPU ? 32 : 8;
 			const bestFramesCapacity = Math.max(1, Math.floor(totalFrames * stackPercentage / 100));
 			const bestFramesForStacking = [];
 			const allAnalyzedFrames = manualThreshold ? [] : null;
