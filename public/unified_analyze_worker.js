@@ -647,6 +647,36 @@ async function handleMessage(e) {
 
         let sharpness, pngBlob, circularity = 0;
 
+        // Raw RGBA input (from Mediabunny/WebCodecs) — skip PNG decode
+        if (type === 'rgba') {
+            const { rgbaBuffer, width, height, includeRgba } = e.data;
+            const imageData = new ImageData(new Uint8ClampedArray(rgbaBuffer), width, height);
+
+            let imgMat = _cv.matFromImageData(imageData);
+            let grayMat = new _cv.Mat();
+            _cv.cvtColor(imgMat, grayMat, _cv.COLOR_RGBA2GRAY);
+            sharpness = calculateSharpnessFromMat(grayMat, index);
+
+            imgMat.delete();
+            grayMat.delete();
+
+            if (sharpness < 0) {
+                self.postMessage({ skipped: true, reason: 'bayer-artifact', index });
+                return;
+            }
+
+            if (includeRgba) {
+                // Return uint8Buffer directly (already RGBA, no conversion needed)
+                const uint8Buffer = new Uint8Array(rgbaBuffer).buffer;
+                self.postMessage({
+                    sharpness, index,
+                    uint8Buffer,
+                    width, height
+                }, [uint8Buffer]);
+                return;
+            }
+        }
+
         if (type === 'ffmpeg') {
             const { analyze, includeRgba } = e.data;
             // opencv-bindings doesn't have imdecode, so decode PNG using browser APIs

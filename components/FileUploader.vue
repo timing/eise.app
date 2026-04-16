@@ -973,15 +973,19 @@ async function processFiles(files, options = {}) {
 			emit('processing-started');
 			eventBusEmit('start-loading', 'Opening video...');
 
-			await processVideoFrames(fileToProcess, {
-				maxFrames: effectiveMaxFrames.value,
-				manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
-				cropMarginPercent: effectiveCropMargin.value,
-				stackPercentage: effectiveStackPercentage.value,
-				drizzleScale: effectiveDrizzleScale.value,
-				surfaceMode: surfaceMode.value
-			});
-			return;
+			try {
+				await processVideoFrames(fileToProcess, {
+					maxFrames: effectiveMaxFrames.value,
+					manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
+					cropMarginPercent: effectiveCropMargin.value,
+					stackPercentage: effectiveStackPercentage.value,
+					drizzleScale: effectiveDrizzleScale.value,
+					surfaceMode: surfaceMode.value
+				});
+				return;
+			} catch (mediabunnyErr) {
+				addLog(`Mediabunny failed: ${mediabunnyErr.message}, falling back to FFmpeg`);
+			}
 		} else {
 			addLog(`Mediabunny cannot handle this file: ${check.reason}`);
 			addLog('Falling back to FFmpeg...');

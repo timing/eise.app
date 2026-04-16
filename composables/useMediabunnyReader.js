@@ -6,6 +6,7 @@ import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWebGpuAnalyzeWorker } from '@/composables/useWebGpuAnalyzeWorker';
+import { useWorkerUrl } from '@/composables/useWorkerUrl';
 
 export function useMediabunnyReader() {
 	const { addLog, emit, on } = useEventBus();
@@ -17,6 +18,7 @@ export function useMediabunnyReader() {
 		analyzeRgbaBatchGpu,
 		detectCropAnalyzeRgbaGpu
 	} = useWebGpuAnalyzeWorker();
+	const { workerUrl } = useWorkerUrl();
 
 	let cancelled = false;
 
@@ -161,15 +163,30 @@ export function useMediabunnyReader() {
 		resetCaptures();
 		cancelled = false;
 
-		// Initialize GPU worker
-		const gpuOk = await initializeGpuWorker();
-		if (!gpuOk) {
-			addLog('GPU worker failed to initialize');
-			emit('stop-loading');
-			return;
+		// Try GPU first, fall back to CPU workers
+		const useGPU = await initializeGpuWorker();
+		let cpuWorkers = [];
+
+		if (!useGPU) {
+			addLog('WebGPU not available, using CPU analysis workers');
+			const CPU_WORKER_COUNT = Math.min(navigator.hardwareConcurrency || 2, 4);
+			for (let i = 0; i < CPU_WORKER_COUNT; i++) {
+				cpuWorkers.push(new Worker(workerUrl('/unified_analyze_worker.js')));
+			}
+			await Promise.all(cpuWorkers.map((worker, i) =>
+				new Promise((resolve, reject) => {
+					const timeout = setTimeout(() => reject(new Error(`CPU worker ${i} timeout`)), 30000);
+					worker.onmessage = (e) => {
+						if (!e.data) { clearTimeout(timeout); reject(new Error('Worker crashed')); return; }
+						if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
+						else if (e.data.type === 'error') { clearTimeout(timeout); reject(new Error(e.data.message)); }
+					};
+					worker.postMessage({ type: 'init' });
+				})
+			));
 		}
 
-		addLog(`Processing video with Mediabunny + WebCodecs (GPU)`);
+		addLog(`Processing video with Mediabunny + WebCodecs (${useGPU ? 'GPU' : 'CPU'})`);
 		emit('set-caption', 'Opening video...');
 
 		try {
@@ -363,8 +380,33 @@ export function useMediabunnyReader() {
 				}
 			}
 
-			// Called after each decoder flush — converts VideoFrames to RGBA, then GPU-analyzes.
-			// Frames are closed after conversion; RGBA is freed after GPU processing.
+			// Analyze a single RGBA frame via CPU worker, returns a promise
+			function analyzeCpuFrame(worker, rgbaData, width, height, index) {
+				return new Promise((resolve, reject) => {
+					const handler = (e) => {
+						worker.removeEventListener('message', handler);
+						if (e.data.skipped) { resolve({ skipped: true, reason: e.data.reason, index }); return; }
+						resolve({
+							sharpness: e.data.sharpness || 0,
+							uint8Buffer: e.data.uint8Buffer,
+							width: e.data.width || width,
+							height: e.data.height || height,
+							index
+						});
+					};
+					worker.addEventListener('message', handler);
+					const buffer = rgbaData.buffer.slice(0);
+					worker.postMessage({
+						type: 'rgba',
+						rgbaBuffer: buffer,
+						width, height, index,
+						includeRgba: true
+					}, [buffer]);
+				});
+			}
+
+			// Called after each decoder flush — converts VideoFrames to RGBA, then analyzes.
+			// Frames are closed after conversion; RGBA is freed after processing.
 			async function processBatch(batch) {
 				if (batch.length === 0) return;
 
@@ -377,45 +419,66 @@ export function useMediabunnyReader() {
 					})
 				);
 
-				if (cropRegion) {
-					const combinedResults = await detectCropAnalyzeRgbaGpu(
-						rgbaBatch, actualWidth, actualHeight, cropRegion.size, 0.1, true
-					);
-					for (let j = 0; j < combinedResults.length; j++) {
-						const gpuResult = combinedResults[j];
-						if (!gpuResult.bounds) { skippedFrames++; continue; }
+				if (useGPU) {
+					// GPU path
+					if (cropRegion) {
+						const combinedResults = await detectCropAnalyzeRgbaGpu(
+							rgbaBatch, actualWidth, actualHeight, cropRegion.size, 0.1, true
+						);
+						for (let j = 0; j < combinedResults.length; j++) {
+							const gpuResult = combinedResults[j];
+							if (!gpuResult.bounds) { skippedFrames++; continue; }
 
-						if (!surfaceMode) {
-							const halfCrop = cropRegion.size / 2;
-							if (gpuResult.centerX - halfCrop < 0 || gpuResult.centerY - halfCrop < 0 ||
-								gpuResult.centerX + halfCrop > actualWidth || gpuResult.centerY + halfCrop > actualHeight) {
-								cutOffFrames++; continue;
+							if (!surfaceMode) {
+								const halfCrop = cropRegion.size / 2;
+								if (gpuResult.centerX - halfCrop < 0 || gpuResult.centerY - halfCrop < 0 ||
+									gpuResult.centerX + halfCrop > actualWidth || gpuResult.centerY + halfCrop > actualHeight) {
+									cutOffFrames++; continue;
+								}
 							}
-						}
-						if (cropRegion.medianObjectSize) {
-							if (Math.max(gpuResult.bounds.width, gpuResult.bounds.height) / cropRegion.medianObjectSize > 1.3) {
-								oversizedFrames++; continue;
+							if (cropRegion.medianObjectSize) {
+								if (Math.max(gpuResult.bounds.width, gpuResult.bounds.height) / cropRegion.medianObjectSize > 1.3) {
+									oversizedFrames++; continue;
+								}
 							}
+							frameCenters.set(rgbaBatch[j].index, { x: gpuResult.centerX, y: gpuResult.centerY });
+							rankFrame({
+								sharpness: gpuResult.sharpness,
+								width: cropRegion.size, height: cropRegion.size,
+								index: rgbaBatch[j].index,
+								centerX: gpuResult.centerX, centerY: gpuResult.centerY,
+								circularity: gpuResult.circularity || 0,
+								uint8Buffer: gpuResult.uint8Buffer
+							});
 						}
-						frameCenters.set(rgbaBatch[j].index, { x: gpuResult.centerX, y: gpuResult.centerY });
-						rankFrame({
-							sharpness: gpuResult.sharpness,
-							width: cropRegion.size, height: cropRegion.size,
-							index: rgbaBatch[j].index,
-							centerX: gpuResult.centerX, centerY: gpuResult.centerY,
-							circularity: gpuResult.circularity || 0,
-							uint8Buffer: gpuResult.uint8Buffer
-						});
+					} else {
+						const results = await analyzeRgbaBatchGpu(rgbaBatch, actualWidth, actualHeight);
+						for (const result of results) {
+							rankFrame({
+								sharpness: result.sharpness || 0,
+								width: actualWidth, height: actualHeight,
+								index: result.index,
+								centerX: actualWidth / 2, centerY: actualHeight / 2,
+								circularity: result.circularity || 0,
+								uint8Buffer: result.uint8Buffer
+							});
+						}
 					}
 				} else {
-					const results = await analyzeRgbaBatchGpu(rgbaBatch, actualWidth, actualHeight);
+					// CPU path — distribute frames across workers
+					const promises = rgbaBatch.map((frame, i) => {
+						const worker = cpuWorkers[i % cpuWorkers.length];
+						return analyzeCpuFrame(worker, frame.data, actualWidth, actualHeight, frame.index);
+					});
+					const results = await Promise.all(promises);
 					for (const result of results) {
+						if (result.skipped) { skippedFrames++; continue; }
 						rankFrame({
-							sharpness: result.sharpness || 0,
-							width: actualWidth, height: actualHeight,
+							sharpness: result.sharpness,
+							width: result.width, height: result.height,
 							index: result.index,
-							centerX: actualWidth / 2, centerY: actualHeight / 2,
-							circularity: result.circularity || 0,
+							centerX: result.width / 2, centerY: result.height / 2,
+							circularity: 0,
 							uint8Buffer: result.uint8Buffer
 						});
 					}
@@ -469,6 +532,10 @@ export function useMediabunnyReader() {
 			decoder2.close();
 			input.dispose();
 
+			// Clean up CPU workers (GPU worker cleaned up by terminateGpuWorker)
+			cpuWorkers.forEach(w => w.terminate());
+			cpuWorkers = [];
+
 			if (cancelled) { addLog('Processing cancelled'); emit('stop-loading'); return; }
 
 			const skipMsgs = [];
@@ -482,7 +549,7 @@ export function useMediabunnyReader() {
 				const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
 				emit('quality-selection-ready', {
 					frames: allFramesSorted,
-					useWebGPU: true,
+					useWebGPU: useGPU,
 					drizzleScale,
 					frameCenters,
 					frameReReader: null
@@ -498,7 +565,7 @@ export function useMediabunnyReader() {
 				bestFramesForStacking,
 				null,
 				drizzleScale,
-				true,
+				useGPU,
 				frameCenters,
 				surfaceMode
 			);
