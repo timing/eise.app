@@ -244,6 +244,7 @@ import { useEventBus } from '@/composables/eventBus';
 // useSerReader removed - now using useSerParser + useDebayerReader
 import { useAviReader } from '@/composables/useAviReader';
 import { useFFmpegReader } from '@/composables/useFFmpegReader';
+import { useMediabunnyReader } from '@/composables/useMediabunnyReader';
 import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { useBatchProcessing } from '@/composables/useBatchProcessing';
@@ -960,6 +961,31 @@ async function processFiles(files, options = {}) {
 		}
 
 		if (!needsFfmpeg) return;
+
+		// Try Mediabunny + WebCodecs first (lighter than FFmpeg, ~50KB vs ~25MB)
+		// Works in both normal and lite mode - especially beneficial for mobile
+		const { canHandle, processVideoFrames } = useMediabunnyReader();
+		const check = await canHandle(fileToProcess);
+
+		if (check.supported) {
+			addLog('Using Mediabunny + WebCodecs (lightweight decoder)');
+			setTrackingContext({ file_type: 'video', reader: 'mediabunny', gpu_enabled: useGPU.value });
+			emit('processing-started');
+			eventBusEmit('start-loading', 'Opening video...');
+
+			await processVideoFrames(fileToProcess, {
+				maxFrames: effectiveMaxFrames.value,
+				manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
+				cropMarginPercent: effectiveCropMargin.value,
+				stackPercentage: effectiveStackPercentage.value,
+				drizzleScale: effectiveDrizzleScale.value,
+				surfaceMode: surfaceMode.value
+			});
+			return;
+		} else {
+			addLog(`Mediabunny cannot handle this file: ${check.reason}`);
+			addLog('Falling back to FFmpeg...');
+		}
 
 		// Show loading indicator for FFmpeg path (SER files handle this after color profile selection)
 		eventBusEmit('start-loading', 'Loading FFmpeg...');
