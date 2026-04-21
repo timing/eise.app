@@ -559,6 +559,22 @@ export function useDebayerReader() {
     }
 
     /**
+     * Ask the GPU worker how many frames fit in one batch at given dimensions.
+     */
+    async function getGpuMaxBatchSize(width, height, bitDepth) {
+        return new Promise((resolve) => {
+            const handler = (e) => {
+                if (e.data.type === 'max-batch-size') {
+                    gpuWorker.removeEventListener('message', handler);
+                    resolve(e.data.maxBatch);
+                }
+            };
+            gpuWorker.addEventListener('message', handler);
+            gpuWorker.postMessage({ type: 'get-max-batch-size', width, height, bitDepth });
+        });
+    }
+
+    /**
      * Demosaic a single frame to color for preview (with optional cropping)
      * Uses full color demosaic (not grayscale-only)
      * @param {TypedArray} frameData - Raw Bayer frame data
@@ -618,20 +634,30 @@ export function useDebayerReader() {
                         }
                     }
 
-                    // Create grayscale blob from packedGrayBuffer (8-bit, same as used for analysis)
+                    // Create grayscale blob from color RGBA (proper demosaic, no Bayer artifacts)
                     let grayBlob = null;
-                    const grayBuffer = result.packedGrayBuffer || result.grayBuffer;
-                    if (grayBuffer) {
+                    if (rgbaBuffer) {
                         try {
-                            const grayView = new Uint8Array(grayBuffer);
-                            // Convert 8-bit grayscale to RGBA
+                            let srcData;
+                            if (result.float32Buffer) {
+                                const floatView = new Float32Array(result.float32Buffer);
+                                srcData = floatView;
+                            } else {
+                                srcData = new Uint8Array(result.uint8Buffer);
+                            }
+                            const isFloat = !!result.float32Buffer;
                             const grayRgba = new Uint8ClampedArray(width * height * 4);
-                            for (let i = 0; i < grayView.length; i++) {
-                                const v = grayView[i];
-                                grayRgba[i * 4] = v;      // R
-                                grayRgba[i * 4 + 1] = v;  // G
-                                grayRgba[i * 4 + 2] = v;  // B
-                                grayRgba[i * 4 + 3] = 255; // A
+                            for (let i = 0; i < width * height; i++) {
+                                const r = srcData[i * 4];
+                                const g = srcData[i * 4 + 1];
+                                const b = srcData[i * 4 + 2];
+                                const v = isFloat
+                                    ? Math.round((0.299 * r + 0.587 * g + 0.114 * b) * 255)
+                                    : Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+                                grayRgba[i * 4] = v;
+                                grayRgba[i * 4 + 1] = v;
+                                grayRgba[i * 4 + 2] = v;
+                                grayRgba[i * 4 + 3] = 255;
                             }
                             const imageData = new ImageData(grayRgba, width, height);
                             const canvas = new OffscreenCanvas(width, height);
@@ -823,8 +849,14 @@ export function useDebayerReader() {
             frames.push({ data, index: idx });
         }
 
-        // Analyze for bounds
-        const results = await analyzeFrameBatchGpu(frames, 0.1, true);
+        // Analyze for bounds (split into sub-batches if needed for large frames)
+        const maxBatch = await getGpuMaxBatchSize(metadata.width, metadata.height, metadata.pixelDepth > 8 ? 16 : 8);
+        const results = [];
+        for (let i = 0; i < frames.length; i += maxBatch) {
+            const sub = frames.slice(i, i + maxBatch);
+            const subResults = await analyzeFrameBatchGpu(sub, 0.1, true);
+            results.push(...subResults);
+        }
 
         // Calculate crop region from bounds
         const boundsResults = results.filter(r => r.bounds && r.bounds.width > 0);
@@ -1016,15 +1048,11 @@ export function useDebayerReader() {
             startTime: performance.now()
         };
 
-        // Dynamic batch size based on frame dimensions and GPU worker memory usage.
-        // 8-bit grayOnly: ~4 bytes/px (grayscale float32 for analysis)
-        // 16-bit needs much more: input(4) + rgba(16) + gray(4) + tenengrad(4) + laplacian(4) + moments(24) + bounds(16) = 72 bytes/px
+        // Ask the GPU worker for max batch size — single source of truth
         const is16bit = metadata.pixelDepth > 8;
-        const bytesPerPixel = is16bit ? 72 : 4;
-        const frameBytes = metadata.width * metadata.height * bytesPerPixel;
-        const maxMemory = 512 * 1024 * 1024;
-        const BATCH_SIZE = Math.max(1, Math.min(256, Math.floor(maxMemory / frameBytes)));
-        addLog(`[DebayerReader] Using batch size ${BATCH_SIZE} for ${metadata.width}x${metadata.height} ${is16bit ? '16-bit' : '8-bit'} frames`);
+        const maxBatch = await getGpuMaxBatchSize(metadata.width, metadata.height, is16bit ? 16 : 8);
+        const BATCH_SIZE = Math.min(256, maxBatch);
+        addLog(`[DebayerReader] Batch size ${BATCH_SIZE} for ${metadata.width}x${metadata.height} ${is16bit ? '16-bit' : '8-bit'}`);
 
         let completedFrames = 0;
 

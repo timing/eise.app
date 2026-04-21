@@ -49,10 +49,20 @@ const handleLogAdded = (log) => {
 	}
 };
 
-onMounted(() => {
+onMounted(async () => {
 	const hasGPU = !!navigator.gpu;
 	const lite = isLiteMode();
-	const mode = (hasGPU ? 'GPU' : 'CPU') + (lite ? ', Lite' : '');
+	let gpuInfo = '';
+	if (hasGPU) {
+		try {
+			const adapter = await navigator.gpu.requestAdapter();
+			if (adapter) {
+				const maxBuf = adapter.limits.maxBufferSize;
+				gpuInfo = `, ${Math.round(maxBuf / 1024 / 1024)}MB max buffer`;
+			}
+		} catch (e) { /* ignore */ }
+	}
+	const mode = (hasGPU ? 'GPU' : 'CPU') + (lite ? ', Lite' : '') + gpuInfo;
 	logContent.value.innerHTML += (new Date()).toLocaleString() + `: Welcome to Eise.app! (${mode})\n`;
 
 	onLogAdded(handleLogAdded);

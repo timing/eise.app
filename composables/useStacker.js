@@ -1711,9 +1711,12 @@ export function useStacker() {
             });
 
             // Process frames in batches and take snapshots
+            // Dynamic batch size based on crop size (same logic as stackWithGpuPipelined)
+            const frameBytes = cropSize * cropSize * 16; // Float32 RGBA = 16 bytes/pixel
+            const targetBatchMemory = 512 * 1024 * 1024;
+            const batchSize = Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
             const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
             let processedCount = 0;
-            const batchSize = 20;
 
             for (let i = 0; i < frameCount; i += batchSize) {
                 if (cancelled) break;

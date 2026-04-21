@@ -105,7 +105,9 @@ export function useWebGpuAnalyzeWorker() {
                 if (e.data.type === 'analyze-result') {
                     resolve(e.data.results);
                 } else if (e.data.type === 'analyze-error') {
-                    reject(new Error(e.data.error));
+                    const err = new Error(e.data.error);
+                    reportError(err, { component: 'useWebGpuAnalyzeWorker', action: 'analyzeRgbaBatchGpu', frameCount: frames.length, width, height });
+                    reject(err);
                 }
             };
             gpuWorker.addEventListener('message', handler);
@@ -142,7 +144,9 @@ export function useWebGpuAnalyzeWorker() {
                 if (e.data.type === 'crop-analyze-result') {
                     resolve(e.data.results);
                 } else if (e.data.type === 'crop-analyze-error') {
-                    reject(new Error(e.data.error));
+                    const err = new Error(e.data.error);
+                    reportError(err, { component: 'useWebGpuAnalyzeWorker', action: 'cropAndAnalyzeRgbaGpu', frameCount: frames.length, srcWidth, srcHeight });
+                    reject(err);
                 }
             };
             gpuWorker.addEventListener('message', handler);
@@ -182,7 +186,9 @@ export function useWebGpuAnalyzeWorker() {
                 if (e.data.type === 'detect-crop-analyze-result') {
                     resolve(e.data.results);
                 } else if (e.data.type === 'detect-crop-analyze-error') {
-                    reject(new Error(e.data.error));
+                    const err = new Error(e.data.error);
+                    reportError(err, { component: 'useWebGpuAnalyzeWorker', action: 'detectCropAnalyzeRgbaGpu', frameCount: frames.length, srcWidth, srcHeight });
+                    reject(err);
                 }
             };
             gpuWorker.addEventListener('message', handler);

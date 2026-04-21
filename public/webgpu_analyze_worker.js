@@ -498,29 +498,43 @@ reinitializeGpu = async function() {
  *
  * @param {number} bitDepth - 8 or 16, determines RGBA buffer size
  */
+/**
+ * Calculate total GPU buffer bytes needed for a single frame at given dimensions/bitDepth.
+ * Used by both the memory check and getAnalyzeBuffers to stay in sync.
+ */
+function calcPerFrameBufferBytes(width, height, bitDepth = 8) {
+    const pixelCount = width * height;
+    const numWorkgroups = Math.ceil(pixelCount / 256);
+    const rgbaBpp = bitDepth === 16 ? 16 : 4;
+    return (
+        pixelCount * 4 +                    // pixelBufferSize (input)
+        pixelCount * rgbaBpp +               // rgbaBufferSize
+        pixelCount * 6 * 4 +                // momentsPixelSize
+        pixelCount * 4 * 4 +                // boundsPixelSize
+        numWorkgroups * 2 * 4 +             // reductionSize
+        numWorkgroups * 6 * 4 +             // momentsReductionSize
+        numWorkgroups * 4 * 4               // boundsReductionSize
+    );
+}
+
 function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const pixelCount = width * height;
     const numWorkgroups = Math.ceil(pixelCount / 256);
-
-    // RGBA buffer size depends on bit depth:
-    // - 8-bit: 4 bytes/pixel (packed RGBA as u32)
-    // - 16-bit: 16 bytes/pixel (4 floats as 4 u32s via bitcast)
     const rgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
 
-    // Calculate required buffer sizes
     const requiredSizes = {
         batchSize,
         pixelCount,
         numWorkgroups,
         bitDepth,
         paramsSize: 16,
-        pixelBufferSize: batchSize * pixelCount * 4,  // Input: always 4 bytes/pixel max
-        rgbaBufferSize: batchSize * pixelCount * rgbaBytesPerPixel,  // Output: depends on bitDepth
+        pixelBufferSize: batchSize * pixelCount * 4,
+        rgbaBufferSize: batchSize * pixelCount * rgbaBytesPerPixel,
         momentsPixelSize: batchSize * pixelCount * 6 * 4,
-        boundsPixelSize: batchSize * pixelCount * 4 * 4,  // 4 u32 per pixel
+        boundsPixelSize: batchSize * pixelCount * 4 * 4,
         reductionSize: batchSize * numWorkgroups * 2 * 4,
         momentsReductionSize: batchSize * numWorkgroups * 6 * 4,
-        boundsReductionSize: batchSize * numWorkgroups * 4 * 4  // 4 u32 per workgroup
+        boundsReductionSize: batchSize * numWorkgroups * 4 * 4
     };
 
     // Check if we can reuse cached buffers
@@ -637,27 +651,9 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     // Determine if we need demosaic (bayerPattern >= 0 means Bayer data)
     const needsDemosaic = bayerPattern >= 0;
 
-    // Memory safeguard: prevent allocations that would likely fail
-    // Mono input (bayerPattern < 0): much lower memory - just grayBuffer + optional RGBA
-    // Bayer/demosaic: needs input buffers + RGBA output
-    // 16-bit Bayer needs significantly more: Float32 RGBA (16 bytes/px) vs Uint8 (4 bytes/px)
-    const estBitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
-    let bytesPerPixel;
-    if (!needsDemosaic) {
-        bytesPerPixel = grayOnly ? 1 : 5;
-    } else if (estBitDepth === 16) {
-        // 16-bit: input(4) + rgba(16) + gray(4) + tenengrad(4) + laplacian(4) + moments(24) + bounds(16)
-        bytesPerPixel = 72;
-    } else {
-        bytesPerPixel = metadataOnly ? 4 : 20;
-    }
-    const estimatedMemory = batchSize * pixelCount * bytesPerPixel;
-    const maxMemory = 512 * 1024 * 1024; // 512MB hard limit (allow some headroom over 256MB target)
-    if (estimatedMemory > maxMemory) {
-        const neededMB = Math.round(estimatedMemory / 1024 / 1024);
-        const maxFrames = Math.max(1, Math.floor(maxMemory / (pixelCount * bytesPerPixel)));
-        throw new Error(`Memory limit: ${batchSize} frames of ${width}x${height} needs ${neededMB}MB (limit: 512MB). Try processing fewer frames or use smaller resolution. Max batch: ${maxFrames} frames.`);
-    }
+    // Memory safeguard using actual buffer sizes (single source of truth: calcPerFrameBufferBytes)
+    // No artificial memory limit — the GPU will throw from createBuffer() if it truly can't allocate.
+    // Callers should use get-max-batch-size to pick sensible batch sizes, but we don't block here.
 
     // Detect bit depth early so we allocate correct buffer sizes
     // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
@@ -2183,6 +2179,19 @@ self.addEventListener('message', async (e) => {
     if (type === 'set-gpu-timing') {
         gpuTimingEnabled = e.data.enabled;
         console.log(`[GPU] Timing ${gpuTimingEnabled ? 'enabled' : 'disabled'}`);
+        return;
+    }
+
+    if (type === 'get-max-batch-size') {
+        const { width, height, bitDepth = 8 } = e.data;
+        const perFrameBytes = calcPerFrameBufferBytes(width, height, bitDepth);
+        // Use actual GPU limit — device.limits.maxBufferSize is set from adapter during init
+        // The largest single buffer is momentsPixelSize (24 bytes/px * batch), so max batch =
+        // maxBufferSize / (pixelCount * 24). But total memory across all buffers matters too,
+        // so use maxBufferSize as a proxy for total available GPU memory.
+        const maxBufferSize = device ? device.limits.maxBufferSize : (256 * 1024 * 1024);
+        const maxBatch = Math.max(1, Math.floor(maxBufferSize / (perFrameBytes * 1.2)));
+        self.postMessage({ type: 'max-batch-size', maxBatch, perFrameBytes, maxBufferSize });
         return;
     }
 

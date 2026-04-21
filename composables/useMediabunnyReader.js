@@ -288,6 +288,11 @@ export function useMediabunnyReader() {
 			for await (const packet of sink1.packets(firstKeyPacket, undefined, { verifyKeyPackets: true })) {
 				if (cancelled || decoderError) break;
 				if (maxFrames > 0 && pass1Count >= maxFrames) break;
+
+				while (decoder1.decodeQueueSize > 3 && !decoderError) {
+					await new Promise(r => setTimeout(r, 5));
+				}
+
 				decoder1.decode(packet.toEncodedVideoChunk());
 			}
 			await decoder1.flush();
@@ -626,6 +631,11 @@ export function useMediabunnyReader() {
 					currentBatch = [];
 					await processBatch(batch);
 					packetsSinceFlush = 0;
+				}
+
+				// Backpressure: wait for decoder to catch up if queue is too deep
+				while (decoder2.decodeQueueSize > 3 && !decoderError) {
+					await new Promise(r => setTimeout(r, 5));
 				}
 
 				decoder2.decode(chunk);
