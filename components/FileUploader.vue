@@ -212,27 +212,28 @@
 	<!-- Welcome content: only show when not processing -->
 	<div class="content" v-if="!isProcessing">
 		<h2>Welcome to Eise.app</h2>
-		<h3>A planetary image stacker for lucky imaging</h3>
-		<p>Turn your blurry and shaky videos of planets, Moon, or Sun into one stacked and sharp image using <em>lucky imaging</em> - a classic astrophotography technique.</p>
-		<ul>
-			<li>Select one or more SER or raw AVI files for stacking followed by post processing. Multiple video files allow you to open batch stacking mode.</li>
-			<li>Select one video file (AVI, MP4, etc.) for stacking followed by post processing.</li>
-			<li>Select multiple image files (TIFF, PNG, JPG, etc.) for stacking and post processing.</li>
-			<li>Select one image file to directly open the <NuxtLink to="/post-processor/">post processing</NuxtLink> with that file.</li>
-		</ul>
-		<p>When stacking, Eise.app analyzes, crops, centers and ranks all frames by sharpness and circularity, and it drops frames automatically that are (almost) cut-off.</p>
-		<p><strong>Tip:</strong> For Moon or Sun surface closeups, select "Surface" mode above to handle larger frame-to-frame drift.</p>
-		<h3>Beta: Batch stacking and post processing workflow</h3>
-		<p>Batch stacking and processing is now in beta. Select multiple SER or raw AVI files, and Eise asks you how you want to stack it. The post processor applies all settings to all stacked images at once.</p>
+		<p class="intro">Turn your shaky planetary videos into sharp images. Drop a SER, AVI, or MP4 file to get started.</p>
+
+		<div class="comparison-images">
+			<img src="/jupiter-singleframe.png" alt="Single frame from video" />
+			<span class="arrow">&rarr;</span>
+			<img src="/jupiter-stacked.png" alt="Stacked and sharpened result" />
+		</div>
+
+		<div class="how-it-works">
+			<p>Eise.app uses <em>lucky imaging</em> to combine the sharpest frames from your video into one detailed image. It automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. After stacking, the post processor opens for wavelet sharpening, RGB alignment, and color adjustments.</p>
+			<ul>
+				<li><strong>SER or AVI files</strong> for stacking + post processing. Multiple files open batch mode.</li>
+				<li><strong>Video files</strong> (MP4, MOV, etc.) for stacking + post processing.</li>
+				<li><strong>Image files</strong> (TIFF, PNG, JPG) for stacking, or a single image to go straight to the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</li>
+			</ul>
+			<p><strong>Tip:</strong> For Moon or Sun surface closeups, select "Surface" mode to handle larger frame-to-frame drift.</p>
+		</div>
+
 		<h3>More information, bugs and feature requests?</h3>
 		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
 
 		<p class="build-date">Latest release: {{ buildDate }}</p>
-		<div class="comparison-images">
-			<img src="/jupiter-singleframe.png" alt="Single frame" />
-			<span class="arrow">&rarr;</span>
-			<img src="/jupiter-stacked.png" alt="Stacked result" />
-		</div>
 	</div>
 </div>
 </template>
@@ -1531,6 +1532,29 @@ async function processFiles(files, options = {}) {
 	border-radius: 3px;
 	margin-left: 5px;
 	vertical-align: middle;
+}
+.intro {
+	font-size: 1.1em;
+	color: #c6fffd;
+	margin-bottom: 5px;
+}
+.how-it-works {
+	margin: 15px 0;
+}
+.how-it-works summary {
+	cursor: pointer;
+	color: #8ababa;
+	font-weight: 500;
+}
+.how-it-works summary:hover {
+	color: #c6fffd;
+}
+.how-it-works ul {
+	margin: 10px 0;
+	padding-left: 20px;
+}
+.how-it-works li {
+	margin-bottom: 5px;
 }
 .build-date {
 	font-size: 0.85em;
