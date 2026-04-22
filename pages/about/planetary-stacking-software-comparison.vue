@@ -89,7 +89,7 @@
 							<td class="highlight">1.5x</td>
 							<td class="highlight">1.5x, 2x, 3x</td>
 							<td>No</td>
-							<td>1.5x, 3x</td>
+							<td class="highlight">1.5x, 3x</td>
 							<td>No</td>
 							<td>No</td>
 						</tr>
