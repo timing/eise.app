@@ -89,7 +89,7 @@
 							<td class="highlight">1.5x</td>
 							<td class="highlight">1.5x, 2x, 3x</td>
 							<td>No</td>
-							<td>No</td>
+							<td>1.5x, 3x</td>
 							<td>No</td>
 							<td>No</td>
 						</tr>
@@ -220,9 +220,9 @@
 
 <script setup>
 useHead({
-	title: 'Planetary Stacking Software Comparison 2026 - AutoStakkert vs PSS vs Planet Stacker X vs Eise.app',
+	title: 'Planetary Stacking Software Comparison 2026 - Planet Stacker X vs AutoStakkert vs PSS vs Eise.app',
 	meta: [
-		{ name: 'description', content: 'Compare planetary astrophotography stacking software: AutoStakkert!, Planetary System Stacker (PSS), Planet Stacker X, Registax, PIPP, and Eise.app. Find the best tool for your needs.' },
+		{ name: 'description', content: 'Compare planetary astrophotography stacking software: Planet Stacker X, AutoStakkert!, Planetary System Stacker (PSS), Registax, PIPP, and Eise.app. Find the best tool for your needs.' },
 		{ name: 'keywords', content: 'planetary stacking software, autostakkert alternative, planetary system stacker, planet stacker x, registax alternative, astrophotography software comparison, planetary imaging software, mac stacking software' },
 	],
 });
