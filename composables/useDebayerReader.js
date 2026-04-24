@@ -265,6 +265,8 @@ export function useDebayerReader() {
     /**
      * Initialize GPU worker
      */
+    let gpuInitFailReason = null;
+
     async function initGpuWorker() {
         if (gpuWorker && gpuWorkerReady) return true;
         if (gpuInitFailed) return false;
@@ -273,7 +275,9 @@ export function useDebayerReader() {
 
         return new Promise((resolve) => {
             const timeout = setTimeout(() => {
-                addLog('[DebayerReader] WebGPU worker timeout');
+                gpuInitFailReason = 'Worker initialization timed out after 10s';
+                addLog(`[DebayerReader] ${gpuInitFailReason}`);
+                reportError(new Error(gpuInitFailReason), { component: 'useDebayerReader', action: 'initGpuWorker' });
                 gpuWorker.terminate();
                 gpuWorker = null;
                 gpuInitFailed = true;
@@ -283,7 +287,9 @@ export function useDebayerReader() {
             gpuWorker.onmessage = (e) => {
                 if (!e.data) {
                     clearTimeout(timeout);
-                    addLog('[DebayerReader] GPU worker crashed');
+                    gpuInitFailReason = 'GPU worker crashed (null message)';
+                    addLog(`[DebayerReader] ${gpuInitFailReason}`);
+                    reportError(new Error(gpuInitFailReason), { component: 'useDebayerReader', action: 'initGpuWorker' });
                     gpuWorker.terminate();
                     gpuWorker = null;
                     gpuInitFailed = true;
@@ -297,7 +303,9 @@ export function useDebayerReader() {
                     resolve(true);
                 } else if (e.data.type === 'init-error') {
                     clearTimeout(timeout);
-                    addLog(`[DebayerReader] WebGPU error: ${e.data.error}`);
+                    gpuInitFailReason = `GPU init-error: ${e.data.error}`;
+                    addLog(`[DebayerReader] ${gpuInitFailReason}`);
+                    reportError(new Error(gpuInitFailReason), { component: 'useDebayerReader', action: 'initGpuWorker' });
                     gpuWorker.terminate();
                     gpuWorker = null;
                     gpuInitFailed = true;
@@ -307,7 +315,8 @@ export function useDebayerReader() {
 
             gpuWorker.onerror = (event) => {
                 clearTimeout(timeout);
-                const err = event.error || new Error(event.message || 'GPU worker error');
+                gpuInitFailReason = event.message || event.error?.message || 'GPU worker load error';
+                const err = event.error || new Error(gpuInitFailReason);
                 console.error('[DebayerReader] GPU worker error:', err);
                 reportError(err, { component: 'useDebayerReader', action: 'initGpuWorker' });
                 gpuWorker.terminate();
@@ -944,7 +953,7 @@ export function useDebayerReader() {
         // Initialize GPU
         const gpuReady = await initGpuWorker();
         if (!gpuReady) {
-            throw new Error('Could not initialize GPU worker');
+            throw new Error(`Could not initialize GPU worker: ${gpuInitFailReason || 'unknown reason'}`);
         }
 
         const frameCount = maxFrames > 0 ? Math.min(maxFrames, metadata.frameCount) : metadata.frameCount;
