@@ -32,6 +32,10 @@ export function useWebGpuAnalyzeWorker() {
             try {
                 await new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => reject(new Error('GPU worker timeout')), 30000);
+                    gpuWorker.onerror = (event) => {
+                        clearTimeout(timeout);
+                        reject(event.error || new Error(event.message || 'GPU worker load error'));
+                    };
                     gpuWorker.onmessage = (e) => {
                         if (!e.data) {
                             clearTimeout(timeout);

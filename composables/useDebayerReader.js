@@ -315,8 +315,8 @@ export function useDebayerReader() {
 
             gpuWorker.onerror = (event) => {
                 clearTimeout(timeout);
-                gpuInitFailReason = event.message || event.error?.message || 'GPU worker load error';
-                const err = event.error || new Error(gpuInitFailReason);
+                const err = event.error || new Error(event.message || 'GPU worker load error');
+                gpuInitFailReason = err.message;
                 console.error('[DebayerReader] GPU worker error:', err);
                 reportError(err, { component: 'useDebayerReader', action: 'initGpuWorker' });
                 gpuWorker.terminate();
