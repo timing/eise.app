@@ -119,7 +119,7 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 
 UI settings in FileUploader.vue sync to this shared state via watchers, and useStacker.js reads from it via getter functions (`getMinApQuality()`, `getApPatchSize()`).
 
-**SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`.
+**SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`. **When adding new JS files to `public/`**, you MUST add them to `config/cloudflare_headers.txt` with COEP headers, otherwise they will be blocked by Cross-Origin-Embedder-Policy on production.
 
 **Float32 Data is Source of Truth (CRITICAL)**: All image processing and exports use float32 data stored in memory, NOT the canvas. The canvas is display-only. When exporting/downloading images, always use the underlying `float32Data` and convert to the target format (PNG, TIFF, etc.) - never use `canvas.toDataURL()` or `canvas.toBlob()` on the display canvas. This preserves 16-bit precision. When applying transforms (alignment, etc.), modify the float32 data directly using GPU shaders, not canvas 2D transforms.
 
