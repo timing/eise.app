@@ -61,3 +61,11 @@ Cache-Control: no-cache, must-revalidate
 Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate
 
+/gpu/shaders.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
+/gpu/helpers.js
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: no-cache, must-revalidate
+
