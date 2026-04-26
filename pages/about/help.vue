@@ -34,9 +34,13 @@
 				<li><strong>Continuous</strong> - Stacks the same file multiple times using increasing percentages (5%, 10%, 15%, ... up to 90%). This lets you compare results and find the sweet spot between detail and noise without trial and error.</li>
 			</ul>
 
-			<h3>Batch Processing</h3>
+			<h3>Batch Processing &amp; Timelapse</h3>
 			<p>Batch processing is a separate feature for handling <strong>multiple files</strong>. When you select two or more SER or AVI files, Eise.app asks whether to process them separately (batch) or combine them into one stack. In batch mode, each file is stacked independently with the same settings.</p>
-			<p>Batch processing and continuous stacking are independent features — batch processes multiple files, continuous explores different frame percentages on a single file.</p>
+			<p>Batch processing and continuous stacking are independent features: batch processes multiple files, continuous explores different frame percentages on a single file.</p>
+			<p>After batch stacking completes, all stacked results are loaded into the Post Processor together. Any processing you apply (wavelet sharpening, color correction, RGB alignment) is applied to all stacks at once, so your entire sequence gets consistent processing.</p>
+			<p><strong>Align Stacks</strong>: In the Post Processor, use the "Align Stacks" button to align all stacked results so they match in size and position. This removes wobble and size differences between individual stacks, producing a smooth sequence ready for animation.</p>
+			<p><strong>MP4 Export</strong>: Once your stacks are aligned, you can export them as an MP4 animation. This creates a timelapse video showing planetary rotation or surface changes across your imaging session.</p>
+			<video src="/Jupiter_animation_full_eise_workflow.mp4" autoplay loop muted playsinline class="help-video"></video>
 
 			<h3>Post-Processing Tips</h3>
 			<ul>
@@ -173,5 +177,13 @@ dd {
 .brave-tip a {
 	color: #856404;
 	font-family: monospace;
+}
+.help-video {
+	max-width: 100%;
+	max-height: 400px;
+	display: block;
+	margin: 0.75rem 0;
+	border-radius: 4px;
+	border: 1px solid #444;
 }
 </style>

@@ -629,7 +629,7 @@ button:hover, a.button:hover, .tabs a:hover {
 	margin: 0 auto;
 }
 .page-layout.page-layout-wide {
-	max-width: 800px;
+	max-width: none;
 }
 .page-layout.page-layout-wide .content {
 	max-width: none;

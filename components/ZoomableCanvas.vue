@@ -1,15 +1,28 @@
 <template>
 	<div class="zoomable-canvas-outer">
 		<div class="canvas-topbar">
-			<span class="zoom-indicator">Zoom: <input
-				type="number"
-				:value="Math.round(zoomLevel * 100)"
-				@change="setZoomFromInput"
-				min="30"
-				max="1500"
-				step="1"
-				class="zoom-input"
-			/>%</span>
+			<span class="zoom-indicator">
+				Zoom:
+				<div class="kebab-menu">
+					<button class="kebab-btn" @click="showZoomDropdown = !showZoomDropdown">&#9662;</button>
+					<div v-if="showZoomDropdown" class="kebab-backdrop" @click="showZoomDropdown = false"></div>
+					<div v-if="showZoomDropdown" class="kebab-dropdown">
+						<button v-for="preset in [25, 50, 75, 100, 150, 200, 300]" :key="preset"
+							@click="setZoomPreset(preset); showZoomDropdown = false">{{ preset }}%</button>
+						<button @click="fitToView(); showZoomDropdown = false">Fit to view</button>
+						<button @click="centerCanvas(); showZoomDropdown = false">Center</button>
+					</div>
+				</div>
+				<input
+					type="number"
+					:value="Math.round(zoomLevel * 100)"
+					@change="setZoomFromInput"
+					min="10"
+					max="1500"
+					step="1"
+					class="zoom-input"
+				/>%
+			</span>
 			<slot name="toolbar"></slot>
 		</div>
 		<div class="zoomable-canvas-wrapper">
@@ -40,10 +53,11 @@ const props = defineProps({
 
 const canvas = ref(null);
 const container = ref(null);
-const zoomLevel = ref(1); // Initial zoom level
+const zoomLevel = ref(1);
 const position = ref({ x: 0, y: 0 });
-const isDragging = ref(false); // Renamed to isDragging
+const isDragging = ref(false);
 const startPos = ref({ x: 0, y: 0 });
+const showZoomDropdown = ref(false);
 
 // Emit the canvas ref to parent right after it's mounted and ready
 onMounted(async () => {
@@ -53,43 +67,35 @@ onMounted(async () => {
 
 const setZoomFromInput = (event) => {
 	const value = parseInt(event.target.value, 10);
-	if (!isNaN(value) && value >= 30 && value <= 1500) {
+	if (!isNaN(value) && value >= 10 && value <= 1500) {
 		zoomLevel.value = value / 100;
+		centerCanvas();
 	}
 };
 
+const setZoomPreset = (percent) => {
+	zoomLevel.value = percent / 100;
+	centerCanvas();
+};
+
 const handleWheel = (event) => {
-	event.preventDefault(); // Prevent the page from scrolling
-	const scaleAmount = 0.02;
-	const rect = canvas.value.getBoundingClientRect(); // Get canvas position and size
-	const mouseX = event.clientX - rect.left; // Mouse X position within the canvas
-	const mouseY = event.clientY - rect.top; // Mouse Y position within the canvas
+	event.preventDefault();
+	const rect = canvas.value.getBoundingClientRect();
+	const mouseX = event.clientX - rect.left;
+	const mouseY = event.clientY - rect.top;
 
 	const oldZoom = zoomLevel.value;
-	if (event.deltaY < 0) {
-		// Zoom in
-		zoomLevel.value = Math.min(zoomLevel.value + scaleAmount, 15); // Limit zoom in
-	} else {
-		// Zoom out
-		zoomLevel.value = Math.max(zoomLevel.value - scaleAmount, 0.3); // Limit zoom out
-	}
-
-	if( Math.abs(1, zoomLevel.value) < 0.1 ){
-		zoomLevel.value = 1;
-	}
-	
-	const newZoom = zoomLevel.value;
-
+	// Proportional zoom: 10% per scroll step, feels consistent at any zoom level
+	const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+	zoomLevel.value = Math.max(0.1, Math.min(15, zoomLevel.value * factor));
 	zoomLevel.value = Math.round(zoomLevel.value * 100) / 100;
 
-	// Calculate the factor of zoom change
-	const zoomFactor = newZoom - oldZoom;
+	const newZoom = zoomLevel.value;
+	const zoomChange = newZoom - oldZoom;
 
-	// Adjust the position to zoom towards the mouse position
-	// This calculation keeps the mouse position a fixed point in the document
-	// by adjusting the position based on the zoom change
-	position.value.x -= mouseX * (zoomFactor / oldZoom);
-	position.value.y -= mouseY * (zoomFactor / oldZoom);
+	// Zoom towards mouse position
+	position.value.x -= mouseX * (zoomChange / oldZoom);
+	position.value.y -= mouseY * (zoomChange / oldZoom);
 };
 
 const handleDoubleClick = (event) => {
@@ -180,6 +186,16 @@ const centerCanvas = () => {
 	};
 };
 
+// Fit canvas to the visible container area
+const fitToView = () => {
+	if (!canvas.value || !container.value) return;
+	const containerRect = container.value.getBoundingClientRect();
+	const scaleX = containerRect.width / canvas.value.width;
+	const scaleY = containerRect.height / canvas.value.height;
+	zoomLevel.value = Math.round(Math.min(scaleX, scaleY) * 100) / 100;
+	centerCanvas();
+};
+
 // Adjust position after crop so the cropped area stays in the same screen location
 const adjustPositionForCrop = (sel) => {
 	// Before crop: selection at (sel.x, sel.y) appears at screen position (position + sel * zoom)
@@ -208,6 +224,9 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 }
 .zoom-indicator {
 	font-size: 13px;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
 }
 .zoom-input {
 	width: 50px;
@@ -218,10 +237,65 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 	font-size: 13px;
 	padding: 2px 4px;
 	text-align: right;
+	box-sizing: border-box;
+	height: 24px;
 }
 .zoom-input:focus {
 	outline: none;
 	border-color: #888;
+}
+.kebab-menu {
+	position: relative;
+	display: inline-block;
+}
+.kebab-btn {
+	background: transparent;
+	border: 1px solid #666;
+	color: #aaa;
+	font-size: 10px;
+	padding: 4px 6px;
+	cursor: pointer;
+	border-radius: 3px;
+	box-sizing: border-box;
+	height: 24px;
+}
+.kebab-btn:hover {
+	color: #fff;
+	border-color: #888;
+}
+.kebab-backdrop {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	z-index: 99;
+}
+.kebab-dropdown {
+	position: absolute;
+	top: 100%;
+	margin-top: 4px;
+	background: #fefefe;
+	border-radius: 6px;
+	box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+	z-index: 100;
+	min-width: 120px;
+	overflow: hidden;
+}
+.kebab-dropdown button {
+	display: block;
+	width: 100%;
+	padding: 8px 12px;
+	border: none;
+	background: none;
+	text-align: left;
+	cursor: pointer;
+	font-size: 13px;
+	font-weight: bold;
+	color: #333;
+}
+.kebab-dropdown button:hover {
+	background: #f0f0f0;
 }
 .zoomable-canvas-wrapper {
 	height: calc(100vh - 240px);
