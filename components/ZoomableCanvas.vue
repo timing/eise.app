@@ -85,8 +85,8 @@ const handleWheel = (event) => {
 	const mouseY = event.clientY - rect.top;
 
 	const oldZoom = zoomLevel.value;
-	// Proportional zoom: 10% per scroll step, feels consistent at any zoom level
-	const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
+	// Proportional zoom: 5% per scroll step, feels consistent at any zoom level
+	const factor = event.deltaY < 0 ? 1.035 : 1 / 1.035;
 	zoomLevel.value = Math.max(0.1, Math.min(15, zoomLevel.value * factor));
 	zoomLevel.value = Math.round(zoomLevel.value * 100) / 100;
 

@@ -647,7 +647,7 @@ fn main(
         let offsetX = coarseDx + fdx - fineRadius;
         let offsetY = coarseDy + fdy - fineRadius;
 
-        let score = computeNCC(frameIdx, apIdx, offsetX, offsetY, false);  // false = use original
+        let score = computeNCC(frameIdx, apIdx, offsetX, offsetY, true);  // true = use blurred (prevents demosaic pattern snapping)
         if (score > bestScore) {
             bestScore = score;
             bestDx = offsetX;
