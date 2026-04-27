@@ -263,8 +263,9 @@ fn main(
 }
 `;
 
-// Gaussian blur shader for packed u8 grayscale - suppresses demosaic artifacts before template matching
-// 5x5 Gaussian kernel applied to packed u8 data (4 pixels per u32)
+// Gaussian blur shader for packed u8 grayscale - suppresses demosaic/compression artifacts before template matching
+// 7x7 Gaussian kernel (σ≈1.5) applied to packed u8 data (4 pixels per u32)
+// Stronger than 5x5 to properly suppress 2px Bayer pattern and 4/8px DCT block artifacts
 // Skips blur near black pixels to preserve limb edges
 const blurPackedShaderCode = `
 struct BlurParams {
@@ -290,10 +291,10 @@ fn sampleInput(frameIdx: u32, x: i32, y: i32) -> u32 {
     return (inputPacked[packedIdx] >> byteOffset) & 0xFFu;
 }
 
-// Check if 5x5 neighborhood has any near-black pixels
+// Check if 7x7 neighborhood has any near-black pixels
 fn hasNearBlack(frameIdx: u32, x: i32, y: i32) -> bool {
-    for (var dy: i32 = -2; dy <= 2; dy++) {
-        for (var dx: i32 = -2; dx <= 2; dx++) {
+    for (var dy: i32 = -3; dy <= 3; dy++) {
+        for (var dx: i32 = -3; dx <= 3; dx++) {
             if (sampleInput(frameIdx, x + dx, y + dy) < BLACK_THRESHOLD) {
                 return true;
             }
@@ -302,7 +303,7 @@ fn hasNearBlack(frameIdx: u32, x: i32, y: i32) -> bool {
     return false;
 }
 
-// Apply 5x5 Gaussian blur at a single pixel
+// Apply 7x7 Gaussian blur at a single pixel (σ≈1.5, sum=4096)
 fn blurPixel(frameIdx: u32, x: i32, y: i32) -> u32 {
     // Skip blur near black pixels (preserves limb edges)
     if (hasNearBlack(frameIdx, x, y)) {
@@ -310,37 +311,64 @@ fn blurPixel(frameIdx: u32, x: i32, y: i32) -> u32 {
     }
 
     var sum: u32 = 0u;
-    // Row -2: [1, 4, 6, 4, 1]
-    sum += sampleInput(frameIdx, x - 2, y - 2) * 1u;
-    sum += sampleInput(frameIdx, x - 1, y - 2) * 4u;
-    sum += sampleInput(frameIdx, x,     y - 2) * 6u;
-    sum += sampleInput(frameIdx, x + 1, y - 2) * 4u;
-    sum += sampleInput(frameIdx, x + 2, y - 2) * 1u;
-    // Row -1: [4, 16, 24, 16, 4]
-    sum += sampleInput(frameIdx, x - 2, y - 1) * 4u;
-    sum += sampleInput(frameIdx, x - 1, y - 1) * 16u;
-    sum += sampleInput(frameIdx, x,     y - 1) * 24u;
-    sum += sampleInput(frameIdx, x + 1, y - 1) * 16u;
-    sum += sampleInput(frameIdx, x + 2, y - 1) * 4u;
-    // Row 0: [6, 24, 36, 24, 6]
-    sum += sampleInput(frameIdx, x - 2, y) * 6u;
-    sum += sampleInput(frameIdx, x - 1, y) * 24u;
-    sum += sampleInput(frameIdx, x,     y) * 36u;
-    sum += sampleInput(frameIdx, x + 1, y) * 24u;
-    sum += sampleInput(frameIdx, x + 2, y) * 6u;
-    // Row +1: [4, 16, 24, 16, 4]
-    sum += sampleInput(frameIdx, x - 2, y + 1) * 4u;
-    sum += sampleInput(frameIdx, x - 1, y + 1) * 16u;
-    sum += sampleInput(frameIdx, x,     y + 1) * 24u;
-    sum += sampleInput(frameIdx, x + 1, y + 1) * 16u;
-    sum += sampleInput(frameIdx, x + 2, y + 1) * 4u;
-    // Row +2: [1, 4, 6, 4, 1]
-    sum += sampleInput(frameIdx, x - 2, y + 2) * 1u;
-    sum += sampleInput(frameIdx, x - 1, y + 2) * 4u;
-    sum += sampleInput(frameIdx, x,     y + 2) * 6u;
-    sum += sampleInput(frameIdx, x + 1, y + 2) * 4u;
-    sum += sampleInput(frameIdx, x + 2, y + 2) * 1u;
-    return sum >> 8u;  // Divide by 256
+    // 7x7 Gaussian kernel, 1D weights: [2, 7, 14, 18, 14, 7, 2], sum=4096
+    // Row -3: [4, 14, 28, 36, 28, 14, 4]
+    sum += sampleInput(frameIdx, x - 3, y - 3) * 4u;
+    sum += sampleInput(frameIdx, x - 2, y - 3) * 14u;
+    sum += sampleInput(frameIdx, x - 1, y - 3) * 28u;
+    sum += sampleInput(frameIdx, x,     y - 3) * 36u;
+    sum += sampleInput(frameIdx, x + 1, y - 3) * 28u;
+    sum += sampleInput(frameIdx, x + 2, y - 3) * 14u;
+    sum += sampleInput(frameIdx, x + 3, y - 3) * 4u;
+    // Row -2: [14, 49, 98, 126, 98, 49, 14]
+    sum += sampleInput(frameIdx, x - 3, y - 2) * 14u;
+    sum += sampleInput(frameIdx, x - 2, y - 2) * 49u;
+    sum += sampleInput(frameIdx, x - 1, y - 2) * 98u;
+    sum += sampleInput(frameIdx, x,     y - 2) * 126u;
+    sum += sampleInput(frameIdx, x + 1, y - 2) * 98u;
+    sum += sampleInput(frameIdx, x + 2, y - 2) * 49u;
+    sum += sampleInput(frameIdx, x + 3, y - 2) * 14u;
+    // Row -1: [28, 98, 196, 252, 196, 98, 28]
+    sum += sampleInput(frameIdx, x - 3, y - 1) * 28u;
+    sum += sampleInput(frameIdx, x - 2, y - 1) * 98u;
+    sum += sampleInput(frameIdx, x - 1, y - 1) * 196u;
+    sum += sampleInput(frameIdx, x,     y - 1) * 252u;
+    sum += sampleInput(frameIdx, x + 1, y - 1) * 196u;
+    sum += sampleInput(frameIdx, x + 2, y - 1) * 98u;
+    sum += sampleInput(frameIdx, x + 3, y - 1) * 28u;
+    // Row 0: [36, 126, 252, 324, 252, 126, 36]
+    sum += sampleInput(frameIdx, x - 3, y) * 36u;
+    sum += sampleInput(frameIdx, x - 2, y) * 126u;
+    sum += sampleInput(frameIdx, x - 1, y) * 252u;
+    sum += sampleInput(frameIdx, x,     y) * 324u;
+    sum += sampleInput(frameIdx, x + 1, y) * 252u;
+    sum += sampleInput(frameIdx, x + 2, y) * 126u;
+    sum += sampleInput(frameIdx, x + 3, y) * 36u;
+    // Row +1: [28, 98, 196, 252, 196, 98, 28]
+    sum += sampleInput(frameIdx, x - 3, y + 1) * 28u;
+    sum += sampleInput(frameIdx, x - 2, y + 1) * 98u;
+    sum += sampleInput(frameIdx, x - 1, y + 1) * 196u;
+    sum += sampleInput(frameIdx, x,     y + 1) * 252u;
+    sum += sampleInput(frameIdx, x + 1, y + 1) * 196u;
+    sum += sampleInput(frameIdx, x + 2, y + 1) * 98u;
+    sum += sampleInput(frameIdx, x + 3, y + 1) * 28u;
+    // Row +2: [14, 49, 98, 126, 98, 49, 14]
+    sum += sampleInput(frameIdx, x - 3, y + 2) * 14u;
+    sum += sampleInput(frameIdx, x - 2, y + 2) * 49u;
+    sum += sampleInput(frameIdx, x - 1, y + 2) * 98u;
+    sum += sampleInput(frameIdx, x,     y + 2) * 126u;
+    sum += sampleInput(frameIdx, x + 1, y + 2) * 98u;
+    sum += sampleInput(frameIdx, x + 2, y + 2) * 49u;
+    sum += sampleInput(frameIdx, x + 3, y + 2) * 14u;
+    // Row +3: [4, 14, 28, 36, 28, 14, 4]
+    sum += sampleInput(frameIdx, x - 3, y + 3) * 4u;
+    sum += sampleInput(frameIdx, x - 2, y + 3) * 14u;
+    sum += sampleInput(frameIdx, x - 1, y + 3) * 28u;
+    sum += sampleInput(frameIdx, x,     y + 3) * 36u;
+    sum += sampleInput(frameIdx, x + 1, y + 3) * 28u;
+    sum += sampleInput(frameIdx, x + 2, y + 3) * 14u;
+    sum += sampleInput(frameIdx, x + 3, y + 3) * 4u;
+    return sum >> 12u;  // Divide by 4096
 }
 
 @compute @workgroup_size(256, 1, 1)
@@ -1873,7 +1901,7 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
     );
     vngPass.end();
 
-    // Apply 5x5 Gaussian blur to suppress demosaic artifacts before template matching
+    // Apply 7x7 Gaussian blur to suppress demosaic/compression artifacts before template matching
     const blurParamsBuffer = stackDevice.createBuffer({
         size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
