@@ -162,18 +162,21 @@
 				<h4>Stacking mode <span class="info-icon" @click="showStackingModeInfo = !showStackingModeInfo">ⓘ</span></h4>
 				<div class="radio-group">
 					<label class="radio-option">
-						<input type="radio" v-model="drizzleMode" value="1.5x" />
-						1.5x Drizzle (recommended)
-					</label>
-					<label class="radio-option">
-						<input type="radio" v-model="drizzleMode" value="1x" />
+						<input type="radio" v-model="drizzleMethod" value="normal" />
 						Normal (1x)
 					</label>
+					<label class="radio-option">
+						<input type="radio" v-model="drizzleMethod" value="bicubic" />
+						1.5x Bicubic drizzle
+					</label>
+					<label class="radio-option">
+						<input type="radio" v-model="drizzleMethod" value="drizzle" />
+						1.5x Pixfrac drizzle
+					</label>
 				</div>
-
-				<label v-if="drizzleMode === '1.5x'" class="checkbox-option">
+				<label v-if="drizzleMethod === 'drizzle'" class="checkbox-option">
 					Pixfrac:
-					<input type="number" min="0.3" max="1.0" step="0.05" v-model.number="pixfrac" class="number-input" />
+					<input type="number" min="0.3" max="0.95" step="0.05" v-model.number="pixfrac" class="number-input" />
 				</label>
 
 				<label class="checkbox-option">
@@ -186,7 +189,7 @@
 					<input type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="number-input" />
 				</label>
 
-								<p v-if="showStackingModeInfo" class="info-text"><strong>Drizzle:</strong> Uses sub-pixel offsets to increase output resolution by 1.5x. Best with 100+ frames.<br><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Pixfrac:</strong> Drop shrink factor for drizzle. Smaller values (0.5-0.7) recover more sub-pixel resolution but need more frames for coverage. 1.0 = no shrinking. Default 0.7 is a good balance.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 30 is a safe middle ground.</p>
+								<p v-if="showStackingModeInfo" class="info-text"><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Bicubic drizzle:</strong> 1.5x upscale using bicubic interpolation. Good general-purpose drizzle.<br><strong>Pixfrac drizzle:</strong> True Fruchter &amp; Hook drizzle with area-overlap accumulation. Each input pixel is shrunk by pixfrac before mapping to the output grid. Smaller pixfrac (0.5-0.7) recovers more sub-pixel detail but needs more frames for coverage.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 30 is a safe middle ground.</p>
 
 				<template v-if="targetType !== 'sun-moon'">
 					<div class="separator"></div>
@@ -328,9 +331,10 @@ const cropMarginPercent = ref(10);
 // Quality threshold mode: 'manual' for interactive selection, 'percentage' for automatic, 'continuous' for batch
 const qualityMode = ref('manual');
 const stackPercentage = ref(30);
-const drizzleMode = ref('1.5x'); // '1x' or '1.5x'
+const drizzleMode = ref('1.5x'); // kept for backward compat with saved settings migration
 const minApQuality = ref(0.3); // Alignment point quality threshold (NCC score)
 const apPatchSize = ref(30); // Alignment point patch size in pixels
+const drizzleMethod = ref('normal'); // 'normal', 'bicubic', or 'drizzle'
 const pixfrac = ref(0.7); // Drizzle drop shrink factor (Fruchter & Hook)
 
 // Target type: 'planet' or 'sun-moon' - affects cut-off frame detection
@@ -338,7 +342,7 @@ const targetType = ref('planet');
 const surfaceMode = computed(() => targetType.value === 'sun-moon');
 
 // Lite mode enforced settings (applies to mobile + no-GPU desktop)
-const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMode.value === '1.5x' ? 1.5 : 1.0));
+const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMethod.value === 'normal' ? 1.0 : 1.5));
 const effectiveMaxFrames = computed(() => liteMode.value ? 100 : (enableMaxFrames.value ? selectedMaxFrames.value : -1));
 const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPercent.value);
 const effectiveQualityMode = computed(() => {
@@ -358,7 +362,12 @@ function loadSettings() {
 			const settings = JSON.parse(saved);
 			if (settings.qualityMode) qualityMode.value = settings.qualityMode;
 			if (settings.stackPercentage) stackPercentage.value = settings.stackPercentage;
-			if (settings.drizzleMode) drizzleMode.value = settings.drizzleMode;
+			// Migrate old drizzleMode to drizzleMethod
+			if (settings.drizzleMethod) {
+				drizzleMethod.value = settings.drizzleMethod;
+			} else if (settings.drizzleMode) {
+				drizzleMethod.value = settings.drizzleMode === '1x' ? 'normal' : 'bicubic';
+			}
 			if (settings.cropMarginPercent) cropMarginPercent.value = settings.cropMarginPercent;
 			if (settings.enableMaxFrames !== undefined) enableMaxFrames.value = settings.enableMaxFrames;
 			if (settings.selectedMaxFrames) selectedMaxFrames.value = settings.selectedMaxFrames;
@@ -366,6 +375,7 @@ function loadSettings() {
 			if (settings.minApQuality !== undefined) minApQuality.value = settings.minApQuality;
 			if (settings.apPatchSize !== undefined) apPatchSize.value = settings.apPatchSize;
 			if (settings.pixfrac !== undefined) pixfrac.value = settings.pixfrac;
+			if (settings.drizzleMethod) drizzleMethod.value = settings.drizzleMethod;
 		}
 	} catch (e) {
 		console.warn('Failed to load settings:', e);
@@ -378,14 +388,15 @@ function saveSettings() {
 		const settings = {
 			qualityMode: qualityMode.value,
 			stackPercentage: stackPercentage.value,
-			drizzleMode: drizzleMode.value,
+			drizzleMethod: drizzleMethod.value,
 			cropMarginPercent: cropMarginPercent.value,
 			enableMaxFrames: enableMaxFrames.value,
 			selectedMaxFrames: selectedMaxFrames.value,
 			targetType: targetType.value,
 			minApQuality: minApQuality.value,
 			apPatchSize: apPatchSize.value,
-			pixfrac: pixfrac.value
+			pixfrac: pixfrac.value,
+			drizzleMethod: drizzleMethod.value
 		};
 		localStorage.setItem('eise-settings', JSON.stringify(settings));
 	} catch (e) {
@@ -394,7 +405,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMode, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, pixfrac], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, pixfrac], saveSettings);
 
 onMounted(async () => {
 	loadSettings();
@@ -490,7 +501,10 @@ const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatch
 // Sync stacking settings to shared state for stacker to use
 watch(minApQuality, (val) => setSharedMinApQuality(val), { immediate: true });
 watch(apPatchSize, (val) => setSharedApPatchSize(val), { immediate: true });
-watch(pixfrac, (val) => setSharedPixfrac(val), { immediate: true });
+// Effective pixfrac: bicubic method uses 1.0, drizzle method uses user value
+const effectivePixfrac = computed(() => drizzleMethod.value === 'drizzle' ? pixfrac.value : 1.0);
+// Migrate old drizzleMode setting to new drizzleMethod
+watch(effectivePixfrac, (val) => setSharedPixfrac(val), { immediate: true });
 
 // Listen for upload errors to display them
 on('upload-error', (message) => {

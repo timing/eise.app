@@ -447,6 +447,56 @@ fn readPixelSafe(ix: i32, iy: i32) -> vec4<f32> {
     return readPixelFloat32(u32(cy) * params.inWidth + u32(cx));
 }
 
+fn cubicWeight(t: f32) -> f32 {
+    let at = abs(t);
+    if (at <= 1.0) {
+        return (1.5 * at - 2.5) * at * at + 1.0;
+    } else if (at < 2.0) {
+        return ((-0.5 * at + 2.5) * at - 4.0) * at + 2.0;
+    }
+    return 0.0;
+}
+
+fn sampleFrameBicubic(x: f32, y: f32) -> vec4<f32> {
+    let x0 = i32(floor(x));
+    let y0 = i32(floor(y));
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+    let w = i32(params.inWidth);
+    let h = i32(params.inHeight);
+
+    let wx0 = cubicWeight(fx + 1.0);
+    let wx1 = cubicWeight(fx);
+    let wx2 = cubicWeight(fx - 1.0);
+    let wx3 = cubicWeight(fx - 2.0);
+    let wy0 = cubicWeight(fy + 1.0);
+    let wy1 = cubicWeight(fy);
+    let wy2 = cubicWeight(fy - 1.0);
+    let wy3 = cubicWeight(fy - 2.0);
+
+    var result = vec4<f32>(0.0);
+    var totalWeight: f32 = 0.0;
+
+    for (var j: i32 = -1; j <= 2; j++) {
+        let cy = clamp(y0 + j, 0, h - 1);
+        let wy = select(select(select(wy3, wy2, j == 1), wy1, j == 0), wy0, j == -1);
+        for (var i: i32 = -1; i <= 2; i++) {
+            let cx = clamp(x0 + i, 0, w - 1);
+            let wx = select(select(select(wx3, wx2, i == 1), wx1, i == 0), wx0, i == -1);
+            let idx = u32(cy * w + cx);
+            let pixel = readPixelFloat32(idx);
+            let weight = wx * wy;
+            result += pixel * weight;
+            totalWeight += weight;
+        }
+    }
+
+    if (totalWeight > 0.0) {
+        result = result / totalWeight;
+    }
+    return result;
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ox = gid.x;
@@ -519,65 +569,80 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let brightnessScale = select(params.refBrightness / frameBrightness, 1.0, frameBrightness < 1.0);
 
     let fw = params.frameWeight;
-    let b = brightnessScale;
-    let halfDrop = params.pixfrac * 0.5;
+    let bScale = brightnessScale;
 
-    // Iterate over input pixels whose drops could overlap this output cell
-    // The output cell in input coords spans [cellMinX, cellMaxX] x [cellMinY, cellMaxY]
-    // After applying displacement, input pixel (ix, iy) maps to (ix + dispX, iy + dispY) in input coords
-    // So we need input pixels where (ix + dispX) ± halfDrop overlaps [cellMinX, cellMaxX]
-    // => ix in [cellMinX - dispX - halfDrop, cellMaxX - dispX + halfDrop]
-    let searchMinX = i32(floor(cellMinX - dispX - halfDrop));
-    let searchMaxX = i32(floor(cellMaxX - dispX + halfDrop));
-    let searchMinY = i32(floor(cellMinY - dispY - halfDrop));
-    let searchMaxY = i32(floor(cellMaxY - dispY + halfDrop));
+    // pixfrac >= 1.0: bicubic interpolation (classic drizzle)
+    // pixfrac < 1.0: true area-overlap drizzle (Fruchter & Hook)
+    if (params.pixfrac >= 1.0) {
+        let srcX = cellCenterX + dispX;
+        let srcY = cellCenterY + dispY;
 
-    var accumColorR: f32 = 0.0;
-    var accumColorG: f32 = 0.0;
-    var accumColorB: f32 = 0.0;
-    var accumArea: f32 = 0.0;
+        if (srcX < 0.0 || srcX >= f32(params.inWidth) - 1.0 ||
+            srcY < 0.0 || srcY >= f32(params.inHeight) - 1.0) {
+            return;
+        }
 
-    for (var iy: i32 = searchMinY; iy <= searchMaxY; iy++) {
-        for (var ix: i32 = searchMinX; ix <= searchMaxX; ix++) {
-            // Bounds check on input frame
-            if (ix < 0 || ix >= i32(params.inWidth) || iy < 0 || iy >= i32(params.inHeight)) {
-                continue;
-            }
+        let color = sampleFrameBicubic(srcX, srcY);
 
-            // Input pixel drop bounds in input-pixel coords (after warp)
-            let dropCenterX = f32(ix) + 0.5 + dispX;
-            let dropCenterY = f32(iy) + 0.5 + dispY;
-            let dropMinX = dropCenterX - halfDrop;
-            let dropMaxX = dropCenterX + halfDrop;
-            let dropMinY = dropCenterY - halfDrop;
-            let dropMaxY = dropCenterY + halfDrop;
+        if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
+            return;
+        }
 
-            // Rectangle intersection with output cell (in input coords)
-            let overlapX = max(0.0, min(dropMaxX, cellMaxX) - max(dropMinX, cellMinX));
-            let overlapY = max(0.0, min(dropMaxY, cellMaxY) - max(dropMinY, cellMinY));
-            let overlapArea = overlapX * overlapY;
+        accumR[outIdx] += color.r * bScale * fw;
+        accumG[outIdx] += color.g * bScale * fw;
+        accumB[outIdx] += color.b * bScale * fw;
+        accumW[outIdx] += fw;
+    } else {
+        let halfDrop = params.pixfrac * 0.5;
 
-            if (overlapArea > 0.0) {
-                let color = readPixelSafe(ix, iy);
+        let searchMinX = i32(floor(cellMinX + dispX - halfDrop));
+        let searchMaxX = i32(floor(cellMaxX + dispX + halfDrop));
+        let searchMinY = i32(floor(cellMinY + dispY - halfDrop));
+        let searchMaxY = i32(floor(cellMaxY + dispY + halfDrop));
 
-                // Skip black pixels
-                if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
+        var accumColorR: f32 = 0.0;
+        var accumColorG: f32 = 0.0;
+        var accumColorB: f32 = 0.0;
+        var accumArea: f32 = 0.0;
+
+        for (var iy: i32 = searchMinY; iy <= searchMaxY; iy++) {
+            for (var ix: i32 = searchMinX; ix <= searchMaxX; ix++) {
+                if (ix < 0 || ix >= i32(params.inWidth) || iy < 0 || iy >= i32(params.inHeight)) {
                     continue;
                 }
 
-                accumColorR += color.r * overlapArea;
-                accumColorG += color.g * overlapArea;
-                accumColorB += color.b * overlapArea;
-                accumArea += overlapArea;
+                let dropCenterX = f32(ix) + 0.5 - dispX;
+                let dropCenterY = f32(iy) + 0.5 - dispY;
+                let dropMinX = dropCenterX - halfDrop;
+                let dropMaxX = dropCenterX + halfDrop;
+                let dropMinY = dropCenterY - halfDrop;
+                let dropMaxY = dropCenterY + halfDrop;
+
+                let overlapX = max(0.0, min(dropMaxX, cellMaxX) - max(dropMinX, cellMinX));
+                let overlapY = max(0.0, min(dropMaxY, cellMaxY) - max(dropMinY, cellMinY));
+                let overlapArea = overlapX * overlapY;
+
+                if (overlapArea > 0.0) {
+                    let color = readPixelSafe(ix, iy);
+
+                    if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
+                        continue;
+                    }
+
+                    accumColorR += color.r * overlapArea;
+                    accumColorG += color.g * overlapArea;
+                    accumColorB += color.b * overlapArea;
+                    accumArea += overlapArea;
+                }
             }
         }
-    }
 
-    if (accumArea > 0.0) {
-        accumR[outIdx] += accumColorR * b * fw;
-        accumG[outIdx] += accumColorG * b * fw;
-        accumB[outIdx] += accumColorB * b * fw;
-        accumW[outIdx] += accumArea * fw;
+        if (accumArea > 0.0) {
+            accumR[outIdx] += accumColorR * bScale * fw;
+            accumG[outIdx] += accumColorG * bScale * fw;
+            accumB[outIdx] += accumColorB * bScale * fw;
+            accumW[outIdx] += accumArea * fw;
+        }
     }
 }
 `;
@@ -706,6 +771,56 @@ fn readPixelSafe(ix: i32, iy: i32) -> vec4<f32> {
     return readPixel(u32(cy) * params.inWidth + u32(cx));
 }
 
+fn cubicWeight(t: f32) -> f32 {
+    let at = abs(t);
+    if (at <= 1.0) {
+        return (1.5 * at - 2.5) * at * at + 1.0;
+    } else if (at < 2.0) {
+        return ((-0.5 * at + 2.5) * at - 4.0) * at + 2.0;
+    }
+    return 0.0;
+}
+
+fn sampleFrame(x: f32, y: f32) -> vec4<f32> {
+    let x0 = i32(floor(x));
+    let y0 = i32(floor(y));
+    let fx = x - f32(x0);
+    let fy = y - f32(y0);
+    let w = i32(params.inWidth);
+    let h = i32(params.inHeight);
+
+    let wx0 = cubicWeight(fx + 1.0);
+    let wx1 = cubicWeight(fx);
+    let wx2 = cubicWeight(fx - 1.0);
+    let wx3 = cubicWeight(fx - 2.0);
+    let wy0 = cubicWeight(fy + 1.0);
+    let wy1 = cubicWeight(fy);
+    let wy2 = cubicWeight(fy - 1.0);
+    let wy3 = cubicWeight(fy - 2.0);
+
+    var result = vec4<f32>(0.0);
+    var totalWeight: f32 = 0.0;
+
+    for (var j: i32 = -1; j <= 2; j++) {
+        let cy = clamp(y0 + j, 0, h - 1);
+        let wy = select(select(select(wy3, wy2, j == 1), wy1, j == 0), wy0, j == -1);
+        for (var i: i32 = -1; i <= 2; i++) {
+            let cx = clamp(x0 + i, 0, w - 1);
+            let wx = select(select(select(wx3, wx2, i == 1), wx1, i == 0), wx0, i == -1);
+            let idx = u32(cy * w + cx);
+            let pixel = readPixel(idx);
+            let weight = wx * wy;
+            result += pixel * weight;
+            totalWeight += weight;
+        }
+    }
+
+    if (totalWeight > 0.0) {
+        result = result / totalWeight;
+    }
+    return result;
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ox = gid.x;
@@ -766,59 +881,80 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let fw = params.frameWeight;
-    let b = params.brightnessScale;
-    let halfDrop = params.pixfrac * 0.5;
+    let bScale = params.brightnessScale;
 
-    // Iterate over input pixels whose drops could overlap this output cell
-    let searchMinX = i32(floor(cellMinX - dispX - halfDrop));
-    let searchMaxX = i32(floor(cellMaxX - dispX + halfDrop));
-    let searchMinY = i32(floor(cellMinY - dispY - halfDrop));
-    let searchMaxY = i32(floor(cellMaxY - dispY + halfDrop));
+    // pixfrac >= 1.0: bicubic interpolation (classic drizzle)
+    // pixfrac < 1.0: true area-overlap drizzle (Fruchter & Hook)
+    if (params.pixfrac >= 1.0) {
+        let srcX = cellCenterX + dispX;
+        let srcY = cellCenterY + dispY;
 
-    var accumColorR: f32 = 0.0;
-    var accumColorG: f32 = 0.0;
-    var accumColorB: f32 = 0.0;
-    var accumArea: f32 = 0.0;
+        if (srcX < 0.0 || srcX >= f32(params.inWidth) - 1.0 ||
+            srcY < 0.0 || srcY >= f32(params.inHeight) - 1.0) {
+            return;
+        }
 
-    for (var iy: i32 = searchMinY; iy <= searchMaxY; iy++) {
-        for (var ix: i32 = searchMinX; ix <= searchMaxX; ix++) {
-            if (ix < 0 || ix >= i32(params.inWidth) || iy < 0 || iy >= i32(params.inHeight)) {
-                continue;
-            }
+        let color = sampleFrame(srcX, srcY);
 
-            // Input pixel drop bounds in input-pixel coords (after warp)
-            let dropCenterX = f32(ix) + 0.5 + dispX;
-            let dropCenterY = f32(iy) + 0.5 + dispY;
-            let dropMinX = dropCenterX - halfDrop;
-            let dropMaxX = dropCenterX + halfDrop;
-            let dropMinY = dropCenterY - halfDrop;
-            let dropMaxY = dropCenterY + halfDrop;
+        if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
+            return;
+        }
 
-            // Rectangle intersection with output cell
-            let overlapX = max(0.0, min(dropMaxX, cellMaxX) - max(dropMinX, cellMinX));
-            let overlapY = max(0.0, min(dropMaxY, cellMaxY) - max(dropMinY, cellMinY));
-            let overlapArea = overlapX * overlapY;
+        accumR[idx] += color.r * bScale * fw;
+        accumG[idx] += color.g * bScale * fw;
+        accumB[idx] += color.b * bScale * fw;
+        accumW[idx] += fw;
+    } else {
+        let halfDrop = params.pixfrac * 0.5;
 
-            if (overlapArea > 0.0) {
-                let color = readPixelSafe(ix, iy);
+        let searchMinX = i32(floor(cellMinX + dispX - halfDrop));
+        let searchMaxX = i32(floor(cellMaxX + dispX + halfDrop));
+        let searchMinY = i32(floor(cellMinY + dispY - halfDrop));
+        let searchMaxY = i32(floor(cellMaxY + dispY + halfDrop));
 
-                if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
+        var accumColorR: f32 = 0.0;
+        var accumColorG: f32 = 0.0;
+        var accumColorB: f32 = 0.0;
+        var accumArea: f32 = 0.0;
+
+        for (var iy: i32 = searchMinY; iy <= searchMaxY; iy++) {
+            for (var ix: i32 = searchMinX; ix <= searchMaxX; ix++) {
+                if (ix < 0 || ix >= i32(params.inWidth) || iy < 0 || iy >= i32(params.inHeight)) {
                     continue;
                 }
 
-                accumColorR += color.r * overlapArea;
-                accumColorG += color.g * overlapArea;
-                accumColorB += color.b * overlapArea;
-                accumArea += overlapArea;
+                let dropCenterX = f32(ix) + 0.5 - dispX;
+                let dropCenterY = f32(iy) + 0.5 - dispY;
+                let dropMinX = dropCenterX - halfDrop;
+                let dropMaxX = dropCenterX + halfDrop;
+                let dropMinY = dropCenterY - halfDrop;
+                let dropMaxY = dropCenterY + halfDrop;
+
+                let overlapX = max(0.0, min(dropMaxX, cellMaxX) - max(dropMinX, cellMinX));
+                let overlapY = max(0.0, min(dropMaxY, cellMaxY) - max(dropMinY, cellMinY));
+                let overlapArea = overlapX * overlapY;
+
+                if (overlapArea > 0.0) {
+                    let color = readPixelSafe(ix, iy);
+
+                    if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
+                        continue;
+                    }
+
+                    accumColorR += color.r * overlapArea;
+                    accumColorG += color.g * overlapArea;
+                    accumColorB += color.b * overlapArea;
+                    accumArea += overlapArea;
+                }
             }
         }
-    }
 
-    if (accumArea > 0.0) {
-        accumR[idx] += accumColorR * b * fw;
-        accumG[idx] += accumColorG * b * fw;
-        accumB[idx] += accumColorB * b * fw;
-        accumW[idx] += accumArea * fw;
+        if (accumArea > 0.0) {
+            accumR[idx] += accumColorR * bScale * fw;
+            accumG[idx] += accumColorG * bScale * fw;
+            accumB[idx] += accumColorB * bScale * fw;
+            accumW[idx] += accumArea * fw;
+        }
     }
 }
 `;
