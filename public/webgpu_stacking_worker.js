@@ -160,7 +160,7 @@ self.addEventListener('message', async (e) => {
     // Step 1: Initialize stacking
     if (type === 'init-stacking') {
         const { width, height, srcWidth, srcHeight, drizzleScale, alignmentPoints, patchSize, refBrightness, minApQuality = 0.3,
-                bayerPattern = -1, bitDepth = 8, bayerScale = 1.0 } = e.data;
+                bayerPattern = -1, bitDepth = 8, bayerScale = 1.0, pixfrac = 1.0 } = e.data;
 
         try {
             if (!stackingReady) {
@@ -185,7 +185,7 @@ self.addEventListener('message', async (e) => {
                 width, height, srcWidth: srcWidth || width, srcHeight: srcHeight || height,
                 outWidth, outHeight,
                 alignmentPoints, patchSize, drizzleScale, refBrightness, minApQuality,
-                bayerPattern, bitDepth, bayerScale
+                bayerPattern, bitDepth, bayerScale, pixfrac
             };
 
             self.postMessage({ type: 'init-stacking-done', outWidth, outHeight });
@@ -304,7 +304,8 @@ self.addEventListener('message', async (e) => {
                 ctx.drizzleScale,
                 ctx.refBrightness,
                 appliedOffset,
-                ctx.minApQuality
+                ctx.minApQuality,
+                ctx.pixfrac
             );
 
             self.postMessage({ type: 'stack-batch-done', count: frames.length });
@@ -346,7 +347,8 @@ self.addEventListener('message', async (e) => {
                 ctx.alignmentPoints,
                 ctx.patchSize,
                 ctx.drizzleScale,
-                ctx.minApQuality
+                ctx.minApQuality,
+                ctx.pixfrac
             );
 
             self.postMessage({ type: 'stack-batch-done', count: frames.length });

@@ -16,7 +16,7 @@ export function useStacker() {
     const { addLog, emit, on } = useEventBus();
     const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
-    const { getMinApQuality, getApPatchSize } = useProcessingState();
+    const { getMinApQuality, getApPatchSize, getPixfrac } = useProcessingState();
 
     // Track active workers for cancellation
     let cancelled = false;
@@ -705,7 +705,8 @@ export function useStacker() {
                     minApQuality: getMinApQuality(),
                     bayerPattern,
                     bitDepth: is16bit ? 16 : 8,
-                    bayerScale: is16bit ? (65535 / ((1 << (frameReReader.header?.pixelDepth || 16)) - 1)) : 1.0
+                    bayerScale: is16bit ? (65535 / ((1 << (frameReReader.header?.pixelDepth || 16)) - 1)) : 1.0,
+                    pixfrac: drizzleScale > 1 ? getPixfrac() : 1.0
                 });
             });
             addLog('GPU stacker initialized');
@@ -1324,7 +1325,8 @@ export function useStacker() {
                 gpuWorker.addEventListener('message', handler);
                 gpuWorker.postMessage({
                     type: 'init-stacking',
-                    width, height, drizzleScale, alignmentPoints, patchSize, refBrightness, minApQuality: getMinApQuality()
+                    width, height, drizzleScale, alignmentPoints, patchSize, refBrightness, minApQuality: getMinApQuality(),
+                    pixfrac: drizzleScale > 1 ? getPixfrac() : 1.0
                 });
             });
 
@@ -1706,7 +1708,8 @@ export function useStacker() {
                 gpuStackWorker.addEventListener('message', handler);
                 gpuStackWorker.postMessage({
                     type: 'init-stacking',
-                    width: cropSize, height: cropSize, srcWidth, srcHeight, drizzleScale, alignmentPoints, patchSize, refBrightness, bayerPattern, bitDepth: is16bit ? 16 : 8
+                    width: cropSize, height: cropSize, srcWidth, srcHeight, drizzleScale, alignmentPoints, patchSize, refBrightness, bayerPattern, bitDepth: is16bit ? 16 : 8,
+                    pixfrac: drizzleScale > 1 ? getPixfrac() : 1.0
                 });
             });
 

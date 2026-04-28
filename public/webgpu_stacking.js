@@ -418,7 +418,7 @@ struct Params {
     searchOffsetX: f32,
     searchOffsetY: f32,
     frameWeight: f32,
-    _pad: u32,
+    pixfrac: f32,         // Drop shrink factor (0.0-1.0, typical 0.7)
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -441,54 +441,10 @@ fn readPixelFloat32(pixelIdx: u32) -> vec4<f32> {
     return vec4<f32>(r, g, b, a) * 255.0;
 }
 
-fn cubicWeight(t: f32) -> f32 {
-    let at = abs(t);
-    if (at <= 1.0) {
-        return (1.5 * at - 2.5) * at * at + 1.0;
-    } else if (at < 2.0) {
-        return ((-0.5 * at + 2.5) * at - 4.0) * at + 2.0;
-    }
-    return 0.0;
-}
-
-fn sampleFrameBicubic(x: f32, y: f32) -> vec4<f32> {
-    let x0 = i32(floor(x));
-    let y0 = i32(floor(y));
-    let fx = x - f32(x0);
-    let fy = y - f32(y0);
-    let w = i32(params.inWidth);
-    let h = i32(params.inHeight);
-
-    let wx0 = cubicWeight(fx + 1.0);
-    let wx1 = cubicWeight(fx);
-    let wx2 = cubicWeight(fx - 1.0);
-    let wx3 = cubicWeight(fx - 2.0);
-    let wy0 = cubicWeight(fy + 1.0);
-    let wy1 = cubicWeight(fy);
-    let wy2 = cubicWeight(fy - 1.0);
-    let wy3 = cubicWeight(fy - 2.0);
-
-    var result = vec4<f32>(0.0);
-    var totalWeight: f32 = 0.0;
-
-    for (var j: i32 = -1; j <= 2; j++) {
-        let cy = clamp(y0 + j, 0, h - 1);
-        let wy = select(select(select(wy3, wy2, j == 1), wy1, j == 0), wy0, j == -1);
-        for (var i: i32 = -1; i <= 2; i++) {
-            let cx = clamp(x0 + i, 0, w - 1);
-            let wx = select(select(select(wx3, wx2, i == 1), wx1, i == 0), wx0, i == -1);
-            let idx = u32(cy * w + cx);
-            let pixel = readPixelFloat32(idx);
-            let weight = wx * wy;
-            result += pixel * weight;
-            totalWeight += weight;
-        }
-    }
-
-    if (totalWeight > 0.0) {
-        result = result / totalWeight;
-    }
-    return result;
+fn readPixelSafe(ix: i32, iy: i32) -> vec4<f32> {
+    let cx = clamp(ix, 0, i32(params.inWidth) - 1);
+    let cy = clamp(iy, 0, i32(params.inHeight) - 1);
+    return readPixelFloat32(u32(cy) * params.inWidth + u32(cx));
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -502,24 +458,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let outIdx = oy * params.outWidth + ox;
     let invScale = 1.0 / params.drizzleScale;
-    let inX = f32(ox) * invScale;
-    let inY = f32(oy) * invScale;
 
-    // Gaussian interpolation params
+    // Output pixel cell in input-pixel coordinates
+    let cellMinX = f32(ox) * invScale;
+    let cellMaxX = f32(ox + 1u) * invScale;
+    let cellMinY = f32(oy) * invScale;
+    let cellMaxY = f32(oy + 1u) * invScale;
+    let cellCenterX = (cellMinX + cellMaxX) * 0.5;
+    let cellCenterY = (cellMinY + cellMaxY) * 0.5;
+
+    // Gaussian interpolation params for displacement
     let patchSize = f32(params.patchSize);
     let influenceRadius = patchSize * 4.0;
     let influenceRadius2 = influenceRadius * influenceRadius;
     let sigma2 = patchSize * 1.5 * patchSize * 1.5 * 2.0;
 
-    // Interpolate displacement from APs
-    var totalWeight: f32 = 0.0;
+    // Interpolate displacement from APs (at output pixel center)
+    var totalApWeight: f32 = 0.0;
     var weightedDx: f32 = 0.0;
     var weightedDy: f32 = 0.0;
 
     let frameIdx = params.frameIdx;
 
     for (var i: u32 = 0u; i < params.numAPs; i++) {
-        // Read shift for this frame and AP
         let shiftIdx = (frameIdx * params.numAPs + i) * 3u;
         let apDx = shifts[shiftIdx] + params.searchOffsetX;
         let apDy = shifts[shiftIdx + 1u] + params.searchOffsetY;
@@ -529,13 +490,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             continue;
         }
 
-        // Read AP position
         let apPacked = apPositions[i];
         let apX = f32(apPacked & 0xFFFFu);
         let apY = f32(apPacked >> 16u);
 
-        let dx = inX - apX;
-        let dy = inY - apY;
+        let dx = cellCenterX - apX;
+        let dy = cellCenterY - apY;
         let dist2 = dx * dx + dy * dy;
 
         if (dist2 < influenceRadius2) {
@@ -543,43 +503,82 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let weight = gaussWeight * quality;
             weightedDx += apDx * weight;
             weightedDy += apDy * weight;
-            totalWeight += weight;
+            totalApWeight += weight;
         }
     }
 
-    // Compute source coordinates
-    var srcX = inX;
-    var srcY = inY;
-    if (totalWeight > 0.0) {
-        srcX += weightedDx / totalWeight;
-        srcY += weightedDy / totalWeight;
-    }
-
-    // Bounds check
-    if (srcX < 0.0 || srcX >= f32(params.inWidth) - 1.0 ||
-        srcY < 0.0 || srcY >= f32(params.inHeight) - 1.0) {
-        return;
-    }
-
-    // Sample frame
-    let color = sampleFrameBicubic(srcX, srcY);
-
-    // Skip black pixels
-    if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
-        return;
+    var dispX: f32 = 0.0;
+    var dispY: f32 = 0.0;
+    if (totalApWeight > 0.0) {
+        dispX = weightedDx / totalApWeight;
+        dispY = weightedDy / totalApWeight;
     }
 
     // Compute brightness scale from GPU buffer
     let frameBrightness = brightness[frameIdx];
     let brightnessScale = select(params.refBrightness / frameBrightness, 1.0, frameBrightness < 1.0);
 
-    let w = params.frameWeight;
+    let fw = params.frameWeight;
     let b = brightnessScale;
+    let halfDrop = params.pixfrac * 0.5;
 
-    accumR[outIdx] += color.r * b * w;
-    accumG[outIdx] += color.g * b * w;
-    accumB[outIdx] += color.b * b * w;
-    accumW[outIdx] += w;
+    // Iterate over input pixels whose drops could overlap this output cell
+    // The output cell in input coords spans [cellMinX, cellMaxX] x [cellMinY, cellMaxY]
+    // After applying displacement, input pixel (ix, iy) maps to (ix + dispX, iy + dispY) in input coords
+    // So we need input pixels where (ix + dispX) ± halfDrop overlaps [cellMinX, cellMaxX]
+    // => ix in [cellMinX - dispX - halfDrop, cellMaxX - dispX + halfDrop]
+    let searchMinX = i32(floor(cellMinX - dispX - halfDrop));
+    let searchMaxX = i32(floor(cellMaxX - dispX + halfDrop));
+    let searchMinY = i32(floor(cellMinY - dispY - halfDrop));
+    let searchMaxY = i32(floor(cellMaxY - dispY + halfDrop));
+
+    var accumColorR: f32 = 0.0;
+    var accumColorG: f32 = 0.0;
+    var accumColorB: f32 = 0.0;
+    var accumArea: f32 = 0.0;
+
+    for (var iy: i32 = searchMinY; iy <= searchMaxY; iy++) {
+        for (var ix: i32 = searchMinX; ix <= searchMaxX; ix++) {
+            // Bounds check on input frame
+            if (ix < 0 || ix >= i32(params.inWidth) || iy < 0 || iy >= i32(params.inHeight)) {
+                continue;
+            }
+
+            // Input pixel drop bounds in input-pixel coords (after warp)
+            let dropCenterX = f32(ix) + 0.5 + dispX;
+            let dropCenterY = f32(iy) + 0.5 + dispY;
+            let dropMinX = dropCenterX - halfDrop;
+            let dropMaxX = dropCenterX + halfDrop;
+            let dropMinY = dropCenterY - halfDrop;
+            let dropMaxY = dropCenterY + halfDrop;
+
+            // Rectangle intersection with output cell (in input coords)
+            let overlapX = max(0.0, min(dropMaxX, cellMaxX) - max(dropMinX, cellMinX));
+            let overlapY = max(0.0, min(dropMaxY, cellMaxY) - max(dropMinY, cellMinY));
+            let overlapArea = overlapX * overlapY;
+
+            if (overlapArea > 0.0) {
+                let color = readPixelSafe(ix, iy);
+
+                // Skip black pixels
+                if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
+                    continue;
+                }
+
+                accumColorR += color.r * overlapArea;
+                accumColorG += color.g * overlapArea;
+                accumColorB += color.b * overlapArea;
+                accumArea += overlapArea;
+            }
+        }
+    }
+
+    if (accumArea > 0.0) {
+        accumR[outIdx] += accumColorR * b * fw;
+        accumG[outIdx] += accumColorG * b * fw;
+        accumB[outIdx] += accumColorB * b * fw;
+        accumW[outIdx] += accumArea * fw;
+    }
 }
 `;
 
@@ -662,7 +661,7 @@ struct Params {
     globalOffsetY: f32,
     minQuality: f32,
     inputFormat: u32,    // 0 = Float32 (4 floats/pixel), 1 = packed Uint8 (1 u32/pixel)
-    _pad: u32,
+    pixfrac: f32,        // Drop shrink factor (0.0-1.0, typical 0.7)
 }
 
 struct AP {
@@ -685,7 +684,6 @@ struct AP {
 // Read a pixel as vec4<f32> in 0-255 range
 fn readPixel(pixelIdx: u32) -> vec4<f32> {
     if (params.inputFormat == 1u) {
-        // Packed Uint8: 4 bytes per pixel stored as 1 u32 (RGBA little-endian)
         let packed = frameData[pixelIdx];
         let r = f32(packed & 0xFFu);
         let g = f32((packed >> 8u) & 0xFFu);
@@ -693,76 +691,19 @@ fn readPixel(pixelIdx: u32) -> vec4<f32> {
         let a = f32((packed >> 24u) & 0xFFu);
         return vec4<f32>(r, g, b, a);
     } else {
-        // Float32: 4 floats per pixel, stored as 4 u32s (bitcast)
         let baseIdx = pixelIdx * 4u;
         let r = bitcast<f32>(frameData[baseIdx]);
         let g = bitcast<f32>(frameData[baseIdx + 1u]);
         let b = bitcast<f32>(frameData[baseIdx + 2u]);
         let a = bitcast<f32>(frameData[baseIdx + 3u]);
-        // Float32 is 0.0-1.0 range, scale to 0-255
         return vec4<f32>(r, g, b, a) * 255.0;
     }
 }
 
-// Cubic interpolation weight (Catmull-Rom spline, a = -0.5)
-fn cubicWeight(t: f32) -> f32 {
-    let at = abs(t);
-    if (at <= 1.0) {
-        return (1.5 * at - 2.5) * at * at + 1.0;
-    } else if (at < 2.0) {
-        return ((-0.5 * at + 2.5) * at - 4.0) * at + 2.0;
-    }
-    return 0.0;
-}
-
-fn sampleFrame(x: f32, y: f32) -> vec4<f32> {
-    // Bicubic interpolation (16 samples, Catmull-Rom)
-    let x0 = i32(floor(x));
-    let y0 = i32(floor(y));
-    let fx = x - f32(x0);
-    let fy = y - f32(y0);
-
-    let w = i32(params.inWidth);
-    let h = i32(params.inHeight);
-
-    // Compute cubic weights for x and y
-    let wx0 = cubicWeight(fx + 1.0);
-    let wx1 = cubicWeight(fx);
-    let wx2 = cubicWeight(fx - 1.0);
-    let wx3 = cubicWeight(fx - 2.0);
-
-    let wy0 = cubicWeight(fy + 1.0);
-    let wy1 = cubicWeight(fy);
-    let wy2 = cubicWeight(fy - 1.0);
-    let wy3 = cubicWeight(fy - 2.0);
-
-    var result = vec4<f32>(0.0);
-    var totalWeight: f32 = 0.0;
-
-    // Sample 4x4 grid
-    for (var j: i32 = -1; j <= 2; j++) {
-        let cy = clamp(y0 + j, 0, h - 1);
-        let wy = select(select(select(wy3, wy2, j == 1), wy1, j == 0), wy0, j == -1);
-
-        for (var i: i32 = -1; i <= 2; i++) {
-            let cx = clamp(x0 + i, 0, w - 1);
-            let wx = select(select(select(wx3, wx2, i == 1), wx1, i == 0), wx0, i == -1);
-
-            let idx = u32(cy * w + cx);
-            let pixel = readPixel(idx);
-            let weight = wx * wy;
-
-            result += pixel * weight;
-            totalWeight += weight;
-        }
-    }
-
-    // Normalize (weights should sum to 1, but clamp can affect this at edges)
-    if (totalWeight > 0.0) {
-        result = result / totalWeight;
-    }
-
-    return result;
+fn readPixelSafe(ix: i32, iy: i32) -> vec4<f32> {
+    let cx = clamp(ix, 0, i32(params.inWidth) - 1);
+    let cy = clamp(iy, 0, i32(params.inHeight) - 1);
+    return readPixel(u32(cy) * params.inWidth + u32(cx));
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -777,9 +718,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = oy * params.outWidth + ox;
     let invScale = 1.0 / params.drizzleScale;
 
-    // Map output pixel to input coordinate space
-    let inX = f32(ox) * invScale;
-    let inY = f32(oy) * invScale;
+    // Output pixel cell in input-pixel coordinates
+    let cellMinX = f32(ox) * invScale;
+    let cellMaxX = f32(ox + 1u) * invScale;
+    let cellMinY = f32(oy) * invScale;
+    let cellMaxY = f32(oy + 1u) * invScale;
+    let cellCenterX = (cellMinX + cellMaxX) * 0.5;
+    let cellCenterY = (cellMinY + cellMaxY) * 0.5;
 
     // Gaussian parameters for displacement interpolation
     let patchSize = f32(params.patchSize);
@@ -789,7 +734,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let sigma2 = sigma * sigma * 2.0;
 
     // Interpolate displacement from nearby APs
-    var totalWeight: f32 = 0.0;
+    var totalApWeight: f32 = 0.0;
     var weightedDx: f32 = 0.0;
     var weightedDy: f32 = 0.0;
 
@@ -800,52 +745,81 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             continue;
         }
 
-        let dx = inX - ap.x;
-        let dy = inY - ap.y;
+        let dx = cellCenterX - ap.x;
+        let dy = cellCenterY - ap.y;
         let dist2 = dx * dx + dy * dy;
 
         if (dist2 < influenceRadius2) {
             let gaussWeight = exp(-dist2 / sigma2);
             let weight = gaussWeight * ap.quality;
-
             weightedDx += ap.dx * weight;
             weightedDy += ap.dy * weight;
-            totalWeight += weight;
+            totalApWeight += weight;
         }
     }
 
-    // Compute source coordinates
-    var srcX: f32;
-    var srcY: f32;
-    if (totalWeight > 0.0) {
-        srcX = inX + params.globalOffsetX + weightedDx / totalWeight;
-        srcY = inY + params.globalOffsetY + weightedDy / totalWeight;
-    } else {
-        srcX = inX + params.globalOffsetX;
-        srcY = inY + params.globalOffsetY;
+    var dispX = params.globalOffsetX;
+    var dispY = params.globalOffsetY;
+    if (totalApWeight > 0.0) {
+        dispX += weightedDx / totalApWeight;
+        dispY += weightedDy / totalApWeight;
     }
 
-    // Check bounds
-    if (srcX < 0.0 || srcX >= f32(params.inWidth) - 1.0 ||
-        srcY < 0.0 || srcY >= f32(params.inHeight) - 1.0) {
-        return;
-    }
-
-    // Sample and accumulate
-    let color = sampleFrame(srcX, srcY);
-
-    // Skip black pixels
-    if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
-        return;
-    }
-
-    let w = params.frameWeight;
+    let fw = params.frameWeight;
     let b = params.brightnessScale;
+    let halfDrop = params.pixfrac * 0.5;
 
-    accumR[idx] += color.r * b * w;
-    accumG[idx] += color.g * b * w;
-    accumB[idx] += color.b * b * w;
-    accumW[idx] += w;
+    // Iterate over input pixels whose drops could overlap this output cell
+    let searchMinX = i32(floor(cellMinX - dispX - halfDrop));
+    let searchMaxX = i32(floor(cellMaxX - dispX + halfDrop));
+    let searchMinY = i32(floor(cellMinY - dispY - halfDrop));
+    let searchMaxY = i32(floor(cellMaxY - dispY + halfDrop));
+
+    var accumColorR: f32 = 0.0;
+    var accumColorG: f32 = 0.0;
+    var accumColorB: f32 = 0.0;
+    var accumArea: f32 = 0.0;
+
+    for (var iy: i32 = searchMinY; iy <= searchMaxY; iy++) {
+        for (var ix: i32 = searchMinX; ix <= searchMaxX; ix++) {
+            if (ix < 0 || ix >= i32(params.inWidth) || iy < 0 || iy >= i32(params.inHeight)) {
+                continue;
+            }
+
+            // Input pixel drop bounds in input-pixel coords (after warp)
+            let dropCenterX = f32(ix) + 0.5 + dispX;
+            let dropCenterY = f32(iy) + 0.5 + dispY;
+            let dropMinX = dropCenterX - halfDrop;
+            let dropMaxX = dropCenterX + halfDrop;
+            let dropMinY = dropCenterY - halfDrop;
+            let dropMaxY = dropCenterY + halfDrop;
+
+            // Rectangle intersection with output cell
+            let overlapX = max(0.0, min(dropMaxX, cellMaxX) - max(dropMinX, cellMinX));
+            let overlapY = max(0.0, min(dropMaxY, cellMaxY) - max(dropMinY, cellMinY));
+            let overlapArea = overlapX * overlapY;
+
+            if (overlapArea > 0.0) {
+                let color = readPixelSafe(ix, iy);
+
+                if (color.r < 1.0 && color.g < 1.0 && color.b < 1.0) {
+                    continue;
+                }
+
+                accumColorR += color.r * overlapArea;
+                accumColorG += color.g * overlapArea;
+                accumColorB += color.b * overlapArea;
+                accumArea += overlapArea;
+            }
+        }
+    }
+
+    if (accumArea > 0.0) {
+        accumR[idx] += accumColorR * b * fw;
+        accumG[idx] += accumColorG * b * fw;
+        accumB[idx] += accumColorB * b * fw;
+        accumW[idx] += accumArea * fw;
+    }
 }
 `;
 
@@ -1502,7 +1476,7 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
  */
 async function warpAndAccumulateFrame(frameData, width, height, outWidth, outHeight,
     alignmentPoints, shifts, patchSize, drizzleScale, frameWeight, brightnessScale,
-    globalOffsetX, globalOffsetY, minApQuality = 0.3) {
+    globalOffsetX, globalOffsetY, minApQuality = 0.3, pixfrac = 1.0) {
 
     if (!isStackingReady) {
         const initialized = await initStackingGPU();
@@ -1557,7 +1531,7 @@ async function warpAndAccumulateFrame(frameData, width, height, outWidth, outHei
     paramsF32[10] = globalOffsetY;
     paramsF32[11] = minApQuality;  // minQuality
     paramsU32[12] = inputFormat;  // 0 = Float32, 1 = Uint8
-    paramsU32[13] = 0;  // padding
+    paramsF32[13] = pixfrac;
     stackQueue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
 
     // Create bind group
@@ -1601,7 +1575,7 @@ async function warpAndAccumulateFrame(frameData, width, height, outWidth, outHei
  * @param {number} minApQuality
  */
 async function warpAndAccumulateBatch(frames, allShifts, width, height, outWidth, outHeight,
-    alignmentPoints, patchSize, drizzleScale, minApQuality = 0.3) {
+    alignmentPoints, patchSize, drizzleScale, minApQuality = 0.3, pixfrac = 1.0) {
 
     if (!isStackingReady) {
         const initialized = await initStackingGPU();
@@ -1680,7 +1654,7 @@ async function warpAndAccumulateBatch(frames, allShifts, width, height, outWidth
             paramsF32[10] = 0; // globalOffsetY
             paramsF32[11] = minApQuality;
             paramsU32[12] = inputFormat;
-            paramsU32[13] = 0;
+            paramsF32[13] = pixfrac;
             stackQueue.writeBuffer(buffers.paramsBuffers[bufferIdx], 0, paramsData);
 
             // Create bind group for this frame
@@ -1947,7 +1921,7 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
  * @param {Array} allShifts - Shifts from template matching
  */
 async function warpAndAccumulateFromGpuBuffer(rgbaGpuBuffer, batchSize, cropSize,
-    frameMetadata, allShifts, outWidth, outHeight, alignmentPoints, patchSize, drizzleScale, minApQuality = 0.3) {
+    frameMetadata, allShifts, outWidth, outHeight, alignmentPoints, patchSize, drizzleScale, minApQuality = 0.3, pixfrac = 1.0) {
 
     if (!isStackingReady) {
         throw new Error('WebGPU stacking not available');
@@ -2007,7 +1981,7 @@ async function warpAndAccumulateFromGpuBuffer(rgbaGpuBuffer, batchSize, cropSize
             paramsF32[10] = 0;
             paramsF32[11] = minApQuality;
             paramsU32[12] = 0;  // inputFormat = Float32
-            paramsU32[13] = 0;
+            paramsF32[13] = pixfrac;
             stackQueue.writeBuffer(buffers.paramsBuffers[bufferIdx], 0, paramsData);
 
             bindGroups.push(stackDevice.createBindGroup({
@@ -2444,7 +2418,8 @@ async function warpAndAccumulateBatchFullyGpu(
     drizzleScale,
     refBrightness,
     searchOffset,
-    minApQuality = 0.3
+    minApQuality = 0.3,
+    pixfrac = 1.0
 ) {
     if (!stackDevice || !warpBatchPipeline) {
         throw new Error('Stacking GPU not initialized for batch warp');
@@ -2483,7 +2458,7 @@ async function warpAndAccumulateBatchFullyGpu(
         paramsF32[10] = searchOffset.dx;
         paramsF32[11] = searchOffset.dy;
         paramsF32[12] = frameWeights[frameIdx];
-        paramsU32[13] = 0;                 // Padding
+        paramsF32[13] = pixfrac;
         stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
 
         const bindGroup = stackDevice.createBindGroup({

@@ -7,6 +7,7 @@ const inputFilename = ref('');
 const inputFilenameWithExt = ref('');
 const minApQuality = ref(0.3);
 const apPatchSize = ref(20);
+const pixfrac = ref(1.0);
 
 // Tracking context for analytics
 const trackingContext = ref({
@@ -50,6 +51,14 @@ export function useProcessingState() {
 
     function getApPatchSize() {
         return apPatchSize.value;
+    }
+
+    function setPixfrac(value) {
+        pixfrac.value = value;
+    }
+
+    function getPixfrac() {
+        return pixfrac.value;
     }
 
     function setStackingMode(mode) {
@@ -99,6 +108,9 @@ export function useProcessingState() {
         apPatchSize,
         setApPatchSize,
         getApPatchSize,
+        pixfrac,
+        setPixfrac,
+        getPixfrac,
         stackingMode,
         setStackingMode,
         getStackingMode,
