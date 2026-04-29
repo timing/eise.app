@@ -663,6 +663,8 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     // Wait for analyze slot BEFORE getting buffers (only 1 analyzeBatch at a time since buffers aren't double-buffered)
     await acquireAnalyzeSlot();
 
+    try {
+
     // Get cached buffers (creates if needed, reuses if possible)
     const buffers = getAnalyzeBuffers(batchSize, width, height, bitDepth);
     let grayAlreadyComputed = false;
@@ -1025,11 +1027,13 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         results.push(result);
     }
 
-    // Release analyze slot to allow next analyzeBatch to proceed
-    releaseAnalyzeSlot();
-
     // Buffers are cached and reused - no cleanup here
     return results;
+
+    } finally {
+        // Release analyze slot to allow next analyzeBatch to proceed (even on error)
+        releaseAnalyzeSlot();
+    }
 }
 
 // Cached buffers for crop+analyze
@@ -1177,6 +1181,8 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
 
     // Wait for a batch slot BEFORE getting buffers (prevents buffer destruction while in use)
     await acquireBatchSlot();
+
+    try {
 
     const buffers = await getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
 
@@ -1420,8 +1426,6 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const packedGrayData = new Uint8Array(packedGrayReadbackBuf.getMappedRange().slice(0));
     packedGrayReadbackBuf.unmap();
 
-    releaseBatchSlot();  // Allow next batch to proceed
-
     // Process results
     const results = [];
     for (let i = 0; i < batchSize; i++) {
@@ -1505,6 +1509,10 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     }
 
     return results;
+
+    } finally {
+        releaseBatchSlot();  // Allow next batch to proceed (even on error)
+    }
 }
 
 /**
@@ -1552,6 +1560,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
 
     // Wait for a batch slot BEFORE getting buffers (prevents buffer destruction while in use)
     await acquireBatchSlot();
+
+    try {
 
     // Get buffers for full-frame analysis
     const analyzeBuffers = getAnalyzeBuffers(batchSize, srcWidth, srcHeight, bitDepth);
@@ -1856,7 +1866,6 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         croppedReadbackBuf.unmap();
         grayReadbackBuf.unmap();
     }
-    releaseBatchSlot();  // Allow next batch to proceed
 
     // Build bounds and centers arrays from GPU output
     // Check for cut-off frames (object touching edge) - matches CPU behavior
@@ -1973,6 +1982,10 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     }
 
     return results;
+
+    } finally {
+        releaseBatchSlot();  // Allow next batch to proceed (even on error)
+    }
 }
 
 // ============================================================

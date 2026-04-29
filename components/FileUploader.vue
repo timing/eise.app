@@ -744,6 +744,7 @@ async function startProcessing() {
 		// Set error and stop processing - FileUploader will show with error visible
 		isProcessing.value = false;
 		errorMessage.value = errorMsg;
+		eventBusEmit('stop-loading');
 		eventBusEmit('show-error');
 	}
 }
@@ -809,6 +810,7 @@ async function processCombinedMode() {
 		const errorMsg = error.message || 'An error occurred during processing';
 		isProcessing.value = false;
 		errorMessage.value = errorMsg;
+		eventBusEmit('stop-loading');
 		eventBusEmit('show-error');
 	}
 }

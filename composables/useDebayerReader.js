@@ -571,15 +571,21 @@ export function useDebayerReader() {
      * Ask the GPU worker how many frames fit in one batch at given dimensions.
      */
     async function getGpuMaxBatchSize(width, height, bitDepth) {
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
+            let timeout;
             const handler = (e) => {
                 if (e.data.type === 'max-batch-size') {
+                    clearTimeout(timeout);
                     gpuWorker.removeEventListener('message', handler);
                     resolve(e.data.maxBatch);
                 }
             };
             gpuWorker.addEventListener('message', handler);
             gpuWorker.postMessage({ type: 'get-max-batch-size', width, height, bitDepth });
+            timeout = setTimeout(() => {
+                gpuWorker.removeEventListener('message', handler);
+                reject(new Error('GPU worker did not respond. Please reload the page and try again.'));
+            }, 15000);
         });
     }
 
