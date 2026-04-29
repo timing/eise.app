@@ -44,6 +44,18 @@ let reinitializing = false; // Prevent concurrent reinit attempts
 let reinitAttempts = 0;
 const MAX_REINIT_ATTEMPTS = 3;
 
+// Promise that rejects when GPU device is lost - raced against mapAsync to unblock hangs.
+// Shared across all concurrent mapAsync calls for the same device lifetime.
+// Reset on successful device recovery.
+let deviceLostSignal = null;
+let fireDeviceLost = null;
+function resetDeviceLostSignal() {
+    const signal = new Promise((_, reject) => { fireDeviceLost = reject; });
+    signal.catch(() => {}); // Prevent unhandled rejection warning
+    deviceLostSignal = signal;
+}
+resetDeviceLostSignal();
+
 // Concurrency control for detectCropAnalyzeBatch (limit to match double-buffering)
 const MAX_CONCURRENT_BATCHES = 2;
 let activeBatchCount = 0;
@@ -101,7 +113,11 @@ async function safeMapAsync(buffer, mode) {
         throw new Error('GPU device was lost. Please reload the page to continue.');
     }
     try {
-        await buffer.mapAsync(mode);
+        // Race mapAsync against device-lost signal to unblock if GPU hangs on device loss
+        await Promise.race([
+            buffer.mapAsync(mode),
+            deviceLostSignal
+        ]);
     } catch (err) {
         // Check for device lost errors (various error messages from different browsers/drivers)
         if (err.message && (err.message.includes('Instance reference') || err.message.includes('Device') && err.message.includes('lost'))) {
@@ -410,6 +426,11 @@ async function init() {
         queue = null;
         isReady = false;
 
+        // Unblock any in-flight mapAsync calls that may be hung
+        if (fireDeviceLost) {
+            fireDeviceLost(new Error('GPU device was lost during operation. Please reload the page.'));
+        }
+
         // Attempt automatic recovery
         if (reinitAttempts < MAX_REINIT_ATTEMPTS) {
             console.log(`Attempting GPU recovery (attempt ${reinitAttempts + 1}/${MAX_REINIT_ATTEMPTS})...`);
@@ -457,6 +478,7 @@ async function init() {
 
     isReady = true;
     deviceLost = false;
+    resetDeviceLostSignal(); // Fresh signal for the new device
     console.log('WebGPU analyze worker initialized');
 }
 

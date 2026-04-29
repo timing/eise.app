@@ -171,7 +171,7 @@
 					</label>
 					<label class="radio-option">
 						<input type="radio" v-model="drizzleMethod" value="drizzle" />
-						1.5x Pixfrac drizzle
+						1.5x Pixfrac drizzle <b>beta</b>
 					</label>
 				</div>
 				<label v-if="drizzleMethod === 'drizzle'" class="checkbox-option">

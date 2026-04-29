@@ -664,6 +664,16 @@ const STACK_MAX_REINIT_ATTEMPTS = 3;
 // Forward declaration for auto-recovery
 let reinitializeStackingGpu = null;
 
+// Promise that rejects when GPU device is lost - raced against mapAsync to unblock hangs
+let stackDeviceLostSignal = null;
+let fireStackDeviceLost = null;
+function resetStackDeviceLostSignal() {
+    const signal = new Promise((_, reject) => { fireStackDeviceLost = reject; });
+    signal.catch(() => {}); // Prevent unhandled rejection warning
+    stackDeviceLostSignal = signal;
+}
+resetStackDeviceLostSignal();
+
 // Helper function to safely map GPU buffer with device lost detection and auto-recovery
 async function safeStackMapAsync(buffer, mode) {
     if (stackDeviceLost && !stackReinitializing) {
@@ -679,7 +689,10 @@ async function safeStackMapAsync(buffer, mode) {
         throw new Error('GPU device was lost. Please reload the page to continue.');
     }
     try {
-        await buffer.mapAsync(mode);
+        await Promise.race([
+            buffer.mapAsync(mode),
+            stackDeviceLostSignal
+        ]);
     } catch (err) {
         if (err.message && (err.message.includes('Instance reference') || err.message.includes('Device') && err.message.includes('lost'))) {
             stackDeviceLost = true;
@@ -1000,6 +1013,11 @@ async function initStackingGPU() {
             cachedStackBuffers = null;
             cachedStackConfig = null;
 
+            // Unblock any in-flight mapAsync calls that may be hung
+            if (fireStackDeviceLost) {
+                fireStackDeviceLost(new Error('GPU device was lost during operation. Please reload the page.'));
+            }
+
             // Attempt automatic recovery
             if (stackReinitAttempts < STACK_MAX_REINIT_ATTEMPTS) {
                 console.log(`Attempting stacking GPU recovery (attempt ${stackReinitAttempts + 1}/${STACK_MAX_REINIT_ATTEMPTS})...`);
@@ -1009,6 +1027,7 @@ async function initStackingGPU() {
                     stackReinitAttempts++;
                     const success = await initStackingGPU();
                     if (success) {
+                        resetStackDeviceLostSignal(); // Fresh signal for new device
                         console.log('Stacking GPU device recovered successfully');
                     }
                 } catch (err) {

@@ -24,6 +24,16 @@ const MATCH_MAX_REINIT_ATTEMPTS = 3;
 // Forward declaration for auto-recovery
 let reinitializeMatchGpu = null;
 
+// Promise that rejects when GPU device is lost - raced against mapAsync to unblock hangs
+let matchDeviceLostSignal = null;
+let fireMatchDeviceLost = null;
+function resetMatchDeviceLostSignal() {
+    const signal = new Promise((_, reject) => { fireMatchDeviceLost = reject; });
+    signal.catch(() => {}); // Prevent unhandled rejection warning
+    matchDeviceLostSignal = signal;
+}
+resetMatchDeviceLostSignal();
+
 // Helper function to safely map GPU buffer with device lost detection and auto-recovery
 async function safeMatchMapAsync(buffer, mode) {
     if (matchDeviceLost && !matchReinitializing) {
@@ -39,7 +49,10 @@ async function safeMatchMapAsync(buffer, mode) {
         throw new Error('GPU device was lost. Please reload the page to continue.');
     }
     try {
-        await buffer.mapAsync(mode);
+        await Promise.race([
+            buffer.mapAsync(mode),
+            matchDeviceLostSignal
+        ]);
     } catch (err) {
         if (err.message && (err.message.includes('Instance reference') || err.message.includes('Device') && err.message.includes('lost'))) {
             matchDeviceLost = true;
@@ -718,6 +731,10 @@ async function initWebGPU() {
         gpuDevice.lost.then(async (info) => {
             console.warn('Template match GPU device lost:', info.message);
             matchDeviceLost = true;
+            // Unblock any in-flight mapAsync calls that may be hung
+            if (fireMatchDeviceLost) {
+                fireMatchDeviceLost(new Error('GPU device was lost during operation. Please reload the page.'));
+            }
             gpuDevice = null;
             gpuQueue = null;
             nccPipeline = null;
@@ -742,6 +759,7 @@ async function initWebGPU() {
                     const success = await initWebGPU();
                     if (success) {
                         matchDeviceLost = false;
+                        resetMatchDeviceLostSignal(); // Fresh signal for new device
                         console.log('Template match GPU device recovered successfully');
                     }
                 } finally {
