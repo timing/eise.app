@@ -16,6 +16,7 @@ export default defineNuxtPlugin(async (nuxtApp) => {
                 messagePlaceholder: 'What went wrong? Or any suggestions?',
                 successMessageText: 'Thank you for your feedback!',
                 showBranding: false,
+                isEmailRequired: true,
             }),
         ],
         tracesSampleRate: 1.0, // 100% of transactions
