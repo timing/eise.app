@@ -1363,7 +1363,7 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
         ]
     });
 
-    // Dispatch
+    // Dispatch VNG demosaic
     const pass = encoder.beginComputePass();
     pass.setPipeline(vngCropPipeline);
     pass.setBindGroup(0, bindGroup);
@@ -1373,6 +1373,33 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
         batchSize
     );
     pass.end();
+
+    // Apply 7x7 Gaussian blur to grayscale (matches batch path for consistent template matching)
+    const blurredGrayBuffer = stackDevice.createBuffer({
+        size: grayOutputSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const blurParamsBuffer = stackDevice.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
+
+    const blurBindGroup = stackDevice.createBindGroup({
+        layout: blurPackedPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: blurParamsBuffer } },
+            { binding: 1, resource: { buffer: grayOutputBuffer } },
+            { binding: 2, resource: { buffer: blurredGrayBuffer } }
+        ]
+    });
+
+    const packedSize = Math.ceil((cropPixelCount * batchSize) / 4);
+    const blurPass = encoder.beginComputePass();
+    blurPass.setPipeline(blurPackedPipeline);
+    blurPass.setBindGroup(0, blurBindGroup);
+    blurPass.dispatchWorkgroups(Math.ceil(packedSize / 256), 1, 1);
+    blurPass.end();
 
     // Readback both buffers
     const rgbaReadback = stackDevice.createBuffer({
@@ -1385,7 +1412,7 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
     });
 
     encoder.copyBufferToBuffer(rgbaOutputBuffer, 0, rgbaReadback, 0, rgbaOutputSize);
-    encoder.copyBufferToBuffer(grayOutputBuffer, 0, grayReadback, 0, grayOutputSize);
+    encoder.copyBufferToBuffer(blurredGrayBuffer, 0, grayReadback, 0, grayOutputSize);
 
     stackQueue.submit([encoder.finish()]);
 
@@ -1407,6 +1434,8 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
     centersBuffer.destroy();
     rgbaOutputBuffer.destroy();
     grayOutputBuffer.destroy();
+    blurredGrayBuffer.destroy();
+    blurParamsBuffer.destroy();
     rgbaReadback.destroy();
     grayReadback.destroy();
 

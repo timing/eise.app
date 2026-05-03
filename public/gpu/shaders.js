@@ -679,10 +679,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Calculate source coordinates from crop center
+    // NOTE: No even-alignment (& ~1) here. The VNG demosaic uses absolute source coordinates
+    // (bx = x % 2) so it handles odd crop starts correctly. Allowing odd starts means the
+    // Bayer residual phase varies across frames, causing it to cancel during stacking.
+    // Forcing even alignment locked all frames to the same phase, reinforcing the pattern.
     let center = centers[frameIdx];
     let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize)) & ~1;  // Ensure even for Bayer alignment
-    let cropStartY = i32(floor(center.y - halfSize)) & ~1;
+    let cropStartX = i32(floor(center.x - halfSize));
+    let cropStartY = i32(floor(center.y - halfSize));
 
     let srcX = cropStartX + i32(outX);
     let srcY = cropStartY + i32(outY);
@@ -691,6 +695,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = u32(clamp(srcX, 0, i32(params.srcWidth) - 1));
     let y = u32(clamp(srcY, 0, i32(params.srcHeight) - 1));
 
+    // Bayer phase from absolute source position - correct regardless of crop start parity
     let bx = x % 2u;
     let by = y % 2u;
     let rgb = vngInterpolate(frameIdx, i32(x), i32(y), bx, by, params.bayerPattern);
@@ -1858,10 +1863,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
+    // No even-alignment (& ~1) - see VNG crop shader comment for rationale
     let center = centers[frameIdx];
     let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize)) & ~1;
-    let cropStartY = i32(floor(center.y - halfSize)) & ~1;
+    let cropStartX = i32(floor(center.x - halfSize));
+    let cropStartY = i32(floor(center.y - halfSize));
 
     let srcX = cropStartX + i32(outX);
     let srcY = cropStartY + i32(outY);
