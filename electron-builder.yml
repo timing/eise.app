@@ -15,7 +15,7 @@ files:
   - electron/package.json
 
 extraResources:
-  - from: .output/public/
+  - from: dist/
     to: app-files/
     filter:
       - "**/*"

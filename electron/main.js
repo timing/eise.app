@@ -25,8 +25,8 @@ function getAppFilesDir() {
   if (fs.existsSync(path.join(bundled, 'index.html'))) {
     return bundled;
   }
-  // Dev mode: use .output/public/ directly
-  return path.join(__dirname, '..', '.output', 'public');
+  // Dev mode: use dist/ directly
+  return path.join(__dirname, '..', 'dist');
 }
 
 function createWindow(appFilesDir) {

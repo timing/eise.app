@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, relative, posix } from 'node:path';
 
-const outputDir = join(process.cwd(), '.output', 'public');
+const outputDir = join(process.cwd(), 'dist');
 
 async function hashFile(filePath) {
   const data = await readFile(filePath);
