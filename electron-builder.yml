@@ -1,0 +1,42 @@
+appId: app.eise.desktop
+productName: Eise
+copyright: Copyright (c) 2026
+artifactName: "Eise-${version}-${os}-${arch}.${ext}"
+
+directories:
+  buildResources: electron/build-resources
+  output: electron-dist
+
+files:
+  - electron/main.js
+  - electron/updater.js
+  - electron/preload.js
+  - electron/protocol.js
+  - electron/package.json
+
+extraResources:
+  - from: .output/public/
+    to: app-files/
+    filter:
+      - "**/*"
+
+mac:
+  category: public.app-category.photography
+  target:
+    - dmg
+    - zip
+
+win:
+  target:
+    - nsis
+
+linux:
+  category: Graphics
+  maintainer: eise@eise.app
+  target:
+    - AppImage
+    - deb
+
+nsis:
+  oneClick: true
+  perMachine: false

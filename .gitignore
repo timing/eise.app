@@ -24,6 +24,12 @@ logs
 !.env.example
 
 # Vim files
-.swp
-.swo
+*.swp
+*.swo
+*.swk
+*.swm
+
+# Electron build output
+electron-dist/
+
 config/sentry-env.sh

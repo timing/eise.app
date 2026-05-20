@@ -1,14 +1,21 @@
 {
   "name": "nuxt-app",
+  "version": "2026.05.20",
   "private": true,
   "type": "module",
+  "main": "electron/main.js",
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "postgenerate": "cp config/cloudflare_headers.txt dist/_headers"
+    "postgenerate": "node scripts/generate-version-json.js && cp config/cloudflare_headers.txt dist/_headers",
+    "electron:dev": "nuxt generate && electron .",
+    "electron:build": "nuxt generate && electron-builder --config electron-builder.yml",
+    "electron:build:mac": "nuxt generate && electron-builder --mac --config electron-builder.yml",
+    "electron:build:win": "nuxt generate && electron-builder --win --config electron-builder.yml",
+    "electron:build:linux": "nuxt generate && electron-builder --linux --config electron-builder.yml"
   },
   "dependencies": {
     "@ffmpeg/core": "^0.10.0",
@@ -22,5 +29,9 @@
     "utif2": "^4.1.0",
     "vue": "^3.4.19",
     "vue-router": "^4.2.5"
+  },
+  "devDependencies": {
+    "electron": "^41.5.0",
+    "electron-builder": "^26.9.0"
   }
 }
