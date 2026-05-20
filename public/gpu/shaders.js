@@ -1574,6 +1574,77 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
+// Mono 16-bit crop shader - reads packed u16 mono data, crops, outputs Float32 RGBA
+// Same layout as demosaicCropShader for 16-bit output but without Bayer demosaicing
+export const mono16CropFloat32Shader = `
+struct Params {
+    srcWidth: u32,
+    srcHeight: u32,
+    cropSize: u32,
+    _pad1: u32,
+    batchSize: u32,
+    scale: f32,
+    _pad3: u32,
+    _pad4: u32,
+}
+
+struct CropCenter {
+    x: f32,
+    y: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> input: array<u32>;
+@group(0) @binding(2) var<storage, read> centers: array<CropCenter>;
+@group(0) @binding(3) var<storage, read_write> output: array<u32>;
+@group(0) @binding(4) var<storage, read_write> grayOutput: array<atomic<u32>>;
+
+fn readMono16(pixelIdx: u32) -> f32 {
+    let u32Idx = pixelIdx >> 1u;
+    let halfPos = pixelIdx & 1u;
+    let packed = input[u32Idx];
+    let rawValue = select(packed & 0xFFFFu, packed >> 16u, halfPos == 1u);
+    return min(1.0, f32(rawValue) * params.scale);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let outX = gid.x;
+    let outY = gid.y;
+    let frameIdx = gid.z;
+
+    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
+        return;
+    }
+
+    let center = centers[frameIdx];
+    let halfSize = f32(params.cropSize) / 2.0;
+    let cropStartX = i32(floor(center.x - halfSize));
+    let cropStartY = i32(floor(center.y - halfSize));
+
+    let srcX = u32(clamp(cropStartX + i32(outX), 0, i32(params.srcWidth) - 1));
+    let srcY = u32(clamp(cropStartY + i32(outY), 0, i32(params.srcHeight) - 1));
+
+    let srcIdx = frameIdx * params.srcWidth * params.srcHeight + srcY * params.srcWidth + srcX;
+    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
+
+    let v = readMono16(srcIdx);
+
+    // Output Float32 RGBA (4 consecutive u32 slots via bitcast, same as demosaicCropShader 16-bit path)
+    let baseIdx = outIdx * 4u;
+    output[baseIdx] = bitcast<u32>(v);
+    output[baseIdx + 1u] = bitcast<u32>(v);
+    output[baseIdx + 2u] = bitcast<u32>(v);
+    output[baseIdx + 3u] = bitcast<u32>(1.0);
+
+    // Packed 8-bit grayscale for template matching
+    let gray = u32(clamp(v * 255.0, 0.0, 255.0));
+    let grayPackedIdx = outIdx >> 2u;
+    let grayByteOffset = (outIdx & 3u) << 3u;
+    atomicOr(&grayOutput[grayPackedIdx], gray << grayByteOffset);
+}
+`;
+
 // Demosaic + Crop shader - crops around per-frame centers during demosaic
 export const demosaicCropShader = `
 struct Params {

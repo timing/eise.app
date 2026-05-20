@@ -19,6 +19,7 @@ import {
     demosaicGrayOnlyShader,
     offsetTenengradShader,
     rgbaCropShader,
+    mono16CropFloat32Shader,
     demosaicCropShader,
     demosaicGrayShader
 } from './gpu/shaders.js';
@@ -366,6 +367,7 @@ let demosaicCropPipeline = null;
 let demosaicGrayPipeline = null;  // Fused demosaic + grayscale
 let demosaicGrayOnlyPipeline = null;  // Grayscale-only demosaic (fast, for analysis)
 let rgbaCropPipeline = null;
+let mono16CropFloat32Pipeline = null;  // 16-bit mono crop → Float32 RGBA output
 let grayscalePipeline = null;
 let grayscaleFloat32Pipeline = null;  // Grayscale for 16-bit Float32 RGBA input
 let tenengradPipeline = null;
@@ -402,7 +404,7 @@ async function init() {
         throw new Error('WebGPU not available');
     }
 
-    const adapter = await navigator.gpu.requestAdapter();
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) {
         throw new Error('No WebGPU adapter found');
     }
@@ -462,6 +464,7 @@ async function init() {
     demosaicGrayPipeline = await createPipeline(device, demosaicGrayShader, 'demosaicGray');
     demosaicGrayOnlyPipeline = await createPipeline(device, demosaicGrayOnlyShader, 'demosaicGrayOnly');
     rgbaCropPipeline = await createPipeline(device, rgbaCropShader, 'rgbaCrop');
+    mono16CropFloat32Pipeline = await createPipeline(device, mono16CropFloat32Shader, 'mono16CropFloat32');
     grayscalePipeline = await createPipeline(device, grayscaleShader, 'grayscale');
     grayscaleFloat32Pipeline = await createPipeline(device, grayscaleFloat32Shader, 'grayscaleFloat32');
     tenengradPipeline = await createPipeline(device, tenengradShader, 'tenengrad');
@@ -725,45 +728,77 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         }
         grayAlreadyComputed = true;
     } else {
-        // Input is either RGBA (4 bytes/pixel) or mono grayscale (1 byte/pixel)
-        // Check first frame to determine input format
+        // Input is RGBA (4 bytes/pixel), 8-bit mono (1 byte/pixel), or 16-bit mono (2 bytes/pixel)
+        // Check first frame to determine format
         const firstFrame = frames[0];
+        const isMono16 = firstFrame.data instanceof Uint16Array;
         let firstSrc;
-        if (firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray) {
-            firstSrc = firstFrame.data;
-        } else if (firstFrame.data instanceof ArrayBuffer) {
-            firstSrc = new Uint8Array(firstFrame.data);
-        } else if (firstFrame.data.buffer instanceof ArrayBuffer) {
-            firstSrc = new Uint8Array(firstFrame.data.buffer, firstFrame.data.byteOffset, firstFrame.data.byteLength);
+        if (!isMono16) {
+            if (firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray) {
+                firstSrc = firstFrame.data;
+            } else if (firstFrame.data instanceof ArrayBuffer) {
+                firstSrc = new Uint8Array(firstFrame.data);
+            } else if (firstFrame.data.buffer instanceof ArrayBuffer) {
+                firstSrc = new Uint8Array(firstFrame.data.buffer, firstFrame.data.byteOffset, firstFrame.data.byteLength);
+            }
         }
-
-        const isMonoInput = firstSrc && firstSrc.length === pixelCount;
+        const isMono8 = !isMono16 && firstSrc && firstSrc.length === pixelCount;
+        const isMonoInput = isMono8 || isMono16;
 
         if (isMonoInput) {
-            // Mono grayscale input - expand to RGBA so grayscale shader can process it
-            // (grayBuffer is float32, so we can't upload uint8 mono data directly)
+            // Mono grayscale input - expand to Uint8 RGBA for GPU processing
+            // Note: 16-bit mono is scaled to 8-bit here. The GPU shaders (grayscale, crop)
+            // only support packed u32 (8-bit RGBA) for non-Bayer input. Full 16-bit precision
+            // for mono would require Float32 RGBA shaders (like the Bayer demosaic path has).
+
+            // For 16-bit mono, find max value for auto-stretch scaling
+            let scale16 = 1;
+            if (isMono16) {
+                let maxVal = 0;
+                for (let i = 0; i < batchSize; i++) {
+                    const src16 = frames[i].data;
+                    const step = Math.max(1, Math.floor(pixelCount / 5000));
+                    for (let j = 0; j < pixelCount; j += step) {
+                        if (src16[j] > maxVal) maxVal = src16[j];
+                    }
+                }
+                scale16 = maxVal > 0 ? 255 / maxVal : 1;
+            }
+
             for (let i = 0; i < batchSize; i++) {
                 const frame = frames[i];
-                let src;
-                if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
-                    src = frame.data;
-                } else if (frame.data instanceof ArrayBuffer) {
-                    src = new Uint8Array(frame.data);
-                } else if (frame.data.buffer instanceof ArrayBuffer) {
-                    src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
-                } else {
-                    console.error('Unknown frame data type:', typeof frame.data, frame.data);
-                    continue;
-                }
-                // Expand mono to RGBA
                 const rgba = new Uint8Array(pixelCount * 4);
-                for (let j = 0; j < pixelCount; j++) {
-                    const v = src[j];
-                    rgba[j * 4] = v;
-                    rgba[j * 4 + 1] = v;
-                    rgba[j * 4 + 2] = v;
-                    rgba[j * 4 + 3] = 255;
+
+                if (isMono16) {
+                    const src16 = frame.data;
+                    for (let j = 0; j < pixelCount; j++) {
+                        const v = Math.min(255, Math.round(src16[j] * scale16));
+                        rgba[j * 4] = v;
+                        rgba[j * 4 + 1] = v;
+                        rgba[j * 4 + 2] = v;
+                        rgba[j * 4 + 3] = 255;
+                    }
+                } else {
+                    let src;
+                    if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
+                        src = frame.data;
+                    } else if (frame.data instanceof ArrayBuffer) {
+                        src = new Uint8Array(frame.data);
+                    } else if (frame.data.buffer instanceof ArrayBuffer) {
+                        src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
+                    } else {
+                        console.error('Unknown frame data type:', typeof frame.data, frame.data);
+                        continue;
+                    }
+                    for (let j = 0; j < pixelCount; j++) {
+                        const v = src[j];
+                        rgba[j * 4] = v;
+                        rgba[j * 4 + 1] = v;
+                        rgba[j * 4 + 2] = v;
+                        rgba[j * 4 + 3] = 255;
+                    }
                 }
+
                 const byteOffset = i * pixelCount * 4;
                 queue.writeBuffer(buffers.rgbaBuffer, byteOffset, rgba);
             }
@@ -1197,8 +1232,8 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     const needsDemosaic = bayerPattern >= 0;
 
     // Detect bitDepth FIRST so we allocate correct buffer sizes
-    // 16-bit SER needs 4x larger RGBA buffers for Float32 output
-    const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
+    // 16-bit sources (Bayer or mono) need 4x larger RGBA buffers for Float32 output
+    const bitDepth = detectBitDepth(frames);
     console.log(`[GPU] cropAndAnalyzeBatch: bitDepth=${bitDepth}, batchSize=${batchSize}, needsDemosaic=${needsDemosaic}`);
 
     // Wait for a batch slot BEFORE getting buffers (prevents buffer destruction while in use)
@@ -1290,9 +1325,44 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         pass.setBindGroup(0, demosaicCropBindGroup);
         pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
         pass.end();
+    } else if (bitDepth === 16) {
+        // 16-bit mono: upload raw u16 data, GPU shader crops and outputs Float32 RGBA
+        // Pack all frames into a single buffer (2 bytes/pixel, same as Bayer 16-bit input layout)
+        const bytesPerPixel = 2;
+        const mono16Data = new Uint8Array(batchSize * srcPixelCount * bytesPerPixel);
+        let maxVal = 0;
+        for (let i = 0; i < batchSize; i++) {
+            const src16 = frames[i].data;
+            const srcBytes = new Uint8Array(src16.buffer, src16.byteOffset, src16.byteLength);
+            mono16Data.set(srcBytes, i * srcPixelCount * bytesPerPixel);
+            // Sample max for auto-stretch
+            const step = Math.max(1, Math.floor(srcPixelCount / 5000));
+            for (let j = 0; j < srcPixelCount; j += step) {
+                if (src16[j] > maxVal) maxVal = src16[j];
+            }
+        }
+        const scale = maxVal > 0 ? 1.0 / maxVal : 1.0;
+        queue.writeBuffer(buffers.inputBuffers[0], 0, mono16Data);
+
+        // Set params with scale for auto-stretch (same layout as rgbaCropShader, scale in slot 5)
+        const paramsData = new ArrayBuffer(32);
+        new Uint32Array(paramsData).set([srcWidth, srcHeight, cropSize, 0, batchSize, 0, 0, 0]);
+        new Float32Array(paramsData)[5] = scale;
+        queue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
+
+        const mono16CropBindGroup = createBindGroup(device, mono16CropFloat32Pipeline, [
+            buffers.paramsBuffer, buffers.inputBuffers[0], buffers.centersBuffer,
+            buffers.croppedRgbaBuffer, buffers.packedGrayBuffer
+        ]);
+
+        // Mono16 crop pass: reads packed u16, outputs Float32 RGBA + packed grayscale
+        let pass = encoder.beginComputePass();
+        pass.setPipeline(mono16CropFloat32Pipeline);
+        pass.setBindGroup(0, mono16CropBindGroup);
+        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.end();
     } else {
-        // Input is either RGBA (4 bytes/pixel) or mono grayscale (1 byte/pixel)
-        // Check first frame to determine input format
+        // 8-bit input: RGBA (4 bytes/pixel) or 8-bit mono (1 byte/pixel)
         const firstFrame = frames[0];
         let firstSrc;
         if (firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray) {
@@ -1302,27 +1372,25 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         } else if (firstFrame.data.buffer instanceof ArrayBuffer) {
             firstSrc = new Uint8Array(firstFrame.data.buffer, firstFrame.data.byteOffset, firstFrame.data.byteLength);
         }
-
         const isMonoInput = firstSrc && firstSrc.length === srcPixelCount;
 
         // Write each frame to GPU buffer (expand mono to RGBA if needed)
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
-            const byteOffset = i * srcPixelCount * 4;  // 4 bytes per RGBA pixel
-            let src;
-            if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
-                src = frame.data;
-            } else if (frame.data instanceof ArrayBuffer) {
-                src = new Uint8Array(frame.data);
-            } else if (frame.data.buffer instanceof ArrayBuffer) {
-                src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
-            } else {
-                console.error('Unknown frame data type:', typeof frame.data);
-                continue;
-            }
+            const byteOffset = i * srcPixelCount * 4;
 
             if (isMonoInput) {
-                // Expand mono to RGBA
+                let src;
+                if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
+                    src = frame.data;
+                } else if (frame.data instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data);
+                } else if (frame.data.buffer instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
+                } else {
+                    console.error('Unknown frame data type:', typeof frame.data);
+                    continue;
+                }
                 const rgba = new Uint8Array(srcPixelCount * 4);
                 for (let j = 0; j < srcPixelCount; j++) {
                     const v = src[j];
@@ -1333,7 +1401,18 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
                 }
                 queue.writeBuffer(buffers.inputBuffers[0], byteOffset, rgba);
             } else {
-                // Write directly to GPU buffer at offset
+                // RGBA input - write directly
+                let src;
+                if (frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray) {
+                    src = frame.data;
+                } else if (frame.data instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data);
+                } else if (frame.data.buffer instanceof ArrayBuffer) {
+                    src = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
+                } else {
+                    console.error('Unknown frame data type:', typeof frame.data);
+                    continue;
+                }
                 queue.writeBuffer(buffers.inputBuffers[0], byteOffset, src);
             }
         }
@@ -1645,23 +1724,52 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
             dcaDemosaicTime += (performance.now() - tDemosaicStart);
         }
     } else {
-        // Input is either RGBA (4 bytes/pixel) or mono grayscale (1 byte/pixel)
-        // Check first frame to determine input format
+        // Input is RGBA (4 bytes/pixel), 8-bit mono (1 byte/pixel), or 16-bit mono (Uint16Array)
+        // Note: 16-bit mono is scaled to 8-bit — GPU shaders only support packed u32 for non-Bayer input.
         const firstFrame = frames[0];
-        let firstSrc = firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray
-            ? firstFrame.data
-            : new Uint8Array(firstFrame.data.buffer || firstFrame.data);
-        const isMonoInput = firstSrc.length === srcPixelCount;
+        const isMono16 = firstFrame.data instanceof Uint16Array;
+        let firstSrc;
+        if (!isMono16) {
+            firstSrc = firstFrame.data instanceof Uint8Array || firstFrame.data instanceof Uint8ClampedArray
+                ? firstFrame.data
+                : new Uint8Array(firstFrame.data.buffer || firstFrame.data);
+        }
+        const isMono8 = !isMono16 && firstSrc && firstSrc.length === srcPixelCount;
+        const isMonoInput = isMono8 || isMono16;
+
+        // For 16-bit mono, find max value for auto-stretch scaling
+        let scale16 = 1;
+        if (isMono16) {
+            let maxVal = 0;
+            for (let i = 0; i < batchSize; i++) {
+                const src16 = frames[i].data;
+                const step = Math.max(1, Math.floor(srcPixelCount / 5000));
+                for (let j = 0; j < srcPixelCount; j += step) {
+                    if (src16[j] > maxVal) maxVal = src16[j];
+                }
+            }
+            scale16 = maxVal > 0 ? 255 / maxVal : 1;
+        }
 
         for (let i = 0; i < batchSize; i++) {
             const frame = frames[i];
             const byteOffset = i * srcPixelCount * 4;
-            let src = frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray
-                ? frame.data
-                : new Uint8Array(frame.data.buffer || frame.data);
 
-            if (isMonoInput) {
-                // Expand mono to RGBA
+            if (isMono16) {
+                const src16 = frame.data;
+                const rgba = new Uint8Array(srcPixelCount * 4);
+                for (let j = 0; j < srcPixelCount; j++) {
+                    const v = Math.min(255, Math.round(src16[j] * scale16));
+                    rgba[j * 4] = v;
+                    rgba[j * 4 + 1] = v;
+                    rgba[j * 4 + 2] = v;
+                    rgba[j * 4 + 3] = 255;
+                }
+                queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, rgba);
+            } else if (isMono8) {
+                let src = frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray
+                    ? frame.data
+                    : new Uint8Array(frame.data.buffer || frame.data);
                 const rgba = new Uint8Array(srcPixelCount * 4);
                 for (let j = 0; j < srcPixelCount; j++) {
                     const v = src[j];
@@ -1672,6 +1780,9 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
                 }
                 queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, rgba);
             } else {
+                let src = frame.data instanceof Uint8Array || frame.data instanceof Uint8ClampedArray
+                    ? frame.data
+                    : new Uint8Array(frame.data.buffer || frame.data);
                 queue.writeBuffer(analyzeBuffers.rgbaBuffer, byteOffset, src);
             }
         }

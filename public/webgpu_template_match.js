@@ -711,7 +711,7 @@ async function initWebGPU() {
     }
 
     try {
-        const adapter = await navigator.gpu.requestAdapter();
+        const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
         if (!adapter) {
             console.log('No WebGPU adapter found');
             return false;

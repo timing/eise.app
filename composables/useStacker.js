@@ -645,15 +645,16 @@ export function useStacker() {
                     throw new Error('Failed to process reference frame - GPU returned no results');
                 }
 
-                refBuffer = is16bit ? refResults[0].float32Buffer : refResults[0].uint8Buffer;
+                refBuffer = refResults[0].float32Buffer || refResults[0].uint8Buffer;
                 if (!refBuffer) {
-                    throw new Error(`Failed to process reference frame - no ${is16bit ? 'float32' : 'uint8'} buffer returned`);
+                    throw new Error('Failed to process reference frame - no pixel buffer returned');
                 }
-                refBlob = is16bit
+                const refIsFloat = refBuffer instanceof Float32Array;
+                refBlob = refIsFloat
                     ? await float32ToBlob(refBuffer, cropSize, cropSize)
                     : await uint8ToBlob(refBuffer, cropSize, cropSize);
                 // Extract grayscale for alignment
-                refGrayData = rgbaToGrayscale(refBuffer, cropSize, cropSize, is16bit);
+                refGrayData = rgbaToGrayscale(refBuffer, cropSize, cropSize, refIsFloat);
             }
 
             const refFrame = {
@@ -846,8 +847,9 @@ export function useStacker() {
                     // Capture for comparison video
                     for (let i = 0; i < gpuResults.length; i++) {
                         const globalIndex = batchStart + i;
-                        const frameBuffer = is16bit ? gpuResults[i].float32Buffer : gpuResults[i].uint8Buffer;
-                        const uint8ForCapture = is16bit
+                        const frameBuffer = gpuResults[i].float32Buffer || gpuResults[i].uint8Buffer;
+                        const isFrameFloat = frameBuffer instanceof Float32Array;
+                        const uint8ForCapture = isFrameFloat
                             ? new Uint8Array(float32ToUint8(frameBuffer, cropSize, cropSize))
                             : new Uint8Array(frameBuffer);
                         capturePostCropFrame(uint8ForCapture, cropSize, cropSize, globalIndex, frameCount);
@@ -1693,9 +1695,10 @@ export function useStacker() {
             } else {
                 // RGBA: crop via analyze worker
                 const refResults = await processGpuBatch(refFrames, refCenters);
-                const refBuffer = is16bit ? refResults[0].float32Buffer : refResults[0].uint8Buffer;
-                refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, is16bit);
-                refGrayData = rgbaToGrayscale(refBuffer, cropSize, cropSize, is16bit);
+                const refBuffer = refResults[0].float32Buffer || refResults[0].uint8Buffer;
+                const isRefFloat = refBuffer instanceof Float32Array;
+                refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, isRefFloat);
+                refGrayData = rgbaToGrayscale(refBuffer, cropSize, cropSize, isRefFloat);
             }
 
             // Prepare alignment points
@@ -1779,10 +1782,13 @@ export function useStacker() {
                     });
 
                     // Accumulate
-                    const rgbaFrames = gpuResults.map((r, idx) => ({
-                        rgbaBuffer: is16bit ? new Float32Array(r.float32Buffer) : new Uint8Array(r.uint8Buffer),
-                        sharpness: batchFrames[idx].sharpness
-                    }));
+                    const rgbaFrames = gpuResults.map((r, idx) => {
+                        const buf = r.float32Buffer || r.uint8Buffer;
+                        return {
+                            rgbaBuffer: buf instanceof Float32Array ? new Float32Array(buf) : new Uint8Array(buf),
+                            sharpness: batchFrames[idx].sharpness
+                        };
+                    });
                     await new Promise((resolve, reject) => {
                         const handler = (e) => {
                             if (e.data.type === 'stack-batch-done') { gpuStackWorker.removeEventListener('message', handler); resolve(); }
