@@ -414,7 +414,7 @@ const handleCanvasReady = (canvasRef) => {
 const downloadCanvasAsPNG = () => {
 	if (!canvas) return;
 
-	track('download', { type: 'processed', format: 'png', bit_depth: 8 });
+	track('export', { type: 'processed', format: 'png', bit_depth: 8 });
 	const dataURL = canvas.value.toDataURL('image/png');
 	const link = document.createElement('a');
 	const filename = exportFilename.value || inputFilename.value || 'eise_app';
@@ -430,7 +430,7 @@ const downloadCanvasAsPNG = () => {
 const downloadUnprocessedPNG = async () => {
 	if (!image16) return;
 
-	track('download', { type: 'unprocessed', format: 'png', bit_depth: 16 });
+	track('export', { type: 'unprocessed', format: 'png', bit_depth: 16 });
 	try {
 		const filename = exportFilename.value || inputFilename.value || 'eise_app';
 		await download16BitPNG(
@@ -461,7 +461,7 @@ const downloadComparisonVideo = async () => {
 			captureProcessedImage(processedBlob);
 		}
 
-		track('download', { type: 'comparison_video', format: 'mp4', bit_depth: null });
+		track('export', { type: 'comparison_video', format: 'mp4', bit_depth: null });
 
 		const videoBlob = await generateComparisonVideo($ffmpeg, $loadFFmpeg, (status) => {
 			exportProgress.value = status;
@@ -492,7 +492,7 @@ const downloadComparisonVideo = async () => {
 const downloadCroppedSer = () => {
 	if (!props.croppedSerData) return;
 
-	track('download', { type: 'cropped_ser', format: 'ser', bit_depth: null });
+	track('export', { type: 'cropped_ser', format: 'ser', bit_depth: null });
 	const url = URL.createObjectURL(props.croppedSerData.blob);
 	const a = document.createElement('a');
 	a.href = url;
@@ -509,7 +509,7 @@ const downloadCroppedSer = () => {
 const download16BitProcessedPNG = async () => {
 	if (!sharpenedImage16) return;
 
-	track('download', { type: 'processed', format: 'png', bit_depth: 16 });
+	track('export', { type: 'processed', format: 'png', bit_depth: 16 });
 	try {
 		const filename = exportFilename.value || inputFilename.value || 'eise_app';
 		await download16BitPNG(

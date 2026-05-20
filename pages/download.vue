@@ -12,22 +12,22 @@
 				<div class="download-card">
 					<div class="platform-icon">&#63743;</div>
 					<h3>macOS</h3>
-					<a :href="DOWNLOAD_URLS.mac" class="download-btn">Download .dmg</a>
+					<a :href="DOWNLOAD_URLS.mac" class="download-btn" @click="track('download', { os: 'mac' })">Download .dmg</a>
 					<p class="platform-note">Apple Silicon (M1+). Right-click → Open on first launch.</p>
 				</div>
 
 				<div class="download-card">
 					<div class="platform-icon">&#8862;</div>
 					<h3>Windows</h3>
-					<a :href="DOWNLOAD_URLS.windows" class="download-btn">Download .exe</a>
+					<a :href="DOWNLOAD_URLS.windows" class="download-btn" @click="track('download', { os: 'windows' })">Download .exe</a>
 					<p class="platform-note">Windows 10+. Click "More info" → "Run anyway" if SmartScreen appears.</p>
 				</div>
 
 				<div class="download-card">
 					<div class="platform-icon">&#9881;</div>
 					<h3>Linux</h3>
-					<a :href="DOWNLOAD_URLS.linux" class="download-btn">Download .AppImage</a>
-					<a :href="DOWNLOAD_URLS.deb" class="download-btn download-btn-secondary">.deb package</a>
+					<a :href="DOWNLOAD_URLS.linux" class="download-btn" @click="track('download', { os: 'linux' })">Download .AppImage</a>
+					<a :href="DOWNLOAD_URLS.deb" class="download-btn download-btn-secondary" @click="track('download', { os: 'linux' })">.deb package</a>
 					<p class="platform-note">Make AppImage executable: <code>chmod +x Eise*.AppImage</code></p>
 				</div>
 			</div>
@@ -84,6 +84,8 @@
 </template>
 
 <script setup>
+import { useTracking } from '~/composables/useTracking';
+const { track } = useTracking();
 const RELEASE_VERSION = '2026.05.20';
 const DOWNLOAD_URLS = {
   mac: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.5.20-mac-arm64.dmg',
