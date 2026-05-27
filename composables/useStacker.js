@@ -645,10 +645,15 @@ export function useStacker() {
                     throw new Error('Failed to process reference frame - GPU returned no results');
                 }
 
-                refBuffer = refResults[0].float32Buffer || refResults[0].uint8Buffer;
-                if (!refBuffer) {
+                const rawRefBuffer = refResults[0].float32Buffer || refResults[0].uint8Buffer;
+                if (!rawRefBuffer) {
                     throw new Error('Failed to process reference frame - no pixel buffer returned');
                 }
+                // GPU analyze worker returns ArrayBuffers, not typed arrays - wrap correctly
+                // 16-bit sources return float32Buffer, 8-bit return uint8Buffer
+                refBuffer = refResults[0].float32Buffer
+                    ? new Float32Array(rawRefBuffer)
+                    : new Uint8ClampedArray(rawRefBuffer);
                 const refIsFloat = refBuffer instanceof Float32Array;
                 refBlob = refIsFloat
                     ? await float32ToBlob(refBuffer, cropSize, cropSize)
