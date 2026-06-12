@@ -30,7 +30,7 @@ export default defineNuxtPlugin(nuxtApp => {
 			addLog('Initializing FFmpeg...');
 			ffmpeg = createFFmpeg({
 				log: true,
-				corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+				corePath: '/ffmpeg/ffmpeg-core.js',
 			});
 		}
 
@@ -57,7 +57,7 @@ export default defineNuxtPlugin(nuxtApp => {
 		if (!ffmpeg) {
 			ffmpeg = createFFmpeg({
 				log: true,
-				corePath: 'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js',
+				corePath: '/ffmpeg/ffmpeg-core.js',
 			});
 		}
 		return ffmpeg;
