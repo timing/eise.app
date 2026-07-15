@@ -120,8 +120,16 @@ async function safeMapAsync(buffer, mode) {
             deviceLostSignal
         ]);
     } catch (err) {
-        // Check for device lost errors (various error messages from different browsers/drivers)
-        if (err.message && (err.message.includes('Instance reference') || err.message.includes('Device') && err.message.includes('lost'))) {
+        // Detect device loss via any known error message shape.
+        // "invalid due to a previous error" / "Invalid Buffer" appear on drivers where the
+        // device-lost event never fired but the buffer was already invalidated by a prior GPU error.
+        const msg = err && err.message || '';
+        const looksLikeDeviceLost =
+            msg.includes('Instance reference') ||
+            (msg.includes('Device') && msg.includes('lost')) ||
+            msg.includes('invalid due to a previous error') ||
+            msg.includes('Invalid Buffer');
+        if (looksLikeDeviceLost) {
             deviceLost = true;
             device = null;
             queue = null;
