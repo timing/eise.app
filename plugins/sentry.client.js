@@ -2,10 +2,12 @@ import * as Sentry from '@sentry/vue';
 
 export default defineNuxtPlugin(async (nuxtApp) => {
     const router = useRouter();
+    const release = useRuntimeConfig().public.sentryRelease;
 
     Sentry.init({
         app: nuxtApp.vueApp,
         dsn: 'https://334d6e6c9fb38f64b8405f6221dc9984@o4510708370571264.ingest.de.sentry.io/4510708376141904',
+        release,
         integrations: [
             Sentry.browserTracingIntegration({ router }),
             Sentry.feedbackIntegration({

@@ -187,23 +187,33 @@ This results in inverted naming:
 ## Sentry Error Tracking
 
 **Access Sentry issues via API:**
+
+Auth token and org/project slugs are in `config/sentry-env.sh` (source it first).
+
+For a single issue by short ID (e.g. `EISE-J8`), use the helper — it makes both API calls and prints a summary or full JSON:
 ```bash
-# Config is in config/sentry-env.sh
+scripts/sentry-issue.sh EISE-J8 --meta-only   # summary
+scripts/sentry-issue.sh EISE-J8               # full {group, event} JSON
+```
+
+For other queries, use the **org-prefixed** endpoints (bare `/api/0/issues/{id}/...` returns 404, and `issues/?query=<shortId>` returns `[]` — do not use those):
+```bash
 source config/sentry-env.sh
 
-# Fetch unresolved issues
+# List unresolved issues
 curl -s -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
   "https://sentry.io/api/0/projects/$SENTRY_ORG/$SENTRY_PROJECT/issues/?query=is:unresolved"
 
-# Get issue details
+# Resolve short ID → numeric group ID
 curl -s -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
-  "https://sentry.io/api/0/issues/{issue_id}/"
+  "https://sentry.io/api/0/organizations/$SENTRY_ORG/shortids/{SHORT_ID}/"
+
+# Latest event for an issue
+curl -s -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
+  "https://sentry.io/api/0/organizations/$SENTRY_ORG/issues/{group_id}/events/latest/"
 
 # Mark issue as resolved
 curl -s -X PUT -H "Authorization: Bearer $SENTRY_AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"status": "resolved"}' \
-  "https://sentry.io/api/0/issues/{issue_id}/"
+  -H "Content-Type: application/json" -d '{"status": "resolved"}' \
+  "https://sentry.io/api/0/organizations/$SENTRY_ORG/issues/{group_id}/"
 ```
-
-**Note:** When Claude is asked to "fix Sentry issues", use curl with the auth token from `config/sentry-env.sh` to fetch and manage issues.

@@ -1,9 +1,22 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
 // also trying to fix this: https://github.com/nuxt/nuxt/issues/22141
 
+import { sentryVitePlugin } from '@sentry/vite-plugin';
+
 // Cloudflare Pages sets CF_PAGES_BRANCH during build
 const isProduction = process.env.CF_PAGES_BRANCH === 'main';
 const robotsContent = isProduction ? 'index, follow' : 'noindex, nofollow';
+
+// Sentry release identifier: prefer Cloudflare's commit SHA, fall back to local git or package version.
+const sentryRelease =
+	process.env.SENTRY_RELEASE ||
+	process.env.CF_PAGES_COMMIT_SHA ||
+	process.env.GITHUB_SHA ||
+	`local-${Date.now()}`;
+
+// Upload source maps only when the auth token is present at build time.
+// Without a token the plugin is a no-op, so local `nuxt generate` still works.
+const sentryUploadEnabled = !!process.env.SENTRY_AUTH_TOKEN;
 
 export default defineNuxtConfig({
 	devtools: { enabled: true },
@@ -44,7 +57,8 @@ export default defineNuxtConfig({
 	},
 	runtimeConfig: {
 		public: {
-			buildTimestamp: Date.now() // Unix timestamp in ms, set at build time
+			buildTimestamp: Date.now(), // Unix timestamp in ms, set at build time
+			sentryRelease
 		}
 	},
 	plugins: [
@@ -73,7 +87,20 @@ export default defineNuxtConfig({
 		},
 		build: {
 			sourcemap: true // Enable source maps for better Sentry stack traces
-		}
+		},
+		plugins: [
+			sentryVitePlugin({
+				disable: !sentryUploadEnabled,
+				org: process.env.SENTRY_ORG || 'eiseapp',
+				project: process.env.SENTRY_PROJECT || 'eise',
+				authToken: process.env.SENTRY_AUTH_TOKEN,
+				release: { name: sentryRelease },
+				sourcemaps: {
+					filesToDeleteAfterUpload: ['dist/**/*.map', '.output/**/*.map']
+				},
+				telemetry: false
+			})
+		]
 	}/*,
 	serverMiddleware: [
 		'~/server/middleware/headers.ts',
