@@ -55,6 +55,11 @@ export default defineNuxtConfig({
 			trailingSlash: false
 		}
 	},
+	experimental: {
+		// Reload the app when a route-chunk load fails (stale bundle after a deploy).
+		// Fires the app:chunkError hook and triggers reload automatically.
+		emitRouteChunkError: 'automatic'
+	},
 	runtimeConfig: {
 		public: {
 			buildTimestamp: Date.now(), // Unix timestamp in ms, set at build time
@@ -62,6 +67,7 @@ export default defineNuxtConfig({
 		}
 	},
 	plugins: [
+		'~/plugins/reload-on-stale-chunk.client.js',
 		'~/plugins/sentry.client.js',
 		'~/plugins/ffmpeg.js',
 		{src: '~/plugins/opencv.js', mode: 'client'}
