@@ -7,6 +7,13 @@ import { sentryVitePlugin } from '@sentry/vite-plugin';
 const isProduction = process.env.CF_PAGES_BRANCH === 'main';
 const robotsContent = isProduction ? 'index, follow' : 'noindex, nofollow';
 
+// Electron builds set EISE_BUILD_TARGET=electron so analytics land in a separate
+// Simple Analytics hostname bucket instead of polluting web stats.
+const isElectronBuild = process.env.EISE_BUILD_TARGET === 'electron';
+const analyticsHostname = isElectronBuild
+	? 'electron.eise.app'
+	: (isProduction ? 'eise.app' : 'localhost.eise.app');
+
 // Sentry release identifier: prefer Cloudflare's commit SHA, fall back to local git or package version.
 const sentryRelease =
 	process.env.SENTRY_RELEASE ||
@@ -42,7 +49,7 @@ export default defineNuxtConfig({
 					async: true,
 					defer: true,
 					crossorigin: 'anonymous',
-					'data-hostname': isProduction ? 'eise.app' : 'localhost.eise.app',
+					'data-hostname': analyticsHostname,
 				}
 			],
 			noscript: [
