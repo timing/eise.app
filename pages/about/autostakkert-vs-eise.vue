@@ -158,9 +158,15 @@
 useHead({
 	title: 'AutoStakkert! vs Eise.app - Compare Planetary Stacking Software',
 	meta: [
-		{ name: 'description', content: 'Balanced comparison of AutoStakkert! (Windows industry standard) and Eise.app (browser-based, cross-platform). Features, platforms, workflow, and when to pick which.' },
+		{ name: 'description', content: 'AutoStakkert! is the standard for planetary stacking on Windows. Eise.app runs in your browser on any OS with integrated post-processing. Compare features, workflow, and when each is the better fit.' },
 	],
 });
+
+useBreadcrumbSchema([
+	{ name: 'Home', url: 'https://eise.app/' },
+	{ name: 'About', url: 'https://eise.app/about/' },
+	{ name: 'AutoStakkert! vs Eise.app', url: 'https://eise.app/about/autostakkert-vs-eise/' },
+]);
 </script>
 
 <style scoped>

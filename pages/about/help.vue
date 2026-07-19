@@ -2,7 +2,7 @@
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
 			<h2>How to Use Eise.app - Planetary Image Stacking Guide</h2>
-			<p >This guide explains how Eise.app processes your astrophotography videos and images to create sharp, detailed results.</p>
+			<p>Eise.app processes astrophotography videos of planets, the Moon, and the Sun by analyzing each frame for sharpness, cropping to keep the target centered, aligning frames with local template matching, and combining the sharpest frames into a single detailed result. You choose how many frames to include - a percentage, a quality threshold, or continuous stacking that tries several percentages automatically. This process - lucky imaging - takes a couple of minutes for a typical planetary video and runs entirely in your browser using WebGPU.</p>
 
 			<h3>Getting Started</h3>
 			<ol>
@@ -145,6 +145,12 @@ useHead({
 		{ name: 'description', content: 'Learn how to use Eise.app for planetary astrophotography. Step-by-step guide to stacking videos of planets, Moon, and Sun in your browser.' },
 	],
 });
+
+useBreadcrumbSchema([
+	{ name: 'Home', url: 'https://eise.app/' },
+	{ name: 'About', url: 'https://eise.app/about/' },
+	{ name: 'Help & How it Works', url: 'https://eise.app/about/help/' },
+]);
 </script>
 
 <style scoped>

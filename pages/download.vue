@@ -102,6 +102,11 @@ useHead({
 		{ name: 'description', content: 'Download Eise.app for macOS, Windows, or Linux. Free offline planetary image stacker for astrophotography.' },
 	],
 });
+
+useBreadcrumbSchema([
+	{ name: 'Home', url: 'https://eise.app/' },
+	{ name: 'Download', url: 'https://eise.app/download/' },
+]);
 </script>
 
 <style scoped>

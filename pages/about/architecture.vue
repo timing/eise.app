@@ -381,6 +381,12 @@ useHead({
 		{ name: 'description', content: 'Technical documentation of Eise.app\'s processing pipeline, algorithms, and architecture. For contributors and curious users.' },
 	],
 });
+
+useBreadcrumbSchema([
+	{ name: 'Home', url: 'https://eise.app/' },
+	{ name: 'About', url: 'https://eise.app/about/' },
+	{ name: 'Technical Architecture', url: 'https://eise.app/about/architecture/' },
+]);
 </script>
 
 <style scoped>

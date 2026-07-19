@@ -67,6 +67,10 @@
 				</label>
 			</div>
 
+			<p v-if="selectedFiles.length === 0" class="try-sample-line">
+				No footage of your own? <a href="#" @click.prevent="loadSample" :aria-busy="loadingSample" class="try-sample-link">{{ loadingSample ? 'Loading sample…' : 'Try a sample Jupiter clip →' }}</a>
+			</p>
+
 			<div v-if="liteModeClient" class="lite-mode-warning">
 				Stacking on mobile devices will likely not work due to memory limitations. For best results, use Eise.app on a laptop or desktop computer.
 			</div>
@@ -220,7 +224,7 @@
 	<!-- Welcome content: only show when not processing -->
 	<div class="content" v-if="!isProcessing">
 		<h2>Welcome to Eise.app</h2>
-		<p class="intro">Turn your shaky planetary videos into sharp images. Drop a SER, AVI, or MP4 file to get started.</p>
+		<p class="intro">Eise.app is a free browser-based planetary image stacker for astrophotography. Upload a SER, AVI, or MP4 video of Jupiter, Saturn, Mars, the Moon, or the Sun, and it uses lucky imaging - combining the sharpest frames - to produce a detailed final image. Runs entirely in your browser using WebGPU. No install, no upload, no signup.</p>
 
 		<div class="comparison-images">
 			<img src="/jupiter-singleframe.png" alt="Single frame from video" />
@@ -229,7 +233,7 @@
 		</div>
 
 		<div class="how-it-works">
-			<p>Eise.app uses <em>lucky imaging</em> to combine the sharpest frames from your video into one detailed image. It automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. After stacking, the post processor opens for wavelet sharpening, RGB alignment, and color adjustments.</p>
+			<p>Under the hood, Eise.app automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. After stacking, the post processor opens for wavelet sharpening, RGB alignment, and color adjustments.</p>
 			<ul>
 				<li><strong>SER or AVI files</strong> for stacking + post processing. Multiple files open batch mode.</li>
 				<li><strong>Video files</strong> (MP4, MOV, etc.) for stacking + post processing.</li>
@@ -712,6 +716,31 @@ function detectBrightObjectBounds(pixels, width, height) {
 		width: maxX - minX,
 		height: maxY - minY
 	};
+}
+
+// Sample file — served from public/samples/. See public/samples/README.md.
+const SAMPLE_URL = '/samples/jupiter-sample.mp4';
+const SAMPLE_NAME = 'jupiter-sample.mp4';
+const SAMPLE_MIME = 'video/mp4';
+const loadingSample = ref(false);
+
+async function loadSample() {
+	if (loadingSample.value) return;
+	loadingSample.value = true;
+	errorMessage.value = null;
+	try {
+		const res = await fetch(SAMPLE_URL);
+		if (!res.ok) throw new Error(`Sample not available (HTTP ${res.status})`);
+		const blob = await res.blob();
+		const file = new File([blob], SAMPLE_NAME, { type: SAMPLE_MIME });
+		selectedFiles.value = [file];
+		track('try_sample', { source: 'homepage' });
+		await startProcessing();
+	} catch (err) {
+		errorMessage.value = `Could not load sample: ${err.message}`;
+	} finally {
+		loadingSample.value = false;
+	}
 }
 
 async function startProcessing() {
@@ -1574,5 +1603,21 @@ async function processFiles(files, options = {}) {
 }
 .how-it-works li {
 	margin-bottom: 5px;
+}
+.try-sample-line {
+	margin-top: 10px;
+	margin-bottom: 0;
+	font-size: 12px;
+	color: #777;
+	text-align: center;
+}
+.try-sample-link {
+	color: #1a5a99 !important;
+	text-decoration: none;
+	white-space: nowrap;
+	font-weight: 500;
+}
+.try-sample-link:hover {
+	text-decoration: underline;
 }
 </style>

@@ -7,7 +7,7 @@
 				This guide compares the most popular options for both stacking and post-processing.
 			</p>
 			<p class="vs-quicklinks">
-				<strong>Head-to-head comparisons:</strong>&nbsp;<NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert! vs Eise.app</NuxtLink>
+				<strong>Head-to-head:</strong>&nbsp;<NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert! vs Eise.app</NuxtLink>
 				· <NuxtLink to="/about/registax-vs-eise/">Registax 6 vs Eise.app</NuxtLink>
 				· <NuxtLink to="/about/planetary-system-stacker-vs-eise/">PSS vs Eise.app</NuxtLink>
 			</p>
@@ -426,6 +426,12 @@ useHead({
 		{ name: 'description', content: 'Side-by-side comparison of the main planetary astrophotography stacking tools: AutoStakkert!, Registax, PSS, PlanetStackerX, LuckyStackWorker, ImPPG, AstroSurface, and Eise.app. Features, platforms, and workflow.' },
 	],
 });
+
+useBreadcrumbSchema([
+	{ name: 'Home', url: 'https://eise.app/' },
+	{ name: 'About', url: 'https://eise.app/about/' },
+	{ name: 'Planetary Stacking Software Comparison', url: 'https://eise.app/about/planetary-stacking-software-comparison/' },
+]);
 </script>
 
 <style scoped>

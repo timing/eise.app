@@ -100,6 +100,21 @@ const buildDate = computed(() => {
 	return new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 });
 
+// Canonical URL: normalize trailing slash + strip query/hash so Google groups
+// all variant URLs onto the canonical form (fixes the "http://eise.app/?"
+// URL-inspection warning).
+useHead({
+	link: [
+		{
+			rel: 'canonical',
+			href: computed(() => {
+				const path = route.path.endsWith('/') || route.path === '/' ? route.path : route.path + '/';
+				return `https://eise.app${path}`;
+			}),
+		},
+	],
+});
+
 // Close menu when route changes
 watch(() => route.path, () => {
 	menuOpen.value = false;

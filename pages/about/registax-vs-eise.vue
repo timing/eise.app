@@ -144,9 +144,15 @@
 useHead({
 	title: 'Registax 6 vs Eise.app - Compare Planetary Stacking Software',
 	meta: [
-		{ name: 'description', content: 'Balanced comparison of Registax 6 (classic wavelet sharpener, last updated 2011) and Eise.app (modern browser-based stacker with integrated wavelets). Features, platforms, and when to pick which.' },
+		{ name: 'description', content: 'Registax 6 pioneered wavelet sharpening but has not been updated since 2011. Eise.app offers modern browser-based stacking and wavelets on any OS. Compare features side by side.' },
 	],
 });
+
+useBreadcrumbSchema([
+	{ name: 'Home', url: 'https://eise.app/' },
+	{ name: 'About', url: 'https://eise.app/about/' },
+	{ name: 'Registax 6 vs Eise.app', url: 'https://eise.app/about/registax-vs-eise/' },
+]);
 </script>
 
 <style scoped>

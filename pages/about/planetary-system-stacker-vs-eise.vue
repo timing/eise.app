@@ -142,9 +142,15 @@
 useHead({
 	title: 'Planetary System Stacker vs Eise.app - Compare Planetary Stacking',
 	meta: [
-		{ name: 'description', content: 'Balanced comparison of Planetary System Stacker (PSS, Python open source) and Eise.app (browser-based, WebGPU). Features, platforms, extensibility, and when to pick which.' },
+		{ name: 'description', content: 'PSS is an open-source Python stacker with a documented pipeline. Eise.app applies the same alignment-point approach in the browser with WebGPU. Skip the pip install and compare.' },
 	],
 });
+
+useBreadcrumbSchema([
+	{ name: 'Home', url: 'https://eise.app/' },
+	{ name: 'About', url: 'https://eise.app/about/' },
+	{ name: 'Planetary System Stacker vs Eise.app', url: 'https://eise.app/about/planetary-system-stacker-vs-eise/' },
+]);
 </script>
 
 <style scoped>
