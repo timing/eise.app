@@ -6,6 +6,11 @@
 				Choosing the right stacking software for planetary astrophotography can be confusing.
 				This guide compares the most popular options for both stacking and post-processing.
 			</p>
+			<p class="vs-quicklinks">
+				<strong>Head-to-head comparisons:</strong>&nbsp;<NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert! vs Eise.app</NuxtLink>
+				· <NuxtLink to="/about/registax-vs-eise/">Registax 6 vs Eise.app</NuxtLink>
+				· <NuxtLink to="/about/planetary-system-stacker-vs-eise/">PSS vs Eise.app</NuxtLink>
+			</p>
 
 			<h3>What is Planetary Stacking Software?</h3>
 			<p>
@@ -342,6 +347,7 @@
 				It offers the most control over alignment points and supports multiple drizzle scales.
 				However, it only handles stacking - you'll need Registax, LuckyStackWorker, or another tool for sharpening.
 				Windows-only, which is problematic for Mac users.
+				<NuxtLink to="/about/autostakkert-vs-eise/">See head-to-head: AutoStakkert! vs Eise.app &rarr;</NuxtLink>
 			</p>
 
 			<h4>Planetary System Stacker (PSS) - Best for: Cross-platform desktop, advanced users</h4>
@@ -350,6 +356,7 @@
 				It includes built-in wavelet sharpening and RGB alignment, making it an all-in-one solution.
 				It's powerful but requires Python installation and dependency management,
 				which can be challenging especially on Apple Silicon Macs.
+				<NuxtLink to="/about/planetary-system-stacker-vs-eise/">See head-to-head: PSS vs Eise.app &rarr;</NuxtLink>
 			</p>
 
 			<h4>Planet Stacker X - Best for: Native macOS experience</h4>
@@ -374,6 +381,7 @@
 				Its 6-layer wavelet interface remains the most well-known in the hobby.
 				However, its stacking capabilities are outdated compared to AutoStakkert! or PSS.
 				Last updated in 2011 but still functional. Windows-only.
+				<NuxtLink to="/about/registax-vs-eise/">See head-to-head: Registax 6 vs Eise.app &rarr;</NuxtLink>
 			</p>
 
 			<h4>AstroSurface - Best for: All-in-one on Windows</h4>
@@ -421,6 +429,13 @@ useHead({
 </script>
 
 <style scoped>
+.vs-quicklinks {
+	background: #f4f4f4;
+	padding: 10px 16px;
+	border-radius: 6px;
+	font-size: 14px;
+	line-height: 1.9;
+}
 .table-wrapper {
 	overflow-x: auto;
 	margin: 1.5rem 0;

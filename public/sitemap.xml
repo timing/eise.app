@@ -4,13 +4,13 @@
 		<loc>https://eise.app/</loc>
 	</url>
 	<url>
-		<loc>https://eise.app/post-processor/</loc>
-	</url>
-	<url>
-		<loc>https://eise.app/tools/</loc>
-	</url>
-	<url>
 		<loc>https://eise.app/about/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/about/architecture/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/about/autostakkert-vs-eise/</loc>
 	</url>
 	<url>
 		<loc>https://eise.app/about/help/</loc>
@@ -18,5 +18,19 @@
 	<url>
 		<loc>https://eise.app/about/planetary-stacking-software-comparison/</loc>
 	</url>
+	<url>
+		<loc>https://eise.app/about/planetary-system-stacker-vs-eise/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/about/registax-vs-eise/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/download/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/post-processor/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/tools/</loc>
+	</url>
 </urlset>
-

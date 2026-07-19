@@ -10,6 +10,7 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
+    "pregenerate": "node scripts/generate-sitemap.mjs",
     "postgenerate": "node scripts/generate-version-json.js && cp config/cloudflare_headers.txt dist/_headers",
     "electron:dev": "EISE_BUILD_TARGET=electron nuxt generate && electron .",
     "electron:build": "EISE_BUILD_TARGET=electron nuxt generate && electron-builder --config electron-builder.yml",

@@ -386,13 +386,13 @@ useHead({
 <style scoped>
 .architecture-page h3 {
 	margin-top: 2rem;
-	border-bottom: 1px solid #444;
+	border-bottom: 1px solid #ddd;
 	padding-bottom: 0.5rem;
 }
 
 .architecture-page h4 {
 	margin-top: 1.5rem;
-	color: #ccc;
+	color: #222;
 }
 
 .diagram {
@@ -425,40 +425,45 @@ table {
 	width: 100%;
 	border-collapse: collapse;
 	margin: 1rem 0;
+	font-size: 14px;
 }
 
 th, td {
-	border: 1px solid #444;
-	padding: 0.5rem 0.75rem;
+	border: 1px solid #e5e5e5;
+	padding: 0.6rem 0.75rem;
 	text-align: left;
+	vertical-align: top;
 }
 
 th {
-	background: #2a2a3e;
+	background: #f4f4f4;
+	color: #222;
 	font-weight: 600;
 }
 
 td {
-	background: #1a1a2e;
+	background: #fff;
+	color: #333;
 }
 
 td code {
-	background: #2a2a3e;
-	padding: 0.1rem 0.3rem;
+	background: #f4f4f4;
+	color: #222;
+	padding: 0.1rem 0.35rem;
 	border-radius: 3px;
 	font-size: 0.9em;
 }
 
 tr:hover td {
-	background: #252538;
+	background: #fafafa;
 }
 
 .note {
-	background: #2a2a3e;
-	border-left: 3px solid #8be9fd;
+	background: #eef7ff;
+	border-left: 3px solid #1a5a99;
 	padding: 0.5rem 1rem;
 	margin: 1rem 0;
 	font-size: 0.9em;
-	color: #aaa;
+	color: #333;
 }
 </style>

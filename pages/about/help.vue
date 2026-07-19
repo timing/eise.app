@@ -165,7 +165,7 @@ dd {
 	display: block;
 	margin: 0.5rem 0;
 	border-radius: 4px;
-	border: 1px solid #444;
+	border: 1px solid #e5e5e5;
 }
 .brave-tip {
 	background: #fff3cd;
@@ -184,6 +184,27 @@ dd {
 	display: block;
 	margin: 0.75rem 0;
 	border-radius: 4px;
-	border: 1px solid #444;
+	border: 1px solid #e5e5e5;
+}
+.compat-table {
+	width: auto;
+	border-collapse: collapse;
+	margin: 1rem 0;
+	font-size: 14px;
+}
+.compat-table th,
+.compat-table td {
+	border: 1px solid #e5e5e5;
+	padding: 8px 14px;
+	text-align: left;
+	color: #333;
+}
+.compat-table th {
+	background: #f4f4f4;
+	color: #222;
+	font-weight: 600;
+}
+.compat-table td {
+	background: #fff;
 }
 </style>

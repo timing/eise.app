@@ -87,6 +87,12 @@
 				For a detailed comparison with AutoStakkert!, Planetary System Stacker, Registax, and other tools,
 				see our <NuxtLink to="/about/planetary-stacking-software-comparison/">stacking software comparison</NuxtLink>.
 			</p>
+			<p>
+				Head-to-head with the most-searched competitors:
+				<NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert! vs Eise.app</NuxtLink>,
+				<NuxtLink to="/about/registax-vs-eise/">Registax 6 vs Eise.app</NuxtLink>,
+				<NuxtLink to="/about/planetary-system-stacker-vs-eise/">PSS vs Eise.app</NuxtLink>.
+			</p>
 
 			<h3>Acknowledgments</h3>
 			<p>
@@ -95,11 +101,37 @@
 			Thank you Rolf for making PSS open source and documenting the algorithms.
 			</p>
 
-			<h3>Bugs or feature requests?</h3>
-			<p>Head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on GitHub</a> for suggestions or bug reports.</p>
-			<p>Or <a href="#" @click.prevent="openFeedback()">send me feedback directly</a> - I'd love to hear about your experience!</p>
+			<section id="community" class="community-section">
+				<h3>Community & feedback</h3>
 
-			<p>Happy Stacking,<br/> Tijmen</p>
+				<h4>Show me what you stacked</h4>
+				<p>
+					If you've made something with Eise.app I'd like to see it. With your permission I'll feature good ones on this page.
+				</p>
+				<ul>
+					<li>Post on <a href="https://www.reddit.com/r/astrophotography/" target="_blank" rel="noopener">r/astrophotography</a> and mention Eise.app in the workflow - I keep an eye out.</li>
+					<li>Post to Instagram or X with <strong>#eiseapp</strong>.</li>
+					<li>Open a GitHub Discussion at <a href="https://github.com/timing/eise.app/discussions" target="_blank" rel="noopener">github.com/timing/eise.app/discussions</a>.</li>
+					<li>Or send it via the in-app feedback button. I read every message.</li>
+				</ul>
+
+				<h4>Bugs and feature requests</h4>
+				<p>
+					Hit a bug, want a feature, or something isn't working the way you expected? Please tell me - especially the niche stuff. "Doesn't work with my old QHY camera", "wavelets need one more slider", "add FITS support", "make it run on my Chromebook" - all useful, all read.
+				</p>
+				<div class="community-cta-row">
+					<a href="#" @click.prevent="openFeedback()" class="cta-secondary">Send feedback in-app</a>
+					<a href="https://github.com/timing/eise.app/issues/new" target="_blank" rel="noopener" class="cta-secondary">Report on GitHub</a>
+					<a href="https://github.com/timing/eise.app/discussions" target="_blank" rel="noopener" class="cta-secondary">Share on Discussions</a>
+				</div>
+
+				<h4>Community gallery</h4>
+				<p class="gallery-placeholder">
+					A gallery of user-submitted stacks is being built. Send yours in and it might be featured here in the next update.
+				</p>
+			</section>
+
+			<p class="signoff">Happy stacking,<br/>Tijmen</p>
 		</div>
 	</div>
 </template>
@@ -140,6 +172,60 @@ useHead({
 </script>
 
 <style scoped>
+.community-section {
+	margin: 2.5rem 0;
+	padding: 1.75rem 2rem;
+	background: #f7f7f7;
+	border-radius: 8px;
+	border-left: 3px solid #8CCF7E;
+}
+.community-section h3 {
+	margin-top: 0;
+}
+.community-section h4 {
+	margin-top: 1.5rem;
+	font-size: 15px;
+}
+.community-cta-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin: 1rem 0 0;
+}
+.cta-secondary {
+	display: inline-block;
+	background: #fff;
+	color: #1a5a99 !important;
+	border: 1px solid #1a5a99;
+	padding: 8px 16px;
+	border-radius: 4px;
+	font-size: 14px;
+	text-decoration: none !important;
+	font-weight: 600;
+}
+.cta-secondary:hover {
+	background: #1a5a99;
+	color: #fff !important;
+}
+.gallery-placeholder {
+	padding: 1rem;
+	background: #fff;
+	border: 1px dashed #ccc;
+	border-radius: 4px;
+	color: #666;
+	font-style: italic;
+	margin-top: 0.5rem;
+}
+.signoff {
+	margin-top: 2rem;
+	color: #666;
+	font-style: italic;
+}
+@media (max-width: 700px) {
+	.community-section {
+		padding: 1.25rem 1.25rem;
+	}
+}
 .testimonials {
 	margin: 2.5rem 0;
 	max-width: 100%;

@@ -248,8 +248,6 @@
 				<NuxtLink to="/about/#testimonials">Read more testimonials &rarr;</NuxtLink>
 			</p>
 		</aside>
-
-		<p class="build-date">Latest release: {{ buildDate }}</p>
 	</div>
 </div>
 </template>
@@ -279,18 +277,6 @@ const useGPU = inject('useGPU', ref(false));
 const isMobile = inject('isMobile', ref(false));
 const isMobileClient = ref(false); // Only true after mount to avoid hydration mismatch
 const liteModeClient = ref(false); // Only true after mount to avoid hydration mismatch
-
-// Build date from nuxt.config.ts (set at build time)
-const config = useRuntimeConfig();
-const buildDate = computed(() => {
-	const ts = config.public.buildTimestamp;
-	if (!ts) return '';
-	return new Date(ts).toLocaleDateString(undefined, {
-		year: 'numeric',
-		month: 'short',
-		day: 'numeric'
-	});
-});
 
 const { track } = useTracking();
 const { detectPlatform, checkFileSize } = useLiteMemoryLimits();
@@ -1588,10 +1574,5 @@ async function processFiles(files, options = {}) {
 }
 .how-it-works li {
 	margin-bottom: 5px;
-}
-.build-date {
-	font-size: 0.85em;
-	color: #888;
-	margin-top: 20px;
 }
 </style>
