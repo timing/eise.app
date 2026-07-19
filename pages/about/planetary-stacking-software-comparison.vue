@@ -11,6 +11,9 @@
 				· <NuxtLink to="/about/registax-vs-eise/">Registax 6 vs Eise.app</NuxtLink>
 				· <NuxtLink to="/about/planetary-system-stacker-vs-eise/">PSS vs Eise.app</NuxtLink>
 			</p>
+			<p class="vs-quicklinks">
+				<strong>Platform guides:</strong>&nbsp;<NuxtLink to="/planetary-stacking-mac/">Planetary stacking on Mac</NuxtLink>
+			</p>
 
 			<h3>What is Planetary Stacking Software?</h3>
 			<p>
