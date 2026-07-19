@@ -726,6 +726,16 @@ const loadingSample = ref(false);
 
 async function loadSample() {
 	if (loadingSample.value) return;
+
+	// Fire analytics on click (before fetch) so intent is captured even if the
+	// sample download fails.
+	track('try_sample', { source: 'homepage' });
+
+	// Force sensible defaults for the demo: Planet target, no frame limit.
+	// Everything else is left as the user configured it.
+	targetType.value = 'planet';
+	enableMaxFrames.value = false;
+
 	loadingSample.value = true;
 	errorMessage.value = null;
 	try {
@@ -734,7 +744,6 @@ async function loadSample() {
 		const blob = await res.blob();
 		const file = new File([blob], SAMPLE_NAME, { type: SAMPLE_MIME });
 		selectedFiles.value = [file];
-		track('try_sample', { source: 'homepage' });
 		await startProcessing();
 	} catch (err) {
 		errorMessage.value = `Could not load sample: ${err.message}`;
