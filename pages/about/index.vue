@@ -1,6 +1,6 @@
 <template>
 	<div class="page-layout page-layout-wide">
-		<div class="content">
+		<div class="content content-card">
 			<h2>About Eise.app - Image Stacker for Planets, Moon & Sun</h2>
 			<h3>100% browser-based - no uploads, no installs</h3>
 			<p>Eise.app is the first fully browser-based planetary image stacking tool for astrophotography.
@@ -20,6 +20,25 @@
 				<NuxtLink to="/about/planetary-stacking-software-comparison/">compare it to other stacking software</NuxtLink>.
 			</p>
 			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image - just open a PNG or TIFF for wavelet sharpening, RGB alignment, and other adjustments without stacking.</p>
+
+			<section id="testimonials" class="testimonials" aria-label="What users say">
+				<h3>What users say</h3>
+				<div class="testimonial-grid">
+					<blockquote>
+						<p>"Very good app — it helped me massively improve my image of the Moon."</p>
+						<cite>— Santhiago, astrophotographer from Costa Rica</cite>
+					</blockquote>
+					<blockquote>
+						<p>"Very satisfied with the result."</p>
+						<cite>— Alexis, astrophotographer from France</cite>
+					</blockquote>
+					<blockquote>
+						<p>"Happy this is easy to use."</p>
+						<cite>— Astroyouda, astrophotographer from Indonesia</cite>
+					</blockquote>
+				</div>
+				<p class="testimonials-note">Quotes translated to English, collected via the in-app feedback form.</p>
+			</section>
 
 			<!-- Screenshot carousel -->
 			<div class="screenshot-carousel">
@@ -121,6 +140,42 @@ useHead({
 </script>
 
 <style scoped>
+.testimonials {
+	margin: 2.5rem 0;
+	max-width: 100%;
+}
+.testimonials h3 {
+	margin-bottom: 1rem;
+}
+.testimonial-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	gap: 1rem;
+}
+.testimonial-grid blockquote {
+	margin: 0;
+	padding: 1rem 1.25rem;
+	background: #f7f7f7;
+	border-left: 3px solid #1a5a99;
+	border-radius: 4px;
+}
+.testimonial-grid blockquote p {
+	margin: 0 0 0.5rem;
+	font-style: italic;
+	color: #333;
+	line-height: 1.5;
+}
+.testimonial-grid blockquote cite {
+	font-style: normal;
+	font-size: 0.85rem;
+	color: #666;
+}
+.testimonials-note {
+	margin-top: 0.75rem;
+	font-size: 0.8rem;
+	color: #888;
+}
+
 .screenshot-carousel {
 	position: relative;
 	margin: 2rem 0;
@@ -146,9 +201,9 @@ useHead({
 }
 
 .carousel-btn {
-	background: rgba(255, 255, 255, 0.1);
-	border: 1px solid rgba(255, 255, 255, 0.2);
-	color: white;
+	background: #f0f0f0;
+	border: 1px solid #d0d0d0;
+	color: #333;
 	font-size: 2rem;
 	width: 40px;
 	height: 40px;
@@ -157,12 +212,15 @@ useHead({
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	transition: background 0.2s;
+	transition: background 0.2s, border-color 0.2s;
 	flex-shrink: 0;
+	line-height: 1;
+	padding: 0;
 }
 
 .carousel-btn:hover {
-	background: rgba(255, 255, 255, 0.2);
+	background: #e0e0e0;
+	border-color: #b0b0b0;
 }
 
 .carousel-dots {
@@ -178,17 +236,17 @@ useHead({
 	width: 8px;
 	height: 8px;
 	border-radius: 50%;
-	background: rgba(255, 255, 255, 0.3);
+	background: #c8c8c8;
 	cursor: pointer;
 	transition: background 0.2s;
 }
 
 .dot.active {
-	background: rgba(255, 255, 255, 0.8);
+	background: #1a5a99;
 }
 
 .dot:hover {
-	background: rgba(255, 255, 255, 0.5);
+	background: #888;
 }
 
 /* Lightbox popup */

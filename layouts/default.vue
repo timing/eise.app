@@ -116,9 +116,14 @@ watch(() => route.path, () => {
 @media (max-width: 700px) {
 	.hamburger-menu {
 		flex: 0;
+		display: flex;
 	}
 	.hamburger-toggle {
 		padding: 8px 12px;
+		font-size: 14px;
+		line-height: 1;
+		height: 100%;
+		box-sizing: border-box;
 	}
 	.menu-dropdown {
 		right: 0;

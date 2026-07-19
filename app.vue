@@ -662,6 +662,110 @@ button:hover, a.button:hover, .tabs a:hover {
 	line-height: 1.5;
 	flex: 1;
 }
+/* Content-card: a white paper for text-heavy pages (about/*, download, comparison).
+   Opt in by adding the `content-card` class to the inner .content div. */
+
+/* Kill the flex layout on the parent when a content-card is present, so the card
+   can center normally with margin: auto and its own max-width. Parent padding
+   guarantees breathing room on the sides at all viewport widths. */
+.page-layout:has(> .content.content-card) {
+	display: block;
+	padding: 0 12px;
+	max-width: none;
+	margin: 0;
+}
+
+.page-layout .content.content-card {
+	background: #fefefe;
+	color: #222;
+	box-sizing: border-box;
+	width: 100%;
+	max-width: 820px;
+	padding: 56px 72px;
+	margin: 24px auto 48px;
+	border-radius: 12px;
+	box-shadow: 0 4px 24px rgba(0, 0, 0, 0.18);
+	line-height: 1.7;
+	font-size: 16px;
+	flex: initial;
+}
+/* Direct-child text blocks stay narrower than the card so line-length is readable
+   (~65-70ch is the sweet spot). Tables, images, and code blocks stay full-width. */
+.page-layout .content.content-card > h2,
+.page-layout .content.content-card > h3,
+.page-layout .content.content-card > h4,
+.page-layout .content.content-card > p,
+.page-layout .content.content-card > ul,
+.page-layout .content.content-card > ol,
+.page-layout .content.content-card > dl,
+.page-layout .content.content-card > blockquote {
+	max-width: 68ch;
+}
+.page-layout .content.content-card h2 {
+	font-size: 30px;
+	color: #1a1a1a;
+	margin: 0 0 20px;
+	line-height: 1.2;
+	letter-spacing: -0.01em;
+	font-weight: 700;
+}
+.page-layout .content.content-card h3 {
+	font-size: 22px;
+	color: #1a1a1a;
+	margin: 40px 0 12px;
+	line-height: 1.3;
+	font-weight: 600;
+}
+.page-layout .content.content-card h4 {
+	font-size: 17px;
+	color: #1a1a1a;
+	margin: 28px 0 8px;
+	font-weight: 600;
+}
+.page-layout .content.content-card p {
+	color: #333;
+	margin: 0 0 16px;
+}
+.page-layout .content.content-card ul,
+.page-layout .content.content-card ol {
+	color: #333;
+	margin: 0 0 16px;
+	padding-left: 24px;
+}
+.page-layout .content.content-card li {
+	margin-bottom: 8px;
+}
+.page-layout .content.content-card a:not(.btn-primary):not(.btn-secondary):not(.btn-danger):not(.button):not(.download-btn):not(.submit-btn),
+.page-layout .content.content-card a:visited:not(.btn-primary):not(.btn-secondary):not(.btn-danger):not(.button):not(.download-btn):not(.submit-btn) {
+	color: #1a5a99;
+	text-decoration: none;
+	border-bottom: 1px solid rgba(26, 90, 153, 0.3);
+}
+.page-layout .content.content-card a:hover:not(.btn-primary):not(.btn-secondary):not(.btn-danger):not(.button):not(.download-btn):not(.submit-btn) {
+	color: #0d3d6e;
+	border-bottom-color: #0d3d6e;
+}
+.page-layout .content.content-card code {
+	background: #f4f4f4;
+	color: #222;
+	padding: 2px 6px;
+	border-radius: 3px;
+	font-size: 0.9em;
+}
+.page-layout .content.content-card strong {
+	color: #1a1a1a;
+}
+@media (max-width: 700px) {
+	.page-layout .content.content-card {
+		padding: 28px 20px;
+		margin: 12px auto 24px;
+		border-radius: 10px;
+		font-size: 15px;
+	}
+	.page-layout .content.content-card h2 { font-size: 24px; }
+	.page-layout .content.content-card h3 { font-size: 19px; margin-top: 32px; }
+	.page-layout .content.content-card h4 { font-size: 16px; }
+}
 canvas {
 	display: block;
 	width: auto;
@@ -872,6 +976,38 @@ canvas {
 	margin: 10px 20px 0px 20px;
 	border-radius: 5px;
 	font-size: 13px;
+}
+.home-testimonial {
+	margin: 20px 0;
+	padding: 14px 20px;
+	background: rgba(255, 255, 255, 0.04);
+	border-left: 3px solid #8CCF7E;
+	border-radius: 4px;
+	color: #c6fffd;
+}
+.home-testimonial-quote {
+	margin: 0 0 6px;
+	font-style: italic;
+	font-size: 14px;
+	line-height: 1.5;
+}
+.home-testimonial-cite {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 12px;
+	margin: 0;
+	font-size: 12px;
+	color: rgba(198, 255, 253, 0.65);
+	flex-wrap: wrap;
+}
+.home-testimonial-cite a {
+	color: #8CCF7E;
+	text-decoration: none;
+	white-space: nowrap;
+}
+.home-testimonial-cite a:hover {
+	text-decoration: underline;
 }
 .comparison-images {
 	display: flex;

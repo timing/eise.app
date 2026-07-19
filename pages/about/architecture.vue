@@ -1,6 +1,6 @@
 <template>
 	<div class="page-layout page-layout-wide">
-		<div class="content architecture-page">
+		<div class="content content-card architecture-page">
 			<h2>Technical Architecture</h2>
 			<p >This page documents the internal processing pipelines and algorithms used by Eise.app. Useful for contributors or anyone curious about how it works.</p>
 

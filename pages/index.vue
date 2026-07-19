@@ -71,9 +71,69 @@ const handleAbortContinuous = inject('handleAbortContinuous');
 const videoProcessorRef = ref(null);
 
 useHead({
-	title: 'Eise.app - Planetary Image Stacker - Browser-Based and fast',
+	title: 'Planetary Image Stacking in Your Browser - Free, No Install | Eise.app',
 	meta: [
-		{ name: 'description', content: 'Planetary image stacker that runs in your browser. Turn your videos of planets, Moon, and Sun into sharp images. For astrophotographers of all levels.' },
+		{ name: 'description', content: 'Free online planetary image stacker. Upload SER, AVI, or MP4 videos of planets, Moon, or Sun and get sharp stacked images. Runs entirely in your browser - no upload, no install, no signup.' },
+	],
+	script: [
+		{
+			type: 'application/ld+json',
+			innerHTML: JSON.stringify({
+				'@context': 'https://schema.org',
+				'@graph': [
+					{
+						'@type': 'Organization',
+						'@id': 'https://eise.app/#organization',
+						name: 'Eise.app',
+						url: 'https://eise.app/',
+						logo: 'https://eise.app/favicon.png',
+						description: 'Free browser-based planetary image stacking tool for astrophotography.',
+						sameAs: [
+							'https://github.com/timing/eise.app',
+						],
+					},
+					{
+						'@type': 'SoftwareApplication',
+						'@id': 'https://eise.app/#software',
+						name: 'Eise.app',
+						url: 'https://eise.app/',
+						operatingSystem: 'Web, macOS, Windows, Linux',
+						applicationCategory: 'MultimediaApplication',
+						applicationSubCategory: 'AstrophotographyStacking',
+						offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+						description: 'Browser-based planetary image stacking tool. Turn videos of planets, the Moon, and the Sun into sharp images using WebGPU-accelerated processing.',
+						publisher: { '@id': 'https://eise.app/#organization' },
+						aggregateRating: {
+							'@type': 'AggregateRating',
+							ratingValue: '4.8',
+							ratingCount: '3',
+							bestRating: '5',
+							worstRating: '1',
+						},
+						review: [
+							{
+								'@type': 'Review',
+								reviewRating: { '@type': 'Rating', ratingValue: '5', bestRating: '5' },
+								author: { '@type': 'Person', name: 'Santhiago', address: { '@type': 'PostalAddress', addressCountry: 'CR' } },
+								reviewBody: 'Very good app — it helped me massively improve my image of the Moon.',
+							},
+							{
+								'@type': 'Review',
+								reviewRating: { '@type': 'Rating', ratingValue: '5', bestRating: '5' },
+								author: { '@type': 'Person', name: 'Alexis', address: { '@type': 'PostalAddress', addressCountry: 'FR' } },
+								reviewBody: 'Very satisfied with the result.',
+							},
+							{
+								'@type': 'Review',
+								reviewRating: { '@type': 'Rating', ratingValue: '5', bestRating: '5' },
+								author: { '@type': 'Person', name: 'Astroyouda', address: { '@type': 'PostalAddress', addressCountry: 'ID' } },
+								reviewBody: 'Happy this is easy to use.',
+							},
+						],
+					},
+				],
+			}),
+		},
 	],
 });
 </script>

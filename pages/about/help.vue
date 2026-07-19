@@ -1,6 +1,6 @@
 <template>
 	<div class="page-layout page-layout-wide">
-		<div class="content">
+		<div class="content content-card">
 			<h2>How to Use Eise.app - Planetary Image Stacking Guide</h2>
 			<p >This guide explains how Eise.app processes your astrophotography videos and images to create sharp, detailed results.</p>
 

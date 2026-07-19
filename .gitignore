@@ -33,3 +33,13 @@ logs
 electron-dist/
 
 config/sentry-env.sh
+
+# GSC service account key (never commit)
+config/eise-app-*.json
+config/gsc-key.json
+
+# SEO snapshot data (regenerable, potentially large)
+seo-data/
+
+# Screenshot output (regenerable)
+screenshots/

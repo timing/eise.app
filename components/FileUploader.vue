@@ -241,6 +241,14 @@
 		<h3>More information, bugs and feature requests?</h3>
 		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
 
+		<aside class="home-testimonial">
+			<p class="home-testimonial-quote">"Very good app — it helped me massively improve my image of the Moon."</p>
+			<p class="home-testimonial-cite">
+				<span>— Santhiago, astrophotographer from Costa Rica</span>
+				<NuxtLink to="/about/#testimonials">Read more testimonials &rarr;</NuxtLink>
+			</p>
+		</aside>
+
 		<p class="build-date">Latest release: {{ buildDate }}</p>
 	</div>
 </div>

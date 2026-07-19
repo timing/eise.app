@@ -1,6 +1,6 @@
 <template>
 	<div class="page-layout page-layout-wide">
-		<div class="content">
+		<div class="content content-card">
 			<h2>Planetary Stacking Software Comparison 2026</h2>
 			<p>
 				Choosing the right stacking software for planetary astrophotography can be confusing.
@@ -413,10 +413,9 @@
 
 <script setup>
 useHead({
-	title: 'Planetary Stacking Software Comparison 2026 - AutoStakkert vs PSS vs Registax vs LuckyStackWorker vs Eise.app',
+	title: 'Planetary Stacking Software Compared: AutoStakkert, Registax, Eise.app (2026)',
 	meta: [
-		{ name: 'description', content: 'Compare planetary astrophotography stacking and post-processing software: AutoStakkert!, PSS, Planet Stacker X, Registax, LuckyStackWorker, ImPPG, AstroSurface, and Eise.app.' },
-		{ name: 'keywords', content: 'planetary stacking software, autostakkert alternative, planetary system stacker, planet stacker x, registax alternative, luckystackworker, imppg, astrosurface, astrophotography software comparison, planetary imaging software, mac stacking software, derotation software' },
+		{ name: 'description', content: 'Side-by-side comparison of the main planetary astrophotography stacking tools: AutoStakkert!, Registax, PSS, PlanetStackerX, LuckyStackWorker, ImPPG, AstroSurface, and Eise.app. Features, platforms, and workflow.' },
 	],
 });
 </script>
@@ -435,11 +434,11 @@ useHead({
 .comparison-table td {
 	padding: 10px 12px;
 	text-align: left;
-	border-bottom: 1px solid #333;
+	border-bottom: 1px solid #e5e5e5;
 }
 .comparison-table th {
-	background: #2a2a2a;
-	color: #fff;
+	background: #f4f4f4;
+	color: #222;
 	font-weight: 600;
 	position: sticky;
 	top: 0;
@@ -448,21 +447,21 @@ useHead({
 	min-width: 160px;
 }
 .comparison-table td {
-	color: #aaa;
+	color: #444;
 }
 .comparison-table td.feature-name {
-	color: #ccc;
-	font-weight: 500;
+	color: #222;
+	font-weight: 600;
 }
 .comparison-table td.highlight {
-	color: #8CCF7E;
-	font-weight: 500;
+	color: #2a7a1a;
+	font-weight: 600;
 }
 .comparison-table tbody tr:hover {
-	background: rgba(255,255,255,0.03);
+	background: rgba(0, 0, 0, 0.025);
 }
 h4 {
-	color: #8CCF7E;
+	color: #1a1a1a;
 	margin-top: 1.5rem;
 	margin-bottom: 0.5rem;
 }

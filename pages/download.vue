@@ -1,6 +1,6 @@
 <template>
 	<div class="page-layout page-layout-wide">
-		<div class="content">
+		<div class="content content-card">
 			<h2>Download Eise.app for Desktop - !Experimental!</h2>
 
 			<p>
@@ -113,8 +113,8 @@ useHead({
 }
 
 .download-card {
-	background: rgba(255, 255, 255, 0.05);
-	border: 1px solid rgba(255, 255, 255, 0.1);
+	background: #f7f7f7;
+	border: 1px solid #e5e5e5;
 	border-radius: 8px;
 	padding: 1.5rem;
 	text-align: center;
@@ -161,13 +161,14 @@ useHead({
 
 .platform-note {
 	font-size: 0.8rem;
-	color: #999;
+	color: #666;
 	margin-top: 0.75rem;
 	line-height: 1.4;
 }
 
 .platform-note code {
-	background: rgba(255, 255, 255, 0.1);
+	background: #ececec;
+	color: #222;
 	padding: 0.1rem 0.3rem;
 	border-radius: 3px;
 	font-size: 0.75rem;
@@ -175,17 +176,17 @@ useHead({
 
 .version-info {
 	text-align: center;
-	color: #999;
+	color: #666;
 	font-size: 0.85rem;
 }
 
 .version-info a {
-	color: #70f1ec;
+	color: #1a5a99;
 }
 
 .interest-form {
-	background: rgba(255, 255, 255, 0.05);
-	border: 1px solid rgba(255, 255, 255, 0.1);
+	background: #f7f7f7;
+	border: 1px solid #e5e5e5;
 	border-radius: 8px;
 	padding: 1.5rem 2rem;
 	margin: 2rem 0;
@@ -214,10 +215,10 @@ useHead({
 .form-row select {
 	width: 100%;
 	padding: 0.6rem 0.8rem;
-	border: 1px solid #555;
+	border: 1px solid #ccc;
 	border-radius: 4px;
-	background: #2a2a2a;
-	color: #fff;
+	background: #fff;
+	color: #222;
 	font-size: 1rem;
 	box-sizing: border-box;
 }
@@ -225,11 +226,11 @@ useHead({
 .form-row input:focus,
 .form-row select:focus {
 	outline: none;
-	border-color: #70f1ec;
+	border-color: #1a5a99;
 }
 
 .form-row input::placeholder {
-	color: #777;
+	color: #999;
 }
 
 .submit-btn {
@@ -252,7 +253,7 @@ useHead({
 .current-option {
 	margin-top: 2rem;
 	padding-top: 1.5rem;
-	border-top: 1px solid rgba(255, 255, 255, 0.1);
+	border-top: 1px solid #e5e5e5;
 }
 
 .current-option h3 {
@@ -260,7 +261,7 @@ useHead({
 }
 
 .show-downloads-link {
-	color: #70f1ec;
+	color: #1a5a99;
 	font-size: 0.9rem;
 }
 </style>
