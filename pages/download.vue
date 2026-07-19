@@ -1,14 +1,13 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>Download Eise.app for Desktop - !Experimental!</h2>
+			<h2>Download Eise.app for Mac, Windows and Linux &mdash; Free Planetary Image Stacker</h2>
 
-			<p>
-				These builds are experimental.
-				<a href="#" class="show-downloads-link" @click.prevent="showDownloads = true" v-if="!showDownloads">Show downloads</a>
-			</p>
+			<p>Native desktop builds of Eise.app for macOS (Apple Silicon), Windows 10+, and Linux. Free planetary image stacker with the same features as the browser version - lucky imaging, alignment-point stacking, wavelet sharpening, RGB alignment - running offline on your own machine.</p>
 
-			<div class="download-cards" v-if="showDownloads">
+			<h3>Choose your platform</h3>
+
+			<div class="download-cards">
 				<div class="download-card">
 					<div class="platform-icon">&#63743;</div>
 					<h3>macOS</h3>
@@ -27,12 +26,12 @@
 					<div class="platform-icon">&#9881;</div>
 					<h3>Linux</h3>
 					<a :href="DOWNLOAD_URLS.linux" download class="download-btn" @click="track('download', { os: 'linux' })">Download .AppImage</a>
-					<a :href="DOWNLOAD_URLS.deb" download class="download-btn download-btn-secondary" @click="track('download', { os: 'linux' })">.deb package</a>
+					<p class="deb-alt">or grab the <a :href="DOWNLOAD_URLS.deb" download @click="track('download', { os: 'linux' })">.deb package</a> for Debian / Ubuntu</p>
 					<p class="platform-note">Make AppImage executable: <code>chmod +x Eise*.AppImage</code></p>
 				</div>
 			</div>
 
-			<p class="version-info" v-if="showDownloads">Version {{ RELEASE_VERSION }} · <a :href="releasesUrl" target="_blank">Release notes</a></p>
+			<p class="version-info">Version {{ RELEASE_VERSION }} · <a :href="releasesUrl" target="_blank">Release notes</a></p>
 
 			<div class="interest-form">
 				<h3>Want a mobile app?</h3>
@@ -94,7 +93,6 @@ const DOWNLOAD_URLS = {
   deb: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.5.20-linux-arm64.deb',
 };
 const releasesUrl = 'https://github.com/timing/eise.app/releases';
-const showDownloads = ref(false);
 
 useHead({
 	title: 'Download Eise.app - Desktop App for macOS, Windows, Linux',
@@ -151,17 +149,14 @@ useBreadcrumbSchema([
 	background: #9ddb8f;
 }
 
-.download-btn-secondary {
-	background: transparent;
-	color: #8CCF7E;
-	border: 1px solid #8CCF7E;
+.deb-alt {
+	margin: 0.5rem 0 0;
 	font-size: 0.85rem;
-	padding: 0.4rem 1rem;
+	color: #666;
 }
-
-.download-btn-secondary:hover {
-	background: rgba(140, 207, 126, 0.1);
-	color: #9ddb8f;
+.deb-alt a {
+	color: #1a5a99;
+	font-weight: 500;
 }
 
 .platform-note {
@@ -263,10 +258,5 @@ useBreadcrumbSchema([
 
 .current-option h3 {
 	margin-top: 0;
-}
-
-.show-downloads-link {
-	color: #1a5a99;
-	font-size: 0.9rem;
 }
 </style>
