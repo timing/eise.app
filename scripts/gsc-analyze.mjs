@@ -149,6 +149,49 @@ function bestPagesForQuery(qList) {
 
 const topPages28 = (opWindow.byPage || []).slice().sort((a, b) => b.impressions - a.impressions);
 
+// Watch-queries — specific queries tied to changelog hypotheses. Compare last 14d
+// vs prev 14d for a bigger signal window than 7d (less noise).
+const WATCH_QUERIES = [
+	// Brand queries — proxy for community mentions (Discord/Reddit/YouTube).
+	// Volume on these = off-site marketing signal, not our SEO work.
+	'eise.app',
+	'eise app',
+	'eise',                        // 2026-07-19 Organization schema target (also ambiguous with Frisian name)
+	// Category / SEO-work targets
+	'image stacker',               // strongest performing non-brand query
+	'image stacker online',        // watch — post-push 2026-07-19 saw 5→1 clicks drop; possible Google variant reshuffle
+	'photo stacking online',
+	'photo stacker',
+	'autostakkert',                // 2026-07-19 vs-page target
+	'autostakkert download',       // 2026-07-19 vs-page target
+	'planetary system stacker',    // 2026-07-19 PSS vs-page target
+	'planet stacker x',            // competitor brand
+	'registax',                    // 2026-07-19 Registax vs-page target
+	'planetary imaging',
+	'astrophotography stacking software',
+	'image stacker for mac',       // 2026-07-20 Mac page target
+	'planetary stacking mac',      // 2026-07-20 Mac page target
+	'how to photograph the moon with iphone',  // future iPhone tutorial target
+];
+
+const last14 = aggPeriod(periodDays(latest, 14));
+const prev14 = aggPeriod(periodDays(addDaysStr(latest, -14), 14));
+const l14q = Object.fromEntries(last14.byQuery.map((r) => [r.query, r]));
+const p14q = Object.fromEntries(prev14.byQuery.map((r) => [r.query, r]));
+
+const watchRows = WATCH_QUERIES.map((q) => {
+	const cur = l14q[q] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+	const prev = p14q[q] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+	return {
+		query: q,
+		prev14: { clicks: prev.clicks, impressions: prev.impressions, ctr: prev.ctr, position: prev.position },
+		last14: { clicks: cur.clicks, impressions: cur.impressions, ctr: cur.ctr, position: cur.position },
+		clicksDelta: cur.clicks - prev.clicks,
+		impressionsDelta: cur.impressions - prev.impressions,
+		positionDelta: cur.position && prev.position ? +(cur.position - prev.position).toFixed(2) : null,
+	};
+});
+
 // Sitemap + URL inspection summary — pull from the most recent monthly file that has them
 let sitemapSummary = null;
 let inspectionSummary = null;
@@ -183,6 +226,7 @@ const report = {
 	opportunityPositionBump: oppPositionBump.slice(0, 20),
 	opportunityWindow: opLabel,
 	topPages: topPages28.slice(0, 15),
+	watchQueries: watchRows,
 	sitemap: sitemapSummary,
 	urlInspections: inspectionSummary,
 };

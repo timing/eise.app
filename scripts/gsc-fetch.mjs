@@ -115,9 +115,20 @@ async function fetchAndStoreRange(startDateStr, endDateStr, missingSet) {
 		dayEntries[d].byPage.push({ page: p, clicks: r.clicks, impressions: r.impressions, ctr: r.ctr, position: r.position });
 	}
 
-	// Fill in zero-totals for days GSC returned nothing (site got zero impressions that day)
+	// A day with no rows is ambiguous: either GSC hasn't finalized it yet
+	// (very recent day) or the site genuinely got zero traffic (extremely
+	// unlikely for a live site). Assume "not finalized" for days within the
+	// recent-days threshold — skip storing them so the next fetch retries.
+	// For older days, fill with zero totals (real zero-traffic day).
+	const NOT_FINALIZED_DAYS = 5;
+	const today = new Date();
 	for (const d of Object.keys(dayEntries)) {
-		if (!dayEntries[d].totals) {
+		if (dayEntries[d].totals) continue;
+		const daysAgo = Math.round((today - parseDate(d)) / 86400000);
+		if (daysAgo <= NOT_FINALIZED_DAYS) {
+			console.log(`  Skipping ${d} — GSC returned no rows (probably not finalized). Will retry next fetch.`);
+			delete dayEntries[d];
+		} else {
 			dayEntries[d].totals = { clicks: 0, impressions: 0, ctr: 0, position: 0 };
 		}
 	}
@@ -216,7 +227,22 @@ async function refreshMetaForCurrentMonth(endDate) {
 }
 
 async function main() {
-	const endDate = addDays(new Date(), -2); // GSC lag
+	// GSC lag is usually 2 days but sometimes today-1 is already available.
+	// Try today-1 first: probe by requesting a single-day totals query; if it
+	// returns rows, use it. Otherwise fall back to today-2.
+	let endDate = addDays(new Date(), -1);
+	try {
+		const probe = await webmasters.searchanalytics.query({
+			siteUrl: SITE_URL,
+			requestBody: { startDate: fmt(endDate), endDate: fmt(endDate), rowLimit: 1 },
+		});
+		if (!probe.data.rows || probe.data.rows.length === 0) {
+			endDate = addDays(new Date(), -2);
+		}
+	} catch {
+		endDate = addDays(new Date(), -2);
+	}
+
 	const endDateStr = fmt(endDate);
 	console.log(`Fetching GSC data for ${SITE_URL} up to ${endDateStr}`);
 
