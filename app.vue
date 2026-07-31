@@ -627,6 +627,10 @@ button:hover, a.button:hover, .tabs a:hover {
 	gap: 20px;
 	max-width: 900px;
 	margin: 0 auto;
+	/* Keeps the footer pushed toward the bottom when the page content shrinks
+	   (e.g. during stacking when the welcome copy is hidden). Reserves rough
+	   space for header (~60px) + footer + Logger sticky. */
+	min-height: calc(100vh - 200px);
 }
 .page-layout.page-layout-wide {
 	max-width: none;
