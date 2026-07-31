@@ -23,10 +23,10 @@
 		<!-- Error message - always visible when set, regardless of processing state -->
 		<div v-if="errorMessage" class="error-message">
 			<p>{{ errorMessage }}</p>
-			<p class="feedback-prompt">
+			<p v-if="!errorIsUserFault" class="feedback-prompt">
 				Something went wrong? <a href="https://github.com/timing/eise.app/issues" @click="openErrorFeedback">Let me know what happened</a> so I can fix it.
 			</p>
-			<button class="reload-button" @click="reloadPage">Start over</button>
+			<button v-if="!errorIsUserFault" class="reload-button" @click="reloadPage">Start over</button>
 		</div>
 
 		<!-- Cancelled message -->
@@ -94,6 +94,23 @@
 			</div>
 
 			<div v-if="selectedFiles.length > 0 && !showBatchChoice && !isBatchMode" class="selected-files">
+				<div v-if="selectedFiles.length > 1" class="selected-file-list">
+					<div
+						v-for="(file, index) in selectedFiles"
+						:key="`${file.name}-${index}`"
+						class="selected-file-item"
+						:class="{ 'is-mismatched': mismatchedFileNames.has(file.name) }"
+					>
+						<span class="file-name" :title="file.name">{{ file.name }}</span>
+						<span class="file-size">{{ formatFileSize(file.size) }}</span>
+						<button
+							class="remove-btn"
+							@click="removeSelectedFile(index)"
+							:title="`Remove ${file.name}`"
+						>&times;</button>
+					</div>
+				</div>
+
 				<div v-if="showMemoryOptimization" class="memory-optimization-box">
 					<p class="optimization-hint">
 						Memory optimization options:
@@ -266,8 +283,8 @@ import { useFFmpegReader } from '@/composables/useFFmpegReader';
 import { useMediabunnyReader } from '@/composables/useMediabunnyReader';
 import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
-import { useBatchProcessing } from '@/composables/useBatchProcessing';
-import { reportError } from '@/composables/useSentryReporting';
+import { useBatchProcessing, formatFileSize } from '@/composables/useBatchProcessing';
+import { reportError, UserError } from '@/composables/useSentryReporting';
 import { useFeedback } from '@/composables/useFeedback';
 import { useTracking } from '@/composables/useTracking';
 import { useLiteMemoryLimits } from '@/composables/useLiteMemoryLimits';
@@ -312,6 +329,8 @@ const enableMaxFrames = ref(false);
 const selectedMaxFrames = ref(100);
 
 const errorMessage = ref(null);
+const errorIsUserFault = ref(false);
+const mismatchedFileNames = ref(new Set());
 const showCancelledMessage = ref(false);
 
 // Info toggle state
@@ -510,7 +529,7 @@ on('upload-error', (message) => {
 });
 
 function onFileChanged(event){
-	errorMessage.value = null; // Clear previous error
+	clearError(); // Clear previous error state (message + user-fault flag + mismatch set)
 	const files = Array.from(event.target.files);
 	selectedFiles.value = files;
 	eventBusEmit('stop-loading');
@@ -754,7 +773,7 @@ async function loadSample() {
 
 async function startProcessing() {
 	if (selectedFiles.value.length === 0) return;
-	errorMessage.value = null;
+	clearError();
 
 	if (liteMode.value) {
 		addLog('Lite Mode: max 100 frames, best 30%, 1x stacking, CPU processing');
@@ -775,7 +794,7 @@ async function startProcessing() {
 		const errorMsg = error.message || 'An error occurred during processing';
 		// Set error and stop processing - FileUploader will show with error visible
 		isProcessing.value = false;
-		errorMessage.value = errorMsg;
+		setErrorFromException(error, errorMsg);
 		eventBusEmit('stop-loading');
 		eventBusEmit('show-error');
 	}
@@ -802,11 +821,42 @@ function clearSelection() {
 	if (fileInput.value) {
 		fileInput.value.value = '';
 	}
-	errorMessage.value = null;
+	clearError();
 	// Also clear batch mode
 	isBatchMode.value = false;
 	showBatchChoice.value = false;
 	pendingBatchFiles.value = [];
+}
+
+function clearError() {
+	errorMessage.value = null;
+	errorIsUserFault.value = false;
+	mismatchedFileNames.value = new Set();
+}
+
+function setErrorFromException(error, fallbackMessage) {
+	errorMessage.value = error?.message || fallbackMessage;
+	errorIsUserFault.value = error instanceof UserError;
+	const names = error?.details?.mismatchedFileNames;
+	mismatchedFileNames.value = new Set(Array.isArray(names) ? names : []);
+}
+
+function removeSelectedFile(index) {
+	const removed = selectedFiles.value[index];
+	if (!removed) return;
+	selectedFiles.value = selectedFiles.value.filter((_, i) => i !== index);
+	if (mismatchedFileNames.value.has(removed.name)) {
+		const next = new Set(mismatchedFileNames.value);
+		next.delete(removed.name);
+		mismatchedFileNames.value = next;
+	}
+	// If the user cleared the mismatched files, hide the error so they can retry.
+	if (errorIsUserFault.value && mismatchedFileNames.value.size === 0) {
+		clearError();
+	}
+	if (selectedFiles.value.length === 0) {
+		clearSelection();
+	}
 }
 
 // Batch mode handlers
@@ -825,7 +875,7 @@ async function processCombinedMode() {
 	pendingBatchFiles.value = [];
 	// Continue with existing multi-SER combined processing (skip batch dialog)
 	if (selectedFiles.value.length === 0) return;
-	errorMessage.value = null;
+	clearError();
 
 	try {
 		await processFiles(selectedFiles.value, { skipBatchChoice: true });
@@ -841,7 +891,7 @@ async function processCombinedMode() {
 		track('stack_failed', getTrackingContext());
 		const errorMsg = error.message || 'An error occurred during processing';
 		isProcessing.value = false;
-		errorMessage.value = errorMsg;
+		setErrorFromException(error, errorMsg);
 		eventBusEmit('stop-loading');
 		eventBusEmit('show-error');
 	}
@@ -1498,6 +1548,57 @@ async function processFiles(files, options = {}) {
 	padding: 10px;
 	background-color: #f0f8ff;
 	border-radius: 5px;
+}
+.selected-file-list {
+	max-height: 240px;
+	overflow-y: auto;
+	margin-bottom: 10px;
+}
+.selected-file-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	background: white;
+	border: 1px solid #e0e0e0;
+	border-radius: 6px;
+	padding: 6px 10px;
+	margin-bottom: 6px;
+}
+.selected-file-item:last-child {
+	margin-bottom: 0;
+}
+.selected-file-item.is-mismatched {
+	border-color: #D9534F;
+	background: #fff5f5;
+}
+.selected-file-item .file-name {
+	flex: 1;
+	font-size: 13px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.selected-file-item .file-size {
+	flex-shrink: 0;
+	font-size: 11px;
+	color: #888;
+}
+.selected-file-item .remove-btn {
+	flex-shrink: 0;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: none;
+	background: #f0f0f0;
+	border-radius: 50%;
+	cursor: pointer;
+	font-size: 15px;
+	line-height: 1;
+	color: #666;
+}
+.selected-file-item .remove-btn:hover {
+	background: #D9534F;
+	color: white;
 }
 .action-buttons {
 	display: flex;

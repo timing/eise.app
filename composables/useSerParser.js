@@ -7,6 +7,8 @@
  * SER V3 format: https://www.grischa-hahn.homepage.t-online.de/astro/ser/
  */
 
+import { UserError } from './useSentryReporting';
+
 // SER file constants
 export const SER_HEADER_SIZE = 178;
 export const SER_FILE_ID = 'LUCAM-RECORDER';
@@ -446,19 +448,34 @@ export function useMultiSerParser() {
             frameOffsets.push(frameOffsets[frameOffsets.length - 1] + meta.frameCount);
         }
 
-        // Validate all files have matching dimensions and colorID
+        // Validate all files have matching dimensions, colorID, and bit depth. Collect
+        // every mismatch so the UI can highlight all offenders at once.
         const firstMeta = parsers[0].getMetadata();
+        const firstName = files[0].name;
+        const mismatches = [];
         for (let i = 1; i < parsers.length; i++) {
             const meta = parsers[i].getMetadata();
+            const reasons = [];
             if (meta.width !== firstMeta.width || meta.height !== firstMeta.height) {
-                throw new Error(`File ${files[i].name} has different dimensions (${meta.width}x${meta.height}) than first file (${firstMeta.width}x${firstMeta.height})`);
+                reasons.push(`${meta.width}×${meta.height} vs ${firstMeta.width}×${firstMeta.height}`);
             }
             if (meta.colorID !== firstMeta.colorID) {
-                throw new Error(`File ${files[i].name} has different color format (colorID ${meta.colorID}) than first file (colorID ${firstMeta.colorID})`);
+                reasons.push('different color format');
             }
             if (meta.pixelDepth !== firstMeta.pixelDepth) {
-                throw new Error(`File ${files[i].name} has different bit depth (${meta.pixelDepth}) than first file (${firstMeta.pixelDepth})`);
+                reasons.push(`${meta.pixelDepth}-bit vs ${firstMeta.pixelDepth}-bit`);
             }
+            if (reasons.length) {
+                mismatches.push({ name: files[i].name, reasons });
+            }
+        }
+        if (mismatches.length) {
+            const names = mismatches.map(m => `"${m.name}" (${m.reasons.join(', ')})`).join(', ');
+            const noun = mismatches.length === 1 ? 'file' : 'files';
+            throw new UserError(
+                `${mismatches.length} ${noun} don't match the reference "${firstName}" (${firstMeta.width}×${firstMeta.height}, ${firstMeta.pixelDepth}-bit): ${names}. Remove them from the list below, or cancel and pick "Batch mode" to stack them separately.`,
+                { mismatchedFileNames: mismatches.map(m => m.name) }
+            );
         }
 
         const totalFrames = frameOffsets[frameOffsets.length - 1];

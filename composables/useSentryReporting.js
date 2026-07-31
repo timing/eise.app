@@ -8,6 +8,19 @@ import { useProcessingState } from './useProcessingState';
 import { logs } from './eventBus';
 
 /**
+ * Error for invalid user input (e.g. incompatible file selection). Not sent to Sentry.
+ * `details` can carry structured info (e.g. { mismatchedFileNames: [...] }) so the UI can
+ * highlight or offer inline recovery.
+ */
+export class UserError extends Error {
+    constructor(message, details = null) {
+        super(message);
+        this.name = 'UserError';
+        this.details = details;
+    }
+}
+
+/**
  * Report an error to Sentry with optional context
  * @param {Error} error - The error to report
  * @param {Object} context - Optional context to add to the error
@@ -18,6 +31,8 @@ import { logs } from './eventBus';
  * @param {Object} context.extra - Additional data to include
  */
 export function reportError(error, context = {}) {
+    if (error instanceof UserError) return;
+
     // Auto-fetch filename from processing state if not provided
     const { getInputFilename } = useProcessingState();
     const filename = context.filename || getInputFilename();
