@@ -22,6 +22,37 @@ function requiresFFmpeg(file) {
     return !NATIVE_FORMATS.includes(file.type) && !isTiffFile(file);
 }
 
+// Center-crop RGBA data to target dimensions. Source must be >= target.
+function centerCropRgba(rgba, targetW, targetH) {
+    if (rgba.width === targetW && rgba.height === targetH) return rgba;
+    const srcW = rgba.width, srcH = rgba.height;
+    const offX = Math.max(0, Math.floor((srcW - targetW) / 2));
+    const offY = Math.max(0, Math.floor((srcH - targetH) / 2));
+    const cropped = new Uint8ClampedArray(targetW * targetH * 4);
+    for (let y = 0; y < targetH; y++) {
+        const srcRowStart = ((y + offY) * srcW + offX) * 4;
+        const dstRowStart = y * targetW * 4;
+        cropped.set(rgba.data.subarray(srcRowStart, srcRowStart + targetW * 4), dstRowStart);
+    }
+    return { data: cropped, width: targetW, height: targetH };
+}
+
+// Fast dimension probe for a File (no full RGBA decode for native formats)
+async function probeImageFileDimensions(file) {
+    const url = URL.createObjectURL(file);
+    try {
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+            img.onload = resolve;
+            img.onerror = () => reject(new Error('Image failed to decode'));
+            img.src = url;
+        });
+        return { width: img.naturalWidth || img.width, height: img.naturalHeight || img.height };
+    } finally {
+        URL.revokeObjectURL(url);
+    }
+}
+
 export function useImageReader() {
     const { addLog, emit } = useEventBus();
     const { stackFramesLocally } = useStacker();
@@ -313,20 +344,26 @@ export function useImageReader() {
 
         addLog(`${frameCount} images to process`);
 
-        // Helper to load a single frame on-demand
+        // Helper to load a single frame on-demand, center-cropped to firstWidth x firstHeight
         async function loadFrameRgba(index) {
             if (failedIndices.has(index)) return null;
+            let rgba;
             // FFmpeg files are cached in memory
             if (rgbaCache.has(index)) {
-                return rgbaCache.get(index);
-            }
-            // Native/TIFF files are re-read from File
-            const file = files[index];
-            if (isTiffFile(file)) {
-                return await decodeTiffToRgba(file);
+                rgba = rgbaCache.get(index);
             } else {
-                return await decodeFileToRgba(file);
+                // Native/TIFF files are re-read from File
+                const file = files[index];
+                if (isTiffFile(file)) {
+                    rgba = await decodeTiffToRgba(file);
+                } else {
+                    rgba = await decodeFileToRgba(file);
+                }
             }
+            if (firstWidth && firstHeight && (rgba.width !== firstWidth || rgba.height !== firstHeight)) {
+                rgba = centerCropRgba(rgba, firstWidth, firstHeight);
+            }
+            return rgba;
         }
 
         // Load a batch of frames in parallel
@@ -343,16 +380,48 @@ export function useImageReader() {
             return results.filter(r => r !== null);
         }
 
-        // Get dimensions from first frame
-        try {
-            const firstRgba = await loadFrameRgba(0);
-            if (!firstRgba) throw new Error('First image failed to load');
-            firstWidth = firstRgba.width;
-            firstHeight = firstRgba.height;
-        } catch (error) {
-            emit('upload-error', `Failed to load first image: ${error.message}`);
+        // Probe dimensions of every file so we can center-crop mismatched frames
+        // to a common size. Some capture pipelines produce frames that differ by
+        // a few pixels; without this, later frames get uploaded to GPU buffers
+        // sized for firstFrame's dimensions, causing offset artifacts.
+        const probeResults = await Promise.all(files.map(async (file, i) => {
+            if (failedIndices.has(i)) return null;
+            try {
+                if (rgbaCache.has(i)) {
+                    const cached = rgbaCache.get(i);
+                    return { width: cached.width, height: cached.height };
+                }
+                if (isTiffFile(file)) {
+                    const rgba = await decodeTiffToRgba(file);
+                    return { width: rgba.width, height: rgba.height };
+                }
+                return await probeImageFileDimensions(file);
+            } catch (e) {
+                failedIndices.add(i);
+                return null;
+            }
+        }));
+
+        const knownDims = probeResults.filter(d => d);
+        if (knownDims.length === 0) {
+            emit('upload-error', 'Failed to load any images');
             emit('stop-loading');
             return;
+        }
+
+        firstWidth = Math.min(...knownDims.map(d => d.width));
+        firstHeight = Math.min(...knownDims.map(d => d.height));
+
+        const sizeCounts = new Map();
+        for (const d of knownDims) {
+            const k = `${d.width}×${d.height}`;
+            sizeCounts.set(k, (sizeCounts.get(k) || 0) + 1);
+        }
+        if (sizeCounts.size > 1) {
+            const summary = [...sizeCounts.entries()]
+                .map(([sz, n]) => `${n}×${sz}`)
+                .join(', ');
+            addLog(`Image dimensions vary (${summary}). Center-cropping all frames to ${firstWidth}×${firstHeight}.`);
         }
 
         // Detect crop region using GPU (loading frames on-demand)
@@ -663,6 +732,10 @@ export function useImageReader() {
                         } else {
                             rgba = await decodeFileToRgba(file);
                         }
+                    }
+
+                    if (rgba.width !== this.srcWidth || rgba.height !== this.srcHeight) {
+                        rgba = centerCropRgba(rgba, this.srcWidth, this.srcHeight);
                     }
 
                     return {
