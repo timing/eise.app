@@ -1,6 +1,7 @@
 // composables/useFFmpegReader.js
 // Handles all FFmpeg-based video processing (mp4, mov, webm, unsupported AVI codecs)
 
+import { fetchFile } from '@ffmpeg/ffmpeg';
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
 import { useComparisonExport } from '@/composables/useComparisonExport';
@@ -311,6 +312,49 @@ export function useFFmpegReader() {
     }
 
     /**
+     * Shared median-based crop sizing/centering math, given GPU bounds-detection results
+     * from a sample of frames. Used by both the pre-extracted-PNGs path and the streamed path.
+     */
+    function computeCropRegionFromDetections(detectedCenters, detectedSizes, canCropCount, sampleCount, header, cropMarginPercent, surfaceMode) {
+        const cropThreshold = sampleCount * 0.5;
+        if (canCropCount < cropThreshold) {
+            addLog(`Only ${canCropCount}/${sampleCount} frames can be cropped. Skipping auto-crop.`);
+            return null;
+        }
+
+        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
+        const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
+
+        const marginMultiplier = 1 + (cropMarginPercent / 100);
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
+        const maxAllowedSize = Math.min(header.width, header.height);
+
+        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
+        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
+        const medianX = sortedX[Math.floor(sortedX.length / 2)];
+        const medianY = sortedY[Math.floor(sortedY.length / 2)];
+
+        // Handle desiredSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        if (desiredSize >= maxAllowedSize) {
+            if (surfaceMode) {
+                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+            } else {
+                addLog(`Skipping crop: desired size ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+                return null;
+            }
+        }
+
+        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+        addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)}), frame center: (${Math.round(header.width/2)}, ${Math.round(header.height/2)})`);
+
+        // GPU detection is consistent - medianObjectSize can be used for oversized frame filtering
+        return { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+    }
+
+    /**
      * Detect crop region from PNG filenames in FFmpeg FS using GPU (for normal mode)
      * @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
      */
@@ -372,42 +416,7 @@ export function useFFmpegReader() {
             });
         }
 
-        const cropThreshold = sampleIndices.length * 0.5;
-        if (canCropCount < cropThreshold) {
-            addLog(`Only ${canCropCount}/${sampleIndices.length} frames can be cropped. Skipping auto-crop.`);
-            return null;
-        }
-
-        const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
-        const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
-
-        const marginMultiplier = 1 + (cropMarginPercent / 100);
-        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
-        const maxAllowedSize = Math.min(header.width, header.height);
-
-        const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
-        const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
-        const medianX = sortedX[Math.floor(sortedX.length / 2)];
-        const medianY = sortedY[Math.floor(sortedY.length / 2)];
-
-        // Handle desiredSize >= frameSize differently based on mode:
-        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
-        if (desiredSize >= maxAllowedSize) {
-            if (surfaceMode) {
-                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-            } else {
-                addLog(`Skipping crop: desired size ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
-                return null;
-            }
-        }
-
-        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
-        addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)}), frame center: (${Math.round(header.width/2)}, ${Math.round(header.height/2)})`);
-
-        // GPU detection is consistent - medianObjectSize can be used for oversized frame filtering
-        return { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+        return computeCropRegionFromDetections(detectedCenters, detectedSizes, canCropCount, sampleIndices.length, header, cropMarginPercent, surfaceMode);
     }
 
     /**
@@ -1075,8 +1084,323 @@ export function useFFmpegReader() {
         }
     }
 
+    /**
+     * Stream-extract + GPU-analyze a video that's too large to safely bulk-extract in one
+     * FFmpeg-WASM pass (e.g. 4K ProRes). Extracts one frame at a time so FFmpeg-WASM's MEMFS
+     * never holds more than a handful of frames at once, and periodically recycles the
+     * FFmpeg-WASM instance to reclaim its internal decode heap - the old @ffmpeg/ffmpeg 0.10.x
+     * core doesn't fully release memory between run() calls, so long extractions (~70+ frames
+     * of 4K10-bit ProRes) eventually abort with an internal OOM even when each individual
+     * frame is extracted and freed correctly. Frame analysis/stacking uses the same WebGPU
+     * path as processFFmpegFrames (the app's primary path), not the CPU/OpenCV Lite path.
+     */
+    async function processVideoStreamedGpu(initialFfmpeg, recycleFFmpeg, videoFile, duration, options = {}) {
+        // Recycling replaces the FFmpeg-WASM instance entirely, so track the live one locally
+        // rather than closing over a single reference (or the caller's destructured $ffmpeg,
+        // which only reads the getter once and would go stale after the first recycle).
+        let ffmpeg = initialFfmpeg;
+        const {
+            preCropRegion = null,
+            manualThreshold = false,
+            stackPercentage = 30,
+            drizzleScale = 1.0,
+            surfaceMode = false,
+            cropMarginPercent = 10,
+            maxFrames = 0, // 0 = no explicit cap, extract every native frame
+            fps = 30,
+            recycleInterval = 25 // frames per FFmpeg-WASM instance before recycling
+        } = options;
+
+        resetCaptures();
+        cancelled = false;
+
+        const gpuOk = await initializeGpuWorker();
+        if (!gpuOk) {
+            addLog('GPU worker failed to initialize - this video is too large to process without GPU support.');
+            emit('upload-error', 'GPU is required to process this video (it is too large for the CPU fallback). Try a shorter clip, or enable a max-frames limit.');
+            emit('stop-loading');
+            return;
+        }
+
+        const videoFilename = videoFile.name;
+        const nativeFrameCount = Math.max(1, Math.floor(duration * fps));
+        const totalFrames = maxFrames > 0 ? Math.min(maxFrames, nativeFrameCount) : nativeFrameCount;
+        const timeStep = duration / totalFrames;
+
+        addLog(`Streamed GPU extraction: ${totalFrames} frames, recycling FFmpeg-WASM every ${recycleInterval} frames`);
+
+        const vfArgs = preCropRegion
+            ? ['-vf', `crop=${preCropRegion.width}:${preCropRegion.height}:${preCropRegion.x}:${preCropRegion.y}`]
+            : [];
+
+        let framesSinceRecycle = 0;
+        async function extractFrame(seekTime, outFile) {
+            if (framesSinceRecycle >= recycleInterval) {
+                addLog('Recycling FFmpeg-WASM to reclaim memory...');
+                ffmpeg = await recycleFFmpeg();
+                const freshData = await fetchFile(videoFile);
+                ffmpeg.FS('writeFile', videoFilename, freshData);
+                framesSinceRecycle = 0;
+            }
+            await ffmpeg.run('-ss', seekTime.toFixed(3), '-i', videoFilename, ...vfArgs, '-vframes', '1', '-y', outFile);
+            framesSinceRecycle++;
+            const pngData = ffmpeg.FS('readFile', outFile);
+            ffmpeg.FS('unlink', outFile);
+            return pngData;
+        }
+
+        // First frame: dimensions + start of crop-sample pass
+        emit('set-caption', 'Analyzing video...');
+        const firstPng = await extractFrame(0, 'probe.png');
+        const firstRgba = await decodeImageToRgba(firstPng);
+        const width = firstRgba.width;
+        const height = firstRgba.height;
+        const header = { width, height, fourCC: 'RGBA', bpp: 32 };
+        addLog(`Frame dimensions: ${width}x${height}`);
+
+        let cropRegion = null;
+        const MIN_SIZE_FOR_CROP = 300;
+        if (width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
+            emit('set-caption', 'Detecting planet position...');
+            const SAMPLE_COUNT = Math.min(30, totalFrames);
+            const sampleStep = Math.max(1, Math.floor(totalFrames / SAMPLE_COUNT));
+            const detectedCenters = [];
+            const detectedSizes = [];
+            let canCropCount = 0;
+            let sampled = 0;
+
+            const firstResult = (await analyzeRgbaBatchGpu([{ data: firstRgba.data, index: 0 }], width, height))[0];
+            sampled++;
+            if (firstResult.bounds) {
+                canCropCount++;
+                detectedCenters.push({ x: firstResult.bounds.centroidX, y: firstResult.bounds.centroidY });
+                detectedSizes.push(firstResult.bounds.size || Math.max(firstResult.bounds.width, firstResult.bounds.height));
+            }
+
+            for (let i = sampleStep; i < totalFrames; i += sampleStep) {
+                if (cancelled) break;
+                const pngData = await extractFrame(i * timeStep, `sample_${i}.png`);
+                const rgba = await decodeImageToRgba(pngData);
+                const result = (await analyzeRgbaBatchGpu([{ data: rgba.data, index: i }], width, height))[0];
+                sampled++;
+                if (result.bounds) {
+                    canCropCount++;
+                    detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
+                    detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
+                }
+                emit('update-loading', { progress: (sampled / SAMPLE_COUNT) * 100, current: sampled, total: SAMPLE_COUNT });
+            }
+
+            cropRegion = computeCropRegionFromDetections(detectedCenters, detectedSizes, canCropCount, sampled, header, cropMarginPercent, surfaceMode);
+            if (cropRegion) {
+                addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
+            }
+        }
+
+        emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
+
+        const bestFramesCapacity = Math.max(1, Math.floor(totalFrames * stackPercentage / 100));
+        const bestFramesForStacking = [];
+        let bestFrameSoFar = null;
+        const allAnalyzedFrames = [];
+        const frameCenters = new Map();
+
+        function rankFrame(frame) {
+            if (frame.uint8Buffer && frame.width && frame.height) {
+                capturePostCropFrame(frame.uint8Buffer, frame.width, frame.height, frame.index, totalFrames);
+            }
+            if (manualThreshold) {
+                allAnalyzedFrames.push(frame);
+            }
+            if (!bestFrameSoFar || frame.sharpness > bestFrameSoFar.sharpness) {
+                bestFrameSoFar = frame;
+            }
+            if (bestFramesForStacking.length < bestFramesCapacity) {
+                bestFramesForStacking.push(frame);
+            } else {
+                const minIdx = bestFramesForStacking.reduce((minI, f, i, arr) =>
+                    f.sharpness < arr[minI].sharpness ? i : minI, 0);
+                if (frame.sharpness > bestFramesForStacking[minIdx].sharpness) {
+                    bestFramesForStacking[minIdx] = frame;
+                }
+            }
+        }
+
+        // Dynamic GPU batch size based on frame size (same formula as processFFmpegFrames)
+        const frameBytes = width * height * 16; // Float32 RGBA = 16 bytes/pixel
+        const targetBatchMemory = 512 * 1024 * 1024; // 512MB
+        const effectiveBatchSize = Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
+
+        let completedFrames = 0;
+        let skippedFrames = 0;
+        let cutOffFrames = 0;
+        let oversizedFrames = 0;
+        let batch = [];
+
+        async function flushBatch() {
+            if (batch.length === 0) return;
+            const batchFrames = batch;
+            const batchIndices = batch.map(f => f.index);
+            batch = [];
+
+            try {
+                if (cropRegion) {
+                    const combinedResults = await detectCropAnalyzeRgbaGpu(
+                        batchFrames, width, height, cropRegion.size, 0.1, true
+                    );
+
+                    for (let j = 0; j < combinedResults.length; j++) {
+                        const gpuResult = combinedResults[j];
+                        const frameIdx = batchIndices[j];
+
+                        if (!gpuResult.bounds) { skippedFrames++; completedFrames++; continue; }
+
+                        if (!surfaceMode) {
+                            const halfCrop = cropRegion.size / 2;
+                            const cx = gpuResult.centerX;
+                            const cy = gpuResult.centerY;
+                            if (cx - halfCrop < 0 || cy - halfCrop < 0 ||
+                                cx + halfCrop > width || cy + halfCrop > height) {
+                                cutOffFrames++; completedFrames++; continue;
+                            }
+                        }
+
+                        if (cropRegion.medianObjectSize) {
+                            const size = Math.max(gpuResult.bounds.width, gpuResult.bounds.height);
+                            if (size / cropRegion.medianObjectSize > 1.3) {
+                                oversizedFrames++; completedFrames++; continue;
+                            }
+                        }
+
+                        const center = { x: gpuResult.centerX, y: gpuResult.centerY };
+                        frameCenters.set(frameIdx, center);
+
+                        rankFrame({
+                            sharpness: gpuResult.sharpness,
+                            width: cropRegion.size,
+                            height: cropRegion.size,
+                            index: frameIdx,
+                            centerX: center.x,
+                            centerY: center.y,
+                            circularity: gpuResult.circularity || 0,
+                            uint8Buffer: gpuResult.uint8Buffer
+                        });
+                        completedFrames++;
+                    }
+                } else {
+                    const results = await analyzeRgbaBatchGpu(batchFrames, width, height);
+                    for (let j = 0; j < results.length; j++) {
+                        const result = results[j];
+                        const frameIdx = batchIndices[j];
+                        rankFrame({
+                            sharpness: result.sharpness || 0,
+                            width, height,
+                            index: frameIdx,
+                            centerX: width / 2,
+                            centerY: height / 2,
+                            circularity: result.circularity || 0,
+                            uint8Buffer: result.uint8Buffer
+                        });
+                        completedFrames++;
+                    }
+                }
+            } catch (error) {
+                console.error('GPU batch processing error:', error);
+                addLog(`GPU error: ${error.message}`);
+                skippedFrames += batchFrames.length;
+                completedFrames += batchFrames.length;
+            }
+
+            emit('update-loading', { progress: (completedFrames / totalFrames) * 100, current: completedFrames, total: totalFrames });
+            if (completedFrames % 20 === 0 || completedFrames >= totalFrames) {
+                addLog(`Analyzed frame ${completedFrames}/${totalFrames}`);
+                if (bestFrameSoFar) emit('best-frame-updated', bestFrameSoFar);
+            }
+        }
+
+        // Reuse the already-extracted+decoded first frame as frame 0
+        batch.push({ data: firstRgba.data, index: 0 });
+
+        for (let i = 1; i < totalFrames; i++) {
+            if (cancelled) break;
+            try {
+                const pngData = await extractFrame(i * timeStep, `frame_${i}.png`);
+                const rgba = await decodeImageToRgba(pngData);
+                batch.push({ data: rgba.data, index: i });
+            } catch (e) {
+                console.warn(`Failed to extract/decode frame ${i}:`, e);
+                skippedFrames++; completedFrames++;
+                continue;
+            }
+            if (batch.length >= effectiveBatchSize) {
+                await flushBatch();
+            }
+        }
+        await flushBatch();
+
+        try { ffmpeg.FS('unlink', videoFilename); } catch (_) {}
+
+        const skipMsgs = [];
+        if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
+        if (oversizedFrames > 0) skipMsgs.push(`${oversizedFrames} oversized`);
+        if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} skipped`);
+        const skippedMsg = skipMsgs.length > 0 ? ` (${skipMsgs.join(', ')})` : '';
+        addLog(`Finished analyzing ${totalFrames} frames. Kept ${bestFramesForStacking.length} best frames.${skippedMsg}`);
+
+        if (manualThreshold) {
+            const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
+            emit('quality-selection-ready', {
+                frames: allFramesSorted,
+                workers: null,
+                useWebGPU: true,
+                drizzleScale,
+                frameReReader: null,
+                frameCenters: cropRegion ? frameCenters : null
+            });
+            return;
+        }
+
+        if (bestFramesForStacking.length === 0) {
+            const errorMsg = 'Stacking failed: no valid frames could be processed.';
+            addLog(errorMsg);
+            emit('upload-error', errorMsg);
+            emit('stack-failed', { component: 'useFFmpegReader', reason: 'no valid frames' });
+            emit('show-error');
+            terminateGpuWorker();
+            return;
+        }
+
+        emit('set-caption', 'Stacking frames...');
+        addLog(`Starting GPU stacking of ${bestFramesForStacking.length} frames`);
+
+        const stackResult = await stackFramesLocally(
+            bestFramesForStacking,
+            null,
+            drizzleScale,
+            true,
+            cropRegion ? frameCenters : null,
+            surfaceMode
+        );
+
+        if (stackResult && stackResult.blob) {
+            addLog('Client-side stacking complete');
+            emit('stacked-image-ready', {
+                blob: stackResult.blob,
+                float32Data: stackResult.float32Data,
+                width: stackResult.width,
+                height: stackResult.height
+            });
+        } else {
+            addLog('Client-side stacking failed - frames may have been corrupted during processing');
+            emit('upload-error', 'Stacking failed unexpectedly. Please try again or use a different video file.');
+            emit('stack-failed', { component: 'useFFmpegReader', reason: 'stacking returned null' });
+            emit('show-error');
+        }
+    }
+
     return {
         processFFmpegFrames,
-        processBatchedVideoFrames
+        processBatchedVideoFrames,
+        processVideoStreamedGpu
     };
 }

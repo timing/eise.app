@@ -303,7 +303,7 @@ const { track } = useTracking();
 const { detectPlatform, checkFileSize } = useLiteMemoryLimits();
 
 const { openFeedback } = useFeedback();
-const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
+const { $ffmpeg, $loadFFmpeg, $recycleFFmpeg } = useNuxtApp();
 
 async function openErrorFeedback(event) {
 	const opened = await openFeedback({
@@ -1253,6 +1253,70 @@ async function processFiles(files, options = {}) {
 			// Normal mode: extract all frames first, then process
 			eventBusEmit('set-caption', 'Extracting frames from video');
 			eventBusEmit('update-loading', { progress: 0, current: 0, total: effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : '?' });
+
+			// Guard against FFmpeg-WASM OOM crashes: an unbounded `-i in out%d.png` call decodes
+			// every frame into FFmpeg-WASM's heap/MEMFS before any frame is consumed. For unlimited-frame
+			// requests on large/high-res video (e.g. 4K ProRes from modern phones) this reliably exceeds
+			// the wasm32 heap. Probe resolution/duration/fps first and switch to the streamed GPU
+			// extraction path (one frame at a time, with periodic FFmpeg-WASM recycling) when the
+			// estimated footprint is unsafe.
+			let useStreamedFallback = false;
+			let probedDuration = 0;
+			let probedFps = 30;
+			if (effectiveMaxFrames.value <= 0) {
+				let probedWidth = 0, probedHeight = 0;
+				$ffmpeg.setLogger(({ message }) => {
+					if (typeof message !== 'string') return;
+					const resMatch = message.match(/(\d{3,4})x(\d{3,4})/);
+					if (resMatch && !probedWidth) {
+						probedWidth = parseInt(resMatch[1], 10);
+						probedHeight = parseInt(resMatch[2], 10);
+					}
+					const durMatch = message.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/);
+					if (durMatch) {
+						probedDuration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+					}
+					// Only parse fps from the Stream metadata line ("... 3840x2160, 30 fps, 30 tbr ...").
+					// FFmpeg progress lines ("frame=    1 fps=1.0 ...") would otherwise match a
+					// looser pattern via the frame counter and clobber the real value.
+					if (message.includes('Video:')) {
+						const fpsMatch = message.match(/(\d+(?:\.\d+)?)\s+fps,/);
+						if (fpsMatch) {
+							probedFps = parseFloat(fpsMatch[1]);
+						}
+					}
+				});
+				try {
+					await $ffmpeg.run('-i', videoFiles[0].name, '-f', 'null', '-t', '0.001', '-');
+				} catch (e) { /* FFmpeg exits with error for -f null, expected */ }
+
+				addLog(`Probe result: ${probedWidth}x${probedHeight}, ${probedDuration.toFixed(1)}s, ${probedFps} fps`);
+				if (probedWidth && probedHeight && probedDuration) {
+					const estFrameCount = Math.max(1, Math.round(probedDuration * probedFps));
+					const estBytesPerFrame = probedWidth * probedHeight * 6; // 16-bit RGB PNG output held in FFmpeg-WASM's in-memory FS
+					const estTotalMB = (estBytesPerFrame * estFrameCount) / (1024 * 1024);
+					const SAFE_EXTRACTION_BUDGET_MB = 350; // conservative headroom under FFmpeg-WASM's wasm32 heap ceiling
+					if (estTotalMB > SAFE_EXTRACTION_BUDGET_MB) {
+						useStreamedFallback = true;
+						addLog(`Video is ${probedWidth}x${probedHeight}, ~${estFrameCount} frames (~${Math.round(estTotalMB)}MB uncompressed) — using streamed GPU extraction to avoid an out-of-memory crash.`);
+					}
+				}
+			}
+
+			if (useStreamedFallback) {
+				const { processVideoStreamedGpu } = useFFmpegReader();
+				await processVideoStreamedGpu($ffmpeg, $recycleFFmpeg, fileToProcess, probedDuration, {
+					preCropRegion,
+					manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
+					stackPercentage: effectiveStackPercentage.value,
+					drizzleScale: effectiveDrizzleScale.value,
+					surfaceMode: surfaceMode.value,
+					cropMarginPercent: effectiveCropMargin.value,
+					maxFrames: effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : 0,
+					fps: probedFps
+				});
+				return;
+			}
 
 			try {
 				const frameLimit = effectiveMaxFrames.value > 0 ? ['-vframes', '' + effectiveMaxFrames.value + ''] : [];
