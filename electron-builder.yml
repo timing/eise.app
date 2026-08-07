@@ -40,3 +40,4 @@ linux:
 nsis:
   oneClick: true
   perMachine: false
+  include: electron/build-resources/installer.nsh
