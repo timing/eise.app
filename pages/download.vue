@@ -18,7 +18,8 @@
 				<div class="download-card">
 					<div class="platform-icon">&#8862;</div>
 					<h3>Windows</h3>
-					<a :href="DOWNLOAD_URLS.windows" download class="download-btn" @click="track('download', { os: 'windows' })">Download .exe</a>
+					<a :href="DOWNLOAD_URLS.windows" download class="download-btn" @click="track('download', { os: 'windows', arch: 'x64' })">Download .exe</a>
+					<p class="deb-alt">or the <a :href="DOWNLOAD_URLS.windowsArm64" download @click="track('download', { os: 'windows', arch: 'arm64' })">ARM64 build</a> for Snapdragon / Surface Pro X</p>
 					<p class="platform-note">Windows 10+. Click "More info" → "Run anyway" if SmartScreen appears.</p>
 				</div>
 
@@ -85,12 +86,13 @@
 <script setup>
 import { useTracking } from '~/composables/useTracking';
 const { track } = useTracking();
-const RELEASE_VERSION = '2026.05.20';
+const RELEASE_VERSION = '2026.08.07';
 const DOWNLOAD_URLS = {
-  mac: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.5.20-mac-arm64.dmg',
-  windows: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.5.20-windows-arm64.exe',
-  linux: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.5.20-linux-arm64.AppImage',
-  deb: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.5.20-linux-arm64.deb',
+  mac: 'https://github.com/timing/eise.app/releases/download/v2026.05.20/Eise-2026.5.20-mac-arm64.dmg',
+  windows: 'https://github.com/timing/eise.app/releases/download/v2026.08.07/Eise-2026.8.7-win-x64.exe',
+  windowsArm64: 'https://github.com/timing/eise.app/releases/download/v2026.08.07/Eise-2026.8.7-win-arm64.exe',
+  linux: 'https://github.com/timing/eise.app/releases/download/v2026.05.20/Eise-2026.5.20-linux-arm64.AppImage',
+  deb: 'https://github.com/timing/eise.app/releases/download/v2026.05.20/Eise-2026.5.20-linux-arm64.deb',
 };
 const releasesUrl = 'https://github.com/timing/eise.app/releases';
 
