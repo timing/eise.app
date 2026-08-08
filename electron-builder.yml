@@ -28,7 +28,10 @@ mac:
 
 win:
   target:
-    - nsis
+    - target: nsis
+      arch:
+        - x64
+        - arm64
 
 linux:
   category: Graphics
