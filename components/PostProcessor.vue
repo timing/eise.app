@@ -266,11 +266,11 @@
 				</button>
 			</div>
 
-			<p class="share-note">If you share this image, a mention of Eise.app is appreciated!</p>
+			<p class="share-note">If you share this image, a mention of Eise.app is appreciated.</p>
 
 			<div class="export-popup-footer">
 				<a href="https://github.com/timing/eise.app/issues" target="_blank" class="btn-primary" @click="handleFeedbackClick">
-					💬 How was your result? Send feedback!
+					💬 How was your result? Feedback is appreciated.
 				</a>
 				<button class="close-btn" @click="showExportPopup = false">Close</button>
 			</div>
