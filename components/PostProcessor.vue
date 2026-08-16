@@ -202,6 +202,9 @@
 				</template>
 				<template #toolbar>
 					<div class="toolbar-actions">
+						<button class="btn-primary btn-publish" @click="openPublishModal('toolbar')" title="Publish to Eise Gallery">
+							✨ Publish
+						</button>
 						<button class="btn-primary" @click="openExportPopup">
 							⬇ Export
 						</button>
@@ -227,6 +230,14 @@
 	<div v-if="showExportPopup" class="export-popup-overlay" @click.self="showExportPopup = false">
 		<div class="export-popup">
 			<h3>Export</h3>
+
+			<div v-if="didExport" class="post-export-nudge">
+				<p><strong>🎉 Downloaded!</strong></p>
+				<p class="nudge-body">The world might want to see your stack too. Want to publish it to the Eise gallery?</p>
+				<button class="btn-primary publish-nudge-btn" @click="openPublishModal('export_popup')">
+					✨ Publish to Eise Gallery
+				</button>
+			</div>
 
 			<div class="export-filename">
 				<label>Filename:</label>
@@ -279,6 +290,12 @@
 		</div>
 	</div>
 
+	<PublishModal
+		v-if="showPublishModal"
+		:canvas="publishCanvas"
+		@close="showPublishModal = false"
+	/>
+
 </div>
 </template>
 
@@ -292,6 +309,7 @@ import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2, blurWi
 import { download16BitPNG, decodePNG } from '@/utils/png16Encoder.js'
 import { decodeTIFF } from '@/utils/tiffDecoder.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
+import PublishModal from '@/components/PublishModal.vue';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { useComparisonExport } from '@/composables/useComparisonExport';
@@ -321,6 +339,11 @@ const exportFilename = ref('');
 const sentryAvailable = ref(false);
 const showKebabMenu = ref(false);
 const showHelpPopup = ref(false);
+
+// Publish flow state
+const showPublishModal = ref(false);
+const didExport = ref(false);
+const publishCanvas = ref(null);
 
 // Features list - shared between main page and help popup
 const features = [
@@ -382,7 +405,15 @@ function closePostProcessor() {
 function openExportPopup() {
 	// Prefill filename with base name (without extension)
 	exportFilename.value = inputFilename.value || 'eise_app';
+	didExport.value = false;
 	showExportPopup.value = true;
+}
+
+function openPublishModal(source) {
+	publishCanvas.value = canvas?.value || null;
+	track('publish_open', { source: source || 'toolbar' });
+	showExportPopup.value = false;
+	showPublishModal.value = true;
 }
 
 function handleFeedbackClick(event) {
@@ -423,7 +454,7 @@ const downloadCanvasAsPNG = () => {
 	document.body.appendChild(link); // Required for Firefox
 	link.click();
 	document.body.removeChild(link);
-	showExportPopup.value = false;
+	didExport.value = true;
 	openFeedbackAfterDownload();
 };
 
@@ -439,7 +470,7 @@ const downloadUnprocessedPNG = async () => {
 			image16.height,
 			`${filename}_unprocessed.png`
 		);
-		showExportPopup.value = false;
+		didExport.value = true;
 		openFeedbackAfterDownload();
 	} catch (e) {
 		console.error('16-bit unprocessed PNG export error:', e);
@@ -477,7 +508,7 @@ const downloadComparisonVideo = async () => {
 		link.click();
 		document.body.removeChild(link);
 		URL.revokeObjectURL(url);
-		showExportPopup.value = false;
+		didExport.value = true;
 		openFeedbackAfterDownload();
 
 	} catch (error) {
@@ -502,7 +533,7 @@ const downloadCroppedSer = () => {
 	a.click();
 	document.body.removeChild(a);
 	URL.revokeObjectURL(url);
-	showExportPopup.value = false;
+	didExport.value = true;
 	openFeedbackAfterDownload();
 };
 
@@ -518,7 +549,7 @@ const download16BitProcessedPNG = async () => {
 			sharpenedImage16.height,
 			`${filename}_processed_16bit.png`
 		);
-		showExportPopup.value = false;
+		didExport.value = true;
 		openFeedbackAfterDownload();
 	} catch (e) {
 		console.error('16-bit PNG export error:', e);
@@ -2616,6 +2647,39 @@ canvas {
 	margin: 15px 0 0 0;
 	padding-top: 15px;
 	border-top: 1px solid #eee;
+}
+.post-export-nudge {
+	background: #f0f9ec;
+	border: 1px solid #8CCF7E;
+	border-radius: 8px;
+	padding: 15px;
+	margin-bottom: 20px;
+	text-align: center;
+}
+.post-export-nudge p {
+	margin: 0 0 8px 0;
+	color: #333;
+	font-size: 14px;
+}
+.post-export-nudge p.nudge-body {
+	font-size: 13px;
+	color: #555;
+	margin-bottom: 12px;
+}
+.publish-nudge-btn {
+	padding: 10px 20px;
+	border: none;
+	border-radius: 5px;
+	cursor: pointer;
+	font-size: 14px;
+	font-weight: bold;
+}
+.btn-publish {
+	background-color: #6b8afd;
+	color: #fff;
+}
+.btn-publish:hover {
+	background-color: #5a7aec;
 }
 .export-popup-footer {
 	display: flex;

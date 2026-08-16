@@ -7,6 +7,7 @@
 			<nav class="tabs">
 				<NuxtLink to="/" :class="{ active: route.path === '/' }">Stack</NuxtLink>
 				<NuxtLink to="/post-processor/" :class="{ active: route.path.startsWith('/post-processor') }">Post Processor</NuxtLink>
+				<NuxtLink to="/gallery/" class="nav-desktop-only" :class="{ active: route.path.startsWith('/gallery') }">Gallery</NuxtLink>
 				<NuxtLink to="/download/" :class="{ active: route.path.startsWith('/download') }">Download</NuxtLink>
 				<div class="hamburger-menu" :class="{ open: menuOpen }">
 					<button class="hamburger-toggle" @click="menuOpen = !menuOpen" aria-label="Menu">
@@ -14,6 +15,8 @@
 					</button>
 					<div class="menu-backdrop" @click="menuOpen = false"></div>
 					<div class="menu-dropdown">
+						<NuxtLink to="/gallery/" class="nav-mobile-only" @click="menuOpen = false">Gallery</NuxtLink>
+						<div class="menu-divider nav-mobile-only"></div>
 						<NuxtLink to="/about/" @click="menuOpen = false">About Eise.app</NuxtLink>
 						<NuxtLink to="/about/help/" @click="menuOpen = false">Help & How it Works</NuxtLink>
 						<NuxtLink to="/about/architecture/" @click="menuOpen = false">Technical Architecture</NuxtLink>
@@ -123,6 +126,11 @@ watch(() => route.path, () => {
 </script>
 
 <style scoped>
+.nav-mobile-only { display: none; }
+@media (max-width: 700px) {
+	.nav-desktop-only { display: none !important; }
+	.nav-mobile-only { display: block; }
+}
 .hamburger-menu {
 	position: relative;
 	display: inline-block;
