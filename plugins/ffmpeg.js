@@ -63,10 +63,31 @@ export default defineNuxtPlugin(nuxtApp => {
 		return ffmpeg;
 	};
 
+	// Tear down and reload the FFmpeg-WASM instance to reclaim its internal decode heap.
+	// The 0.10.x core doesn't fully release memory between run() calls, so long-running
+	// per-frame extraction loops (e.g. many 4K frames) need periodic recycling to avoid
+	// an internal OOM. Caller is responsible for re-writing any files it needs afterward.
+	// Returns the fresh instance - callers must use the returned value, not a previously
+	// destructured `$ffmpeg`, since destructuring only reads the getter once.
+	const recycleFFmpeg = async () => {
+		if (ffmpeg && isLoaded) {
+			try {
+				ffmpeg.exit();
+			} catch (e) {
+				// Ignore errors during teardown
+			}
+		}
+		ffmpeg = null;
+		isLoaded = false;
+		await loadFFmpeg();
+		return ffmpeg;
+	};
+
 	// Use defineProperty so $ffmpeg access is lazy
 	Object.defineProperty(nuxtApp, '$ffmpeg', {
 		get: () => getFFmpeg()
 	});
 	nuxtApp.$loadFFmpeg = loadFFmpeg;
+	nuxtApp.$recycleFFmpeg = recycleFFmpeg;
 });
 

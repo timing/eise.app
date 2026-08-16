@@ -303,7 +303,7 @@ const { track } = useTracking();
 const { detectPlatform, checkFileSize } = useLiteMemoryLimits();
 
 const { openFeedback } = useFeedback();
-const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
+const { $ffmpeg, $loadFFmpeg, $recycleFFmpeg } = useNuxtApp();
 
 async function openErrorFeedback(event) {
 	const opened = await openFeedback({
@@ -1168,6 +1168,11 @@ async function processFiles(files, options = {}) {
 		let lastLoggedFrame = 0;
 		const totalFramesTarget = effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : expectedFrameCount;
 
+		// Also captured here so an OOM during bulk extract can hand off to the streamed
+		// path without needing a separate pre-flight probe run.
+		let capturedDuration = 0;
+		let capturedFps = 30;
+
 		$ffmpeg.setLogger(({ type, message }) => {
 			if (typeof message !== 'string') return;
 
@@ -1178,6 +1183,19 @@ async function processFiles(files, options = {}) {
 			if (type === 'fferr') {
 				if (message.includes('Stream') || message.includes('Duration') || message.includes('Output') || message.includes('Error') || message.includes('error') || message.includes('crop')) {
 					addLog(`[ffmpeg] ${message}`);
+				}
+			}
+
+			const durMatch = message.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/);
+			if (durMatch) {
+				capturedDuration = parseInt(durMatch[1]) * 3600 + parseInt(durMatch[2]) * 60 + parseFloat(durMatch[3]);
+			}
+			// Only match fps from the Stream metadata line ("... 30 fps, 30 tbr ..."),
+			// not from progress lines ("frame= 1 fps= 1.0"), by requiring a trailing comma.
+			if (message.includes('Video:')) {
+				const fpsMatch = message.match(/(\d+(?:\.\d+)?)\s+fps,/);
+				if (fpsMatch) {
+					capturedFps = parseFloat(fpsMatch[1]);
 				}
 			}
 
@@ -1254,6 +1272,15 @@ async function processFiles(files, options = {}) {
 			eventBusEmit('set-caption', 'Extracting frames from video');
 			eventBusEmit('update-loading', { progress: 0, current: 0, total: effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : '?' });
 
+			// Try the fast bulk-extract path (`ffmpeg -i in out%d.png`). It's much faster than
+			// streamed per-frame extraction, but it decodes every frame into FFmpeg-WASM's
+			// heap/MEMFS before any frame is consumed and can therefore hit an internal OOM
+			// on large clips (e.g. 4K ProRes). If that happens the wasm instance is poisoned,
+			// so we recycle and hand off to the streamed GPU path — which extracts one frame
+			// at a time with periodic instance recycling. Reactive fallback (rather than a
+			// pre-flight size heuristic) avoids misrouting normal clips to the slower path
+			// just because raw-uncompressed math overestimates their real PNG footprint.
+			let hitOOM = false;
 			try {
 				const frameLimit = effectiveMaxFrames.value > 0 ? ['-vframes', '' + effectiveMaxFrames.value + ''] : [];
 
@@ -1272,12 +1299,44 @@ async function processFiles(files, options = {}) {
 				await $ffmpeg.run(...ffmpegArgs);
 				addLog('FFmpeg extraction completed');
 			} catch(err){
-				console.log(err);
-				addLog('FFmpeg forcefully exited, but continuing!');
+				const msg = err?.message || String(err);
+				// wasm OOM aborts throw as WebAssembly.RuntimeError with "abort(OOM)" in the message
+				hitOOM = /OOM|out of memory|abort\(OOM\)/i.test(msg);
+				if (hitOOM) {
+					addLog(`FFmpeg-WASM ran out of memory during bulk extraction — falling back to streamed GPU extraction (${capturedDuration.toFixed(1)}s @ ${capturedFps} fps).`);
+				} else {
+					console.log(err);
+					addLog('FFmpeg forcefully exited, but continuing!');
+				}
 			}
 
 			// Clear the logger
 			$ffmpeg.setLogger(({ message }) => {});
+
+			if (hitOOM) {
+				if (!capturedDuration) {
+					addLog('Could not determine video duration from FFmpeg output — cannot recover from OOM.');
+					eventBusEmit('upload-error', 'FFmpeg ran out of memory and the video duration could not be parsed for the streamed-extraction retry. Try again with a max-frames limit.');
+					eventBusEmit('show-error');
+					return;
+				}
+				// Bulk extract poisoned the wasm instance; recycle and reload the source file
+				// into the fresh instance before handing off to the streamed path.
+				const fresh = await $recycleFFmpeg();
+				fresh.FS('writeFile', videoFiles[0].name, await fetchFile(fileToProcess));
+				const { processVideoStreamedGpu } = useFFmpegReader();
+				await processVideoStreamedGpu(fresh, $recycleFFmpeg, fileToProcess, capturedDuration, {
+					preCropRegion,
+					manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
+					stackPercentage: effectiveStackPercentage.value,
+					drizzleScale: effectiveDrizzleScale.value,
+					surfaceMode: surfaceMode.value,
+					cropMarginPercent: effectiveCropMargin.value,
+					maxFrames: effectiveMaxFrames.value > 0 ? effectiveMaxFrames.value : 0,
+					fps: capturedFps
+				});
+				return;
+			}
 
 			// Get list of PNG files created by FFmpeg
 			const pngFiles = $ffmpeg.FS('readdir', '/').filter(f => f.endsWith('.png')).sort((a, b) => {
