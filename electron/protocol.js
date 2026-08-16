@@ -25,7 +25,7 @@ function registerScheme() {
  * @param {string} appFilesDir - Absolute path to the directory serving static files
  */
 function registerHandler(appFilesDir) {
-  protocol.handle('app', (request) => {
+  protocol.handle('app', async (request) => {
     const url = new URL(request.url);
     // Strip query params (cache-bust ?v=xxx) — just use pathname
     let pathname = decodeURIComponent(url.pathname);
@@ -46,7 +46,19 @@ function registerHandler(appFilesDir) {
       }
     }
 
-    return net.fetch(pathToFileURL(filePath).toString());
+    const response = await net.fetch(pathToFileURL(filePath).toString());
+    // Cross-origin isolation headers must be on every app:// response —
+    // webRequest.onHeadersReceived bypasses protocol.handle, so we set them here.
+    // Without these, module workers (e.g. webgpu_analyze_worker.js) fail to load.
+    const headers = new Headers(response.headers);
+    headers.set('Cross-Origin-Embedder-Policy', 'require-corp');
+    headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+    headers.set('Cross-Origin-Resource-Policy', 'same-origin');
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
   });
 }
 

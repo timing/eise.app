@@ -1,6 +1,6 @@
 {
   "name": "nuxt-app",
-  "version": "2026.08.07",
+  "version": "2026.08.16",
   "private": true,
   "type": "module",
   "main": "electron/main.js",

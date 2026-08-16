@@ -86,13 +86,13 @@
 <script setup>
 import { useTracking } from '~/composables/useTracking';
 const { track } = useTracking();
-const RELEASE_VERSION = '2026.08.07';
+const RELEASE_VERSION = '2026.08.16';
 const DOWNLOAD_URLS = {
-  mac: 'https://github.com/timing/eise.app/releases/download/v2026.05.20/Eise-2026.5.20-mac-arm64.dmg',
-  windows: 'https://github.com/timing/eise.app/releases/download/v2026.08.07/Eise-2026.8.7-win-x64.exe',
-  windowsArm64: 'https://github.com/timing/eise.app/releases/download/v2026.08.07/Eise-2026.8.7-win-arm64.exe',
-  linux: 'https://github.com/timing/eise.app/releases/download/v2026.05.20/Eise-2026.5.20-linux-arm64.AppImage',
-  deb: 'https://github.com/timing/eise.app/releases/download/v2026.05.20/Eise-2026.5.20-linux-arm64.deb',
+  mac: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-mac-arm64.dmg',
+  windows: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-win-x64.exe',
+  windowsArm64: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-win-arm64.exe',
+  linux: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-linux-arm64.AppImage',
+  deb: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-linux-arm64.deb',
 };
 const releasesUrl = 'https://github.com/timing/eise.app/releases';
 
