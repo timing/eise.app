@@ -222,4 +222,23 @@ export class Image16 {
 
 		return rotated;
 	}
+
+	/**
+	 * Rotate on the GPU with bicubic (Keys) interpolation. Falls back to the
+	 * CPU bilinear rotate() when WebGPU is unavailable. Preferred over rotate()
+	 * for user-facing rotation: bilinear produces moiré on near-Nyquist detail.
+	 * @param {number} angleDegrees
+	 * @returns {Promise<Image16>}
+	 */
+	async rotateAsync(angleDegrees) {
+		if (angleDegrees === 0) return this.clone();
+		try {
+			const { rotateGPU } = await import('./rotateGPU.js');
+			const rotated = await rotateGPU(this.data, this.width, this.height, angleDegrees);
+			if (rotated) return new Image16(this.width, this.height, rotated);
+		} catch (e) {
+			console.warn('[Image16] GPU rotate failed, using CPU bilinear:', e);
+		}
+		return this.rotate(angleDegrees);
+	}
 }

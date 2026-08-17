@@ -1738,7 +1738,7 @@ function previewRotation() {
 	previewRotationAngle.value = rotation.value - appliedRotation;
 }
 
-function applyRotation() {
+async function applyRotation() {
 	// If rotation is same as already applied, nothing to do
 	if (rotation.value === appliedRotation) {
 		previewRotationAngle.value = 0;
@@ -1759,9 +1759,10 @@ function applyRotation() {
 		preRotationImage16 = image16.clone();
 	}
 
-	// Rotate from the original backup (not current state - avoids accumulated interpolation)
-	// Use Image16.rotate() to preserve 16-bit precision
-	image16 = preRotationImage16.rotate(rotation.value);
+	// Rotate from the original backup (not current state - avoids accumulated interpolation).
+	// GPU bicubic when available; falls back to CPU bilinear. Bilinear on near-Nyquist
+	// detail produces visible moiré on stacked planetary images.
+	image16 = await preRotationImage16.rotateAsync(rotation.value);
 	sharpenedImage16 = null;
 
 	// Convert rotated Image16 to ImageData for display
