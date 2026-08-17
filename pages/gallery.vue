@@ -2,7 +2,11 @@
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
 			<h2>Eise Gallery</h2>
-			<p>Stacks published by the community, made with Eise.app. Want yours here? <NuxtLink to="/">Stack an image</NuxtLink> and hit Publish.</p>
+			<p>Stacks published by the community, made with Eise.app. Want yours here? <NuxtLink to="/">Stack an image</NuxtLink> and hit Publish, or <button type="button" class="link-btn" @click="triggerUpload">upload an Eise stack</button> you've already saved.</p>
+
+			<input ref="uploadInput" type="file" accept="image/png,image/jpeg,image/webp" hidden @change="handleFileSelect" />
+
+			<div v-if="uploadError" class="gallery-msg error">{{ uploadError }}</div>
 
 			<div v-if="loading" class="gallery-msg">Loading gallery…</div>
 			<div v-else-if="error" class="gallery-msg error">{{ error }}</div>
@@ -19,7 +23,23 @@
 					</div>
 				</button>
 			</div>
+
+			<div class="gallery-cta">
+				<h3>Show off your work</h3>
+				<p>Publish a stack straight from Eise, or upload an Eise stack you've already saved.</p>
+				<div class="gallery-cta-actions">
+					<NuxtLink to="/" class="btn-primary">Stack an image</NuxtLink>
+					<button type="button" class="btn-primary" @click="triggerUpload">Upload an Eise stack</button>
+				</div>
+			</div>
 		</div>
+
+		<PublishModal
+			v-if="uploadCanvas"
+			:canvas="uploadCanvas"
+			@close="closeUploadModal"
+			@published="onPublished"
+		/>
 
 		<div v-if="selected" class="lightbox" @click.self="selected = null">
 			<div class="lightbox-panel">
@@ -46,12 +66,63 @@
 
 <script setup>
 import { ref, onMounted } from 'vue';
+import PublishModal from '@/components/PublishModal.vue';
 
 const API_BASE = 'https://gallery.eise.app';
 const items = ref([]);
 const loading = ref(true);
 const error = ref('');
 const selected = ref(null);
+
+const uploadInput = ref(null);
+const uploadCanvas = ref(null);
+const uploadError = ref('');
+
+function triggerUpload() {
+	uploadError.value = '';
+	uploadInput.value?.click();
+}
+
+async function handleFileSelect(event) {
+	const file = event.target.files?.[0];
+	event.target.value = '';
+	if (!file) return;
+	uploadError.value = '';
+	try {
+		uploadCanvas.value = await fileToCanvas(file);
+	} catch (e) {
+		uploadError.value = e.message || 'Could not read that image.';
+	}
+}
+
+async function fileToCanvas(file) {
+	const url = URL.createObjectURL(file);
+	try {
+		const img = new Image();
+		img.src = url;
+		await img.decode();
+		const w = img.naturalWidth;
+		const h = img.naturalHeight;
+		if (!w || !h) throw new Error('Image has zero dimensions.');
+		const canvas = document.createElement('canvas');
+		canvas.width = w;
+		canvas.height = h;
+		canvas.getContext('2d').drawImage(img, 0, 0);
+		return canvas;
+	} finally {
+		URL.revokeObjectURL(url);
+	}
+}
+
+function closeUploadModal() {
+	uploadCanvas.value = null;
+}
+
+function onPublished() {
+	fetch(`${API_BASE}/submissions`).then(r => r.ok && r.json()).then(body => {
+		if (body?.items) items.value = body.items;
+	}).catch(() => {});
+}
 
 onMounted(async () => {
 	try {
@@ -85,6 +156,16 @@ useHead({
 </script>
 
 <style scoped>
+.link-btn {
+	background: none;
+	border: none;
+	padding: 0;
+	color: #8CCF7E;
+	cursor: pointer;
+	font: inherit;
+	text-decoration: underline;
+}
+.link-btn:hover { color: #a8dc9c; }
 .gallery-msg {
 	text-align: center;
 	padding: 3rem 1rem;
@@ -144,6 +225,29 @@ useHead({
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+.gallery-cta {
+	margin-top: 3rem;
+	padding: 2rem 1rem;
+	text-align: center;
+	border-top: 1px solid #333;
+}
+.gallery-cta h3 {
+	margin: 0 0 0.5rem 0;
+	color: #eee;
+}
+.gallery-cta p {
+	margin: 0 0 1.25rem 0;
+	color: #aaa;
+}
+.gallery-cta-actions {
+	display: flex;
+	gap: 0.75rem;
+	justify-content: center;
+	flex-wrap: wrap;
+}
+.gallery-cta-actions .btn-primary {
+	font-size: 15px;
 }
 .lightbox {
 	position: fixed;
