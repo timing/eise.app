@@ -313,6 +313,26 @@ export function useMediabunnyReader() {
 			addLog(`Pass 1: ${totalFrames} frames, ${reservoir.length} samples for crop detection, detected range: ${detectedFullRange ? 'full (expansion skipped)' : 'limited (expansion applied)'}`);
 			if (totalFrames === 0) throw new Error('No frames decoded from video');
 
+			// Diagnostic: peak RGB brightness across sample frames (CPU-side).
+			// If the GPU crop detection returns a phantom 1×1 object at (0,0) but
+			// the CPU already saw bright pixels here, the failure is in the GPU path.
+			if (reservoir.length > 0) {
+				let peakMin = 255, peakMax = 0, peakSum = 0;
+				for (const { data } of reservoir) {
+					const step = Math.max(4, Math.floor(data.length / 4000)) * 4;
+					let framePeak = 0;
+					for (let i = 0; i < data.length - 3; i += step) {
+						const px = Math.max(data[i], data[i + 1], data[i + 2]);
+						if (px > framePeak) framePeak = px;
+					}
+					if (framePeak < peakMin) peakMin = framePeak;
+					if (framePeak > peakMax) peakMax = framePeak;
+					peakSum += framePeak;
+				}
+				const peakMean = Math.round(peakSum / reservoir.length);
+				addLog(`Sample peak brightness (per-frame max RGB): min=${peakMin}, mean=${peakMean}, max=${peakMax}`);
+			}
+
 			// Detect crop region from reservoir samples
 			let cropRegion = null;
 			const MIN_SIZE_FOR_CROP = 300;
@@ -345,11 +365,32 @@ export function useMediabunnyReader() {
 					sampleResults = await Promise.all(promises);
 				}
 				const detectedCenters = [], detectedSizes = [];
+				let nullCount = 0, trivialCount = 0;
 				for (const r of sampleResults) {
-					if (r.bounds) {
-						detectedCenters.push({ x: r.bounds.centroidX, y: r.bounds.centroidY });
-						detectedSizes.push(Math.max(r.bounds.width, r.bounds.height));
-					}
+					if (!r.bounds) { nullCount++; continue; }
+					const size = Math.max(r.bounds.width, r.bounds.height);
+					detectedCenters.push({ x: r.bounds.centroidX, y: r.bounds.centroidY });
+					detectedSizes.push(size);
+					// size ≤ 2 usually means the bounds shader's initial (0,0,0,0) leaked
+					// through — no pixel actually exceeded the brightness threshold.
+					if (size <= 2) trivialCount++;
+				}
+
+				// Diagnostic: size / center distribution across sample frames.
+				// If every frame reports size=1 at (0,0), the grayscale/threshold
+				// path returned no bright pixels on the user's GPU (phantom detection).
+				if (detectedSizes.length > 0) {
+					const sortedS = [...detectedSizes].sort((a, b) => a - b);
+					const sMin = sortedS[0];
+					const sMed = sortedS[Math.floor(sortedS.length / 2)];
+					const sMax = sortedS[sortedS.length - 1];
+					const xs = detectedCenters.map(c => c.x);
+					const ys = detectedCenters.map(c => c.y);
+					const xMin = Math.round(Math.min(...xs)), xMax = Math.round(Math.max(...xs));
+					const yMin = Math.round(Math.min(...ys)), yMax = Math.round(Math.max(...ys));
+					addLog(`Bounds: ${detectedSizes.length} valid, ${nullCount} null, ${trivialCount} trivial (size≤2) | sizes[min/med/max]=${sMin}/${sMed}/${sMax}px | centers x[${xMin}..${xMax}] y[${yMin}..${yMax}]`);
+				} else {
+					addLog(`Bounds: 0 valid, ${nullCount} null (all samples). Threshold=0.1 saw no bright pixels.`);
 				}
 
 				if (detectedCenters.length < reservoir.length * 0.5) {
