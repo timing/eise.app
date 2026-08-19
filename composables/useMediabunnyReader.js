@@ -7,6 +7,7 @@ import { useStacker } from '@/composables/useStacker';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWebGpuAnalyzeWorker } from '@/composables/useWebGpuAnalyzeWorker';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
+import { computePreCropRegion } from '@/composables/useDebayerReader';
 
 export function useMediabunnyReader() {
 	const { addLog, emit, on } = useEventBus();
@@ -335,6 +336,7 @@ export function useMediabunnyReader() {
 
 			// Detect crop region from reservoir samples
 			let cropRegion = null;
+			let reservoirBounds = null;  // saved for seeding the pass-2 ROI
 			const MIN_SIZE_FOR_CROP = 300;
 			if (actualWidth >= MIN_SIZE_FOR_CROP && actualHeight >= MIN_SIZE_FOR_CROP && reservoir.length > 0) {
 				let sampleResults;
@@ -366,6 +368,7 @@ export function useMediabunnyReader() {
 				}
 				const detectedCenters = [], detectedSizes = [];
 				let nullCount = 0, trivialCount = 0;
+				const validBounds = [];  // normalized bounds objects for ROI seeding
 				for (const r of sampleResults) {
 					if (!r.bounds) { nullCount++; continue; }
 					const size = Math.max(r.bounds.width, r.bounds.height);
@@ -374,7 +377,21 @@ export function useMediabunnyReader() {
 					// size ≤ 2 usually means the bounds shader's initial (0,0,0,0) leaked
 					// through — no pixel actually exceeded the brightness threshold.
 					if (size <= 2) trivialCount++;
+					// Skip trivial "phantom" bounds so they don't drag the ROI to (0,0).
+					if (size > 2) {
+						// Some shaders emit x/y explicitly; others only centroidX/Y+width/height.
+						// Fall back to centroid-derived corner in the second case.
+						const bx = r.bounds.x !== undefined ? r.bounds.x : Math.max(0, r.bounds.centroidX - r.bounds.width / 2);
+						const by = r.bounds.y !== undefined ? r.bounds.y : Math.max(0, r.bounds.centroidY - r.bounds.height / 2);
+						validBounds.push({
+							x: bx, y: by,
+							width: r.bounds.width, height: r.bounds.height,
+							centroidX: r.bounds.centroidX, centroidY: r.bounds.centroidY,
+							size, cutOff: r.bounds.cutOff
+						});
+					}
 				}
+				reservoirBounds = validBounds.length > 0 ? validBounds : null;
 
 				// Diagnostic: size / center distribution across sample frames.
 				// If every frame reports size=1 at (0,0), the grayscale/threshold
@@ -452,6 +469,73 @@ export function useMediabunnyReader() {
 			let skippedFrames = 0, cutOffFrames = 0, oversizedFrames = 0;
 			let pass2FrameIndex = 0;
 
+			// ROI pre-crop state. Same idea as the SER precrop_worker but the
+			// "cropping" happens inside VideoFrame.copyTo() via its rect parameter,
+			// so we skip the decoded YUV → RGBA copy work on pixels outside the ROI.
+			// The video codec still decodes the whole frame (fundamental constraint),
+			// but the per-frame copy + GPU upload shrinks to the ROI size.
+			//
+			// Only active when we have a cropRegion (detected planet) and not in
+			// surface mode. Seeded from reservoir bounds (below) so batch 0 benefits.
+			let preCropRegion = null;
+			let preCropLoggedFor = null;  // avoid spamming the log when ROI shifts
+			const roiActive = () => cropRegion && !surfaceMode && preCropRegion !== null;
+
+			// A crop centered on the planet must fit inside the ROI. computePreCropRegion's
+			// 1.5×planet-size margin is enough for typical motion, but if the planet is
+			// small the absolute margin can be smaller than the crop's own half-size,
+			// which caused the "square border" artifact when planet drifted a bit within
+			// a batch. Enforce a floor that gives the crop cropRegion.size + 100 px of
+			// room (50 px of drift budget per side, well above per-batch drift).
+			function enforceMinRoi(region) {
+				if (!region || !cropRegion) return region;
+				const minSize = cropRegion.size + 100;
+				let { x, y, width, height } = region;
+				if (width < minSize) {
+					const grow = minSize - width;
+					x = Math.max(0, x - Math.floor(grow / 2));
+					width = Math.min(minSize, actualWidth - x);
+				}
+				if (height < minSize) {
+					const grow = minSize - height;
+					y = Math.max(0, y - Math.floor(grow / 2));
+					height = Math.min(minSize, actualHeight - y);
+				}
+				// If we hit the frame edge on one side, push the origin back so we still
+				// get the full minSize when there's room on the other side.
+				if (width < minSize && x > 0) {
+					x = Math.max(0, actualWidth - minSize);
+					width = Math.min(minSize, actualWidth - x);
+				}
+				if (height < minSize && y > 0) {
+					y = Math.max(0, actualHeight - minSize);
+					height = Math.min(minSize, actualHeight - y);
+				}
+				// Even dimensions/coords keep GPU byte-alignment consistent.
+				x = x & ~1; y = y & ~1;
+				width = width & ~1; height = height & ~1;
+				return { x, y, width, height };
+			}
+
+			// Seed the ROI from reservoir bounds so batch 0 already benefits AND the
+			// initial ROI reflects the full range of planet positions across the whole
+			// clip (reservoir was uniform-sampled across all frames), not just the
+			// first batch's ~1 second of footage. Use marginFactor 2.0 (wider than the
+			// 1.5 used for per-batch updates) since the between-sample gap can be
+			// several seconds of unaccounted drift.
+			if (cropRegion && !surfaceMode && reservoirBounds) {
+				let seeded = computePreCropRegion(reservoirBounds, actualWidth, actualHeight, 2.0);
+				seeded = enforceMinRoi(seeded);
+				if (seeded) {
+					const reduction = ((actualWidth * actualHeight) - (seeded.width * seeded.height)) / (actualWidth * actualHeight) * 100;
+					if (reduction > 10) {
+						preCropRegion = seeded;
+						preCropLoggedFor = `${seeded.width}x${seeded.height}`;
+						addLog(`ROI pre-crop seeded from reservoir: ${seeded.width}x${seeded.height} (${reduction.toFixed(0)}% smaller than full ${actualWidth}x${actualHeight})`);
+					}
+				}
+			}
+
 			function rankFrame(frame) {
 				if (frame.uint8Buffer && frame.width && frame.height) {
 					capturePostCropFrame(frame.uint8Buffer, frame.width, frame.height, frame.index, totalFrames);
@@ -528,29 +612,75 @@ export function useMediabunnyReader() {
 			async function processBatch(batch) {
 				if (batch.length === 0) return;
 
-				// Convert VideoFrames to RGBA async (no canvas, preserves source bit depth)
+				// Snapshot ROI so it stays consistent across the batch even if a
+				// concurrent batch mutates preCropRegion (belt-and-braces; batches
+				// are processed serially today, but be defensive).
+				const roi = roiActive() ? preCropRegion : null;
+				const roiW = roi ? roi.width : actualWidth;
+				const roiH = roi ? roi.height : actualHeight;
+
+				// Convert VideoFrames to RGBA async. When ROI is active, copyTo
+				// only copies the ROI pixels — decode still runs on the full frame
+				// (codec constraint), but the per-frame RGBA copy shrinks to ROI.
 				const rgbaBatch = await Promise.all(
 					batch.map(async ({ frame, index }) => {
-						const data = await videoFrameToRgba(frame, actualWidth, actualHeight);
+						const data = await videoFrameToRgba(frame, actualWidth, actualHeight, roi);
 						frame.close();
 						return { data, index };
 					})
 				);
 
+				// Coordinates returned by GPU/CPU are ROI-local when ROI is active;
+				// bounds fields need to be shifted back to full-frame coords before
+				// cutoff checks (which are measured against actualWidth/Height) and
+				// before we hand results downstream.
+				const shiftX = roi ? roi.x : 0;
+				const shiftY = roi ? roi.y : 0;
+				const collectedBounds = [];
+				// Lost-track detector: if the ROI moved away from the planet (e.g. user
+				// nudged the scope between batches), most detections come back empty.
+				// Count and, at the end of the batch, reset ROI to null if the rate is
+				// too high so the next batch scans full-frame and re-locks.
+				let batchAttempts = 0;
+				let batchNoBounds = 0;
+
 				if (useGPU) {
 					// GPU path
 					if (cropRegion) {
 						const combinedResults = await detectCropAnalyzeRgbaGpu(
-							rgbaBatch, actualWidth, actualHeight, cropRegion.size, 0.1, true
+							rgbaBatch, roiW, roiH, cropRegion.size, 0.1, true
 						);
 						for (let j = 0; j < combinedResults.length; j++) {
 							const gpuResult = combinedResults[j];
-							if (!gpuResult.bounds) { skippedFrames++; continue; }
+							batchAttempts++;
+							if (!gpuResult.bounds) { batchNoBounds++; skippedFrames++; continue; }
+
+							// gpuResult.centerX/Y are in the buffer we sent (ROI-local when
+							// ROI active, full-frame otherwise). Shift into full-frame coords
+							// for the outward-facing outputs, but keep the ROI-local value
+							// around for the cut-off check.
+							const localCx = gpuResult.centerX;
+							const localCy = gpuResult.centerY;
+							const centerX = localCx + shiftX;
+							const centerY = localCy + shiftY;
+							const shiftedBounds = {
+								...gpuResult.bounds,
+								x: (gpuResult.bounds.x || 0) + shiftX,
+								y: (gpuResult.bounds.y || 0) + shiftY,
+								centroidX: (gpuResult.bounds.centroidX || 0) + shiftX,
+								centroidY: (gpuResult.bounds.centroidY || 0) + shiftY
+							};
+							collectedBounds.push(shiftedBounds);
 
 							if (!surfaceMode) {
+								// Reject if the crop would straddle the buffer we operated on.
+								// When ROI is active, that's the ROI; when not, it's the full
+								// frame (roiW/roiH reduce to actualWidth/Height). Pixels outside
+								// the ROI weren't copied, so a crop that reaches past the ROI
+								// edge shows GPU sampler clamp/border, not real pixel data.
 								const halfCrop = cropRegion.size / 2;
-								if (gpuResult.centerX - halfCrop < 0 || gpuResult.centerY - halfCrop < 0 ||
-									gpuResult.centerX + halfCrop > actualWidth || gpuResult.centerY + halfCrop > actualHeight) {
+								if (localCx - halfCrop < 0 || localCy - halfCrop < 0 ||
+									localCx + halfCrop > roiW || localCy + halfCrop > roiH) {
 									cutOffFrames++; continue;
 								}
 							}
@@ -559,24 +689,24 @@ export function useMediabunnyReader() {
 									oversizedFrames++; continue;
 								}
 							}
-							frameCenters.set(rgbaBatch[j].index, { x: gpuResult.centerX, y: gpuResult.centerY });
+							frameCenters.set(rgbaBatch[j].index, { x: centerX, y: centerY });
 							rankFrame({
 								sharpness: gpuResult.sharpness,
 								width: cropRegion.size, height: cropRegion.size,
 								index: rgbaBatch[j].index,
-								centerX: gpuResult.centerX, centerY: gpuResult.centerY,
+								centerX, centerY,
 								circularity: gpuResult.circularity || 0,
 								uint8Buffer: gpuResult.uint8Buffer
 							});
 						}
 					} else {
-						const results = await analyzeRgbaBatchGpu(rgbaBatch, actualWidth, actualHeight);
+						const results = await analyzeRgbaBatchGpu(rgbaBatch, roiW, roiH);
 						for (const result of results) {
 							rankFrame({
 								sharpness: result.sharpness || 0,
-								width: actualWidth, height: actualHeight,
+								width: roiW, height: roiH,
 								index: result.index,
-								centerX: actualWidth / 2, centerY: actualHeight / 2,
+								centerX: roiW / 2 + shiftX, centerY: roiH / 2 + shiftY,
 								circularity: result.circularity || 0,
 								uint8Buffer: result.uint8Buffer
 							});
@@ -590,17 +720,32 @@ export function useMediabunnyReader() {
 							const frame = rgbaBatch[j];
 							const worker = cpuWorkers[j % cpuWorkers.length];
 
-							// Detect object center
-							const boundsResult = await detectBoundsCpu(worker, frame.data, actualWidth, actualHeight, frame.index);
-							if (!boundsResult.bounds) { skippedFrames++; continue; }
+							// Detect object center within the (possibly ROI-cropped) buffer.
+							batchAttempts++;
+							const boundsResult = await detectBoundsCpu(worker, frame.data, roiW, roiH, frame.index);
+							if (!boundsResult.bounds) { batchNoBounds++; skippedFrames++; continue; }
 
-							const cx = boundsResult.bounds.centroidX;
-							const cy = boundsResult.bounds.centroidY;
+							// ROI-local center and full-frame center.
+							const localCx = boundsResult.bounds.centroidX;
+							const localCy = boundsResult.bounds.centroidY;
+							const cx = localCx + shiftX;
+							const cy = localCy + shiftY;
+							collectedBounds.push({
+								...boundsResult.bounds,
+								x: (boundsResult.bounds.x || 0) + shiftX,
+								y: (boundsResult.bounds.y || 0) + shiftY,
+								centroidX: cx,
+								centroidY: cy
+							});
 
 							if (!surfaceMode) {
+								// Same reasoning as the GPU branch: reject if the crop reaches
+								// outside the buffer we actually copied. cropRgba below clamps
+								// silently, so without this check a drifted-to-edge planet
+								// would come out with a hard ROI-boundary border on one side.
 								const halfCrop = cropRegion.size / 2;
-								if (cx - halfCrop < 0 || cy - halfCrop < 0 ||
-									cx + halfCrop > actualWidth || cy + halfCrop > actualHeight) {
+								if (localCx - halfCrop < 0 || localCy - halfCrop < 0 ||
+									localCx + halfCrop > roiW || localCy + halfCrop > roiH) {
 									cutOffFrames++; continue;
 								}
 							}
@@ -610,8 +755,9 @@ export function useMediabunnyReader() {
 								}
 							}
 
-							// Crop and analyze
-							const cropped = cropRgba(frame.data, actualWidth, actualHeight, cropRegion.size, cx, cy);
+							// Crop from the ROI buffer using ROI-local coords so the crop
+							// doesn't need to re-derive full-frame offsets.
+							const cropped = cropRgba(frame.data, roiW, roiH, cropRegion.size, localCx, localCy);
 							const result = await analyzeCpuFrame(worker, cropped, cropRegion.size, cropRegion.size, frame.index);
 							if (result.skipped) { skippedFrames++; continue; }
 
@@ -642,6 +788,50 @@ export function useMediabunnyReader() {
 								circularity: 0,
 								uint8Buffer: result.uint8Buffer
 							});
+						}
+					}
+				}
+
+				// Lost-track recovery. If most frames in the batch had no detected
+				// bounds AND we were using an ROI, the planet has probably drifted
+				// out of it. Drop the ROI so the next batch scans full-frame and
+				// re-locks; skip the ROI update since the sparse detections we do
+				// have would just point at the ROI edge and pull it the wrong way.
+				const lostTrack = roi && batchAttempts >= 4 && batchNoBounds / batchAttempts > 0.7;
+				if (lostTrack) {
+					preCropRegion = null;
+					preCropLoggedFor = null;
+					addLog(`ROI pre-crop reset: ${batchNoBounds}/${batchAttempts} frames lost planet, rescanning full frame`);
+				}
+
+				// Update the ROI for the next batch. Guard by cropRegion+non-surface
+				// (matches SER: no ROI when there's no planet detection or when the
+				// whole frame is the subject). Skip on lost-track — see above.
+				if (!lostTrack && cropRegion && !surfaceMode && collectedBounds.length > 0) {
+					let newRegion = computePreCropRegion(collectedBounds, actualWidth, actualHeight, 1.5);
+					newRegion = enforceMinRoi(newRegion);
+					if (newRegion) {
+						const reduction = ((actualWidth * actualHeight) - (newRegion.width * newRegion.height)) / (actualWidth * actualHeight) * 100;
+						if (reduction > 10) {
+							// Only update if it moved noticeably (avoid jitter).
+							const moved = !preCropRegion
+								|| Math.abs(newRegion.x - preCropRegion.x) > 10
+								|| Math.abs(newRegion.y - preCropRegion.y) > 10;
+							if (moved) {
+								preCropRegion = newRegion;
+								const logKey = `${newRegion.width}x${newRegion.height}`;
+								if (preCropLoggedFor !== logKey) {
+									addLog(`ROI pre-crop: ${newRegion.width}x${newRegion.height} (${reduction.toFixed(0)}% smaller than full ${actualWidth}x${actualHeight})`);
+									preCropLoggedFor = logKey;
+								}
+							}
+						} else if (preCropRegion) {
+							// New computed ROI is basically the full frame — planet drifted
+							// wide enough that pre-crop no longer buys us anything. Drop it
+							// so subsequent batches process at full resolution.
+							preCropRegion = null;
+							preCropLoggedFor = null;
+							addLog('ROI pre-crop disabled (planet motion covers most of frame)');
 						}
 					}
 				}
@@ -768,24 +958,38 @@ export function useMediabunnyReader() {
 	}
 
 	/**
-	 * Convert VideoFrame to RGBA Uint8ClampedArray, cropped to maxWidth×maxHeight.
+	 * Convert VideoFrame to RGBA Uint8ClampedArray, optionally to just a sub-region.
 	 * Uses frame.copyTo() with explicit RGBA format for all pixel formats — avoids
 	 * OffscreenCanvas which always quantizes to 8-bit and loses 10-bit source data.
 	 *
 	 * WebCodecs copyTo() does the YUV→RGB matrix conversion but does NOT apply
 	 * limited→full-range expansion for broadcast-range video (luma 16–235).
 	 * Camera H.264 is almost always limited range, so we expand manually.
+	 *
+	 * @param {VideoFrame} frame - source frame
+	 * @param {number} maxWidth - full-frame width (post codec-padding clamp)
+	 * @param {number} maxHeight - full-frame height
+	 * @param {{x:number,y:number,width:number,height:number}|null} roi - optional sub-region
+	 *   to extract instead of the whole frame. Same trick as SER pre-crop: decode still
+	 *   processes the whole frame (codec constraint) but the VideoFrame→RGBA copy and
+	 *   downstream GPU upload shrink to the ROI.
 	 */
-	async function videoFrameToRgba(frame, maxWidth, maxHeight) {
+	async function videoFrameToRgba(frame, maxWidth, maxHeight, roi = null) {
 		const frameW = frame.displayWidth || frame.codedWidth;
 		const frameH = frame.displayHeight || frame.codedHeight;
-		const width = maxWidth ? Math.min(frameW, maxWidth) : frameW;
-		const height = maxHeight ? Math.min(frameH, maxHeight) : frameH;
+		const fullWidth = maxWidth ? Math.min(frameW, maxWidth) : frameW;
+		const fullHeight = maxHeight ? Math.min(frameH, maxHeight) : frameH;
+
+		const rect = roi
+			? { x: roi.x, y: roi.y, width: roi.width, height: roi.height }
+			: { x: 0, y: 0, width: fullWidth, height: fullHeight };
+		const width = rect.width;
+		const height = rect.height;
 
 		const buffer = new Uint8ClampedArray(width * height * 4);
 		await frame.copyTo(buffer, {
 			format: 'RGBA',
-			rect: { x: 0, y: 0, width, height },
+			rect,
 			layout: [{ offset: 0, stride: width * 4 }]
 		});
 

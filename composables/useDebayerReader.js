@@ -123,7 +123,7 @@ function autoStretchRgba(rgba) {
  * @param {number} marginFactor - Margin multiplier (e.g., 2.0 = 2x planet size)
  * @returns {Object|null} - {x, y, width, height} or null if no valid bounds
  */
-function computePreCropRegion(bounds, srcWidth, srcHeight, marginFactor = 1.5) {
+export function computePreCropRegion(bounds, srcWidth, srcHeight, marginFactor = 1.5) {
     // Filter valid bounds (not cut-off, has size)
     const validBounds = bounds.filter(b => b && !b.cutOff && b.width > 0);
     if (validBounds.length === 0) return null;
