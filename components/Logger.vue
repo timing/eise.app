@@ -10,9 +10,11 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useLiteMode } from '@/composables/useLiteMode';
+import { useEnvironmentInfo } from '@/composables/useEnvironmentInfo';
 
 const { logs, onLogAdded, off } = useEventBus();
 const { isLiteMode } = useLiteMode();
+const { getEnvironmentInfo } = useEnvironmentInfo();
 const logContent = ref(null);
 const isExpanded = ref(false);
 const memoryDisplay = ref('');
@@ -62,8 +64,9 @@ onMounted(async () => {
 			}
 		} catch (e) { /* ignore */ }
 	}
+	const { os, browser } = await getEnvironmentInfo();
 	const mode = (hasGPU ? 'GPU' : 'CPU') + (lite ? ', Lite' : '') + gpuInfo;
-	logContent.value.innerHTML += (new Date()).toLocaleString() + `: Welcome to Eise.app! (${mode})\n`;
+	logContent.value.innerHTML += (new Date()).toLocaleString() + `: Welcome to Eise.app! (${browser} on ${os}, ${mode})\n`;
 
 	onLogAdded(handleLogAdded);
 
