@@ -22,15 +22,21 @@ export function useStacker() {
     let cancelled = false;
     const activeWorkers = new Set();
 
-    // Cancel processing and terminate all workers
+    // Cancel processing and terminate all workers.
+    // Only log when there is actually something to cancel — during video Pass 1/2
+    // the mediabunny reader owns the pipeline and this cancel-processing handler
+    // fires with an empty worker set, which used to spam misleading "(0 active)"
+    // lines on every user click.
     function cancelProcessing() {
         cancelled = true;
-        addLog(`Cancelling stacker workers (${activeWorkers.size} active)...`);
-        for (const worker of activeWorkers) {
-            try { worker.terminate(); } catch (e) { /* ignore */ }
+        if (activeWorkers.size > 0) {
+            addLog(`Cancelling ${activeWorkers.size} stacker workers...`);
+            for (const worker of activeWorkers) {
+                try { worker.terminate(); } catch (e) { /* ignore */ }
+            }
+            activeWorkers.clear();
+            addLog('Stacker workers terminated');
         }
-        activeWorkers.clear();
-        addLog('Stacker workers terminated');
     }
 
     // Listen for cancel event from UI

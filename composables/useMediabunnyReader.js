@@ -405,7 +405,17 @@ export function useMediabunnyReader() {
 					const desiredSize = Math.ceil(medianSize * (1 + cropMarginPercent / 100) / 2) * 2;
 					const maxAllowedSize = Math.min(actualWidth, actualHeight);
 
-					if (desiredSize >= maxAllowedSize) {
+					// Real planets at 1080p are at least ~15-20px across. A median object
+					// size of a few pixels across 50 samples means auto-detection failed
+					// (e.g. planet too dim, below GPU brightness threshold, or shader
+					// anomaly returning phantom bounds at (0,0) as in Sentry EISE-M2).
+					// Falling through with a 2×2 cropRegion causes every downstream frame
+					// to be rejected — and even if we processed full frames, the planet is
+					// too small relative to the frame for stacking to align correctly. Stop
+					// with a clear message rather than proceed to guaranteed-broken output.
+					if (medianSize <= 4) {
+						throw new Error(`Planet detection failed — the detected object was only ${Math.round(medianSize)}px across ${detectedCenters.length} samples. This can happen with very dim planets, unusual video formats, or on some GPUs. Try re-encoding the video at a lower resolution, cropping around the planet in a video editor first, or a different browser.`);
+					} else if (desiredSize >= maxAllowedSize) {
 						if (surfaceMode) {
 							addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize}`);
 							cropRegion = { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
@@ -697,9 +707,9 @@ export function useMediabunnyReader() {
 			if (cancelled) { addLog('Processing cancelled'); emit('stop-loading'); return; }
 
 			const skipMsgs = [];
-			if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} cut-off`);
-			if (oversizedFrames > 0) skipMsgs.push(`${oversizedFrames} oversized`);
-			if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} skipped`);
+			if (skippedFrames > 0) skipMsgs.push(`${skippedFrames} no-bounds`);
+			if (cutOffFrames > 0) skipMsgs.push(`${cutOffFrames} near-edge`);
+			if (oversizedFrames > 0) skipMsgs.push(`${oversizedFrames} size-outlier`);
 			if (skipMsgs.length > 0) addLog(`Skipped: ${skipMsgs.join(', ')}`);
 
 			// Manual threshold mode: keep all uint8Buffers for quality selector
