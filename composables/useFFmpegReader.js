@@ -427,14 +427,22 @@ export function useFFmpegReader() {
         resetCaptures();
         cancelled = false; // Reset cancellation flag
 
-        // Initialize GPU worker
-        const gpuOk = await initializeGpuWorker();
+        // Respect the caller's GPU preference. If they asked for CPU we skip the
+        // GPU init entirely so the settings toggle actually takes effect on
+        // GPU-capable machines; otherwise try GPU and fall back to CPU on failure.
+        let gpuOk = false;
+        if (useWebGPU) {
+            gpuOk = await initializeGpuWorker();
+            if (!gpuOk) {
+                addLog("GPU worker failed, falling back to CPU workers...");
+            }
+        } else {
+            addLog("CPU mode selected, skipping GPU worker init");
+        }
         if (!gpuOk) {
-            addLog("GPU worker failed, falling back to CPU workers...");
-            // Fall back to CPU path by initializing CPU workers
             await initializeWorkers();
             if (!workersReady) {
-                addLog("Both GPU and CPU worker initialization failed.");
+                addLog("CPU worker initialization failed.");
                 emit('stop-loading');
                 return;
             }
@@ -444,7 +452,9 @@ export function useFFmpegReader() {
         addLog(`Processing ${pngFilenames.length} FFmpeg-extracted frames (${useGpu ? 'GPU' : 'CPU'})`);
         emit('set-caption', 'Decoding frames...');
 
-        // Decode first PNG to get dimensions
+        // Decode first PNG to get dimensions. Do the decode on the main thread
+        // once regardless of backend - the CPU worker doesn't expose a dimension
+        // probe, and one createImageBitmap upfront is negligible.
         const firstPngData = ffmpeg.FS('readFile', pngFilenames[0]);
         const firstRgba = await decodeImageToRgba(firstPngData);
         const width = firstRgba.width;
@@ -525,7 +535,9 @@ export function useFFmpegReader() {
         const targetBatchMemory = 512 * 1024 * 1024; // 512MB
         let effectiveBatchSize = Math.max(4, Math.min(128, Math.floor(targetBatchMemory / frameBytes)));
 
-        // Helper to decode a batch of PNG frames
+        // Helper to load a batch of PNG frames. GPU path decodes to RGBA up front
+        // (feeds analyzeRgbaBatchGpu); CPU path leaves them as PNG bytes and lets
+        // the worker decode inside unified_analyze_worker's 'ffmpeg' handler.
         async function decodeBatch(start, end) {
             const decodePromises = [];
             for (let i = start; i < end; i++) {
@@ -535,8 +547,12 @@ export function useFFmpegReader() {
                         try {
                             const pngData = ffmpeg.FS('readFile', pngFilenames[frameIdx]);
                             ffmpeg.FS('unlink', pngFilenames[frameIdx]); // Free memory as we go
-                            const rgba = await decodeImageToRgba(pngData);
-                            return { data: rgba.data, index: frameIdx, success: true };
+                            if (useGpu) {
+                                const rgba = await decodeImageToRgba(pngData);
+                                return { data: rgba.data, index: frameIdx, success: true };
+                            }
+                            // CPU path decodes PNG inside the worker, so we pass raw bytes.
+                            return { pngData, index: frameIdx, success: true };
                         } catch (e) {
                             console.warn(`Failed to decode PNG frame ${frameIdx}:`, e);
                             return { index: frameIdx, success: false };
@@ -545,6 +561,17 @@ export function useFFmpegReader() {
                 );
             }
             return Promise.all(decodePromises);
+        }
+
+        // Per-worker promise chain so postMessage handlers never overlap on the
+        // same worker. processFrameWithWorker's message listener is one-shot but
+        // not indexed, so two concurrent posts to the same worker would cross-fire.
+        const workerChain = new Array(numWorkers).fill(null).map(() => Promise.resolve());
+        function dispatchCpuFrame(workerIdx, message, transferables) {
+            const prev = workerChain[workerIdx];
+            const next = prev.then(() => processFrameWithWorker(unifiedAnalyzeWorkers[workerIdx], message, transferables));
+            workerChain[workerIdx] = next.catch(() => {});
+            return next;
         }
 
         // Pipeline: start decoding next batch while GPU processes current batch
@@ -572,7 +599,11 @@ export function useFFmpegReader() {
             const batchIndices = [];
             for (const result of decodeResults) {
                 if (result.success) {
-                    batchFrames.push({ data: result.data, index: result.index });
+                    if (useGpu) {
+                        batchFrames.push({ data: result.data, index: result.index });
+                    } else {
+                        batchFrames.push({ pngData: result.pngData, index: result.index });
+                    }
                     batchIndices.push(result.index);
                 } else {
                     skippedFrames++;
@@ -659,8 +690,8 @@ export function useFFmpegReader() {
 
                         completedFrames++;
                     }
-                } else {
-                    // No crop or CPU fallback - analyze full frames
+                } else if (useGpu) {
+                    // GPU no-crop path - analyze full frames
                     const results = await analyzeRgbaBatchGpu(batchFrames, width, height);
 
                     for (let j = 0; j < results.length; j++) {
@@ -681,10 +712,52 @@ export function useFFmpegReader() {
                         rankFrame(currentFrame);
                         completedFrames++;
                     }
+                } else {
+                    // CPU path - dispatch each PNG to unified_analyze_worker
+                    const cpuPromises = batchFrames.map((frame, j) => {
+                        const frameIdx = batchIndices[j];
+                        return dispatchCpuFrame(
+                            j % numWorkers,
+                            {
+                                type: 'ffmpeg',
+                                analyze: frame.pngData,
+                                includeRgba: true,
+                                index: frameIdx
+                            },
+                            [frame.pngData.buffer]
+                        ).catch(err => ({ skipped: true, index: frameIdx, error: err }));
+                    });
+
+                    const cpuResults = await Promise.all(cpuPromises);
+                    for (const result of cpuResults) {
+                        if (!result || result.skipped) {
+                            skippedFrames++;
+                            completedFrames++;
+                            continue;
+                        }
+
+                        const currentFrame = {
+                            sharpness: result.sharpness || 0,
+                            width: result.width,
+                            height: result.height,
+                            index: result.index,
+                            centerX: result.width / 2,
+                            centerY: result.height / 2,
+                            circularity: result.circularity || 0,
+                            float32Buffer: result.float32Buffer,
+                            blob: result.pngBlob
+                        };
+
+                        rankFrame(currentFrame);
+                        if (bestFrameSoFar === currentFrame && result.pngBlob) {
+                            emit('best-frame-updated', currentFrame);
+                        }
+                        completedFrames++;
+                    }
                 }
             } catch (error) {
-                console.error(`GPU batch processing error:`, error);
-                addLog(`GPU error: ${error.message}`);
+                console.error(`Batch processing error:`, error);
+                addLog(`${useGpu ? 'GPU' : 'CPU'} error: ${error.message}`);
                 // Count all frames in batch as skipped
                 skippedFrames += batchFrames.length;
                 completedFrames += batchFrames.length;
@@ -717,8 +790,8 @@ export function useFFmpegReader() {
             addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);
             emit('quality-selection-ready', {
                 frames: allFramesSorted,
-                workers: null, // GPU path doesn't use CPU workers
-                useWebGPU: true,
+                workers: useGpu ? null : unifiedAnalyzeWorkers,
+                useWebGPU: useGpu,
                 drizzleScale,
                 frameReReader: null,
                 frameCenters: cropRegion ? frameCenters : null
@@ -749,17 +822,18 @@ export function useFFmpegReader() {
             return;
         }
 
-        // Stack frames using WebGPU
+        // Stack frames using WebGPU (or CPU when unavailable)
         emit('set-caption', 'Stacking frames...');
-        addLog(`Starting GPU stacking of ${bestFramesForStacking.length} frames`);
+        addLog(`Starting ${useGpu ? 'GPU' : 'CPU'} stacking of ${bestFramesForStacking.length} frames`);
 
-        // For GPU stacking, pass frameCenters if we did cropping
+        // frameCenters are only populated by the GPU crop path; CPU stacker aligns
+        // via template matching so it doesn't need per-frame centers.
         const stackResult = await stackFramesLocally(
             bestFramesForStacking,
-            null, // No CPU worker needed for GPU path
+            useGpu ? null : unifiedAnalyzeWorkers[0],
             drizzleScale,
-            true, // Always use WebGPU since we're in GPU path
-            cropRegion ? frameCenters : null,
+            useGpu,
+            useGpu && cropRegion ? frameCenters : null,
             surfaceMode
         );
 

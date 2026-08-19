@@ -235,6 +235,25 @@
 				{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
 				<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
 			</template>
+
+			<!-- Processing backend toggle - only meaningful when GPU is actually available -->
+			<template v-if="useGPU">
+				<div class="separator"></div>
+				<h4>Processing <span class="info-icon" @click="showProcessingBackendInfo = !showProcessingBackendInfo">ⓘ</span></h4>
+				<div class="radio-group">
+					<label class="radio-option">
+						<input type="radio" v-model="processingBackend" value="gpu" />
+						GPU (fast)
+					</label>
+					<label class="radio-option">
+						<input type="radio" v-model="processingBackend" value="cpu" />
+						CPU (slow)
+					</label>
+				</div>
+				<p v-if="showProcessingBackendInfo" class="info-text">
+					GPU is much faster and is the default. Only pick CPU if the GPU path produces bad results or crashes on your file. CPU processing can take many minutes even for short clips.
+				</p>
+			</template>
 		</template>
 	</div>
 
@@ -341,6 +360,12 @@ const showTargetInfo = ref(false);
 const showFrameSelectionInfo = ref(false);
 const showStackingModeInfo = ref(false);
 const showContinuousInfo = ref(false);
+const showProcessingBackendInfo = ref(false);
+
+// User-selectable backend. Only takes effect when GPU is otherwise available;
+// effectiveUseGpu below computes what actually gets used.
+const processingBackend = ref('gpu');
+const effectiveUseGpu = computed(() => useGPU.value && processingBackend.value !== 'cpu');
 
 // Crop margin setting (percentage of detected object size to add as margin)
 const cropMarginPercent = ref(10);
@@ -393,6 +418,9 @@ function loadSettings() {
 			if (settings.apPatchSize !== undefined) apPatchSize.value = settings.apPatchSize;
 			if (settings.pixfrac !== undefined) pixfrac.value = settings.pixfrac;
 			if (settings.drizzleMethod) drizzleMethod.value = settings.drizzleMethod;
+			if (settings.processingBackend === 'gpu' || settings.processingBackend === 'cpu') {
+				processingBackend.value = settings.processingBackend;
+			}
 		}
 	} catch (e) {
 		console.warn('Failed to load settings:', e);
@@ -413,7 +441,8 @@ function saveSettings() {
 			minApQuality: minApQuality.value,
 			apPatchSize: apPatchSize.value,
 			pixfrac: pixfrac.value,
-			drizzleMethod: drizzleMethod.value
+			drizzleMethod: drizzleMethod.value,
+			processingBackend: processingBackend.value
 		};
 		localStorage.setItem('eise-settings', JSON.stringify(settings));
 	} catch (e) {
@@ -422,7 +451,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, pixfrac], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, pixfrac, processingBackend], saveSettings);
 
 onMounted(async () => {
 	loadSettings();
@@ -948,7 +977,13 @@ async function processFiles(files, options = {}) {
 
 	// Handle multiple SER files (combined stacking) - when user chose "Combine" option
 	if (serFiles.length > 1) {
-		setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: useGPU.value });
+		if (!effectiveUseGpu.value) {
+			eventBusEmit('upload-error', 'SER files require GPU processing. Please switch Processing to GPU in settings, or convert your SER file to MP4/MOV.');
+			eventBusEmit('show-error');
+			isProcessing.value = false;
+			return;
+		}
+		setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: effectiveUseGpu.value });
 		// Note: processing-started is emitted via eventBus after color profile selection
 		addLog(`Processing ${serFiles.length} SER files for combined stacking`);
 
@@ -985,7 +1020,13 @@ async function processFiles(files, options = {}) {
 
 		// Handle SER files with unified debayer reader
 		if (fileToProcess.name.endsWith('.ser')) {
-			setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: useGPU.value });
+			if (!effectiveUseGpu.value) {
+				eventBusEmit('upload-error', 'SER files require GPU processing. Please switch Processing to GPU in settings, or convert your SER file to MP4/MOV.');
+				eventBusEmit('show-error');
+				isProcessing.value = false;
+				return;
+			}
+			setTrackingContext({ file_type: 'ser', reader: 'debayer', gpu_enabled: effectiveUseGpu.value });
 			// Note: processing-started is emitted via eventBus after color profile selection (if needed)
 
 			// Use new unified debayer reader
@@ -1011,7 +1052,7 @@ async function processFiles(files, options = {}) {
 		let needsFfmpeg = !fileToProcess.name.endsWith('.avi'); // Non-AVI always needs FFmpeg
 		let expectedFrameCount = null; // From AVI header if available
 
-		if (fileToProcess.name.endsWith('.avi') && !liteMode.value) {
+		if (fileToProcess.name.endsWith('.avi') && !liteMode.value && effectiveUseGpu.value) {
 			// First, just check the header (only 5MB) to see if we can process directly
 			const { readAviFile, checkAviFormat } = useAviReader();
 
@@ -1029,7 +1070,7 @@ async function processFiles(files, options = {}) {
 
 				if (is8bitRaw) {
 					// Route 8-bit raw Bayer AVI through unified debayer reader
-					setTrackingContext({ file_type: 'avi', reader: 'debayer', gpu_enabled: useGPU.value });
+					setTrackingContext({ file_type: 'avi', reader: 'debayer', gpu_enabled: effectiveUseGpu.value });
 					// Note: processing-started is emitted via eventBus after color profile selection
 					addLog('8-bit raw Bayer AVI detected. Using unified debayer reader.');
 
@@ -1053,9 +1094,9 @@ async function processFiles(files, options = {}) {
 				}
 
 				// Non-Bayer AVI: use old reader for uncompressed BGR or MJPEG
-				setTrackingContext({ file_type: 'avi', reader: 'avi', gpu_enabled: useGPU.value });
+				setTrackingContext({ file_type: 'avi', reader: 'avi', gpu_enabled: effectiveUseGpu.value });
 				emit('processing-started');
-				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, null, surfaceMode.value, formatInfo.aviHeader);
+				await readAviFile(fileToProcess, effectiveMaxFrames.value, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveUseGpu.value, null, surfaceMode.value, formatInfo.aviHeader);
 				return;
 			} else {
 				addLog(`AVI format '${formatInfo.fourCC}' needs FFmpeg processing.`);
@@ -1066,38 +1107,47 @@ async function processFiles(files, options = {}) {
 			// Lite mode: force FFmpeg for AVI files too
 			addLog('Lite mode: using FFmpeg for AVI processing');
 			needsFfmpeg = true;
+		} else if (fileToProcess.name.endsWith('.avi') && !effectiveUseGpu.value) {
+			// User selected CPU: route AVI through FFmpeg so it hits the fixed CPU path
+			addLog('CPU mode: using FFmpeg for AVI processing');
+			needsFfmpeg = true;
 		}
 
 		if (!needsFfmpeg) return;
 
 		// Try Mediabunny + WebCodecs first (lighter than FFmpeg, ~50KB vs ~25MB)
-		// Works in both normal and lite mode - especially beneficial for mobile
-		const { canHandle, processVideoFrames } = useMediabunnyReader();
-		const check = await canHandle(fileToProcess);
+		// Works in both normal and lite mode - especially beneficial for mobile.
+		// When user selected CPU, skip mediabunny entirely and go straight to FFmpeg.
+		if (effectiveUseGpu.value) {
+			const { canHandle, processVideoFrames } = useMediabunnyReader();
+			const check = await canHandle(fileToProcess);
 
-		if (check.supported) {
-			addLog('Using Mediabunny + WebCodecs (lightweight decoder)');
-			setTrackingContext({ file_type: 'video', reader: 'mediabunny', gpu_enabled: useGPU.value });
-			emit('processing-started');
-			eventBusEmit('start-loading', 'Opening video...');
+			if (check.supported) {
+				addLog('Using Mediabunny + WebCodecs (lightweight decoder)');
+				setTrackingContext({ file_type: 'video', reader: 'mediabunny', gpu_enabled: effectiveUseGpu.value });
+				emit('processing-started');
+				eventBusEmit('start-loading', 'Opening video...');
 
-			try {
-				await processVideoFrames(fileToProcess, {
-					maxFrames: effectiveMaxFrames.value,
-					manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
-					cropMarginPercent: effectiveCropMargin.value,
-					stackPercentage: effectiveStackPercentage.value,
-					drizzleScale: effectiveDrizzleScale.value,
-					surfaceMode: surfaceMode.value,
-					useWebGPU: useGPU.value
-				});
-				return;
-			} catch (mediabunnyErr) {
-				addLog(`Mediabunny failed: ${mediabunnyErr.message}, falling back to FFmpeg`);
+				try {
+					await processVideoFrames(fileToProcess, {
+						maxFrames: effectiveMaxFrames.value,
+						manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
+						cropMarginPercent: effectiveCropMargin.value,
+						stackPercentage: effectiveStackPercentage.value,
+						drizzleScale: effectiveDrizzleScale.value,
+						surfaceMode: surfaceMode.value,
+						useWebGPU: effectiveUseGpu.value
+					});
+					return;
+				} catch (mediabunnyErr) {
+					addLog(`Mediabunny failed: ${mediabunnyErr.message}, falling back to FFmpeg`);
+				}
+			} else {
+				addLog(`Mediabunny cannot handle this file: ${check.reason}`);
+				addLog('Falling back to FFmpeg...');
 			}
 		} else {
-			addLog(`Mediabunny cannot handle this file: ${check.reason}`);
-			addLog('Falling back to FFmpeg...');
+			addLog('CPU mode: using FFmpeg directly');
 		}
 
 		// Show loading indicator for FFmpeg path (SER files handle this after color profile selection)
@@ -1153,7 +1203,7 @@ async function processFiles(files, options = {}) {
 		// Only switch to processing view after we know the file loaded successfully
 		// Determine file type for tracking (could be AVI needing FFmpeg or other video format)
 		const ffmpegFileType = fileToProcess.name.endsWith('.avi') ? 'avi' : 'video';
-		setTrackingContext({ file_type: ffmpegFileType, reader: 'ffmpeg', gpu_enabled: useGPU.value });
+		setTrackingContext({ file_type: ffmpegFileType, reader: 'ffmpeg', gpu_enabled: effectiveUseGpu.value });
 		emit('processing-started');
 
 		// Run pre-crop detection if enabled
@@ -1320,6 +1370,13 @@ async function processFiles(files, options = {}) {
 					eventBusEmit('show-error');
 					return;
 				}
+				if (!effectiveUseGpu.value) {
+					// Streamed extraction path is GPU-only. In CPU mode, give a clean
+					// error instead of pretending we can recover.
+					eventBusEmit('upload-error', 'FFmpeg ran out of memory. The streamed-extraction recovery path requires GPU processing. Please switch Processing to GPU or lower the Max frames limit and try again.');
+					eventBusEmit('show-error');
+					return;
+				}
 				// Bulk extract poisoned the wasm instance; recycle and reload the source file
 				// into the fresh instance before handing off to the streamed path.
 				const fresh = await $recycleFFmpeg();
@@ -1360,7 +1417,7 @@ async function processFiles(files, options = {}) {
 			// Route PNG frames through FFmpeg reader
 			const { processFFmpegFrames } = useFFmpegReader();
 
-			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, surfaceMode.value);
+			await processFFmpegFrames($ffmpeg, pngFiles, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveUseGpu.value, surfaceMode.value);
 		}
 	
 	} else if (imageFiles.length > 1) {
@@ -1372,12 +1429,18 @@ async function processFiles(files, options = {}) {
 			return;
 		}
 
-		setTrackingContext({ file_type: 'images', reader: 'image', gpu_enabled: useGPU.value });
+		if (!effectiveUseGpu.value) {
+			eventBusEmit('upload-error', 'Image sequence stacking requires GPU processing. Please switch Processing to GPU in settings, or convert your images to an MP4/MOV video.');
+			eventBusEmit('show-error');
+			isProcessing.value = false;
+			return;
+		}
+		setTrackingContext({ file_type: 'images', reader: 'image', gpu_enabled: effectiveUseGpu.value });
 		emit('processing-started');
 		addLog(`${imageFiles.length} images selected for stacking`);
 
 		const { readImageFiles } = useImageReader();
-		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, useGPU.value, surfaceMode.value);
+		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveUseGpu.value, surfaceMode.value);
 
 	} else if (imageFiles.length == 1) {
 		// Single image - go directly to post processing

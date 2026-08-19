@@ -65,7 +65,7 @@
 					<div class="site-footer-col">
 						<h4>Community</h4>
 						<ul>
-							<li><NuxtLink to="/about/#community">Share your stacked image</NuxtLink></li>
+							<li><NuxtLink to="/gallery/">Share your stacked image</NuxtLink></li>
 							<li><NuxtLink to="/about/#testimonials">What users say</NuxtLink></li>
 							<li><a href="https://github.com/timing/eise.app/issues" target="_blank" rel="noopener">Report a bug / suggest a feature</a></li>
 							<li><a href="https://github.com/timing/eise.app" target="_blank" rel="noopener">GitHub</a></li>
