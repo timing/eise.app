@@ -21,6 +21,8 @@
 			</p>
 			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image - just open a PNG or TIFF for wavelet sharpening, RGB alignment, and other adjustments without stacking.</p>
 
+			<p>Curious what people are making with it? Browse the <NuxtLink to="/gallery/">community gallery</NuxtLink> of stacks published straight from the app.</p>
+
 			<section id="testimonials" class="testimonials" aria-label="What users say">
 				<h3>What users say</h3>
 				<div class="testimonial-grid">
@@ -126,9 +128,25 @@
 				</div>
 
 				<h4>Community gallery</h4>
-				<p class="gallery-placeholder">
-					A gallery of user-submitted stacks is being built. Send yours in and it might be featured here in the next update.
+				<p>
+					The <NuxtLink to="/gallery/">community gallery</NuxtLink> shows stacks published from the app by other astrophotographers. You can publish yours in one click straight from the stacking result, or upload an Eise stack you've already saved.
 				</p>
+				<div class="community-cta-row">
+					<NuxtLink to="/gallery/" class="cta-secondary">Open the gallery</NuxtLink>
+				</div>
+			</section>
+
+			<section id="newsletter" class="newsletter-section" aria-label="Newsletter signup">
+				<h3>Stay in the loop</h3>
+				<p>
+					Get an occasional email when Eise has updates. No spam, unsubscribe any time.
+				</p>
+				<MailingListForm
+					submit-label="Subscribe"
+					usecase-label="What are you into? (optional)"
+					usecase-placeholder="e.g., Jupiter with a C8, lunar mosaics, solar Hα..."
+					track-source="about-newsletter"
+				/>
 			</section>
 
 			<p class="signoff">Happy stacking,<br/>Tijmen</p>
@@ -138,6 +156,7 @@
 
 <script setup>
 import { useFeedback } from '@/composables/useFeedback';
+import MailingListForm from '@/components/MailingListForm.vue';
 
 const { openFeedback } = useFeedback();
 const webGPUSupported = inject('webGPUSupported');
@@ -207,14 +226,20 @@ useHead({
 	background: #1a5a99;
 	color: #fff !important;
 }
-.gallery-placeholder {
-	padding: 1rem;
-	background: #fff;
-	border: 1px dashed #ccc;
-	border-radius: 4px;
-	color: #666;
-	font-style: italic;
-	margin-top: 0.5rem;
+.newsletter-section {
+	margin: 2.5rem 0;
+	padding: 1.75rem 2rem;
+	background: #f7f7f7;
+	border-radius: 8px;
+	border-left: 3px solid #1a5a99;
+}
+.newsletter-section h3 {
+	margin-top: 0;
+}
+@media (max-width: 700px) {
+	.newsletter-section {
+		padding: 1.25rem 1.25rem;
+	}
 }
 .signoff {
 	margin-top: 2rem;

@@ -126,10 +126,10 @@ watch(() => route.path, () => {
 </script>
 
 <style scoped>
-.nav-mobile-only { display: none; }
+.nav-mobile-only { display: none !important; }
 @media (max-width: 700px) {
 	.nav-desktop-only { display: none !important; }
-	.nav-mobile-only { display: block; }
+	.nav-mobile-only { display: block !important; }
 }
 .hamburger-menu {
 	position: relative;

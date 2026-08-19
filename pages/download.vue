@@ -36,39 +36,15 @@
 
 			<div class="interest-form">
 				<h3>Want a mobile app?</h3>
-				<p>Sign up to be notified when native Android/iOS apps become available.</p>
+				<p>Sign up to the mailinglist to be notified when native Android/iOS apps become available.</p>
 
-				<form
-					action="https://app.us18.list-manage.com/subscribe/post?u=1e23126c833bf49699891f7d2&amp;id=bf3278e839"
-					method="POST"
-					target="_blank"
-					class="signup-form"
-				>
-					<div class="form-row">
-						<label for="mce-EMAIL">Email</label>
-						<input type="email" name="EMAIL" id="mce-EMAIL" placeholder="your@email.com" required />
-					</div>
-
-					<div class="form-row">
-						<label for="mce-PLATFORM">Which platform interests you most?</label>
-						<select name="PLATFORM" id="mce-PLATFORM">
-							<option value="Mobile - Android">Android</option>
-							<option value="Mobile - iOS">iOS</option>
-						</select>
-					</div>
-
-					<div class="form-row">
-						<label for="mce-USECASE">How would you use it? (optional)</label>
-						<input type="text" name="USECASE" id="mce-USECASE" placeholder="e.g., phone recordings through eyepiece, then stack with an app." />
-					</div>
-
-					<!-- Bot protection -->
-					<div style="position: absolute; left: -5000px;" aria-hidden="true">
-						<input type="text" name="b_1e23126c833bf49699891f7d2_bf3278e839" tabindex="-1" value="" />
-					</div>
-
-					<button type="submit" class="submit-btn">Notify me</button>
-				</form>
+				<MailingListForm
+					:show-platform="true"
+					submit-label="Notify me"
+					usecase-label="How would you use it? (optional)"
+					usecase-placeholder="e.g., phone recordings through eyepiece, then stack with an app."
+					track-source="download-mobile"
+				/>
 			</div>
 
 			<div class="current-option">
@@ -85,6 +61,7 @@
 
 <script setup>
 import { useTracking } from '~/composables/useTracking';
+import MailingListForm from '@/components/MailingListForm.vue';
 const { track } = useTracking();
 const RELEASE_VERSION = '2026.08.16';
 const DOWNLOAD_URLS = {
@@ -196,60 +173,6 @@ useBreadcrumbSchema([
 
 .interest-form h3 {
 	margin-top: 0;
-}
-
-.signup-form {
-	max-width: 400px;
-}
-
-.form-row {
-	margin-bottom: 1rem;
-}
-
-.form-row label {
-	display: block;
-	margin-bottom: 0.4rem;
-	font-weight: 500;
-	font-size: 0.9rem;
-}
-
-.form-row input,
-.form-row select {
-	width: 100%;
-	padding: 0.6rem 0.8rem;
-	border: 1px solid #ccc;
-	border-radius: 4px;
-	background: #fff;
-	color: #222;
-	font-size: 1rem;
-	box-sizing: border-box;
-}
-
-.form-row input:focus,
-.form-row select:focus {
-	outline: none;
-	border-color: #1a5a99;
-}
-
-.form-row input::placeholder {
-	color: #999;
-}
-
-.submit-btn {
-	background: #8CCF7E;
-	color: #111;
-	border: none;
-	padding: 0.7rem 1.5rem;
-	font-size: 1rem;
-	font-weight: bold;
-	border-radius: 4px;
-	cursor: pointer;
-	transition: background 0.2s;
-	margin-top: 0.5rem;
-}
-
-.submit-btn:hover {
-	background: #9ddb8f;
 }
 
 .current-option {
