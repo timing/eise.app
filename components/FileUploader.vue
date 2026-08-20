@@ -1456,32 +1456,8 @@ async function processFiles(files, options = {}) {
 		const isNativeFormat = ['image/png', 'image/jpg', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'].includes(file.type);
 
 		if (isTiff) {
-			// Use lightweight TIFF decoder (no FFmpeg needed)
-			addLog('One TIFF image selected, decoding...');
-			const { decodeTIFF } = await import('@/utils/tiffDecoder.js');
-			const buffer = await file.arrayBuffer();
-			const decoded = await decodeTIFF(buffer);
-
-			// Convert Float32 to PNG blob for post processor
-			const pixelCount = decoded.width * decoded.height;
-			const uint8Data = new Uint8ClampedArray(pixelCount * 4);
-			const float32 = decoded.float32Data;
-
-			for (let i = 0; i < pixelCount; i++) {
-				uint8Data[i * 4] = Math.round(Math.min(1, Math.max(0, float32[i * 4])) * 255);
-				uint8Data[i * 4 + 1] = Math.round(Math.min(1, Math.max(0, float32[i * 4 + 1])) * 255);
-				uint8Data[i * 4 + 2] = Math.round(Math.min(1, Math.max(0, float32[i * 4 + 2])) * 255);
-				uint8Data[i * 4 + 3] = Math.round(Math.min(1, Math.max(0, float32[i * 4 + 3])) * 255);
-			}
-
-			const imageData = new ImageData(uint8Data, decoded.width, decoded.height);
-			const canvas = new OffscreenCanvas(decoded.width, decoded.height);
-			const ctx = canvas.getContext('2d');
-			ctx.putImageData(imageData, 0, 0);
-			const blob = await canvas.convertToBlob({ type: 'image/png' });
-
-			addLog('Load post processing');
-			emit('postProcessing', blob);
+			addLog('One TIFF image selected, load post processing');
+			emit('postProcessing', file);
 		} else if (!isNativeFormat) {
 			addLog('One image selected that is not natively supported by browsers, converting..');
 
