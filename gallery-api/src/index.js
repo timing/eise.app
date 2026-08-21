@@ -3,6 +3,10 @@ import { cors } from 'hono/cors';
 import { createDb, initSchema } from './db.js';
 import { createStorage } from './storage.js';
 import { adminAuth } from './auth.js';
+import { createAnalyticsDb, initAnalyticsSchema } from './analytics/db.js';
+import { createAnalyticsRoutes } from './analytics/routes.js';
+import { createAnalyticsAdminRoutes } from './analytics/adminRoutes.js';
+import { signRoleToken, roleCookieHeader } from './analytics/roleCookie.js';
 
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 const WEBP_MAGIC_RIFF = [0x52, 0x49, 0x46, 0x46];
@@ -62,8 +66,14 @@ export function createApp(env) {
   app.use('*', cors({
     origin: origins,
     allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Session-Id'],
+    credentials: true,
   }));
+
+  const analyticsDb = createAnalyticsDb(env);
+  if (analyticsDb) {
+    app.route('/a', createAnalyticsRoutes({ db: analyticsDb, env }));
+  }
 
   app.get('/health', c => c.json({ ok: true }));
 
@@ -134,6 +144,13 @@ export function createApp(env) {
 
   const admin = new Hono();
   admin.use('*', adminAuth(env));
+  admin.use('*', async (c, next) => {
+    if (env.ANALYTICS_SALT) {
+      const token = await signRoleToken(env.ANALYTICS_SALT, 'admin');
+      c.header('Set-Cookie', roleCookieHeader(token, { domain: env.ADMIN_COOKIE_DOMAIN || null }));
+    }
+    await next();
+  });
 
   admin.get('/submissions', async c => {
     const status = c.req.query('status');
@@ -173,9 +190,16 @@ export function createApp(env) {
     return c.json({ ok: true });
   });
 
+  if (analyticsDb) {
+    admin.route('/analytics', createAnalyticsAdminRoutes({ db: analyticsDb }));
+  }
+
   app.route('/admin', admin);
 
-  app.__init = async () => { await initSchema(db); };
+  app.__init = async () => {
+    await initSchema(db);
+    if (analyticsDb) await initAnalyticsSchema(analyticsDb);
+  };
   return app;
 }
 

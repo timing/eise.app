@@ -46,10 +46,11 @@ BASE=https://gallery.eise.app ADMIN="admin:$ADMIN_PASS" node scripts/smoke.mjs
 Expect 8 "OK" lines. Any "FAIL" means the deployment is broken — do NOT declare success. Common failures:
 
 - 500 on POST /submissions → likely a missing env var on the Edge Script. Check with `bunny scripts env list`. Compare against the required set:
-  - Plain: `BUNNY_STORAGE_ZONE`, `BUNNY_STORAGE_HOSTNAME`, `BUNNY_STORAGE_PUBLIC_URL`, `ADMIN_USER`, `CORS_ORIGIN`
-  - Secret: `BUNNY_STORAGE_ACCESS_KEY`, `ADMIN_PASS`, `BUNNY_DATABASE_URL`, `BUNNY_DATABASE_AUTH_TOKEN`
+  - Plain: `BUNNY_STORAGE_ZONE`, `BUNNY_STORAGE_HOSTNAME`, `BUNNY_STORAGE_PUBLIC_URL`, `ADMIN_USER`, `CORS_ORIGIN`, `ADMIN_COOKIE_DOMAIN`
+  - Secret: `BUNNY_STORAGE_ACCESS_KEY`, `ADMIN_PASS`, `BUNNY_DATABASE_URL`, `BUNNY_DATABASE_AUTH_TOKEN`, `ANALYTICS_DB_URL`, `ANALYTICS_DB_TOKEN`, `ANALYTICS_SALT`
 - 401 on admin endpoints → `ADMIN_PASS` on the Edge Script differs from `.env`. Re-sync with `bunny scripts env set --secret ADMIN_PASS ...`.
 - 404 on image_url fetch → the pull zone (`eise-gallery.b-cdn.net`) isn't serving the storage zone yet. Check in Bunny dashboard that the pull zone origin is `eise-gallery-2` storage.
+- 404 on POST /a/event → `ANALYTICS_DB_URL` is not set on the Edge Script, so the `/a/*` routes are not mounted. Set it and redeploy.
 
 ## Reporting to the user
 

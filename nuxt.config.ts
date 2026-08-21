@@ -14,6 +14,15 @@ const analyticsHostname = isElectronBuild
 	? 'electron.eise.app'
 	: (isProduction ? 'eise.app' : 'localhost.eise.app');
 
+// Custom analytics beacon (parallel-run with Simple Analytics for validation).
+const beaconSite = isElectronBuild
+	? 'eise-electron'
+	: (isProduction ? 'eise-prod' : 'eise-dev');
+// In dev builds, point beacon at local gallery-api; prod hits the deployed edge script.
+const beaconEndpoint = isProduction || isElectronBuild
+	? 'https://gallery.eise.app/a'
+	: 'http://localhost:8787/a';
+
 // Sentry release identifier: prefer Cloudflare's commit SHA, fall back to local git or package version.
 const sentryRelease =
 	process.env.SENTRY_RELEASE ||
@@ -50,6 +59,13 @@ export default defineNuxtConfig({
 					defer: true,
 					crossorigin: 'anonymous',
 					'data-hostname': analyticsHostname,
+				},
+				{
+					src: '/beacon.js',
+					async: true,
+					defer: true,
+					'data-endpoint': beaconEndpoint,
+					'data-site': beaconSite,
 				}
 			],
 			noscript: [

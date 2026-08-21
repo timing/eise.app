@@ -14,6 +14,11 @@ export function useTracking() {
                 window.sa_event(event);
             }
         }
+
+        // Send to eise analytics (if beacon loaded)
+        if (window.eise && typeof window.eise.track === 'function') {
+            window.eise.track(event, metadata || undefined);
+        }
     }
 
     function trackHumanInteraction() {

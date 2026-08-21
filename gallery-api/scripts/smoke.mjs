@@ -65,3 +65,94 @@ if (!process.env.SKIP_DELETE) {
   const del = await fetch(`${BASE}/admin/submissions/${id}`, { method: 'DELETE', headers: { Authorization: auth } });
   ok('DELETE /admin/submissions/:id', del, await del.json());
 }
+
+// Analytics endpoints (skip if not configured on the server)
+if (!process.env.SKIP_ANALYTICS) {
+  function extractCookie(res, name) {
+    const raw = res.headers.getSetCookie
+      ? res.headers.getSetCookie()
+      : (res.headers.get('set-cookie') || '').split(/,(?=[^;]+=)/g);
+    for (const c of raw) {
+      if (!c) continue;
+      const m = c.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+      if (m) return decodeURIComponent(m[1]);
+    }
+    return null;
+  }
+
+  const SITE = process.env.ANALYTICS_SITE || 'smoke-test';
+
+  const ev1 = await fetch(`${BASE}/a/event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ site_id: SITE, event: 'pageview', path: '/', referrer: 'https://reddit.com/r/astrophotography/' }),
+  });
+  if (ev1.status === 404) {
+    console.log('SKIP /a/event (analytics not configured on this server)');
+  } else {
+    const ev1Body = await ev1.json();
+    ok('POST /a/event (new session)', ev1, ev1Body);
+    const sid = extractCookie(ev1, '_eise_sid') || ev1Body.session_id;
+    if (!sid) { console.log('FAIL no session_id returned'); process.exitCode = 1; }
+
+    const ev2 = await fetch(`${BASE}/a/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `_eise_sid=${sid}` },
+      body: JSON.stringify({ site_id: SITE, event: 'pageview', path: '/gallery' }),
+    });
+    const ev2Body = await ev2.json();
+    ok('POST /a/event (reuses cookie session)', ev2, ev2Body);
+    if (ev2Body.session_id !== sid) { console.log(`FAIL session_id changed: ${ev2Body.session_id} vs ${sid}`); process.exitCode = 1; }
+
+    // Experiment stickiness
+    const exp1 = await fetch(`${BASE}/a/experiment/nonexistent?site_id=${SITE}`, {
+      headers: { Cookie: `_eise_sid=${sid}` },
+    });
+    ok('GET /a/experiment/:name (missing experiment returns variant:null)', exp1, await exp1.json());
+
+    // Admin role tagging: fetch admin route to obtain role cookie, then send an event with it
+    const adminReq = await fetch(`${BASE}/admin/submissions`, { headers: { Authorization: auth } });
+    const roleToken = extractCookie(adminReq, '_eise_role');
+    if (!roleToken) {
+      console.log('SKIP admin role tagging (no _eise_role cookie — ANALYTICS_SALT may be unset on the server)');
+    } else {
+      const who = await fetch(`${BASE}/a/whoami`, {
+        headers: { Cookie: `_eise_sid=${sid}; _eise_role=${roleToken}` },
+      });
+      const whoBody = await who.json();
+      ok('GET /a/whoami (admin cookie)', who, whoBody);
+      if (whoBody.role !== 'admin') { console.log(`FAIL expected role=admin, got ${whoBody.role}`); process.exitCode = 1; }
+
+      const ev3 = await fetch(`${BASE}/a/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: `_eise_sid=${sid}; _eise_role=${roleToken}` },
+        body: JSON.stringify({ site_id: SITE, event: 'pageview', path: '/admin' }),
+      });
+      const ev3Body = await ev3.json();
+      ok('POST /a/event (with admin role cookie)', ev3, ev3Body);
+      if (ev3Body.role !== 'admin') { console.log(`FAIL expected role=admin on event, got ${ev3Body.role}`); process.exitCode = 1; }
+    }
+
+    // Admin analytics query endpoints
+    const sitesRes = await fetch(`${BASE}/admin/analytics/sites`, { headers: { Authorization: auth } });
+    ok('GET /admin/analytics/sites', sitesRes, await sitesRes.json());
+
+    const summaryRes = await fetch(`${BASE}/admin/analytics/summary?site_id=${SITE}&include_admin=1`, { headers: { Authorization: auth } });
+    ok('GET /admin/analytics/summary', summaryRes, await summaryRes.json());
+
+    const pagesRes = await fetch(`${BASE}/admin/analytics/pages?site_id=${SITE}&include_admin=1`, { headers: { Authorization: auth } });
+    ok('GET /admin/analytics/pages', pagesRes, await pagesRes.json());
+
+    const refRes = await fetch(`${BASE}/admin/analytics/referrers?site_id=${SITE}&include_admin=1`, { headers: { Authorization: auth } });
+    const refBody = await refRes.json();
+    ok('GET /admin/analytics/referrers', refRes, refBody);
+    const firstHost = (refBody.items || [])[0]?.referrer_host;
+    if (firstHost) {
+      const urlsRes = await fetch(`${BASE}/admin/analytics/referrers/urls?site_id=${SITE}&host=${encodeURIComponent(firstHost)}&include_admin=1`, { headers: { Authorization: auth } });
+      ok(`GET /admin/analytics/referrers/urls (host=${firstHost})`, urlsRes, await urlsRes.json());
+    }
+
+    const evtsRes = await fetch(`${BASE}/admin/analytics/events?site_id=${SITE}&include_admin=1`, { headers: { Authorization: auth } });
+    ok('GET /admin/analytics/events', evtsRes, await evtsRes.json());
+  }
+}
