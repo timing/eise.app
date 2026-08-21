@@ -600,7 +600,12 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         boundsPixelSize: batchSize * pixelCount * 4 * 4,
         reductionSize: batchSize * numWorkgroups * 2 * 4,
         momentsReductionSize: batchSize * numWorkgroups * 6 * 4,
-        boundsReductionSize: batchSize * numWorkgroups * 4 * 4
+        boundsReductionSize: batchSize * numWorkgroups * 4 * 4,
+        // 4 floats/frame for circularity (circ, cx, cy, tiltAngle). Untracked in
+        // the cache-hit check previously — a later call with a larger batchSize
+        // would reuse a too-small buffer and the copyBufferToBuffer readback
+        // overflows (Sentry EISE-MS).
+        circularitySize: batchSize * 4 * 4
     };
 
     // Check if we can reuse cached buffers
@@ -612,7 +617,8 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         cachedAnalyzeConfig.boundsPixelSize >= requiredSizes.boundsPixelSize &&
         cachedAnalyzeConfig.reductionSize >= requiredSizes.reductionSize &&
         cachedAnalyzeConfig.momentsReductionSize >= requiredSizes.momentsReductionSize &&
-        cachedAnalyzeConfig.boundsReductionSize >= requiredSizes.boundsReductionSize) {
+        cachedAnalyzeConfig.boundsReductionSize >= requiredSizes.boundsReductionSize &&
+        cachedAnalyzeConfig.circularitySize >= requiredSizes.circularitySize) {
         // Update config with current batch params
         cachedAnalyzeConfig.batchSize = batchSize;
         cachedAnalyzeConfig.pixelCount = pixelCount;
@@ -639,6 +645,7 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const reductionSize = align4(Math.ceil(requiredSizes.reductionSize * headroom));
     const momentsReductionSize = align4(Math.ceil(requiredSizes.momentsReductionSize * headroom));
     const boundsReductionSize = align4(Math.ceil(requiredSizes.boundsReductionSize * headroom));
+    const circularitySize = align4(Math.ceil(requiredSizes.circularitySize * headroom));
 
     // Fail loudly if any single buffer would exceed maxBufferSize. WebGPU's own
     // failure mode is silent (invalid buffer + uncaptured validation error), which
@@ -686,9 +693,9 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         reductionReadback: readbackBuffer(device, reductionSize),
         momentsReadback: readbackBuffer(device, momentsReductionSize),
         // Circularity + centroid + tilt: computed on GPU from moments (4 floats per frame: circ, cx, cy, tiltAngle)
-        circularityBuffer: storageBuffer(device, batchSize * 4 * 4, { copySrc: true }),
+        circularityBuffer: storageBuffer(device, circularitySize, { copySrc: true }),
         circularityParamsBuffer: uniformBuffer(device, 16),
-        circularityReadback: readbackBuffer(device, batchSize * 4 * 4),
+        circularityReadback: readbackBuffer(device, circularitySize),
         // RGBA readback: matches rgbaBuffer size for 16-bit Float32 support
         rgbaReadback: readbackBuffer(device, rgbaBufferSize),
         boundsBuffer: storageBuffer(device, boundsPixelSize),
@@ -708,7 +715,8 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         boundsPixelSize,
         reductionSize,
         momentsReductionSize,
-        boundsReductionSize
+        boundsReductionSize,
+        circularitySize
     };
 
     return cachedAnalyzeBuffers;
@@ -1195,15 +1203,22 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
         numWorkgroups  // Store for use in shader params
     };
 
-    // Validate cache - check sizes that determine buffer requirements
+    // Validate cache - EVERY batch-sized buffer must be checked. Missing checks
+    // caused Sentry EISE-MS: a later call with a larger batchSize reused an
+    // too-small buffer and the readback copyBufferToBuffer overflowed.
     if (cachedCropBuffers && cachedCropConfig &&
         cachedCropConfig.inputSize >= requiredSizes.inputSize &&
+        cachedCropConfig.centersSize >= requiredSizes.centersSize &&
         cachedCropConfig.croppedRgbaSize >= requiredSizes.croppedRgbaSize &&
         cachedCropConfig.packedGraySize >= requiredSizes.packedGraySize &&
+        cachedCropConfig.graySize >= requiredSizes.graySize &&
+        cachedCropConfig.tenengradSize >= requiredSizes.tenengradSize &&
+        cachedCropConfig.laplacianSize >= requiredSizes.laplacianSize &&
         cachedCropConfig.momentsSize >= requiredSizes.momentsSize &&
         cachedCropConfig.reductionSize >= requiredSizes.reductionSize &&
         cachedCropConfig.momentsReductionSize >= requiredSizes.momentsReductionSize &&
-        cachedCropConfig.boundsOutputSize >= requiredSizes.boundsOutputSize) {
+        cachedCropConfig.boundsOutputSize >= requiredSizes.boundsOutputSize &&
+        cachedCropConfig.sharpnessFinalSize >= requiredSizes.sharpnessFinalSize) {
         cachedCropConfig.bitDepth = bitDepth;
         return cachedCropBuffers;
     }
