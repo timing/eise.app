@@ -11,6 +11,9 @@ let gpuWorker = null;
 let gpuReady = false;
 let initPromise = null;
 let logListenerAttached = false;
+// Cache getMaxBatchSize results per (width, height, bitDepth) — the underlying
+// message round-trip is ~1ms but adds up on hot paths. Cleared on terminate.
+const maxBatchCache = new Map();
 
 export function useWebGpuAnalyzeWorker() {
     const { addLog } = useEventBus();
@@ -97,6 +100,7 @@ export function useWebGpuAnalyzeWorker() {
             gpuReady = false;
             initPromise = null;
             logListenerAttached = false;
+            maxBatchCache.clear();
         }
     }
 
@@ -134,13 +138,43 @@ export function useWebGpuAnalyzeWorker() {
     }
 
     /**
-     * GPU batch analysis for RGBA frames
+     * Cached wrapper around getMaxBatchSize — same result per dimensions until
+     * the worker is terminated (which invalidates the cache).
+     */
+    async function getMaxBatchCached(width, height, bitDepth = 8) {
+        const key = `${width}x${height}x${bitDepth}`;
+        if (maxBatchCache.has(key)) return maxBatchCache.get(key);
+        const maxBatch = await getMaxBatchSize(width, height, bitDepth);
+        maxBatchCache.set(key, maxBatch);
+        return maxBatch;
+    }
+
+    /**
+     * GPU batch analysis for RGBA frames. Transparently chunks large batches
+     * so no single dispatch exceeds the device's maxBufferSize — the caller's
+     * batch-sizing heuristic doesn't need to know about GPU memory limits.
+     * See Sentry EISE-M2 / EISE-MT.
      */
     async function analyzeRgbaBatchGpu(frames, width, height) {
         if (!gpuReady || !gpuWorker) {
             throw new Error('GPU worker not initialized');
         }
+        const maxBatch = await getMaxBatchCached(width, height, 8);
+        if (frames.length <= maxBatch) {
+            return dispatchAnalyzeBatch(frames, width, height);
+        }
+        // Batch is larger than the device can handle in one dispatch — chunk it.
+        addLog(`GPU analyze chunked: ${frames.length} frames / ${maxBatch} per batch (${width}x${height})`);
+        const results = [];
+        for (let start = 0; start < frames.length; start += maxBatch) {
+            const chunk = frames.slice(start, start + maxBatch);
+            const chunkResults = await dispatchAnalyzeBatch(chunk, width, height);
+            results.push(...chunkResults);
+        }
+        return results;
+    }
 
+    async function dispatchAnalyzeBatch(frames, width, height) {
         return new Promise((resolve, reject) => {
             const requestId = Date.now() + Math.random();
             const handler = (e) => {
