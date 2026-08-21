@@ -428,6 +428,18 @@ async function init() {
     });
     queue = device.queue;
 
+    // Surface WebGPU validation errors to the main thread. Without this, allocations
+    // that exceed maxBufferSize (or any other validation failure) return an invalid
+    // buffer silently — downstream dispatches then no-op and readbacks come back as
+    // zeros. See Sentry EISE-M2: on a Mac with maxBufferSize=2GB a 50-frame 1080p
+    // batch requested a 2.98GB moments buffer, so every frame was reported as a
+    // 1px "planet" at (0, 0).
+    device.onuncapturederror = (event) => {
+        const msg = event.error?.message || String(event.error);
+        console.error('[GPU] Uncaptured WebGPU error:', msg);
+        self.postMessage({ type: 'log', level: 'error', message: `WebGPU validation error: ${msg}` });
+    };
+
     // Handle GPU device lost (tab suspended, driver crash, etc.)
     device.lost.then(async (info) => {
         console.error('WebGPU device lost:', info.message);
@@ -457,12 +469,16 @@ async function init() {
                 self.postMessage({ type: 'device-recovered' });
             } catch (err) {
                 console.error('GPU recovery failed:', err.message);
-                self.postMessage({ type: 'error', error: `GPU device lost and recovery failed: ${err.message}. Please reload the page.` });
+                const message = `GPU device lost and recovery failed: ${err.message}. Please reload the page.`;
+                self.postMessage({ type: 'log', level: 'error', message });
+                self.postMessage({ type: 'error', error: message });
             } finally {
                 reinitializing = false;
             }
         } else {
-            self.postMessage({ type: 'error', error: `GPU device lost: ${info.message}. Max recovery attempts reached. Please reload the page.` });
+            const message = `GPU device lost: ${info.message}. Max recovery attempts reached. Please reload the page.`;
+            self.postMessage({ type: 'log', level: 'error', message });
+            self.postMessage({ type: 'error', error: message });
         }
     });
 
@@ -550,6 +566,23 @@ function calcPerFrameBufferBytes(width, height, bitDepth = 8) {
     );
 }
 
+/**
+ * Per-frame contribution to the LARGEST single buffer. maxBufferSize is a
+ * per-buffer limit in WebGPU (not a total-memory budget), so batch sizing
+ * should be constrained by the biggest buffer, not the sum. Reduction buffers
+ * scale with numWorkgroups (not pixelCount) and are always tiny — skipped here.
+ */
+function calcLargestPerFrameBufferBytes(width, height, bitDepth = 8) {
+    const pixelCount = width * height;
+    const rgbaBpp = bitDepth === 16 ? 16 : 4;
+    return pixelCount * Math.max(
+        4,          // pixelBuffer
+        rgbaBpp,    // rgbaBuffer (4 or 16 B/px)
+        6 * 4,      // momentsPixelBuffer — usually the largest at 24 B/px
+        4 * 4       // boundsPixelBuffer
+    );
+}
+
 function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const pixelCount = width * height;
     const numWorkgroups = Math.ceil(pixelCount / 256);
@@ -606,6 +639,27 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const reductionSize = align4(Math.ceil(requiredSizes.reductionSize * headroom));
     const momentsReductionSize = align4(Math.ceil(requiredSizes.momentsReductionSize * headroom));
     const boundsReductionSize = align4(Math.ceil(requiredSizes.boundsReductionSize * headroom));
+
+    // Fail loudly if any single buffer would exceed maxBufferSize. WebGPU's own
+    // failure mode is silent (invalid buffer + uncaptured validation error), which
+    // masqueraded as "planet detected as 1px at (0,0)" — see Sentry EISE-M2.
+    // Callers should use 'get-max-batch-size' to size batches; this is the guardrail.
+    const maxBufferSize = device.limits.maxBufferSize;
+    const oversized = [
+        ['momentsPixelBuffer', momentsPixelSize],
+        ['boundsPixelBuffer', boundsPixelSize],
+        ['rgbaBuffer', rgbaBufferSize],
+        ['pixelBuffer', pixelBufferSize]
+    ].find(([, size]) => size > maxBufferSize);
+    if (oversized) {
+        const [name, size] = oversized;
+        throw new Error(
+            `GPU buffer '${name}' would be ${(size / 1024 / 1024).toFixed(0)}MB, ` +
+            `exceeds device maxBufferSize ${(maxBufferSize / 1024 / 1024).toFixed(0)}MB ` +
+            `(batchSize=${batchSize}, ${width}x${height}, bitDepth=${bitDepth}). ` +
+            `Query 'get-max-batch-size' before calling analyzeBatch.`
+        );
+    }
 
     // Helper to create array of N identical buffers for concurrent batch support
     const createBufferArray = (size, usage) =>
@@ -2338,13 +2392,13 @@ self.addEventListener('message', async (e) => {
 
     if (type === 'get-max-batch-size') {
         const { width, height, bitDepth = 8 } = e.data;
-        const perFrameBytes = calcPerFrameBufferBytes(width, height, bitDepth);
-        // Use actual GPU limit — device.limits.maxBufferSize is set from adapter during init
-        // The largest single buffer is momentsPixelSize (24 bytes/px * batch), so max batch =
-        // maxBufferSize / (pixelCount * 24). But total memory across all buffers matters too,
-        // so use maxBufferSize as a proxy for total available GPU memory.
+        // maxBufferSize applies to each buffer individually, not the total. Bound
+        // batchSize by the largest per-frame buffer only, otherwise we're over-
+        // conservative by ~2× and force needless chunking on capable devices.
+        const largestPerFrame = calcLargestPerFrameBufferBytes(width, height, bitDepth);
+        const perFrameBytes = calcPerFrameBufferBytes(width, height, bitDepth);  // reported for diagnostics
         const maxBufferSize = device ? device.limits.maxBufferSize : (256 * 1024 * 1024);
-        const maxBatch = Math.max(1, Math.floor(maxBufferSize / (perFrameBytes * 1.2)));
+        const maxBatch = Math.max(1, Math.floor(maxBufferSize / (largestPerFrame * 1.2)));
         self.postMessage({ type: 'max-batch-size', maxBatch, perFrameBytes, maxBufferSize });
         return;
     }
@@ -2364,6 +2418,8 @@ self.addEventListener('message', async (e) => {
             self.postMessage({ type: 'analyze-result', requestId, results }, transferables);
         } catch (err) {
             console.error(`[GPU] analyze-batch error:`, err);
+            // analyze-error is already routed to reportError in the composable — don't
+            // double-report via the log listener.
             self.postMessage({ type: 'analyze-error', requestId, error: err.message });
         }
         return;
@@ -2422,6 +2478,10 @@ self.addEventListener('message', async (e) => {
             self.postMessage({ type: 'demosaic-thumbnails-result', results },
                 results.map(r => r.rgba));
         } catch (err) {
+            console.error('[GPU] demosaic-thumbnails error:', err);
+            // No composable listens for demosaic-thumbnails-error — route through
+            // the log listener so it still reaches the user log and Sentry.
+            self.postMessage({ type: 'log', level: 'error', message: `GPU demosaic-thumbnails failed: ${err.message}` });
             self.postMessage({ type: 'demosaic-thumbnails-error', error: err.message });
         }
         return;

@@ -17,7 +17,8 @@ export function useMediabunnyReader() {
 		initializeGpuWorker,
 		terminateGpuWorker,
 		analyzeRgbaBatchGpu,
-		detectCropAnalyzeRgbaGpu
+		detectCropAnalyzeRgbaGpu,
+		getMaxBatchSize
 	} = useWebGpuAnalyzeWorker();
 	const { workerUrl } = useWorkerUrl();
 
@@ -341,7 +342,21 @@ export function useMediabunnyReader() {
 			if (actualWidth >= MIN_SIZE_FOR_CROP && actualHeight >= MIN_SIZE_FOR_CROP && reservoir.length > 0) {
 				let sampleResults;
 				if (useGPU) {
-					sampleResults = await analyzeRgbaBatchGpu(reservoir, actualWidth, actualHeight);
+					// Chunk the reservoir so no single analyzeBatch exceeds the device's
+					// maxBufferSize. On Macs with maxBufferSize=2GB, a 50-frame 1080p
+					// batch would request a ~3GB moments buffer; WebGPU would silently
+					// return an invalid buffer and every frame would be reported as a
+					// 1px "planet" at (0, 0). See Sentry EISE-M2.
+					const maxBatch = await getMaxBatchSize(actualWidth, actualHeight, 8);
+					if (reservoir.length > maxBatch) {
+						addLog(`Chunking crop-detection: ${reservoir.length} samples / ${maxBatch} per GPU batch (maxBufferSize limit)`);
+					}
+					sampleResults = [];
+					for (let start = 0; start < reservoir.length; start += maxBatch) {
+						const chunk = reservoir.slice(start, start + maxBatch);
+						const chunkResults = await analyzeRgbaBatchGpu(chunk, actualWidth, actualHeight);
+						sampleResults.push(...chunkResults);
+					}
 				} else {
 					// CPU: detect bounds via workers
 					const promises = reservoir.map((frame, i) => {

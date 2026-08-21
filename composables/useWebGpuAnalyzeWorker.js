@@ -10,10 +10,27 @@ import { reportError } from '@/composables/useSentryReporting';
 let gpuWorker = null;
 let gpuReady = false;
 let initPromise = null;
+let logListenerAttached = false;
 
 export function useWebGpuAnalyzeWorker() {
     const { addLog } = useEventBus();
     const { workerUrl } = useWorkerUrl();
+
+    // Route worker-side {type: 'log'} messages into the app logger + Sentry.
+    // Without this, uncaptured WebGPU validation errors (e.g. buffer > maxBufferSize)
+    // only appear in the worker's DevTools console and never reach the user or Sentry.
+    function attachWorkerLogListener() {
+        if (logListenerAttached || !gpuWorker) return;
+        logListenerAttached = true;
+        gpuWorker.addEventListener('message', (e) => {
+            if (!e.data || e.data.type !== 'log') return;
+            const { level, message } = e.data;
+            addLog(message);
+            if (level === 'error') {
+                reportError(new Error(message), { component: 'useWebGpuAnalyzeWorker', action: 'workerLog' });
+            }
+        });
+    }
 
     /**
      * Initialize GPU worker (singleton - safe to call multiple times)
@@ -53,6 +70,7 @@ export function useWebGpuAnalyzeWorker() {
                     gpuWorker.postMessage({ type: 'init' });
                 });
                 gpuReady = true;
+                attachWorkerLogListener();
                 addLog('GPU analyze worker initialized');
                 return true;
             } catch (error) {
@@ -78,7 +96,34 @@ export function useWebGpuAnalyzeWorker() {
             gpuWorker = null;
             gpuReady = false;
             initPromise = null;
+            logListenerAttached = false;
         }
+    }
+
+    /**
+     * Ask the GPU worker how many frames fit in one analyzeBatch call at these
+     * dimensions, given the current device's maxBufferSize. Callers should chunk
+     * larger batches to avoid silent WebGPU allocation failures (Sentry EISE-M2).
+     */
+    async function getMaxBatchSize(width, height, bitDepth = 8) {
+        if (!gpuReady || !gpuWorker) {
+            throw new Error('GPU worker not initialized');
+        }
+        return new Promise((resolve, reject) => {
+            let timeout;
+            const handler = (e) => {
+                if (e.data?.type !== 'max-batch-size') return;
+                clearTimeout(timeout);
+                gpuWorker.removeEventListener('message', handler);
+                resolve(e.data.maxBatch);
+            };
+            gpuWorker.addEventListener('message', handler);
+            gpuWorker.postMessage({ type: 'get-max-batch-size', width, height, bitDepth });
+            timeout = setTimeout(() => {
+                gpuWorker.removeEventListener('message', handler);
+                reject(new Error('GPU worker did not respond to get-max-batch-size'));
+            }, 15000);
+        });
     }
 
     /**
@@ -234,6 +279,7 @@ export function useWebGpuAnalyzeWorker() {
         initializeGpuWorker,
         terminateGpuWorker,
         isGpuReady,
+        getMaxBatchSize,
         analyzeRgbaBatchGpu,
         cropAndAnalyzeRgbaGpu,
         detectCropAnalyzeRgbaGpu,
