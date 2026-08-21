@@ -63,6 +63,15 @@ export function parseUserAgent(ua) {
   return { browser, os, device };
 }
 
+export function normalizePath(p) {
+  if (!p) return p;
+  const qIdx = p.indexOf('?');
+  const pathPart = qIdx === -1 ? p : p.slice(0, qIdx);
+  const queryPart = qIdx === -1 ? '' : p.slice(qIdx);
+  const trimmed = pathPart.replace(/\/+$/, '') || '/';
+  return trimmed + queryPart;
+}
+
 export function parseReferrer(referrer) {
   if (!referrer || typeof referrer !== 'string') return { url: null, host: null, path: null };
   try {

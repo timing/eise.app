@@ -9,6 +9,7 @@ import {
   parseReferrer,
   parseUtm,
   readCountry,
+  normalizePath,
 } from './session.js';
 import { ROLE_COOKIE, verifyRoleToken } from './roleCookie.js';
 
@@ -73,7 +74,7 @@ export function createAnalyticsRoutes({ db, env }) {
     if (!eventName) return c.json({ error: 'event required' }, 400);
 
     const { id: sessionId, source } = resolveSessionId(c, body.session_id);
-    const path = body.path ? String(body.path).slice(0, MAX_PATH_LEN) : null;
+    const path = body.path ? normalizePath(String(body.path).slice(0, MAX_PATH_LEN)) : null;
     const referrer = body.referrer ? String(body.referrer).slice(0, 2000) : null;
     const userId = body.user_id ? String(body.user_id).slice(0, 128) : null;
     const variant = body.variant ? String(body.variant).slice(0, 64) : null;
