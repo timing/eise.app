@@ -63,13 +63,23 @@ export function parseUserAgent(ua) {
   return { browser, os, device };
 }
 
+const TRACKING_PARAM = /^(utm_|gclid$|dclid$|fbclid$|msclkid$|yclid$|mc_eid$|mc_cid$|_hsenc$|_hsmi$|ref$|ref_)/i;
+
 export function normalizePath(p) {
   if (!p) return p;
   const qIdx = p.indexOf('?');
   const pathPart = qIdx === -1 ? p : p.slice(0, qIdx);
-  const queryPart = qIdx === -1 ? '' : p.slice(qIdx);
-  const trimmed = pathPart.replace(/\/+$/, '') || '/';
-  return trimmed + queryPart;
+  const queryStr = qIdx === -1 ? '' : p.slice(qIdx + 1);
+  const trimmedPath = pathPart.replace(/\/+$/, '') || '/';
+  if (!queryStr) return trimmedPath;
+
+  const kept = new URLSearchParams();
+  const params = new URLSearchParams(queryStr);
+  for (const [k, v] of params) {
+    if (!TRACKING_PARAM.test(k)) kept.append(k, v);
+  }
+  const keptStr = kept.toString();
+  return keptStr ? `${trimmedPath}?${keptStr}` : trimmedPath;
 }
 
 export function parseReferrer(referrer) {

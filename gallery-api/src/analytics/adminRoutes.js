@@ -204,6 +204,84 @@ export function createAnalyticsAdminRoutes({ db }) {
     return c.json({ dimension: dim, items: res.rows });
   });
 
+  app.get('/dashboard', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const { from, to } = parseRange(c);
+    const inc = includeAdmin(c);
+    const limit = limitArg(c, 50);
+
+    const adminFilter = `AND (? = 1 OR COALESCE(role, '') != 'admin')`;
+    const baseArgs = [site, from, to, inc];
+
+    const stmts = [
+      // 0 - daily
+      { sql: `SELECT DATE(ts/1000, 'unixepoch') AS day, COUNT(*) AS pageviews,
+                COUNT(DISTINCT session_id) AS sessions,
+                COUNT(DISTINCT visitor_hash) AS daily_uniques,
+                SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) AS admin_pageviews
+              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter}
+              GROUP BY day ORDER BY day ASC`,
+        args: baseArgs },
+      // 1 - totals
+      { sql: `SELECT COUNT(*) AS pageviews, COUNT(DISTINCT session_id) AS sessions,
+                SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) AS admin_pageviews
+              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter}`,
+        args: baseArgs },
+      // 2 - pages
+      { sql: `SELECT path, COUNT(*) AS pageviews, COUNT(DISTINCT session_id) AS sessions
+              FROM events WHERE site_id = ? AND event_name = 'pageview' AND path IS NOT NULL
+                AND ts >= ? AND ts < ? ${adminFilter}
+              GROUP BY path ORDER BY pageviews DESC LIMIT ?`,
+        args: [...baseArgs, limit] },
+      // 3 - referrers
+      { sql: `SELECT referrer_host, COUNT(*) AS pageviews, COUNT(DISTINCT session_id) AS sessions,
+                COUNT(DISTINCT referrer_url) AS distinct_urls
+              FROM events WHERE site_id = ? AND event_name = 'pageview'
+                AND referrer_host IS NOT NULL AND referrer_host != ''
+                AND ts >= ? AND ts < ? ${adminFilter}
+              GROUP BY referrer_host ORDER BY pageviews DESC LIMIT ?`,
+        args: [...baseArgs, limit] },
+      // 4 - custom events
+      { sql: `SELECT event_name, COUNT(*) AS occurrences, COUNT(DISTINCT session_id) AS sessions
+              FROM events WHERE site_id = ? AND event_name != 'pageview'
+                AND ts >= ? AND ts < ? ${adminFilter}
+              GROUP BY event_name ORDER BY occurrences DESC LIMIT ?`,
+        args: [...baseArgs, limit] },
+    ];
+
+    // 5..8 - breakdowns
+    for (const dim of ['country', 'device', 'os', 'browser']) {
+      const col = DIMENSIONS[dim];
+      stmts.push({
+        sql: `SELECT COALESCE(${col}, '(unknown)') AS value,
+                COUNT(DISTINCT e.session_id) AS sessions, COUNT(*) AS pageviews
+              FROM events e JOIN sessions s ON s.id = e.session_id
+              WHERE e.site_id = ? AND e.event_name = 'pageview' AND e.ts >= ? AND e.ts < ?
+                AND (? = 1 OR COALESCE(e.role, '') != 'admin')
+              GROUP BY value ORDER BY pageviews DESC LIMIT ?`,
+        args: [...baseArgs, dim === 'country' ? 30 : 10],
+      });
+    }
+
+    const results = await db.batch(stmts, 'read');
+    return c.json({
+      range: { from, to },
+      include_admin: !!inc,
+      days: results[0].rows,
+      totals: results[1].rows[0] || { pageviews: 0, sessions: 0, admin_pageviews: 0 },
+      pages: results[2].rows,
+      referrers: results[3].rows,
+      events: results[4].rows,
+      breakdowns: {
+        country: results[5].rows,
+        device: results[6].rows,
+        os: results[7].rows,
+        browser: results[8].rows,
+      },
+    });
+  });
+
   app.get('/events', async c => {
     const site = siteId(c);
     if (!site) return c.json({ error: 'site_id required' }, 400);

@@ -91,7 +91,12 @@ export function createAnalyticsRoutes({ db, env }) {
     const country = readCountry(c);
     const vh = await visitorHash(salt, ip, ua);
     const ref = parseReferrer(referrer);
-    const utm = parseUtm(path);
+    const utm = parseUtm(body.path ? String(body.path) : null);
+    // If no HTTP referrer but UTM source is set, treat UTM source as synthetic referrer.
+    // Real referrers still win when both are present.
+    if (!ref.host && utm.source) {
+      ref.host = String(utm.source).toLowerCase().slice(0, 128);
+    }
     const ts = Date.now();
 
     const cookies = parseCookies(c.req.header('cookie'));

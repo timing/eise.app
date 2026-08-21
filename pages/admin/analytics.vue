@@ -278,26 +278,12 @@ async function fetchAll() {
 	error.value = '';
 	refUrls.value = {};
 	try {
-		const [s, p, r, e, bCountry, bDevice, bOs, bBrowser] = await Promise.all([
-			apiGet('/admin/analytics/summary'),
-			apiGet('/admin/analytics/pages', { limit: '50' }),
-			apiGet('/admin/analytics/referrers', { limit: '50' }),
-			apiGet('/admin/analytics/events', { limit: '50' }),
-			apiGet('/admin/analytics/breakdown', { dimension: 'country', limit: '30' }),
-			apiGet('/admin/analytics/breakdown', { dimension: 'device', limit: '10' }),
-			apiGet('/admin/analytics/breakdown', { dimension: 'os', limit: '10' }),
-			apiGet('/admin/analytics/breakdown', { dimension: 'browser', limit: '10' }),
-		]);
-		summary.value = s;
-		pages.value = p.items || [];
-		referrers.value = r.items || [];
-		events.value = e.items || [];
-		breakdowns.value = {
-			country: bCountry.items || [],
-			device: bDevice.items || [],
-			os: bOs.items || [],
-			browser: bBrowser.items || [],
-		};
+		const d = await apiGet('/admin/analytics/dashboard', { limit: '50' });
+		summary.value = { range: d.range, include_admin: d.include_admin, totals: d.totals, days: d.days };
+		pages.value = d.pages || [];
+		referrers.value = d.referrers || [];
+		events.value = d.events || [];
+		breakdowns.value = d.breakdowns || { country: [], device: [], os: [], browser: [] };
 	} catch (err) {
 		error.value = err.message;
 	} finally {
