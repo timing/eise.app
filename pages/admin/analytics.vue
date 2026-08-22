@@ -19,6 +19,14 @@
 					</button>
 				</div>
 			</div>
+			<div v-if="rangeKey === 'custom'" class="control">
+				<label>From – To</label>
+				<div class="date-inputs">
+					<input type="date" v-model="customFrom" :max="customTo || todayISO" @change="fetchAll" />
+					<span>–</span>
+					<input type="date" v-model="customTo" :min="customFrom" :max="todayISO" @change="fetchAll" />
+				</div>
+			</div>
 			<div class="control">
 				<label>
 					<input type="checkbox" v-model="includeAdmin" @change="fetchAll" />
@@ -190,11 +198,23 @@ import { ref, inject, onMounted, computed } from 'vue';
 const { apiBase, authHeader, logout } = inject('adminAuth');
 
 const ranges = [
-	{ key: '24h', label: 'Last 24h', ms: 24 * 60 * 60 * 1000 },
-	{ key: '7d',  label: 'Last 7 days', ms: 7 * 24 * 60 * 60 * 1000 },
-	{ key: '30d', label: 'Last 30 days', ms: 30 * 24 * 60 * 60 * 1000 },
-	{ key: 'all', label: 'All time', ms: null },
+	{ key: 'today', label: 'Today' },
+	{ key: '24h',   label: 'Last 24h' },
+	{ key: '7d',    label: 'Last 7 days' },
+	{ key: '30d',   label: 'Last 30 days' },
+	{ key: 'all',   label: 'All time' },
+	{ key: 'custom', label: 'Custom' },
 ];
+
+function isoDate(d) {
+	const y = d.getFullYear();
+	const m = String(d.getMonth() + 1).padStart(2, '0');
+	const day = String(d.getDate()).padStart(2, '0');
+	return `${y}-${m}-${day}`;
+}
+const todayISO = isoDate(new Date());
+const customFrom = ref(todayISO);
+const customTo = ref(todayISO);
 
 const sites = ref([]);
 const siteId = ref('');
@@ -211,10 +231,31 @@ const breakdowns = ref({ country: [], device: [], os: [], browser: [] });
 const loading = ref(false);
 const error = ref('');
 
-const rangeMs = computed(() => ranges.find(r => r.key === rangeKey.value)?.ms);
 const hasBreakdowns = computed(() =>
 	['country', 'device', 'browser', 'os'].some(k => breakdowns.value[k]?.length)
 );
+
+function currentRangeMs() {
+	const now = Date.now();
+	switch (rangeKey.value) {
+		case 'today': {
+			const d = new Date();
+			d.setHours(0, 0, 0, 0);
+			return { from: d.getTime(), to: now };
+		}
+		case '24h': return { from: now - 24 * 3600 * 1000, to: now };
+		case '7d':  return { from: now - 7 * 24 * 3600 * 1000, to: now };
+		case '30d': return { from: now - 30 * 24 * 3600 * 1000, to: now };
+		case 'all': return { from: null, to: null };
+		case 'custom': {
+			if (!customFrom.value || !customTo.value) return { from: null, to: null };
+			const from = new Date(customFrom.value + 'T00:00:00').getTime();
+			const to = new Date(customTo.value + 'T23:59:59.999').getTime();
+			return { from, to };
+		}
+	}
+	return { from: null, to: null };
+}
 
 onMounted(async () => {
 	await fetchSites();
@@ -230,13 +271,13 @@ function setRange(k) {
 }
 
 function commonParams() {
-	const now = Date.now();
+	const { from, to } = currentRangeMs();
 	const params = new URLSearchParams();
 	params.set('site_id', siteId.value);
 	params.set('include_admin', includeAdmin.value ? '1' : '0');
-	if (rangeMs.value != null) {
-		params.set('from', String(now - rangeMs.value));
-		params.set('to', String(now));
+	if (from != null && to != null) {
+		params.set('from', String(from));
+		params.set('to', String(to));
 	}
 	return params;
 }
@@ -317,7 +358,7 @@ async function toggleRefUrls(host) {
 	padding: 6px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px;
 	background: white; min-width: 160px;
 }
-.range-buttons { display: flex; gap: 4px; }
+.range-buttons { display: flex; gap: 4px; flex-wrap: wrap; }
 .range-buttons button {
 	padding: 6px 12px; background: #f0f0f0; border: 1px solid #ddd;
 	border-radius: 4px; cursor: pointer; font-size: 13px;
@@ -325,6 +366,12 @@ async function toggleRefUrls(host) {
 .range-buttons button.active {
 	background: #8CCF7E; color: #111; font-weight: bold; border-color: #7ABF6E;
 }
+.date-inputs { display: flex; align-items: center; gap: 6px; }
+.date-inputs input[type="date"] {
+	padding: 6px 8px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px;
+	background: white;
+}
+.date-inputs span { color: #888; }
 .btn-refresh {
 	padding: 8px 16px; background: #eee; color: #333; border: none;
 	border-radius: 5px; font-size: 13px; cursor: pointer;
