@@ -229,15 +229,11 @@
 	<!-- Export Popup -->
 	<div v-if="showExportPopup" class="export-popup-overlay" @click.self="showExportPopup = false">
 		<div class="export-popup">
+			<button class="popup-close-x" aria-label="Close" @click="showExportPopup = false">×</button>
 			<h3>Export</h3>
-
-			<div v-if="didExport" class="post-export-nudge">
-				<p><strong>🎉 Downloaded!</strong></p>
-				<p class="nudge-body">The world might want to see your stack too. Want to publish it to the Eise gallery?</p>
-				<button class="btn-primary publish-nudge-btn" @click="openPublishModal('export_popup')">
-					✨ Publish to Eise Gallery
-				</button>
-			</div>
+			<p class="popup-intro">
+				Save your image to your computer. Choose 16-bit for maximum precision (best for further editing in other apps) or 8-bit for a smaller file that displays anywhere.
+			</p>
 
 			<div class="export-filename">
 				<label>Filename:</label>
@@ -257,22 +253,17 @@
 				<button v-if="props.croppedSerData" class="export-option secondary" @click="downloadCroppedSer">
 					⬇ Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})
 				</button>
-				<button
-					class="export-option video"
-					@click="downloadComparisonVideo"
-					:disabled="!canExport() || isExportingVideo"
-					:title="!canExport() ? 'Only available after running the full stack pipeline' : ''">
-					{{ isExportingVideo ? exportProgress : '⬇ Comparison Video (mp4)' }}
-				</button>
 			</div>
 
 			<p class="share-note">If you share this image, a mention of Eise.app is appreciated.</p>
 
-			<div class="export-popup-footer">
-				<a href="https://github.com/timing/eise.app/issues" target="_blank" class="btn-primary" @click="handleFeedbackClick">
-					💬 How was your result? Feedback is appreciated.
-				</a>
-				<button class="close-btn" @click="showExportPopup = false">Close</button>
+			<div class="publish-section">
+				<p class="publish-section-text">
+					Proud of your result? Publish it to the <strong>Eise Gallery</strong> for others to see.
+				</p>
+				<button class="btn-publish" @click="openPublishModal('export_popup')">
+					✨ Publish to Eise Gallery
+				</button>
 			</div>
 		</div>
 	</div>
@@ -280,13 +271,11 @@
 	<!-- Help Popup -->
 	<div v-if="showHelpPopup" class="help-popup-overlay" @click.self="showHelpPopup = false">
 		<div class="help-popup">
+			<button class="popup-close-x" aria-label="Close" @click="showHelpPopup = false">×</button>
 			<h3>Post Processor Help</h3>
 			<p>The post-processor helps you bring out detail in your astrophotography. Works great on stacked planetary images, but you can also load any image directly.</p>
 			<h4>Features</h4>
 			<p v-for="feature in features" :key="feature.title"><strong>{{ feature.title }}</strong><br/>{{ feature.desc }}</p>
-			<div class="help-popup-footer">
-				<button class="close-btn" @click="showHelpPopup = false">Close</button>
-			</div>
 		</div>
 	</div>
 
@@ -324,7 +313,7 @@ const selectedFile = inject('selectedFile', ref(null));
 const directFileInput = ref(null);
 
 const { track } = useTracking();
-const { openFeedback, openFeedbackAfterDownload } = useFeedback();
+const { openFeedbackAfterDownload } = useFeedback();
 const { inputFilename, getOutputFilename } = useProcessingState();
 const { workerUrl } = useWorkerUrl();
 const { captureProcessedImage, canExport, generateComparisonVideo, getExportStatus } = useComparisonExport();
@@ -336,7 +325,6 @@ const exportProgress = ref('');
 // Export popup state
 const showExportPopup = ref(false);
 const exportFilename = ref('');
-const sentryAvailable = ref(false);
 const showKebabMenu = ref(false);
 const showHelpPopup = ref(false);
 
@@ -415,15 +403,6 @@ function openPublishModal(source) {
 	showExportPopup.value = false;
 	showPublishModal.value = true;
 }
-
-function handleFeedbackClick(event) {
-	if (sentryAvailable.value) {
-		event.preventDefault();
-		openFeedback();
-	}
-	// Otherwise, let the <a href> work normally (opens GitHub)
-}
-
 
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
 
@@ -700,13 +679,6 @@ onMounted(() => {
 	if (props.file) {
 		loadImage(props.file);
 	}
-
-	// Check Sentry feedback availability (getFeedback() returns null if not configured)
-	import('@sentry/vue').then((Sentry) => {
-		sentryAvailable.value = !!(Sentry.getFeedback && Sentry.getFeedback());
-	}).catch(() => {
-		sentryAvailable.value = false;
-	});
 });
 
 onUnmounted(() => {
@@ -2649,56 +2621,66 @@ canvas {
 	padding-top: 15px;
 	border-top: 1px solid #eee;
 }
-.post-export-nudge {
-	background: #f0f9ec;
-	border: 1px solid #8CCF7E;
-	border-radius: 8px;
-	padding: 15px;
-	margin-bottom: 20px;
-	text-align: center;
-}
-.post-export-nudge p {
-	margin: 0 0 8px 0;
-	color: #333;
-	font-size: 14px;
-}
-.post-export-nudge p.nudge-body {
+.popup-intro {
 	font-size: 13px;
 	color: #555;
-	margin-bottom: 12px;
+	margin: 0 0 20px 0;
+	line-height: 1.5;
 }
-.publish-nudge-btn {
+.publish-section {
+	margin-top: 20px;
+	padding: 15px;
+	background: #f4f6ff;
+	border: 1px solid #d8dffa;
+	border-radius: 8px;
+	text-align: center;
+}
+.publish-section-text {
+	margin: 0 0 12px 0;
+	font-size: 13px;
+	color: #333;
+	line-height: 1.5;
+}
+.btn-publish {
 	padding: 10px 20px;
 	border: none;
 	border-radius: 5px;
 	cursor: pointer;
 	font-size: 14px;
 	font-weight: bold;
-}
-.btn-publish {
 	background-color: #6b8afd;
 	color: #fff;
 }
 .btn-publish:hover {
 	background-color: #5a7aec;
 }
-.export-popup-footer {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	gap: 10px;
-	padding-top: 15px;
-}
-.close-btn {
-	padding: 8px 20px;
-	background-color: #eee;
+.export-popup,
+.help-popup { position: relative; }
+.popup-close-x {
+	position: absolute;
+	top: 12px;
+	right: 12px;
+	width: 32px;
+	height: 32px;
 	border: none;
-	border-radius: 5px;
+	background: transparent;
+	color: #666;
+	font-size: 24px;
+	line-height: 1;
 	cursor: pointer;
-	font-size: 14px;
+	border-radius: 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
 }
-.close-btn:hover {
-	background-color: #ddd;
+.popup-close-x:hover {
+	background: #f0f0f0;
+	color: #111;
+}
+.popup-close-x:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
 }
 
 /* Help popup */
@@ -2737,13 +2719,6 @@ canvas {
 .help-popup p {
 	margin: 8px 0;
 	line-height: 1.5;
-}
-.help-popup-footer {
-	display: flex;
-	justify-content: flex-end;
-	padding-top: 15px;
-	margin-top: 15px;
-	border-top: 1px solid #eee;
 }
 
 /* Feature list styling - muted descriptions with bold titles */

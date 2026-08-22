@@ -1,6 +1,7 @@
 <template>
 	<div class="publish-popup-overlay" @click.self="close">
 		<div class="publish-popup">
+			<button class="popup-close-x" aria-label="Close" :disabled="submitting" @click="close">×</button>
 			<h3>Publish to Eise Gallery</h3>
 			<p class="publish-intro">
 				Share your stack with the world in the
@@ -43,7 +44,6 @@
 				<div v-if="error" class="publish-error">{{ error }}</div>
 
 				<div class="publish-popup-footer">
-					<button class="close-btn" @click="close" :disabled="submitting">Cancel</button>
 					<button class="btn-primary publish-submit" @click="submit" :disabled="!canSubmit">
 						{{ submitting ? 'Uploading...' : 'Publish' }}
 					</button>
@@ -277,16 +277,27 @@ function close() {
 	gap: 10px;
 	padding-top: 10px;
 }
-.close-btn {
-	padding: 8px 20px;
-	background-color: #eee;
+.publish-popup { position: relative; }
+.popup-close-x {
+	position: absolute;
+	top: 12px;
+	right: 12px;
+	width: 32px;
+	height: 32px;
 	border: none;
-	border-radius: 5px;
+	background: transparent;
+	color: #666;
+	font-size: 24px;
+	line-height: 1;
 	cursor: pointer;
-	font-size: 14px;
+	border-radius: 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0;
 }
-.close-btn:hover:not(:disabled) { background-color: #ddd; }
-.close-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.popup-close-x:hover:not(:disabled) { background: #f0f0f0; color: #111; }
+.popup-close-x:disabled { opacity: 0.4; cursor: not-allowed; }
 .publish-submit {
 	padding: 8px 20px;
 	border: none;

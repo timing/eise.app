@@ -50,19 +50,12 @@ export function useFeedback() {
     }
 
     /**
-     * Open feedback after a successful download (only once per session)
+     * Open feedback after a successful download.
+     * Disabled: the auto-popup was too intrusive. Kept as a no-op so existing
+     * call sites remain working; flip the early-return to re-enable.
      */
     async function openFeedbackAfterDownload() {
-        if (feedbackShownThisSession) return;
-        feedbackShownThisSession = true;
-
-        // Small delay so user sees the download started
-        setTimeout(() => {
-            openFeedback({
-                formTitle: 'How was your result?',
-                messagePlaceholder: 'Happy with the output? Any issues or suggestions for improvement?',
-            });
-        }, 1500);
+        return;
     }
 
     /**
