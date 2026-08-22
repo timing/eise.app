@@ -60,6 +60,9 @@ export function useImageReader() {
 
     let gpuWorker = null;
     let gpuReady = false;
+    // Cache getMaxBatchSize per (width, height, bitDepth) so we don't
+    // round-trip to the worker for every batch. Cleared on terminate.
+    const maxBatchCache = new Map();
 
     async function initializeGpuWorker() {
         if (gpuReady) return true;
@@ -166,8 +169,53 @@ export function useImageReader() {
         return { data: uint8Data, width: decoded.width, height: decoded.height };
     }
 
-    // GPU batch analysis for RGBA images
+    // Ask the worker how many frames fit in one analyzeBatch at these dimensions.
+    async function getMaxBatchSize(width, height, bitDepth = 8) {
+        return new Promise((resolve, reject) => {
+            let timeout;
+            const handler = (e) => {
+                if (e.data?.type !== 'max-batch-size') return;
+                clearTimeout(timeout);
+                gpuWorker.removeEventListener('message', handler);
+                resolve(e.data.maxBatch);
+            };
+            gpuWorker.addEventListener('message', handler);
+            gpuWorker.postMessage({ type: 'get-max-batch-size', width, height, bitDepth });
+            timeout = setTimeout(() => {
+                gpuWorker.removeEventListener('message', handler);
+                reject(new Error('GPU worker did not respond to get-max-batch-size'));
+            }, 15000);
+        });
+    }
+
+    async function getMaxBatchCached(width, height, bitDepth = 8) {
+        const key = `${width}x${height}x${bitDepth}`;
+        if (maxBatchCache.has(key)) return maxBatchCache.get(key);
+        const maxBatch = await getMaxBatchSize(width, height, bitDepth);
+        maxBatchCache.set(key, maxBatch);
+        return maxBatch;
+    }
+
+    // GPU batch analysis for RGBA images. Transparently chunks large batches so
+    // no single dispatch exceeds the device's maxBufferSize. Sentry EISE-MT
+    // fired 18× overnight when 36MP smartphone photos with batchSize=4
+    // demanded a 4GB moments buffer on a 2GB device.
     async function analyzeRgbaBatchGpu(frames, width, height) {
+        const maxBatch = await getMaxBatchCached(width, height, 8);
+        if (frames.length <= maxBatch) {
+            return dispatchAnalyzeBatch(frames, width, height);
+        }
+        addLog(`GPU analyze chunked: ${frames.length} frames / ${maxBatch} per batch (${width}x${height})`);
+        const results = [];
+        for (let start = 0; start < frames.length; start += maxBatch) {
+            const chunk = frames.slice(start, start + maxBatch);
+            const chunkResults = await dispatchAnalyzeBatch(chunk, width, height);
+            results.push(...chunkResults);
+        }
+        return results;
+    }
+
+    async function dispatchAnalyzeBatch(frames, width, height) {
         return new Promise((resolve, reject) => {
             const requestId = Date.now() + Math.random();
             const handler = (e) => {
@@ -773,6 +821,7 @@ export function useImageReader() {
         gpuWorker.terminate();
         gpuWorker = null;
         gpuReady = false;
+        maxBatchCache.clear();
 
         if (stackResult && stackResult.blob) {
             addLog('GPU stacking complete');
