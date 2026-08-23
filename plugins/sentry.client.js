@@ -44,6 +44,23 @@ export default defineNuxtPlugin(async (nuxtApp) => {
 
         // Only report errors in production, and never for bots / unsupported browsers.
         enabled: process.env.NODE_ENV === 'production' && !shouldSkipSentry(),
+
+        // Drop errors that we already surface to the user in-app so they don't
+        // dominate the Sentry dashboard.
+        //   - abort(OOM): async FFmpeg-WASM pthread abort — handled via the
+        //     streamed-extract fallback and shown to the user as a load error.
+        //   - SharedArrayBuffer missing: known browser capability gap — user
+        //     sees the "browser can't run FFmpeg" alternatives UI.
+        //   - pthread sent an error: same underlying FFmpeg worker failure.
+        beforeSend(event, hint) {
+            const err = hint?.originalException;
+            const msg = (err && (err.message || String(err))) || event?.message || '';
+            if (typeof msg !== 'string') return event;
+            if (/abort\(OOM\)|pthread sent an error/i.test(msg)) return null;
+            if (/SharedArrayBuffer is not defined|Can't find variable: SharedArrayBuffer/i.test(msg)) return null;
+            if (err && err.name === 'FFmpegUnsupportedError') return null;
+            return event;
+        },
     });
 
     // Set WebGPU support tag

@@ -1,12 +1,22 @@
 import { createFFmpeg } from '@ffmpeg/ffmpeg';
 import { useEventBus } from '@/composables/eventBus';
 
+// Thrown when the current browser can't run FFmpeg-WASM at all (missing
+// SharedArrayBuffer, i.e. no cross-origin isolation). Callers should present
+// alternatives (different file type, desktop app) rather than reporting to Sentry.
+export class FFmpegUnsupportedError extends Error {
+	constructor(reason) {
+		super(`FFmpeg is not supported in this browser: ${reason}`);
+		this.name = 'FFmpegUnsupportedError';
+		this.reason = reason;
+	}
+}
 
 export default defineNuxtPlugin(nuxtApp => {
 	let ffmpeg = null;
 	let isLoaded = false;
 
-	const { addLog } = useEventBus();
+	const { addLog, emit } = useEventBus();
 
 	// Cleanup on page unload to help release WASM memory
 	if (typeof window !== 'undefined') {
@@ -21,10 +31,42 @@ export default defineNuxtPlugin(nuxtApp => {
 			ffmpeg = null;
 			isLoaded = false;
 		});
+
+		// FFmpeg-WASM's pthread runtime can abort asynchronously from inside a
+		// worker (e.g. `RuntimeError: abort(OOM)` on a large video). The abort
+		// surfaces as an uncaught `error` event with only a blob-URL frame, so
+		// the in-flight ffmpeg.run() promise doesn't reliably reject and the
+		// user sees a generic "Something went wrong". Intercept it and surface
+		// an actionable message instead. Sentry's beforeSend drops the raw
+		// event separately (see plugins/sentry.client.js).
+		const isFFmpegPthreadAbort = (msg) =>
+			typeof msg === 'string' && /abort\(OOM\)|pthread sent an error/i.test(msg);
+		window.addEventListener('error', (event) => {
+			const msg = event?.error?.message || event?.message || '';
+			if (!isFFmpegPthreadAbort(msg)) return;
+			addLog(`FFmpeg ran out of memory: ${msg}`);
+			emit('upload-error', 'Your device ran out of memory while decoding this video. Try lowering the max-frames limit, using a shorter clip, or the Eise desktop app for large files.');
+			emit('show-error');
+		});
+		window.addEventListener('unhandledrejection', (event) => {
+			const msg = event?.reason?.message || String(event?.reason || '');
+			if (!isFFmpegPthreadAbort(msg)) return;
+			addLog(`FFmpeg ran out of memory: ${msg}`);
+			emit('upload-error', 'Your device ran out of memory while decoding this video. Try lowering the max-frames limit, using a shorter clip, or the Eise desktop app for large files.');
+			emit('show-error');
+		});
 	}
 
 	const loadFFmpeg = async () => {
 		if (isLoaded) return;
+
+		// FFmpeg-WASM needs SharedArrayBuffer for its pthread runtime. Some
+		// Android/iOS in-app browsers (HeyTap, Samsung Internet on older versions,
+		// pre-16.4 iOS Safari) don't expose SAB even when we send COOP/COEP, so
+		// we fail fast with a distinguishable error before touching ffmpeg.load().
+		if (typeof SharedArrayBuffer === 'undefined') {
+			throw new FFmpegUnsupportedError('SharedArrayBuffer is not available');
+		}
 
 		if (!ffmpeg) {
 			addLog('Initializing FFmpeg...');
@@ -41,6 +83,9 @@ export default defineNuxtPlugin(nuxtApp => {
 			const errorMsg = err?.message || String(err);
 			console.error('FFmpeg load failed:', err);
 			addLog(`FFmpeg failed to load: ${errorMsg}`);
+			if (/SharedArrayBuffer/i.test(errorMsg)) {
+				throw new FFmpegUnsupportedError(errorMsg);
+			}
 			throw new Error(`Failed to load FFmpeg: ${errorMsg}`);
 		}
 		addLog('Loading FFmpeg done');

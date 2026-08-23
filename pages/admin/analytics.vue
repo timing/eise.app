@@ -33,6 +33,12 @@
 					Include admin traffic
 				</label>
 			</div>
+			<div class="control">
+				<label>
+					<input type="checkbox" v-model="includeBots" @change="fetchAll" />
+					Include bots
+				</label>
+			</div>
 			<button class="btn-refresh" @click="fetchAll" :disabled="loading">
 				{{ loading ? 'Loading…' : 'Refresh' }}
 			</button>
@@ -193,9 +199,11 @@
 </template>
 
 <script setup>
-import { ref, inject, onMounted, computed } from 'vue';
+import { ref, inject, onMounted, computed, watch } from 'vue';
 
 const { apiBase, authHeader, logout } = inject('adminAuth');
+
+const RANGE_STORAGE_KEY = 'eise-admin-analytics-range';
 
 const ranges = [
 	{ key: 'today', label: 'Today' },
@@ -220,6 +228,7 @@ const sites = ref([]);
 const siteId = ref('');
 const rangeKey = ref('7d');
 const includeAdmin = ref(false);
+const includeBots = ref(false);
 
 const summary = ref(null);
 const pages = ref([]);
@@ -258,6 +267,25 @@ function currentRangeMs() {
 }
 
 onMounted(async () => {
+	try {
+		const saved = JSON.parse(localStorage.getItem(RANGE_STORAGE_KEY) || 'null');
+		if (saved && ranges.some(r => r.key === saved.rangeKey)) {
+			rangeKey.value = saved.rangeKey;
+			if (saved.customFrom) customFrom.value = saved.customFrom;
+			if (saved.customTo) customTo.value = saved.customTo;
+		}
+	} catch {}
+
+	watch([rangeKey, customFrom, customTo], () => {
+		try {
+			localStorage.setItem(RANGE_STORAGE_KEY, JSON.stringify({
+				rangeKey: rangeKey.value,
+				customFrom: customFrom.value,
+				customTo: customTo.value,
+			}));
+		} catch {}
+	});
+
 	await fetchSites();
 	if (sites.value.length) {
 		siteId.value = sites.value[0].site_id;
@@ -275,6 +303,7 @@ function commonParams() {
 	const params = new URLSearchParams();
 	params.set('site_id', siteId.value);
 	params.set('include_admin', includeAdmin.value ? '1' : '0');
+	params.set('include_bots', includeBots.value ? '1' : '0');
 	if (from != null && to != null) {
 		params.set('from', String(from));
 		params.set('to', String(to));

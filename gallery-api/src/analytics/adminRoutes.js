@@ -20,6 +20,11 @@ function includeAdmin(c) {
   return v === '1' || v === 'true' ? 1 : 0;
 }
 
+function includeBots(c) {
+  const v = c.req.query('include_bots');
+  return v === '1' || v === 'true' ? 1 : 0;
+}
+
 function limitArg(c, fallback = 50) {
   const raw = Number(c.req.query('limit'));
   if (!Number.isFinite(raw) || raw <= 0) return fallback;
@@ -47,6 +52,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     if (!site) return c.json({ error: 'site_id required' }, 400);
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
+    const incBots = includeBots(c);
 
     const days = await db.execute({
       sql: `
@@ -59,10 +65,11 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE site_id = ? AND event_name = 'pageview'
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
         GROUP BY day
         ORDER BY day ASC
       `,
-      args: [site, from, to, inc],
+      args: [site, from, to, inc, incBots],
     });
 
     const totals = await db.execute({
@@ -74,13 +81,15 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE site_id = ? AND event_name = 'pageview'
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
       `,
-      args: [site, from, to, inc],
+      args: [site, from, to, inc, incBots],
     });
 
     return c.json({
       range: { from, to },
       include_admin: !!inc,
+      include_bots: !!incBots,
       totals: totals.rows[0] || { pageviews: 0, sessions: 0, admin_pageviews: 0 },
       days: days.rows,
     });
@@ -91,6 +100,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     if (!site) return c.json({ error: 'site_id required' }, 400);
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
+    const incBots = includeBots(c);
     const limit = limitArg(c);
 
     const res = await db.execute({
@@ -103,11 +113,12 @@ export function createAnalyticsAdminRoutes({ db }) {
           AND path IS NOT NULL
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
         GROUP BY path
         ORDER BY pageviews DESC
         LIMIT ?
       `,
-      args: [site, from, to, inc, limit],
+      args: [site, from, to, inc, incBots, limit],
     });
     return c.json({ items: res.rows });
   });
@@ -117,6 +128,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     if (!site) return c.json({ error: 'site_id required' }, 400);
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
+    const incBots = includeBots(c);
     const limit = limitArg(c);
 
     const res = await db.execute({
@@ -130,11 +142,12 @@ export function createAnalyticsAdminRoutes({ db }) {
           AND referrer_host IS NOT NULL AND referrer_host != ''
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
         GROUP BY referrer_host
         ORDER BY pageviews DESC
         LIMIT ?
       `,
-      args: [site, from, to, inc, limit],
+      args: [site, from, to, inc, incBots, limit],
     });
     return c.json({ items: res.rows });
   });
@@ -146,6 +159,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     if (!host) return c.json({ error: 'host required' }, 400);
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
+    const incBots = includeBots(c);
     const limit = limitArg(c);
 
     const res = await db.execute({
@@ -159,11 +173,12 @@ export function createAnalyticsAdminRoutes({ db }) {
           AND referrer_url IS NOT NULL
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
         GROUP BY referrer_url
         ORDER BY pageviews DESC
         LIMIT ?
       `,
-      args: [site, String(host).slice(0, 253), from, to, inc, limit],
+      args: [site, String(host).slice(0, 253), from, to, inc, incBots, limit],
     });
     return c.json({ items: res.rows });
   });
@@ -183,6 +198,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     if (!col) return c.json({ error: `dimension must be one of: ${Object.keys(DIMENSIONS).join(', ')}` }, 400);
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
+    const incBots = includeBots(c);
     const limit = limitArg(c, 100);
 
     const res = await db.execute({
@@ -195,11 +211,12 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE e.site_id = ? AND e.event_name = 'pageview'
           AND e.ts >= ? AND e.ts < ?
           AND (? = 1 OR COALESCE(e.role, '') != 'admin')
+          AND (? = 1 OR e.bot IS NULL)
         GROUP BY value
         ORDER BY pageviews DESC
         LIMIT ?
       `,
-      args: [site, from, to, inc, limit],
+      args: [site, from, to, inc, incBots, limit],
     });
     return c.json({ dimension: dim, items: res.rows });
   });
@@ -209,10 +226,12 @@ export function createAnalyticsAdminRoutes({ db }) {
     if (!site) return c.json({ error: 'site_id required' }, 400);
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
+    const incBots = includeBots(c);
     const limit = limitArg(c, 50);
 
     const adminFilter = `AND (? = 1 OR COALESCE(role, '') != 'admin')`;
-    const baseArgs = [site, from, to, inc];
+    const botFilter = `AND (? = 1 OR bot IS NULL)`;
+    const baseArgs = [site, from, to, inc, incBots];
 
     const stmts = [
       // 0 - daily
@@ -220,18 +239,18 @@ export function createAnalyticsAdminRoutes({ db }) {
                 COUNT(DISTINCT session_id) AS sessions,
                 COUNT(DISTINCT visitor_hash) AS daily_uniques,
                 SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) AS admin_pageviews
-              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter}
+              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}
               GROUP BY day ORDER BY day ASC`,
         args: baseArgs },
       // 1 - totals
       { sql: `SELECT COUNT(*) AS pageviews, COUNT(DISTINCT session_id) AS sessions,
                 SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) AS admin_pageviews
-              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter}`,
+              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}`,
         args: baseArgs },
       // 2 - pages
       { sql: `SELECT path, COUNT(*) AS pageviews, COUNT(DISTINCT session_id) AS sessions
               FROM events WHERE site_id = ? AND event_name = 'pageview' AND path IS NOT NULL
-                AND ts >= ? AND ts < ? ${adminFilter}
+                AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}
               GROUP BY path ORDER BY pageviews DESC LIMIT ?`,
         args: [...baseArgs, limit] },
       // 3 - referrers
@@ -239,13 +258,13 @@ export function createAnalyticsAdminRoutes({ db }) {
                 COUNT(DISTINCT referrer_url) AS distinct_urls
               FROM events WHERE site_id = ? AND event_name = 'pageview'
                 AND referrer_host IS NOT NULL AND referrer_host != ''
-                AND ts >= ? AND ts < ? ${adminFilter}
+                AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}
               GROUP BY referrer_host ORDER BY pageviews DESC LIMIT ?`,
         args: [...baseArgs, limit] },
       // 4 - custom events
       { sql: `SELECT event_name, COUNT(*) AS occurrences, COUNT(DISTINCT session_id) AS sessions
               FROM events WHERE site_id = ? AND event_name != 'pageview'
-                AND ts >= ? AND ts < ? ${adminFilter}
+                AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}
               GROUP BY event_name ORDER BY occurrences DESC LIMIT ?`,
         args: [...baseArgs, limit] },
     ];
@@ -259,6 +278,7 @@ export function createAnalyticsAdminRoutes({ db }) {
               FROM events e JOIN sessions s ON s.id = e.session_id
               WHERE e.site_id = ? AND e.event_name = 'pageview' AND e.ts >= ? AND e.ts < ?
                 AND (? = 1 OR COALESCE(e.role, '') != 'admin')
+                AND (? = 1 OR e.bot IS NULL)
               GROUP BY value ORDER BY pageviews DESC LIMIT ?`,
         args: [...baseArgs, dim === 'country' ? 30 : 10],
       });
@@ -268,6 +288,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     return c.json({
       range: { from, to },
       include_admin: !!inc,
+      include_bots: !!incBots,
       days: results[0].rows,
       totals: results[1].rows[0] || { pageviews: 0, sessions: 0, admin_pageviews: 0 },
       pages: results[2].rows,
@@ -287,6 +308,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     if (!site) return c.json({ error: 'site_id required' }, 400);
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
+    const incBots = includeBots(c);
     const limit = limitArg(c);
 
     const res = await db.execute({
@@ -298,13 +320,71 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE site_id = ? AND event_name != 'pageview'
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
         GROUP BY event_name
         ORDER BY occurrences DESC
         LIMIT ?
       `,
-      args: [site, from, to, inc, limit],
+      args: [site, from, to, inc, incBots, limit],
     });
     return c.json({ items: res.rows });
+  });
+
+  // A/B experiment results. Reads the variant from props_json.ab_<name>
+  // (populated by the client's useTracking wrapper). Conversion metric:
+  // sessions that fired human_interaction AND own-footage stack_start
+  // (stack_start without a try_sample event in the same session).
+  app.get('/ab', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const name = String(c.req.query('name') || '').trim();
+    if (!/^[a-z0-9_]{1,32}$/i.test(name)) {
+      return c.json({ error: 'invalid experiment name' }, 400);
+    }
+    const { from, to } = parseRange(c);
+    const inc = includeAdmin(c);
+    const incBots = includeBots(c);
+    const jsonPath = `$.ab_${name}`;
+
+    const res = await db.execute({
+      sql: `
+        WITH session_variant AS (
+          SELECT session_id,
+                 json_extract(props_json, ?) AS variant,
+                 MAX(CASE WHEN event_name = 'human_interaction' THEN 1 ELSE 0 END) AS did_interact,
+                 MAX(CASE WHEN event_name = 'stack_start' THEN 1 ELSE 0 END) AS did_stack_start,
+                 MAX(CASE WHEN event_name = 'try_sample' THEN 1 ELSE 0 END) AS did_try_sample
+          FROM events
+          WHERE site_id = ?
+            AND ts >= ? AND ts < ?
+            AND (? = 1 OR COALESCE(role, '') != 'admin')
+            AND (? = 1 OR bot IS NULL)
+            AND json_extract(props_json, ?) IS NOT NULL
+          GROUP BY session_id, variant
+        )
+        SELECT variant,
+               COUNT(*) AS participants,
+               SUM(did_interact) AS interacted,
+               SUM(CASE WHEN did_stack_start = 1 AND did_try_sample = 0 THEN 1 ELSE 0 END) AS own_stack_start,
+               SUM(CASE WHEN did_interact = 1 AND did_stack_start = 1 AND did_try_sample = 0 THEN 1 ELSE 0 END) AS converted
+        FROM session_variant
+        GROUP BY variant
+        ORDER BY variant
+      `,
+      args: [jsonPath, site, from, to, inc, incBots, jsonPath],
+    });
+
+    return c.json({
+      name,
+      range: { from, to },
+      variants: res.rows.map(r => ({
+        variant: r.variant,
+        participants: Number(r.participants) || 0,
+        interacted: Number(r.interacted) || 0,
+        own_stack_start: Number(r.own_stack_start) || 0,
+        converted: Number(r.converted) || 0,
+      })),
+    });
   });
 
   return app;

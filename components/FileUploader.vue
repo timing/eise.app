@@ -23,6 +23,13 @@
 		<!-- Error message - always visible when set, regardless of processing state -->
 		<div v-if="errorMessage" class="error-message">
 			<p>{{ errorMessage }}</p>
+			<ul v-if="errorAlternatives.length" class="error-alternatives">
+				<li v-for="(alt, i) in errorAlternatives" :key="i">
+					<a v-if="alt.url" :href="alt.url" :target="alt.external ? '_blank' : undefined" :rel="alt.external ? 'noopener' : undefined">{{ alt.label }}</a>
+					<span v-else>{{ alt.label }}</span>
+					<small v-if="alt.description">{{ alt.description }}</small>
+				</li>
+			</ul>
 			<p v-if="!errorIsUserFault" class="feedback-prompt">
 				Something went wrong? <a href="https://github.com/timing/eise.app/issues" @click="openErrorFeedback">Let me know what happened</a> so I can fix it.
 			</p>
@@ -270,9 +277,15 @@
 		<p class="intro">Eise.app is a free browser-based planetary image stacker for astrophotography. Upload a SER, AVI, or MP4 video of Jupiter, Saturn, Mars, the Moon, or the Sun, and it uses lucky imaging - combining the sharpest frames - to produce a detailed final image. Runs entirely in your browser using WebGPU. No install, no upload, no signup.</p>
 
 		<div class="comparison-images">
-			<img src="/jupiter-singleframe.png" alt="Single frame from video" />
+			<figure class="comparison-figure">
+				<img src="/jupiter-singleframe.png" alt="Single frame from video" />
+				<figcaption>Single frame</figcaption>
+			</figure>
 			<span class="arrow">&rarr;</span>
-			<img src="/jupiter-stacked.png" alt="Stacked and sharpened result" />
+			<figure class="comparison-figure">
+				<img src="/jupiter-stacked.png" alt="Stacked and sharpened result" />
+				<figcaption>Stacked + Sharpened</figcaption>
+			</figure>
 		</div>
 
 		<div class="how-it-works">
@@ -311,6 +324,7 @@ import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { useBatchProcessing, formatFileSize } from '@/composables/useBatchProcessing';
 import { reportError, UserError } from '@/composables/useSentryReporting';
+import { FFmpegUnsupportedError } from '@/plugins/ffmpeg';
 import { useFeedback } from '@/composables/useFeedback';
 import { useTracking } from '@/composables/useTracking';
 import { useAbTest } from '@/composables/useAbTest';
@@ -366,6 +380,7 @@ const selectedMaxFrames = ref(100);
 
 const errorMessage = ref(null);
 const errorIsUserFault = ref(false);
+const errorAlternatives = ref([]); // [{ label, description, url?, external? }]
 const mismatchedFileNames = ref(new Set());
 const showCancelledMessage = ref(false);
 
@@ -880,7 +895,42 @@ function clearSelection() {
 function clearError() {
 	errorMessage.value = null;
 	errorIsUserFault.value = false;
+	errorAlternatives.value = [];
 	mismatchedFileNames.value = new Set();
+}
+
+// Show an error that the user can act on without reloading (e.g. the browser
+// can't run FFmpeg). `alternatives` become clickable options in the error card.
+function showActionableError(message, alternatives) {
+	errorMessage.value = message;
+	errorIsUserFault.value = true; // suppress the "let me know" feedback prompt + reload button
+	errorAlternatives.value = alternatives;
+	eventBusEmit('stop-loading');
+	eventBusEmit('show-error');
+}
+
+function ffmpegUnsupportedAlternatives({ context = 'video' } = {}) {
+	const fileHint = context === 'image'
+		? {
+			label: 'Convert the image first',
+			description: 'Save as PNG, JPEG or TIFF (any format your browser opens natively) and try again.'
+		}
+		: {
+			label: 'Use a file format that runs in your browser',
+			description: 'SER and AVI files from capture software (SharpCap, FireCapture, etc.) work directly, no FFmpeg needed.'
+		};
+	return [
+		fileHint,
+		{
+			label: 'Download the Eise desktop app',
+			description: 'The Mac, Windows and Linux builds ship their own decoder and handle any format.',
+			url: '/download/'
+		},
+		{
+			label: 'Open eise.app in Chrome or Firefox on a laptop',
+			description: 'Most desktop browsers support the feature this file needs.'
+		}
+	];
 }
 
 function setErrorFromException(error, fallbackMessage) {
@@ -1175,6 +1225,13 @@ async function processFiles(files, options = {}) {
 		try {
 			await $loadFFmpeg();
 		} catch (err) {
+			if (err instanceof FFmpegUnsupportedError) {
+				showActionableError(
+					"Your browser can't run the video decoder needed for this file. It's missing a feature (SharedArrayBuffer) that FFmpeg needs. You have a few options:",
+					ffmpegUnsupportedAlternatives()
+				);
+				return;
+			}
 			reportError(err, { component: 'FileUploader', action: 'loadFFmpeg', logs: logs.value });
 			eventBusEmit('upload-error', err.message || 'Failed to load FFmpeg. Please refresh and try again.');
 			eventBusEmit('show-error');
@@ -1481,7 +1538,18 @@ async function processFiles(files, options = {}) {
 		} else if (!isNativeFormat) {
 			addLog('One image selected that is not natively supported by browsers, converting..');
 
-			await $loadFFmpeg();
+			try {
+				await $loadFFmpeg();
+			} catch (err) {
+				if (err instanceof FFmpegUnsupportedError) {
+					showActionableError(
+						"Your browser can't run the image converter needed for this format. It's missing a feature (SharedArrayBuffer) that FFmpeg needs. You have a few options:",
+						ffmpegUnsupportedAlternatives({ context: 'image' })
+					);
+					return;
+				}
+				throw err;
+			}
 
 			let imageData;
 			try {
@@ -1613,6 +1681,30 @@ async function processFiles(files, options = {}) {
 }
 .error-message .reload-button:hover {
 	background-color: #c9302c;
+}
+.error-message .error-alternatives {
+	list-style: none;
+	padding: 0;
+	margin: 10px 0 0 0;
+	font-weight: normal;
+}
+.error-message .error-alternatives li {
+	padding: 8px 0;
+	border-top: 1px solid rgba(217, 83, 79, 0.25);
+}
+.error-message .error-alternatives li:first-child {
+	border-top: none;
+}
+.error-message .error-alternatives a {
+	color: #D9534F;
+	text-decoration: underline;
+	font-weight: bold;
+}
+.error-message .error-alternatives small {
+	display: block;
+	margin-top: 2px;
+	font-size: 0.85em;
+	color: #a34641;
 }
 .cancelled-message {
 	background-color: #fff3cd;

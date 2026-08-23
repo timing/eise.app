@@ -2,7 +2,7 @@
 	<div>
 		<div class="top-bar">
 			<header>
-				<h1><a href="/">Eise.app</a> <span class="subtitle">- Easy Image Stacker Engine</span></h1>
+				<h1><a href="/">Eise.app</a>&nbsp;&nbsp;<span class="subtitle">Easy Image Stacker Engine</span></h1>
 			</header>
 			<nav class="tabs">
 				<NuxtLink to="/" :class="{ active: route.path === '/' }">Stack</NuxtLink>

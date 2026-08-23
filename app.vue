@@ -693,6 +693,15 @@ button:hover, a.button:hover, .tabs a:hover {
 	font-size: 16px;
 	flex: initial;
 }
+/* Dashboard variant: full-width, slim padding, no text-child cap. Use on
+   pages like /admin where the card contains tables/forms, not prose. */
+.page-layout .content.content-card.content-card-dashboard {
+	max-width: none;
+	padding: 24px 32px;
+}
+.page-layout .content.content-card.content-card-dashboard > :is(h2, h3, h4, p, ul, ol, dl, blockquote) {
+	max-width: none;
+}
 /* Direct-child text blocks stay narrower than the card so line-length is readable
    (~65-70ch is the sweet spot). Tables, images, and code blocks stay full-width. */
 .page-layout .content.content-card > h2,
@@ -1034,6 +1043,18 @@ canvas {
 }
 .comparison-images .arrow {
 	font-size: 24px;
+}
+.comparison-figure {
+	margin: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 8px;
+}
+.comparison-figure figcaption {
+	font-size: 12px;
+	color: rgba(198, 255, 253, 0.75);
+	text-align: center;
 }
 .webgpu-dialog-overlay {
 	position: fixed;

@@ -68,6 +68,9 @@ const MIGRATIONS = [
   `ALTER TABLE events ADD COLUMN role TEXT`,
   `ALTER TABLE sessions ADD COLUMN role TEXT`,
   `CREATE INDEX IF NOT EXISTS idx_events_role_ts ON events(role, ts DESC)`,
+  `ALTER TABLE events ADD COLUMN bot TEXT`,
+  `ALTER TABLE sessions ADD COLUMN bot TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_events_bot_ts ON events(bot, ts DESC)`,
 ];
 
 export function createAnalyticsDb(env) {

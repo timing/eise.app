@@ -104,6 +104,12 @@ export function createAnalyticsRoutes({ db, env }) {
     const verified = roleToken ? await verifyRoleToken(salt, roleToken) : null;
     const role = verified ? verified.role : null;
 
+    // Bunny Shield adds CDN-Bot only when a bot is detected. Format example:
+    // "googlebot; category=SEO; verified=yes; action=allow". Store the raw
+    // header so we can filter it out of analytics and still inspect it later.
+    const cdnBot = c.req.header('cdn-bot');
+    const bot = cdnBot ? String(cdnBot).slice(0, 256) : null;
+
     const existing = await db.execute({
       sql: 'SELECT id FROM sessions WHERE id = ? LIMIT 1',
       args: [sessionId],
@@ -116,21 +122,22 @@ export function createAnalyticsRoutes({ db, env }) {
           id, site_id, first_ts, last_ts,
           first_referrer_url, first_referrer_host,
           first_utm_source, first_utm_medium, first_utm_campaign, first_utm_term, first_utm_content,
-          country, ua_browser, ua_os, ua_device, role
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          country, ua_browser, ua_os, ua_device, role, bot
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           sessionId, siteId, ts, ts,
           ref.url, ref.host,
           utm.source, utm.medium, utm.campaign, utm.term, utm.content,
-          country, uaInfo.browser, uaInfo.os, uaInfo.device, role,
+          country, uaInfo.browser, uaInfo.os, uaInfo.device, role, bot,
         ],
       });
     } else {
       await db.execute({
         sql: `UPDATE sessions SET last_ts = ?,
-                role = CASE WHEN ? IS NOT NULL THEN ? ELSE role END
+                role = CASE WHEN ? IS NOT NULL THEN ? ELSE role END,
+                bot  = CASE WHEN ? IS NOT NULL THEN ? ELSE bot  END
               WHERE id = ?`,
-        args: [ts, role, role, sessionId],
+        args: [ts, role, role, bot, bot, sessionId],
       });
     }
 
@@ -138,12 +145,12 @@ export function createAnalyticsRoutes({ db, env }) {
       sql: `INSERT INTO events (
         site_id, session_id, user_id, ts, event_name,
         path, referrer_url, referrer_host, referrer_path,
-        visitor_hash, props_json, variant, role
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        visitor_hash, props_json, variant, role, bot
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         siteId, sessionId, userId, ts, eventName,
         path, ref.url, ref.host, ref.path,
-        vh, propsJson, variant, role,
+        vh, propsJson, variant, role, bot,
       ],
     });
 
