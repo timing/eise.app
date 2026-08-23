@@ -287,6 +287,9 @@
 				<figcaption>Stacked + Sharpened</figcaption>
 			</figure>
 		</div>
+		<p class="sample-credit">
+			The example above was shot with a <a href="https://www.astroshop.eu/telescopes/ts-optics-telescope-n-150-750-photon-ota/p,64564?affiliate_id=Eiseapp" target="_blank" rel="noopener sponsored">TS Optics Photon 150/750 Newtonian</a>.
+		</p>
 
 		<div class="how-it-works">
 			<p>Under the hood, Eise.app automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. After stacking, the post processor opens for wavelet sharpening, RGB alignment, and color adjustments.</p>
@@ -1905,6 +1908,15 @@ async function processFiles(files, options = {}) {
 	font-size: 1.1em;
 	color: #c6fffd;
 	margin-bottom: 5px;
+}
+.sample-credit {
+	font-size: 12px;
+	color: rgba(198, 255, 253, 0.75);
+	margin: -15px 0 20px;
+}
+.sample-credit a {
+	color: inherit;
+	text-decoration: underline;
 }
 .how-it-works {
 	margin: 15px 0;
