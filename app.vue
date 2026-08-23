@@ -748,13 +748,13 @@ button:hover, a.button:hover, .tabs a:hover {
 .page-layout .content.content-card li {
 	margin-bottom: 8px;
 }
-.page-layout .content.content-card a:not(.btn-primary):not(.btn-secondary):not(.btn-danger):not(.button):not(.download-btn):not(.submit-btn),
-.page-layout .content.content-card a:visited:not(.btn-primary):not(.btn-secondary):not(.btn-danger):not(.button):not(.download-btn):not(.submit-btn) {
+.page-layout .content.content-card a:not(.btn-primary):not(.btn-secondary):not(.btn-danger):not(.button):not(.download-btn):not(.submit-btn):not(.cta-secondary):not(.bmc-btn),
+.page-layout .content.content-card a:visited:not(.btn-primary):not(.btn-secondary):not(.btn-danger):not(.button):not(.download-btn):not(.submit-btn):not(.cta-secondary):not(.bmc-btn) {
 	color: #1a5a99;
 	text-decoration: none;
 	border-bottom: 1px solid rgba(26, 90, 153, 0.3);
 }
-.page-layout .content.content-card a:hover:not(.btn-primary):not(.btn-secondary):not(.btn-danger):not(.button):not(.download-btn):not(.submit-btn) {
+.page-layout .content.content-card a:hover:not(.btn-primary):not(.btn-secondary):not(.btn-danger):not(.button):not(.download-btn):not(.submit-btn):not(.cta-secondary):not(.bmc-btn) {
 	color: #0d3d6e;
 	border-bottom-color: #0d3d6e;
 }

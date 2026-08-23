@@ -134,6 +134,17 @@
 				<div class="community-cta-row">
 					<NuxtLink to="/gallery/" class="cta-secondary">Open the gallery</NuxtLink>
 				</div>
+
+				<h4>Support the project</h4>
+				<p>
+					Eise.app is free and I build it in my spare time. If it saved you an evening of wrestling with Wine or a legacy install, you can buy me a coffee to keep the project going.
+				</p>
+				<div class="community-cta-row">
+					<a href="https://buymeacoffee.com/timing" target="_blank" rel="noopener" class="bmc-btn">
+						<span class="bmc-btn-emoji">☕</span>
+						<span class="bmc-btn-text">Buy me a coffee</span>
+					</a>
+				</div>
 			</section>
 
 			<section id="newsletter" class="newsletter-section" aria-label="Newsletter signup">
@@ -161,6 +172,14 @@ import MailingListForm from '@/components/MailingListForm.vue';
 const { openFeedback } = useFeedback();
 const webGPUSupported = inject('webGPUSupported');
 const detectedBrowser = inject('detectedBrowser');
+
+useHead({
+	link: [
+		{ rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+		{ rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' },
+		{ rel: 'stylesheet', href: 'https://fonts.googleapis.com/css2?family=Cookie&display=swap' }
+	]
+});
 
 // Screenshot carousel
 const screenshots = [
@@ -210,6 +229,33 @@ useHead({
 	flex-wrap: wrap;
 	gap: 10px;
 	margin: 1rem 0 0;
+}
+.bmc-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background: #FFDD00;
+	color: #000000 !important;
+	border: 1px solid #000000;
+	border-radius: 6px;
+	padding: 8px 18px;
+	font-family: 'Cookie', cursive;
+	font-size: 22px;
+	line-height: 1;
+	text-decoration: none !important;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+	transition: opacity 0.2s;
+}
+.bmc-btn:hover {
+	opacity: 0.85;
+}
+.bmc-btn-emoji {
+	font-size: 20px;
+	font-family: system-ui, sans-serif;
+}
+.bmc-btn-text {
+	position: relative;
+	top: 2px;
 }
 .cta-secondary {
 	display: inline-block;
