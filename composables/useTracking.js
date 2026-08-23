@@ -1,23 +1,34 @@
 // composables/useTracking.js
 
+import { getVariant } from '@/composables/useAbTest';
+
 let humanInteractionTracked = false;
+
+// Experiments whose variant should be attached to every tracked event.
+const ACTIVE_EXPERIMENTS = ['homepage'];
+
+function abProps() {
+    const props = {};
+    for (const name of ACTIVE_EXPERIMENTS) {
+        props[`ab_${name}`] = getVariant(name);
+    }
+    return props;
+}
 
 export function useTracking() {
     function track(event, metadata = null) {
         if (typeof window === 'undefined') return;
 
+        const enriched = { ...abProps(), ...(metadata || {}) };
+
         // Send to Simple Analytics (if loaded)
         if (typeof window.sa_event === 'function') {
-            if (metadata) {
-                window.sa_event(event, metadata);
-            } else {
-                window.sa_event(event);
-            }
+            window.sa_event(event, enriched);
         }
 
         // Send to eise analytics (if beacon loaded)
         if (window.eise && typeof window.eise.track === 'function') {
-            window.eise.track(event, metadata || undefined);
+            window.eise.track(event, enriched);
         }
     }
 

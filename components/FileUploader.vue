@@ -176,8 +176,15 @@
 				</p>
 			</template>
 
+			<!-- Advanced toggle (variant B only) -->
+			<div v-if="homepageVariant === 'B' && !liteModeClient" class="advanced-toggle-wrapper">
+				<button type="button" class="advanced-toggle" @click="toggleAdvanced">
+					{{ advancedExpanded ? '− Hide advanced settings' : '+ Advanced settings' }}
+				</button>
+			</div>
+
 			<!-- Advanced options hidden in lite mode -->
-			<template v-if="!liteModeClient">
+			<template v-if="!liteModeClient && showAdvanced">
 				<div class="separator"></div>
 
 				<h4>Stacking mode <span class="info-icon" @click="showStackingModeInfo = !showStackingModeInfo">ⓘ</span></h4>
@@ -224,7 +231,7 @@
 				</template>
 
 			<!-- Max frames - always visible (important for lite mode) -->
-			<template v-if="!showMemoryOptimization">
+			<template v-if="!showMemoryOptimization && (showAdvanced || liteModeClient)">
 				<div class="separator"></div>
 				<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
 				<label>
@@ -237,7 +244,7 @@
 			</template>
 
 			<!-- Processing backend toggle - only meaningful when GPU is actually available -->
-			<template v-if="useGPU">
+			<template v-if="useGPU && showAdvanced">
 				<div class="separator"></div>
 				<h4>Processing <span class="info-icon" @click="showProcessingBackendInfo = !showProcessingBackendInfo">ⓘ</span></h4>
 				<div class="radio-group">
@@ -306,6 +313,7 @@ import { useBatchProcessing, formatFileSize } from '@/composables/useBatchProces
 import { reportError, UserError } from '@/composables/useSentryReporting';
 import { useFeedback } from '@/composables/useFeedback';
 import { useTracking } from '@/composables/useTracking';
+import { useAbTest } from '@/composables/useAbTest';
 import { useLiteMemoryLimits } from '@/composables/useLiteMemoryLimits';
 
 // Lite mode: auto-enabled on mobile OR when WebGPU unavailable
@@ -319,6 +327,15 @@ const isMobileClient = ref(false); // Only true after mount to avoid hydration m
 const liteModeClient = ref(false); // Only true after mount to avoid hydration mismatch
 
 const { track } = useTracking();
+const homepageVariant = useAbTest('homepage');
+const advancedExpanded = ref(false);
+const showAdvanced = computed(() => homepageVariant.value !== 'B' || advancedExpanded.value);
+function toggleAdvanced() {
+	advancedExpanded.value = !advancedExpanded.value;
+	try {
+		localStorage.setItem('eise-advanced-expanded', advancedExpanded.value ? 'true' : 'false');
+	} catch {}
+}
 const { detectPlatform, checkFileSize } = useLiteMemoryLimits();
 
 const { openFeedback } = useFeedback();
@@ -455,6 +472,9 @@ watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMax
 
 onMounted(async () => {
 	loadSettings();
+	try {
+		advancedExpanded.value = localStorage.getItem('eise-advanced-expanded') === 'true';
+	} catch {}
 	isMobileClient.value = isMobile.value;
 	liteModeClient.value = liteMode.value;
 
@@ -1827,5 +1847,27 @@ async function processFiles(files, options = {}) {
 }
 .try-sample-link:hover {
 	text-decoration: underline;
+}
+
+/* Advanced settings toggle (variant B) */
+.advanced-toggle-wrapper {
+	margin-top: 14px;
+	text-align: left;
+}
+.advanced-toggle {
+	background: transparent;
+	border: none;
+	border-radius: 0;
+	color: #1a5a99;
+	font: inherit;
+	padding: 4px 0;
+	cursor: pointer;
+	text-decoration: none;
+	border-bottom: 1px solid rgba(26, 90, 153, 0.3);
+}
+.advanced-toggle:hover {
+	background: transparent;
+	color: #0d3d6e;
+	border-bottom-color: #0d3d6e;
 }
 </style>
