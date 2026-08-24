@@ -230,7 +230,7 @@
 					<div class="separator"></div>
 
 					<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
-					<input type="range" min="5" max="50" step="5" v-model="cropMarginPercent" />
+					<input type="range" min="5" max="200" step="5" v-model="cropMarginPercent" />
 					{{ cropMarginPercent }}%
 					<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
 				</template>

@@ -49,6 +49,8 @@
 				<label class="checkbox-label">
 					<input type="checkbox" v-model="autoStretch" @change="applyProcessing" />
 					Auto levels (stretch)
+					<input type="number" min="0" max="100" step="5" v-model.number="autoStretchAmount" @input="applyProcessing" class="number-input" :disabled="!autoStretch" />
+					%
 				</label>
 			</div>
 
@@ -573,6 +575,7 @@ const saturationRepeats = ref(1);
 const vibrance = ref(0);
 const autoColorBalance = ref(false);
 const autoStretch = ref(false);
+const autoStretchAmount = ref(100);
 const preNoiseReduction = ref(0);
 const waveletsRadius = ref(0);
 const waveletsAmount = ref(0);
@@ -1021,8 +1024,8 @@ const applyProcessingInternal = async() => {
 
 	// STEP 0.6: Auto stretch (levels)
 	// Stretches black/white points to full range before sharpening
-	if (autoStretch.value) {
-		workingData = applyAutoStretch16(workingData, width, height);
+	if (autoStretch.value && autoStretchAmount.value > 0) {
+		workingData = applyAutoStretch16(workingData, width, height, autoStretchAmount.value / 100);
 	}
 
 	// STEP 1: Sharpening (based on selected method)
@@ -1394,7 +1397,7 @@ function applyAutoColorBalance16(data, width, height) {
 // ==================== AUTO STRETCH ====================
 // Applies levels adjustment: maps black/white points to 0/1 range
 
-function applyAutoStretch16(data, width, height) {
+function applyAutoStretch16(data, width, height, amount = 1) {
 	const pixelCount = width * height;
 
 	// Sample every Nth pixel for speed (max ~100k samples)
@@ -1442,13 +1445,19 @@ function applyAutoStretch16(data, width, height) {
 	const targetMax = 0.9;
 	const scale = targetMax / range;
 
+	const inv = 1 - amount;
 	const result = new Float32Array(data.length);
 	for (let i = 0; i < pixelCount; i++) {
 		const idx = i * 4;
-		// Stretch each channel using same black/white points, with headroom
-		result[idx] = Math.max(0, Math.min(1, (data[idx] - blackPoint) * scale));
-		result[idx + 1] = Math.max(0, Math.min(1, (data[idx + 1] - blackPoint) * scale));
-		result[idx + 2] = Math.max(0, Math.min(1, (data[idx + 2] - blackPoint) * scale));
+		const r = data[idx];
+		const g = data[idx + 1];
+		const b = data[idx + 2];
+		const sr = Math.max(0, Math.min(1, (r - blackPoint) * scale));
+		const sg = Math.max(0, Math.min(1, (g - blackPoint) * scale));
+		const sb = Math.max(0, Math.min(1, (b - blackPoint) * scale));
+		result[idx] = r * inv + sr * amount;
+		result[idx + 1] = g * inv + sg * amount;
+		result[idx + 2] = b * inv + sb * amount;
 		result[idx + 3] = data[idx + 3]; // Alpha unchanged
 	}
 
