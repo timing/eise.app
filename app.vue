@@ -25,7 +25,15 @@ const {
 } = useContinuousStacking();
 
 const { track, trackHumanInteraction } = useTracking();
-const { getTrackingContext } = useProcessingState();
+const { getTrackingContext, getInputFilename } = useProcessingState();
+
+function stackStartProps() {
+	const filename = getInputFilename();
+	return {
+		...getTrackingContext(),
+		filename: filename ? String(filename).slice(0, 200) : undefined,
+	};
+}
 const router = useRouter();
 
 // Processing state
@@ -195,13 +203,13 @@ onMounted(async () => {
 		isProcessing.value = true;
 		// Emit start-loading immediately so VideoFrameProcessor shows loading state
 		eventBusEmit('start-loading', 'Preparing to analyze...');
-		track('stack_start', getTrackingContext());
+		track('stack_start', stackStartProps());
 	});
 	on('debayer-processing-started', () => {
 		// For SER files where color profile selector was skipped (e.g., forced pattern)
 		isProcessing.value = true;
 		eventBusEmit('start-loading', 'Preparing to analyze...');
-		track('stack_start', getTrackingContext());
+		track('stack_start', stackStartProps());
 	});
 	on('quality-selection-ready', handleQualitySelectionReady);
 	on('cropped-ser-ready', (data) => {
@@ -505,7 +513,7 @@ function handleBatchComplete(data) {
 
 function handleProcessingStarted() {
 	isProcessing.value = true;
-	track('stack_start', getTrackingContext());
+	track('stack_start', stackStartProps());
 }
 
 async function handlePostProcessing(data) {
