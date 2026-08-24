@@ -39,7 +39,7 @@
 						<cite>— Astroyouda, astrophotographer from Indonesia</cite>
 					</blockquote>
 				</div>
-				<p class="testimonials-note">Quotes translated to English, collected via the in-app feedback form.</p>
+				<p class="testimonials-note">Quotes translated to English, collected via the feedback form.</p>
 			</section>
 
 			<!-- Screenshot carousel -->
@@ -114,7 +114,7 @@
 					<li>Post on <a href="https://www.reddit.com/r/astrophotography/" target="_blank" rel="noopener">r/astrophotography</a> and mention Eise.app in the workflow - I keep an eye out.</li>
 					<li>Post to Instagram or X with <strong>#eiseapp</strong>.</li>
 					<li>Open a GitHub Discussion at <a href="https://github.com/timing/eise.app/discussions" target="_blank" rel="noopener">github.com/timing/eise.app/discussions</a>.</li>
-					<li>Or send it via the in-app feedback button. I read every message.</li>
+					<li>Or send it via the feedback button. I read every message.</li>
 				</ul>
 
 				<h4>Bugs and feature requests</h4>
@@ -122,7 +122,7 @@
 					Hit a bug, want a feature, or something isn't working the way you expected? Please tell me - especially the niche stuff. "Doesn't work with my old QHY camera", "wavelets need one more slider", "add FITS support", "make it run on my Chromebook" - all useful, all read.
 				</p>
 				<div class="community-cta-row">
-					<a href="#" @click.prevent="openFeedback()" class="cta-secondary">Send feedback in-app</a>
+					<a href="https://github.com/timing/eise.app/issues" target="_blank" rel="noopener" data-no-track @click="onLetMeKnowClick" class="cta-secondary">Send feedback</a>
 					<a href="https://github.com/timing/eise.app/issues/new" target="_blank" rel="noopener" class="cta-secondary">Report on GitHub</a>
 					<a href="https://github.com/timing/eise.app/discussions" target="_blank" rel="noopener" class="cta-secondary">Share on Discussions</a>
 				</div>
@@ -172,6 +172,17 @@ import MailingListForm from '@/components/MailingListForm.vue';
 const { openFeedback } = useFeedback();
 const webGPUSupported = inject('webGPUSupported');
 const detectedBrowser = inject('detectedBrowser');
+
+async function onLetMeKnowClick(event) {
+	// Open Sentry feedback if available; otherwise the href fallback opens
+	// GitHub issues. Manually record click_ext only when we actually navigate.
+	const opened = await openFeedback();
+	if (opened) {
+		event.preventDefault();
+	} else if (typeof window !== 'undefined' && window.eise?.track) {
+		window.eise.track('click_ext', { url: event.currentTarget.href });
+	}
+}
 
 useHead({
 	link: [

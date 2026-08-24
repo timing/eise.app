@@ -173,7 +173,7 @@
 					</label>
 					<label class="radio-option">
 						<input type="radio" v-model="qualityMode" value="continuous" />
-						Continuous stacking (5% to 90%) <b>new+beta</b>
+						Continuous stacking (5% to 90%) <b>new</b>
 					</label>
 				</div>
 				<p v-if="showFrameSelectionInfo" class="info-text">
@@ -302,7 +302,7 @@
 		</div>
 
 		<h3>More information, bugs and feature requests?</h3>
-		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="#" @click.prevent="openFeedback()">Let me know!</a></p>
+		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="https://github.com/timing/eise.app/issues" target="_blank" data-no-track @click="onLetMeKnowClick">Let me know!</a></p>
 
 		<aside class="home-testimonial">
 			<p class="home-testimonial-quote">"Very good app — it helped me massively improve my image of the Moon."</p>
@@ -375,6 +375,20 @@ async function openCancelFeedback(event) {
 	});
 	if (opened) {
 		event.preventDefault();
+	}
+}
+
+async function onLetMeKnowClick(event) {
+	// If Sentry feedback loads, open the modal in-place and cancel the link
+	// navigation. If Sentry isn't available (dev, bots, init failure), the
+	// href + target="_blank" fallback opens the GitHub issues page instead.
+	// The link carries data-no-track so beacon.js skips its auto click_ext —
+	// we only want to record navigations that actually reached GitHub.
+	const opened = await openFeedback();
+	if (opened) {
+		event.preventDefault();
+	} else if (typeof window !== 'undefined' && window.eise?.track) {
+		window.eise.track('click_ext', { url: event.currentTarget.href });
 	}
 }
 

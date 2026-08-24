@@ -66,6 +66,11 @@
     var t = e.target;
     var link = t && t.closest ? t.closest('a[href]') : null;
     if (!link) return;
+    // Some links (e.g. "Let me know!" that opens Sentry feedback in-page
+    // when available) explicitly manage their own tracking. Skip auto-track
+    // for those — the click handler fires window.eise.track manually when
+    // it can confirm the user actually navigated.
+    if (link.hasAttribute('data-no-track')) return;
     var href = link.getAttribute('href');
     if (!href) return;
     var url;

@@ -115,15 +115,31 @@
 
 			<h3>Need more help?</h3>
 			<p>Head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on GitHub</a> to ask questions or report issues.</p>
+			<p>
+				<a href="https://github.com/timing/eise.app/issues" target="_blank" rel="noopener" data-no-track @click="onLetMeKnowClick" class="cta-secondary">Send feedback</a>
+			</p>
 		</div>
 	</div>
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue';
+import { useFeedback } from '@/composables/useFeedback';
 
 const webGPUSupported = inject('webGPUSupported');
 const detectedBrowser = inject('detectedBrowser');
+const { openFeedback } = useFeedback();
+
+async function onLetMeKnowClick(event) {
+	// Open Sentry feedback if available; otherwise the href fallback opens
+	// GitHub issues. Manually record click_ext only when we actually navigate.
+	const opened = await openFeedback();
+	if (opened) {
+		event.preventDefault();
+	} else if (typeof window !== 'undefined' && window.eise?.track) {
+		window.eise.track('click_ext', { url: event.currentTarget.href });
+	}
+}
 
 // Detect Brave browser
 const isBrave = ref(false);
@@ -154,6 +170,21 @@ useBreadcrumbSchema([
 </script>
 
 <style scoped>
+.cta-secondary {
+	display: inline-block;
+	background: #fff;
+	color: #1a5a99 !important;
+	border: 1px solid #1a5a99;
+	padding: 8px 16px;
+	border-radius: 4px;
+	font-size: 14px;
+	text-decoration: none !important;
+	font-weight: 600;
+}
+.cta-secondary:hover {
+	background: #1a5a99;
+	color: #fff !important;
+}
 dl {
 	margin: 1rem 0;
 }

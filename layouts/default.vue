@@ -67,7 +67,7 @@
 						<ul>
 							<li><NuxtLink to="/gallery/">Share your stacked image</NuxtLink></li>
 							<li><NuxtLink to="/about/#testimonials">What users say</NuxtLink></li>
-							<li><a href="https://github.com/timing/eise.app/issues" target="_blank" rel="noopener">Report a bug / suggest a feature</a></li>
+							<li><a href="https://github.com/timing/eise.app/issues" target="_blank" rel="noopener" data-no-track @click="onLetMeKnowClick">Report a bug / suggest a feature</a></li>
 							<li><a href="https://github.com/timing/eise.app" target="_blank" rel="noopener">GitHub</a></li>
 						</ul>
 					</div>
@@ -86,9 +86,24 @@
 
 <script setup>
 import Logger from '@/components/Logger.vue';
+import { useFeedback } from '@/composables/useFeedback';
 
 const route = useRoute();
 const menuOpen = ref(false);
+const { openFeedback } = useFeedback();
+
+async function onLetMeKnowClick(event) {
+	// If Sentry feedback is available, open the modal and cancel navigation.
+	// Otherwise the href + target="_blank" fallback opens the GitHub issues page.
+	// The link carries data-no-track so beacon.js skips its auto click_ext;
+	// we record it manually only in the fallback branch that actually navigates.
+	const opened = await openFeedback();
+	if (opened) {
+		event.preventDefault();
+	} else if (typeof window !== 'undefined' && window.eise?.track) {
+		window.eise.track('click_ext', { url: event.currentTarget.href });
+	}
+}
 
 // Content pages (about/*, download) don't need the Logs sticky bar — it belongs
 // to the interactive app flow. Everything else shows it.
