@@ -447,16 +447,13 @@ export function useMediabunnyReader() {
 					// with a clear message rather than proceed to guaranteed-broken output.
 					if (medianSize <= 4) {
 						throw new Error(`Planet detection failed — the detected object was only ${Math.round(medianSize)}px across ${detectedCenters.length} samples. This can happen with very dim planets, unusual video formats, or on some GPUs. Try re-encoding the video at a lower resolution, cropping around the planet in a video editor first, or a different browser.`);
-					} else if (desiredSize >= maxAllowedSize) {
-						if (surfaceMode) {
-							addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize}`);
-							cropRegion = { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-						} else {
-							addLog(`Skipping crop: detected size ${desiredSize}px (median: ${Math.round(medianSize)}px) exceeds frame ${maxAllowedSize}px`);
-						}
+					} else if (desiredSize >= maxAllowedSize && surfaceMode) {
+						addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize}`);
+						cropRegion = { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
 					} else {
 						cropRegion = { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-						addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object: ${Math.round(medianSize)}px`);
+						const padNote = desiredSize > maxAllowedSize ? ' (padded — exceeds frame)' : '';
+						addLog(`Detected crop size: ${desiredSize}x${desiredSize}${padNote}, median object: ${Math.round(medianSize)}px`);
 						addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)})`);
 					}
 				}

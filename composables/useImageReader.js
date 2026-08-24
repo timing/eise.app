@@ -580,25 +580,23 @@ export function useImageReader() {
 
                 // Handle cropSize >= frameSize differently based on mode:
                 // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-                // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
-                if (desiredSize >= maxAllowedSize) {
-                    if (surfaceMode) {
-                        cropRegion = {
-                            size: maxAllowedSize,
-                            referenceCenter: { x: medianX, y: medianY },
-                            medianObjectSize: medianSize
-                        };
-                        addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-                    } else {
-                        addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
-                    }
+                // - Normal mode: Allow crop to exceed frame — the shader pads OOB pixels with
+                //   black so the object stays centered even at large margins.
+                if (desiredSize >= maxAllowedSize && surfaceMode) {
+                    cropRegion = {
+                        size: maxAllowedSize,
+                        referenceCenter: { x: medianX, y: medianY },
+                        medianObjectSize: medianSize
+                    };
+                    addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
                 } else if (detectedCenters.length > 0) {
                     cropRegion = {
                         size: desiredSize,
                         referenceCenter: { x: medianX, y: medianY },
                         medianObjectSize: medianSize
                     };
-                    addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+                    const padNote = desiredSize > maxAllowedSize ? ' (padded — exceeds frame)' : '';
+                    addLog(`Detected crop size: ${desiredSize}x${desiredSize}${padNote}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
                 } else {
                     cropRegion = { size: desiredSize, medianObjectSize: medianSize };
                     addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
@@ -851,11 +849,16 @@ export function useImageReader() {
 
                     if (this.cropRegion && Number.isFinite(frame.centerX) && Number.isFinite(frame.centerY)) {
                         const size = this.cropRegion.size;
-                        const cropX = Math.max(0, Math.min(frameData.width - size, Math.round(frame.centerX - size / 2)));
-                        const cropY = Math.max(0, Math.min(frameData.height - size, Math.round(frame.centerY - size / 2)));
+                        // Allow negative crop offsets so the object stays centered when
+                        // the requested crop extends past the source frame; fill the
+                        // OOB region with black to match the GPU crop shader behavior.
+                        const cropX = Math.round(frame.centerX - size / 2);
+                        const cropY = Math.round(frame.centerY - size / 2);
                         const cropped = new OffscreenCanvas(size, size);
                         const cctx = cropped.getContext('2d');
-                        cctx.drawImage(canvas, cropX, cropY, size, size, 0, 0, size, size);
+                        cctx.fillStyle = '#000';
+                        cctx.fillRect(0, 0, size, size);
+                        cctx.drawImage(canvas, cropX, cropY);
                         return await cropped.convertToBlob({ type: 'image/png' });
                     }
                     return await canvas.convertToBlob({ type: 'image/png' });

@@ -434,19 +434,16 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Handle cropSize >= frameSize differently based on mode:
-        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
-        if (desiredSize >= maxAllowedSize) {
-            if (surfaceMode) {
-                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-            }
-            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
-            return null;
+        // Surface mode uses per-frame centering on the full frame; normal mode
+        // always crops around the detected object and pads with black in the
+        // shader if the crop extends past the source frame.
+        if (desiredSize >= maxAllowedSize && surfaceMode) {
+            addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+            return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
         }
 
-        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${medianSize}, margin: ${cropMarginPercent}% (${canCropCount}/${sampleIndices.length} frames croppable)`);
+        const padNote = desiredSize > maxAllowedSize ? ' (padded — exceeds frame)' : '';
+        addLog(`Detected crop size: ${desiredSize}x${desiredSize}${padNote}, median object size: ${medianSize}, margin: ${cropMarginPercent}% (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
         return { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
@@ -1208,19 +1205,16 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Handle cropSize >= frameSize differently based on mode:
-        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
-        if (desiredSize >= maxAllowedSize) {
-            if (surfaceMode) {
-                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-            }
-            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
-            return null;
+        // Surface mode uses per-frame centering on the full frame; normal mode
+        // always crops around the detected object and pads with black in the
+        // shader if the crop extends past the source frame.
+        if (desiredSize >= maxAllowedSize && surfaceMode) {
+            addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+            return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
         }
 
-        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+        const padNote = desiredSize > maxAllowedSize ? ' (padded — exceeds frame)' : '';
+        addLog(`Detected crop size: ${desiredSize}x${desiredSize}${padNote}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
 
         return { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }

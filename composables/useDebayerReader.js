@@ -887,23 +887,19 @@ export function useDebayerReader() {
 
         const maxSize = Math.min(metadata.width, metadata.height);
 
-        // Handle cropSize >= frameSize differently based on mode:
-        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
-        if (cropSize >= maxSize) {
-            if (surfaceMode) {
-                addLog(`[DebayerReader] Surface mode: using full frame ${maxSize}x${maxSize} with per-frame centering`);
-                return {
-                    size: maxSize,
-                    medianSize,
-                };
-            } else {
-                addLog(`[DebayerReader] Skipping crop: desired ${cropSize}px exceeds frame ${maxSize}px`);
-                return null;
-            }
+        // Surface mode (lunar/solar) prefers per-frame centering on the full
+        // frame; normal mode always crops around the detected object and lets
+        // the crop shader pad with black if the crop extends past the frame.
+        if (cropSize >= maxSize && surfaceMode) {
+            addLog(`[DebayerReader] Surface mode: using full frame ${maxSize}x${maxSize} with per-frame centering`);
+            return {
+                size: maxSize,
+                medianSize,
+            };
         }
 
-        addLog(`[DebayerReader] Detected crop size: ${cropSize}x${cropSize} (median object: ${medianSize})`);
+        const padNote = cropSize > maxSize ? ' (padded — exceeds frame)' : '';
+        addLog(`[DebayerReader] Detected crop size: ${cropSize}x${cropSize}${padNote} (median object: ${medianSize})`);
 
         return {
             size: cropSize,

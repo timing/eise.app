@@ -691,19 +691,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let srcX = cropStartX + i32(outX);
     let srcY = cropStartY + i32(outY);
 
-    // Clamp to source bounds
-    let x = u32(clamp(srcX, 0, i32(params.srcWidth) - 1));
-    let y = u32(clamp(srcY, 0, i32(params.srcHeight) - 1));
-
-    // Bayer phase from absolute source position - correct regardless of crop start parity
-    let bx = x % 2u;
-    let by = y % 2u;
-    let rgb = vngInterpolate(frameIdx, i32(x), i32(y), bx, by, params.bayerPattern);
-
+    // When the requested crop extends past the source frame, pad OOB pixels
+    // with black rather than clamping to the edge (which would repeat edge
+    // pixels and bias template matching near the padded region).
     let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
+    let baseIdx = outIdx * 4u;
+
+    var rgb: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
+    if (srcX >= 0 && srcX < i32(params.srcWidth) && srcY >= 0 && srcY < i32(params.srcHeight)) {
+        let x = u32(srcX);
+        let y = u32(srcY);
+        // Bayer phase from absolute source position — correct regardless of crop start parity
+        let bx = x % 2u;
+        let by = y % 2u;
+        rgb = vngInterpolate(frameIdx, i32(x), i32(y), bx, by, params.bayerPattern);
+    }
 
     // Output Float32 RGBA via bitcast
-    let baseIdx = outIdx * 4u;
     output[baseIdx] = bitcast<u32>(rgb.x);
     output[baseIdx + 1u] = bitcast<u32>(rgb.y);
     output[baseIdx + 2u] = bitcast<u32>(rgb.z);
@@ -1554,13 +1558,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cropStartX = i32(floor(center.x - halfSize));
     let cropStartY = i32(floor(center.y - halfSize));
 
-    let srcX = u32(clamp(cropStartX + i32(outX), 0, i32(params.srcWidth) - 1));
-    let srcY = u32(clamp(cropStartY + i32(outY), 0, i32(params.srcHeight) - 1));
+    let sx = cropStartX + i32(outX);
+    let sy = cropStartY + i32(outY);
 
-    let srcIdx = frameIdx * params.srcWidth * params.srcHeight + srcY * params.srcWidth + srcX;
+    // When the requested crop extends past the source frame, pad OOB pixels
+    // with opaque black rather than clamping to the edge. Clamping would
+    // repeat the edge pixel and shift the object off-center at large margins.
+    var rgba: u32 = 0xFF000000u; // A=255, RGB=0
+    if (sx >= 0 && sx < i32(params.srcWidth) && sy >= 0 && sy < i32(params.srcHeight)) {
+        let srcIdx = frameIdx * params.srcWidth * params.srcHeight + u32(sy) * params.srcWidth + u32(sx);
+        rgba = input[srcIdx];
+    }
+
     let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
-
-    let rgba = input[srcIdx];
     output[outIdx] = rgba;
 
     let r = f32(rgba & 0xFFu);
@@ -1622,13 +1632,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cropStartX = i32(floor(center.x - halfSize));
     let cropStartY = i32(floor(center.y - halfSize));
 
-    let srcX = u32(clamp(cropStartX + i32(outX), 0, i32(params.srcWidth) - 1));
-    let srcY = u32(clamp(cropStartY + i32(outY), 0, i32(params.srcHeight) - 1));
+    let sx = cropStartX + i32(outX);
+    let sy = cropStartY + i32(outY);
 
-    let srcIdx = frameIdx * params.srcWidth * params.srcHeight + srcY * params.srcWidth + srcX;
     let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
 
-    let v = readMono16(srcIdx);
+    // Pad OOB pixels with black instead of clamping to the edge (see rgbaCropShader).
+    var v: f32 = 0.0;
+    if (sx >= 0 && sx < i32(params.srcWidth) && sy >= 0 && sy < i32(params.srcHeight)) {
+        let srcIdx = frameIdx * params.srcWidth * params.srcHeight + u32(sy) * params.srcWidth + u32(sx);
+        v = readMono16(srcIdx);
+    }
 
     // Output Float32 RGBA (4 consecutive u32 slots via bitcast, same as demosaicCropShader 16-bit path)
     let baseIdx = outIdx * 4u;
@@ -1943,23 +1957,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let srcX = cropStartX + i32(outX);
     let srcY = cropStartY + i32(outY);
 
-    let x = u32(clamp(srcX, 0, i32(params.srcWidth) - 1));
-    let y = u32(clamp(srcY, 0, i32(params.srcHeight) - 1));
-    let ix = i32(x);
-    let iy = i32(y);
-
-    let bx = x % 2u;
-    let by = y % 2u;
-    let pattern = params.bayerPattern;
-
-    var rgb: vec3<f32>;
-    if (params.useVng == 1u) {
-        rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    } else {
-        rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
-    }
-
     let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
+
+    // Pad OOB pixels with black rather than clamping to the edge (see rgbaCropShader).
+    var rgb: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
+    if (srcX >= 0 && srcX < i32(params.srcWidth) && srcY >= 0 && srcY < i32(params.srcHeight)) {
+        let x = u32(srcX);
+        let y = u32(srcY);
+        let ix = i32(x);
+        let iy = i32(y);
+        let bx = x % 2u;
+        let by = y % 2u;
+        let pattern = params.bayerPattern;
+        if (params.useVng == 1u) {
+            rgb = vngInterpolate(frameIdx, ix, iy, bx, by, pattern);
+        } else {
+            rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
+        }
+    }
 
     let gray = u32(clamp((0.299 * rgb.x + 0.587 * rgb.y + 0.114 * rgb.z) * 255.0, 0.0, 255.0));
     let grayPackedIdx = outIdx >> 2u;
