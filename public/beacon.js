@@ -52,6 +52,23 @@
 
   pageview();
 
+  // Auto-track clicks to external hosts. keepalive on the fetch survives
+  // same-tab navigation; capture phase ensures we fire before any handler
+  // that might preventDefault.
+  document.addEventListener('click', function (e) {
+    if (e.defaultPrevented) return;
+    var t = e.target;
+    var link = t && t.closest ? t.closest('a[href]') : null;
+    if (!link) return;
+    var href = link.getAttribute('href');
+    if (!href) return;
+    var url;
+    try { url = new URL(href, location.href); } catch (_) { return; }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+    if (url.hostname === location.hostname) return;
+    send('click_ext', { props: { url: url.href } });
+  }, true);
+
   var _push = history.pushState;
   history.pushState = function () {
     _push.apply(this, arguments);
