@@ -595,6 +595,30 @@ on('upload-error', (message) => {
 	errorMessage.value = message;
 });
 
+// Guard so we only fire one stack_failed per processing run — a reader can
+// emit `stack-failed` on the bus AND throw, and we don't want to double-count.
+let stackFailedFired = false;
+
+function trackStackFailed(reason, extraProps) {
+	if (stackFailedFired) return;
+	stackFailedFired = true;
+	const first = selectedFiles.value?.[0];
+	track('stack_failed', {
+		...getTrackingContext(),
+		reason: reason ? String(reason).slice(0, 200) : 'unknown',
+		filename: first?.name ? String(first.name).slice(0, 200) : undefined,
+		file_count: selectedFiles.value?.length || 0,
+		...(extraProps || {}),
+	});
+}
+
+// Fires when a reader gives up (e.g. "no valid frames") without throwing.
+on('stack-failed', (info) => {
+	const reason = info?.reason || 'unknown';
+	const component = info?.component;
+	trackStackFailed(reason, component ? { failed_in: component } : null);
+});
+
 function onFileChanged(event){
 	clearError(); // Clear previous error state (message + user-fault flag + mismatch set)
 	const files = Array.from(event.target.files);
@@ -846,6 +870,7 @@ async function startProcessing() {
 		addLog('Lite Mode: max 100 frames, best 30%, 1x stacking, CPU processing');
 	}
 
+	stackFailedFired = false;
 	try {
 		await processFiles(selectedFiles.value);
 	} catch (error) {
@@ -857,7 +882,7 @@ async function startProcessing() {
 			filename,
 			logs: logs.value
 		});
-		track('stack_failed', getTrackingContext());
+		trackStackFailed(error?.message, { failed_in: 'processFiles' });
 		const errorMsg = error.message || 'An error occurred during processing';
 		// Set error and stop processing - FileUploader will show with error visible
 		isProcessing.value = false;
@@ -979,6 +1004,7 @@ async function processCombinedMode() {
 	if (selectedFiles.value.length === 0) return;
 	clearError();
 
+	stackFailedFired = false;
 	try {
 		await processFiles(selectedFiles.value, { skipBatchChoice: true });
 	} catch (error) {
@@ -990,7 +1016,7 @@ async function processCombinedMode() {
 			filename,
 			logs: logs.value
 		});
-		track('stack_failed', getTrackingContext());
+		trackStackFailed(error?.message, { failed_in: 'processFiles' });
 		const errorMsg = error.message || 'An error occurred during processing';
 		isProcessing.value = false;
 		setErrorFromException(error, errorMsg);
