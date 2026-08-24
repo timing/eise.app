@@ -432,23 +432,37 @@ export function useImageReader() {
         // to a common size. Some capture pipelines produce frames that differ by
         // a few pixels; without this, later frames get uploaded to GPU buffers
         // sized for firstFrame's dimensions, causing offset artifacts.
-        const probeResults = await Promise.all(files.map(async (file, i) => {
-            if (failedIndices.has(i)) return null;
-            try {
-                if (rgbaCache.has(i)) {
-                    const cached = rgbaCache.get(i);
-                    return { width: cached.width, height: cached.height };
-                }
-                if (isTiffFile(file)) {
-                    const rgba = await decodeTiffToRgba(file);
-                    return { width: rgba.width, height: rgba.height };
-                }
-                return await probeImageFileDimensions(file);
-            } catch (e) {
-                failedIndices.add(i);
-                return null;
+        //
+        // Concurrency-limited: Promise.all(files.map(...)) fully decodes every
+        // TIFF simultaneously, which briefly holds gigabytes for a 100-file drop.
+        const PROBE_CONCURRENCY = 8;
+        const probeResults = new Array(files.length).fill(null);
+        for (let start = 0; start < files.length; start += PROBE_CONCURRENCY) {
+            const batch = [];
+            for (let k = start; k < Math.min(start + PROBE_CONCURRENCY, files.length); k++) {
+                const i = k;
+                const file = files[i];
+                batch.push((async () => {
+                    if (failedIndices.has(i)) return;
+                    try {
+                        if (rgbaCache.has(i)) {
+                            const cached = rgbaCache.get(i);
+                            probeResults[i] = { width: cached.width, height: cached.height };
+                            return;
+                        }
+                        if (isTiffFile(file)) {
+                            const rgba = await decodeTiffToRgba(file);
+                            probeResults[i] = { width: rgba.width, height: rgba.height };
+                            return;
+                        }
+                        probeResults[i] = await probeImageFileDimensions(file);
+                    } catch (e) {
+                        failedIndices.add(i);
+                    }
+                })());
             }
-        }));
+            await Promise.all(batch);
+        }
 
         const knownDims = probeResults.filter(d => d);
         if (knownDims.length === 0) {
@@ -459,6 +473,21 @@ export function useImageReader() {
 
         firstWidth = Math.min(...knownDims.map(d => d.width));
         firstHeight = Math.min(...knownDims.map(d => d.height));
+
+        // Guard against photos so large that even a single-frame batch would
+        // exceed the GPU buffer cap (mobile is usually 256MB per buffer).
+        // Above this size the analyze pipeline silently drops every frame and
+        // the stacker fails with "no valid frames" — surface a real error.
+        const MAX_FRAME_BYTES = 256 * 1024 * 1024; // 256MB Float32 RGBA
+        const frameBytesEst = firstWidth * firstHeight * 16;
+        if (frameBytesEst > MAX_FRAME_BYTES) {
+            const mp = (firstWidth * firstHeight / 1e6).toFixed(1);
+            const msg = `Frames are too large: ${firstWidth}×${firstHeight} (${mp}MP). Downscale below ~4000×4000 and try again.`;
+            addLog(msg);
+            emit('upload-error', msg);
+            emit('stop-loading');
+            return;
+        }
 
         const sizeCounts = new Map();
         for (const d of knownDims) {
@@ -489,10 +518,13 @@ export function useImageReader() {
 
             addLog(`Sampling ${sampleIndices.length} images for crop detection...`);
 
-            // Dynamic batch size based on frame dimensions to stay under GPU memory limit
+            // Dynamic batch size based on frame dimensions to stay under GPU memory limit.
+            // Floor is 1 (not 4): very large frames must be able to process alone,
+            // otherwise 4×384MB batches blow past mobile GPU buffer caps and every
+            // frame allocation fails silently ("no valid frames").
             const frameBytes = firstWidth * firstHeight * 16; // Float32 RGBA = 16 bytes/pixel
             const targetBatchMemory = 512 * 1024 * 1024; // 512MB
-            const BATCH_SIZE = Math.max(4, Math.min(32, Math.floor(targetBatchMemory / frameBytes)));
+            const BATCH_SIZE = Math.max(1, Math.min(32, Math.floor(targetBatchMemory / frameBytes)));
             let canCropCount = 0;
             const detectedCenters = [];
             const detectedSizes = [];
@@ -579,10 +611,11 @@ export function useImageReader() {
         // Second pass: GPU analyze (loading frames on-demand)
         emit('set-caption', cropRegion ? 'Cropping and analyzing images' : 'Analyzing images');
 
-        // Dynamic batch size based on frame dimensions to stay under GPU memory limit
+        // Dynamic batch size based on frame dimensions to stay under GPU memory limit.
+        // Floor is 1 (see note in crop-detection pass above).
         const analyzeFrameBytes = firstWidth * firstHeight * 16; // Float32 RGBA
         const analyzeTargetMemory = 512 * 1024 * 1024; // 512MB
-        const ANALYZE_BATCH_SIZE = Math.max(4, Math.min(32, Math.floor(analyzeTargetMemory / analyzeFrameBytes)));
+        const ANALYZE_BATCH_SIZE = Math.max(1, Math.min(32, Math.floor(analyzeTargetMemory / analyzeFrameBytes)));
         const frameCenters = new Map(); // Store centers for frameReReader
         let completedFrames = 0;
 
@@ -797,6 +830,39 @@ export function useImageReader() {
                     console.warn(`Failed to re-read frame ${frameIndex}:`, e);
                     return null;
                 }
+            },
+
+            // Render a PNG preview for QualitySelector on demand. Uses the
+            // same on-disk re-read path as stacking, then crops around the
+            // frame's detected center (matching the cropRegion applied during
+            // stacking).
+            async getPreviewBlob(frame) {
+                try {
+                    const frameData = await this.getFrame(frame.index);
+                    if (!frameData) return null;
+
+                    const canvas = new OffscreenCanvas(frameData.width, frameData.height);
+                    const ctx = canvas.getContext('2d');
+                    const imageData = new ImageData(
+                        new Uint8ClampedArray(frameData.data.buffer, frameData.data.byteOffset, frameData.data.length),
+                        frameData.width, frameData.height
+                    );
+                    ctx.putImageData(imageData, 0, 0);
+
+                    if (this.cropRegion && Number.isFinite(frame.centerX) && Number.isFinite(frame.centerY)) {
+                        const size = this.cropRegion.size;
+                        const cropX = Math.max(0, Math.min(frameData.width - size, Math.round(frame.centerX - size / 2)));
+                        const cropY = Math.max(0, Math.min(frameData.height - size, Math.round(frame.centerY - size / 2)));
+                        const cropped = new OffscreenCanvas(size, size);
+                        const cctx = cropped.getContext('2d');
+                        cctx.drawImage(canvas, cropX, cropY, size, size, 0, 0, size, size);
+                        return await cropped.convertToBlob({ type: 'image/png' });
+                    }
+                    return await canvas.convertToBlob({ type: 'image/png' });
+                } catch (e) {
+                    console.warn('getPreviewBlob (image) failed:', e);
+                    return null;
+                }
             }
         };
 
@@ -814,7 +880,11 @@ export function useImageReader() {
             return;
         }
 
-        // Automatic stacking
+        // Automatic stacking. Stacker accumulates in Float32 regardless of
+        // input bit-depth, so 8-bit source frames (PNG/JPG) still produce a
+        // 16-bit-precision stacked result — averaging N frames adds ~log2(N)
+        // effective bits over any single input.
+        addLog(`Stacking ${bestFramesForStacking.length} frames (Float32 accumulator, 16-bit output)...`);
         const stackResult = await stackFramesLocally(bestFramesForStacking, null, drizzleScale, true, frameReReader, surfaceMode);
 
         // Cleanup
