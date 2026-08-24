@@ -14,6 +14,7 @@
     };
     if (extra && extra.props) body.props = extra.props;
     if (extra && extra.variant) body.variant = extra.variant;
+    if (extra && extra.variants) body.variants = extra.variants;
     if (extra && extra.user_id) body.user_id = extra.user_id;
     try {
       fetch(endpoint + '/event', {
@@ -34,7 +35,12 @@
   }
 
   window.eise = window.eise || {};
-  window.eise.track = function (event, props) { send(event, { props: props }); };
+  window.eise.track = function (event, props, extra) {
+    send(event, {
+      props: props,
+      variants: extra && extra.variants ? extra.variants : undefined,
+    });
+  };
   window.eise.pageview = pageview;
   window.eise.experiment = function (name) {
     return fetch(endpoint + '/experiment/' + encodeURIComponent(name) + '?site_id=' + encodeURIComponent(siteId), {

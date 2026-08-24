@@ -278,12 +278,12 @@
 
 		<div class="comparison-images">
 			<figure class="comparison-figure">
-				<img src="/jupiter-singleframe.png" alt="Single frame from video" />
+				<img src="/jupiter-singleframe.png" alt="Single frame from video" width="150" height="150" />
 				<figcaption>Single frame</figcaption>
 			</figure>
 			<span class="arrow">&rarr;</span>
 			<figure class="comparison-figure">
-				<img src="/jupiter-stacked.png" alt="Stacked and sharpened result" />
+				<img src="/jupiter-stacked.png" alt="Stacked and sharpened result" width="150" height="150" />
 				<figcaption>Stacked + Sharpened</figcaption>
 			</figure>
 		</div>

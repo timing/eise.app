@@ -330,9 +330,35 @@ export function createAnalyticsAdminRoutes({ db }) {
     return c.json({ items: res.rows });
   });
 
-  // A/B experiment results. Reads the variant from props_json.ab_<name>
-  // (populated by the client's useTracking wrapper). Conversion metric:
-  // sessions that fired human_interaction AND own-footage stack_start
+  app.get('/event-detail', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const name = String(c.req.query('event_name') || '').slice(0, 64);
+    if (!name) return c.json({ error: 'event_name required' }, 400);
+    const { from, to } = parseRange(c);
+    const inc = includeAdmin(c);
+    const incBots = includeBots(c);
+    const limit = limitArg(c, 100);
+
+    const res = await db.execute({
+      sql: `
+        SELECT ts, path, props_json, referrer_host
+        FROM events
+        WHERE site_id = ? AND event_name = ?
+          AND ts >= ? AND ts < ?
+          AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
+        ORDER BY ts DESC
+        LIMIT ?
+      `,
+      args: [site, name, from, to, inc, incBots, limit],
+    });
+    return c.json({ items: res.rows });
+  });
+
+  // A/B experiment results. Variants are stored once per session in
+  // sessions.variants_json (json object like {"homepage": "A"}). Conversion
+  // metric: sessions that fired human_interaction AND own-footage stack_start
   // (stack_start without a try_sample event in the same session).
   app.get('/ab', async c => {
     const site = siteId(c);
@@ -344,23 +370,24 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
-    const jsonPath = `$.ab_${name}`;
+    const jsonPath = `$.${name}`;
 
     const res = await db.execute({
       sql: `
         WITH session_variant AS (
-          SELECT session_id,
-                 json_extract(props_json, ?) AS variant,
-                 MAX(CASE WHEN event_name = 'human_interaction' THEN 1 ELSE 0 END) AS did_interact,
-                 MAX(CASE WHEN event_name = 'stack_start' THEN 1 ELSE 0 END) AS did_stack_start,
-                 MAX(CASE WHEN event_name = 'try_sample' THEN 1 ELSE 0 END) AS did_try_sample
-          FROM events
-          WHERE site_id = ?
-            AND ts >= ? AND ts < ?
-            AND (? = 1 OR COALESCE(role, '') != 'admin')
-            AND (? = 1 OR bot IS NULL)
-            AND json_extract(props_json, ?) IS NOT NULL
-          GROUP BY session_id, variant
+          SELECT s.id AS session_id,
+                 json_extract(s.variants_json, ?) AS variant,
+                 MAX(CASE WHEN e.event_name = 'human_interaction' THEN 1 ELSE 0 END) AS did_interact,
+                 MAX(CASE WHEN e.event_name = 'stack_start' THEN 1 ELSE 0 END) AS did_stack_start,
+                 MAX(CASE WHEN e.event_name = 'try_sample' THEN 1 ELSE 0 END) AS did_try_sample
+          FROM sessions s
+          JOIN events e ON e.session_id = s.id
+          WHERE s.site_id = ?
+            AND e.ts >= ? AND e.ts < ?
+            AND (? = 1 OR COALESCE(e.role, '') != 'admin')
+            AND (? = 1 OR e.bot IS NULL)
+            AND json_extract(s.variants_json, ?) IS NOT NULL
+          GROUP BY s.id, variant
         )
         SELECT variant,
                COUNT(*) AS participants,

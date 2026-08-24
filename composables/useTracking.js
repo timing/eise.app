@@ -4,31 +4,35 @@ import { getVariant } from '@/composables/useAbTest';
 
 let humanInteractionTracked = false;
 
-// Experiments whose variant should be attached to every tracked event.
+// Experiments whose variant should be reported with each tracked event.
+// Sent at the top-level `variants` field so the server can attach them to
+// the session once, instead of duplicating on every event's props.
 const ACTIVE_EXPERIMENTS = ['homepage'];
 
-function abProps() {
-    const props = {};
+function activeVariants() {
+    const v = {};
     for (const name of ACTIVE_EXPERIMENTS) {
-        props[`ab_${name}`] = getVariant(name);
+        v[name] = getVariant(name);
     }
-    return props;
+    return v;
 }
 
 export function useTracking() {
     function track(event, metadata = null) {
         if (typeof window === 'undefined') return;
 
-        const enriched = { ...abProps(), ...(metadata || {}) };
+        const variants = activeVariants();
 
-        // Send to Simple Analytics (if loaded)
+        // Simple Analytics uses a flat props bag; keep ab_<name> merged for it.
         if (typeof window.sa_event === 'function') {
-            window.sa_event(event, enriched);
+            const saProps = { ...(metadata || {}) };
+            for (const [name, v] of Object.entries(variants)) saProps[`ab_${name}`] = v;
+            window.sa_event(event, saProps);
         }
 
-        // Send to eise analytics (if beacon loaded)
+        // eise analytics: props stays clean; variants travel separately.
         if (window.eise && typeof window.eise.track === 'function') {
-            window.eise.track(event, enriched);
+            window.eise.track(event, metadata, { variants });
         }
     }
 

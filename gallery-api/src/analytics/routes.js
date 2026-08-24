@@ -79,12 +79,40 @@ export function createAnalyticsRoutes({ db, env }) {
     const userId = body.user_id ? String(body.user_id).slice(0, 128) : null;
     const variant = body.variant ? String(body.variant).slice(0, 64) : null;
 
-    let propsJson = null;
+    // Extract A/B variants. New clients send them at top-level `body.variants`
+    // (e.g. { homepage: "A" }). Older cached clients still shove them into
+    // props as `ab_<name>`; accept those too and strip from props so events
+    // stay clean. Variants are stored once on the session, not on every event.
+    const variants = {};
+    if (body.variants && typeof body.variants === 'object') {
+      for (const [k, v] of Object.entries(body.variants)) {
+        if (typeof v === 'string' && v.length <= 32 && /^[a-z0-9_]{1,32}$/i.test(k)) {
+          variants[k] = v.slice(0, 32);
+        }
+      }
+    }
+    let propsObj = null;
     if (body.props && typeof body.props === 'object') {
-      const s = JSON.stringify(body.props);
+      propsObj = {};
+      for (const [k, v] of Object.entries(body.props)) {
+        if (k.startsWith('ab_')) {
+          const name = k.slice(3);
+          if (typeof v === 'string' && v.length <= 32 && /^[a-z0-9_]{1,32}$/i.test(name) && !(name in variants)) {
+            variants[name] = v.slice(0, 32);
+          }
+          continue;
+        }
+        propsObj[k] = v;
+      }
+      if (Object.keys(propsObj).length === 0) propsObj = null;
+    }
+    let propsJson = null;
+    if (propsObj) {
+      const s = JSON.stringify(propsObj);
       if (s.length > MAX_PROPS_BYTES) return c.json({ error: 'props too large' }, 400);
       propsJson = s;
     }
+    const variantsJson = Object.keys(variants).length ? JSON.stringify(variants) : null;
 
     const ip = clientIp(c);
     const ua = c.req.header('user-agent') || '';
@@ -122,22 +150,29 @@ export function createAnalyticsRoutes({ db, env }) {
           id, site_id, first_ts, last_ts,
           first_referrer_url, first_referrer_host,
           first_utm_source, first_utm_medium, first_utm_campaign, first_utm_term, first_utm_content,
-          country, ua_browser, ua_os, ua_device, role, bot
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          country, ua_browser, ua_os, ua_device, role, bot, variants_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           sessionId, siteId, ts, ts,
           ref.url, ref.host,
           utm.source, utm.medium, utm.campaign, utm.term, utm.content,
-          country, uaInfo.browser, uaInfo.os, uaInfo.device, role, bot,
+          country, uaInfo.browser, uaInfo.os, uaInfo.device, role, bot, variantsJson,
         ],
       });
     } else {
+      // Merge variants: if a new key comes in that isn't already stored, add it.
+      // json_patch keeps existing keys and overwrites with new values only where present.
       await db.execute({
         sql: `UPDATE sessions SET last_ts = ?,
                 role = CASE WHEN ? IS NOT NULL THEN ? ELSE role END,
-                bot  = CASE WHEN ? IS NOT NULL THEN ? ELSE bot  END
+                bot  = CASE WHEN ? IS NOT NULL THEN ? ELSE bot  END,
+                variants_json = CASE
+                  WHEN ? IS NULL THEN variants_json
+                  WHEN variants_json IS NULL THEN ?
+                  ELSE json_patch(variants_json, ?)
+                END
               WHERE id = ?`,
-        args: [ts, role, role, bot, bot, sessionId],
+        args: [ts, role, role, bot, bot, variantsJson, variantsJson, variantsJson, sessionId],
       });
     }
 

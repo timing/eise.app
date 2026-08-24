@@ -179,14 +179,46 @@
 			<h3>Custom events</h3>
 			<table class="stats-table">
 				<thead>
-					<tr><th>Event</th><th>Occurrences</th><th>Sessions</th></tr>
+					<tr><th></th><th>Event</th><th>Occurrences</th><th>Sessions</th></tr>
 				</thead>
 				<tbody>
-					<tr v-for="e in events" :key="e.event_name">
-						<td class="mono">{{ e.event_name }}</td>
-						<td>{{ e.occurrences }}</td>
-						<td>{{ e.sessions }}</td>
-					</tr>
+					<template v-for="e in events" :key="e.event_name">
+						<tr>
+							<td class="expand-cell">
+								<button class="expand-btn" @click="toggleEvent(e.event_name)">
+									{{ expandedEvent === e.event_name ? '−' : '+' }}
+								</button>
+							</td>
+							<td class="mono">{{ e.event_name }}</td>
+							<td>{{ e.occurrences }}</td>
+							<td>{{ e.sessions }}</td>
+						</tr>
+						<tr v-if="expandedEvent === e.event_name" class="expanded-row">
+							<td></td>
+							<td colspan="3">
+								<div v-if="eventDetailLoading" class="admin-msg">Loading…</div>
+								<div v-else-if="eventDetailError" class="admin-msg error">{{ eventDetailError }}</div>
+								<div v-else-if="!eventDetail.length" class="admin-msg">No events in range.</div>
+								<table v-else class="stats-table sub">
+									<thead>
+										<tr><th>When</th><th>Path</th><th>Details</th></tr>
+									</thead>
+									<tbody>
+										<tr v-for="(row, i) in eventDetail" :key="i">
+											<td class="mono">{{ formatTs(row.ts) }}</td>
+											<td class="mono url-cell">{{ row.path || '—' }}</td>
+											<td class="mono url-cell">
+												<a v-if="propsUrl(row.props_json)" :href="propsUrl(row.props_json)" target="_blank" rel="noopener">
+													{{ propsUrl(row.props_json) }}
+												</a>
+												<span v-else>{{ row.props_json || '—' }}</span>
+											</td>
+										</tr>
+									</tbody>
+								</table>
+							</td>
+						</tr>
+					</template>
 				</tbody>
 			</table>
 		</section>
@@ -204,6 +236,7 @@ import { ref, inject, onMounted, computed, watch } from 'vue';
 const { apiBase, authHeader, logout } = inject('adminAuth');
 
 const RANGE_STORAGE_KEY = 'eise-admin-analytics-range';
+const SITE_STORAGE_KEY = 'eise-admin-analytics-site';
 
 const ranges = [
 	{ key: 'today', label: 'Today' },
@@ -234,6 +267,10 @@ const summary = ref(null);
 const pages = ref([]);
 const referrers = ref([]);
 const events = ref([]);
+const expandedEvent = ref(null);
+const eventDetail = ref([]);
+const eventDetailLoading = ref(false);
+const eventDetailError = ref('');
 const refUrls = ref({}); // { host: [{referrer_url, pageviews, sessions}] }
 const breakdowns = ref({ country: [], device: [], os: [], browser: [] });
 
@@ -288,9 +325,17 @@ onMounted(async () => {
 
 	await fetchSites();
 	if (sites.value.length) {
-		siteId.value = sites.value[0].site_id;
+		let savedSite = null;
+		try { savedSite = localStorage.getItem(SITE_STORAGE_KEY); } catch {}
+		siteId.value = (savedSite && sites.value.some(s => s.site_id === savedSite))
+			? savedSite
+			: sites.value[0].site_id;
 		await fetchAll();
 	}
+
+	watch(siteId, v => {
+		try { if (v) localStorage.setItem(SITE_STORAGE_KEY, v); } catch {}
+	});
 });
 
 function setRange(k) {
@@ -347,6 +392,9 @@ async function fetchAll() {
 	loading.value = true;
 	error.value = '';
 	refUrls.value = {};
+	expandedEvent.value = null;
+	eventDetail.value = [];
+	eventDetailError.value = '';
 	try {
 		const d = await apiGet('/admin/analytics/dashboard', { limit: '50' });
 		summary.value = { range: d.range, include_admin: d.include_admin, totals: d.totals, days: d.days };
@@ -359,6 +407,39 @@ async function fetchAll() {
 	} finally {
 		loading.value = false;
 	}
+}
+
+async function toggleEvent(name) {
+	if (expandedEvent.value === name) {
+		expandedEvent.value = null;
+		return;
+	}
+	expandedEvent.value = name;
+	eventDetail.value = [];
+	eventDetailError.value = '';
+	eventDetailLoading.value = true;
+	try {
+		const body = await apiGet('/admin/analytics/event-detail', { event_name: name, limit: '100' });
+		eventDetail.value = body.items || [];
+	} catch (err) {
+		eventDetailError.value = err.message;
+	} finally {
+		eventDetailLoading.value = false;
+	}
+}
+
+function formatTs(ts) {
+	if (!ts) return '';
+	const d = new Date(Number(ts));
+	return d.toLocaleString();
+}
+
+function propsUrl(propsJson) {
+	if (!propsJson) return null;
+	try {
+		const p = typeof propsJson === 'string' ? JSON.parse(propsJson) : propsJson;
+		return typeof p.url === 'string' ? p.url : null;
+	} catch { return null; }
 }
 
 async function toggleRefUrls(host) {
