@@ -434,7 +434,13 @@ export function useMediabunnyReader() {
 					const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
 					const medianX = sortedX[Math.floor(sortedX.length / 2)];
 					const medianY = sortedY[Math.floor(sortedY.length / 2)];
-					const desiredSize = Math.ceil(medianSize * (1 + cropMarginPercent / 100) / 2) * 2;
+					let desiredSize = Math.ceil(medianSize * (1 + cropMarginPercent / 100) / 2) * 2;
+					// Cap before WebGPU 4GB per-buffer limit (moments ~ cropSize² × 24 × batchSize).
+					const MAX_CROP_SIZE = 4096;
+					if (desiredSize > MAX_CROP_SIZE) {
+						addLog(`Requested crop ${desiredSize}px exceeds ${MAX_CROP_SIZE}px cap — clamping.`);
+						desiredSize = MAX_CROP_SIZE;
+					}
 					const maxAllowedSize = Math.min(actualWidth, actualHeight);
 
 					// Real planets at 1080p are at least ~15-20px across. A median object
