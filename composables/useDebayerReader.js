@@ -905,6 +905,46 @@ export function useDebayerReader() {
 
         addLog(`[DebayerReader] Detected crop size: ${cropSize}x${cropSize} (median object: ${medianSize})`);
 
+        // Publish an initial best-frame preview using the sharpest sample so
+        // the user sees a detected planet crop as soon as detection finishes,
+        // before per-frame ranking has run. Fire-and-forget — never blocks.
+        try {
+            const centersX = boundsResults.map(r => r.bounds.centroidX).sort((a, b) => a - b);
+            const centersY = boundsResults.map(r => r.bounds.centroidY).sort((a, b) => a - b);
+            const medianX = centersX[Math.floor(centersX.length / 2)];
+            const medianY = centersY[Math.floor(centersY.length / 2)];
+            let sharpest = null;
+            for (let i = 0; i < results.length; i++) {
+                const r = results[i];
+                if (!r?.bounds || !(r.bounds.width > 0)) continue;
+                if (!sharpest || (r.sharpness || 0) > (sharpest.sharpness || 0)) {
+                    sharpest = { ...r, frameData: frames[i]?.data, index: frames[i]?.index };
+                }
+            }
+            if (sharpest?.frameData) {
+                demosaicFrameForPreview(sharpest.frameData, sharpest.index, {
+                    size: cropSize,
+                    centerX: sharpest.bounds.centroidX ?? medianX,
+                    centerY: sharpest.bounds.centroidY ?? medianY,
+                }).then(blobs => {
+                    if (blobs?.colorBlob) {
+                        emit('best-frame-updated', {
+                            index: sharpest.index,
+                            sharpness: sharpest.sharpness,
+                            width: cropSize,
+                            height: cropSize,
+                            centerX: sharpest.bounds.centroidX,
+                            centerY: sharpest.bounds.centroidY,
+                            blob: blobs.colorBlob,
+                            grayBlob: blobs.grayBlob,
+                        });
+                    }
+                }).catch(e => console.warn('[DebayerReader] Crop-detection preview blob failed:', e));
+            }
+        } catch (e) {
+            console.warn('[DebayerReader] Crop-detection preview setup failed:', e);
+        }
+
         return {
             size: cropSize,
             medianSize,

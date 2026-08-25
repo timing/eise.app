@@ -528,6 +528,8 @@ export function useImageReader() {
             let canCropCount = 0;
             const detectedCenters = [];
             const detectedSizes = [];
+            // Retain the sharpest sample's RGBA to seed a crop-detection preview.
+            let bestSample = null;  // { data, width, height, index, sharpness, bounds }
 
             // Prefetch first batch
             let nextBatchPromise = loadBatchParallel(sampleIndices.slice(0, BATCH_SIZE));
@@ -548,11 +550,24 @@ export function useImageReader() {
                 if (batchFrames.length > 0) {
                     const results = await analyzeRgbaBatchGpu(batchFrames, firstWidth, firstHeight);
 
-                    for (const result of results) {
+                    for (let j = 0; j < results.length; j++) {
+                        const result = results[j];
                         if (result.bounds) {
                             canCropCount++;
                             detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
                             detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
+                            const sharpness = result.sharpness || 0;
+                            if (!bestSample || sharpness > bestSample.sharpness) {
+                                // Copy the RGBA — batchFrames drops out of scope next iteration.
+                                bestSample = {
+                                    data: new Uint8ClampedArray(batchFrames[j].data),
+                                    width: batchFrames[j].width,
+                                    height: batchFrames[j].height,
+                                    index: batchFrames[j].index,
+                                    sharpness,
+                                    bounds: result.bounds,
+                                };
+                            }
                         }
                     }
                 }
@@ -605,6 +620,49 @@ export function useImageReader() {
                 }
             } else {
                 addLog(`Only ${canCropCount}/${sampleIndices.length} images can be cropped. Skipping auto-crop.`);
+            }
+
+            // Publish an initial best-frame preview from the sharpest sample so
+            // the "Sharpest Frame" panel populates as soon as crop detection
+            // finishes, before per-frame ranking begins. Fire-and-forget.
+            if (bestSample) {
+                (async () => {
+                    try {
+                        let previewData, previewSize;
+                        if (cropRegion?.size) {
+                            const size = cropRegion.size;
+                            const cx = bestSample.bounds.centroidX;
+                            const cy = bestSample.bounds.centroidY;
+                            const startX = Math.max(0, Math.min(bestSample.width - size, Math.floor(cx - size / 2)));
+                            const startY = Math.max(0, Math.min(bestSample.height - size, Math.floor(cy - size / 2)));
+                            previewData = new Uint8ClampedArray(size * size * 4);
+                            for (let y = 0; y < size; y++) {
+                                const srcOff = ((startY + y) * bestSample.width + startX) * 4;
+                                previewData.set(bestSample.data.subarray(srcOff, srcOff + size * 4), y * size * 4);
+                            }
+                            previewSize = size;
+                        } else {
+                            previewData = bestSample.data;
+                            previewSize = null;
+                        }
+                        const w = previewSize || bestSample.width;
+                        const h = previewSize || bestSample.height;
+                        const canvas = new OffscreenCanvas(w, h);
+                        canvas.getContext('2d').putImageData(new ImageData(previewData, w, h), 0, 0);
+                        const blob = await canvas.convertToBlob({ type: 'image/png' });
+                        emit('best-frame-updated', {
+                            index: bestSample.index,
+                            sharpness: bestSample.sharpness,
+                            width: w,
+                            height: h,
+                            centerX: bestSample.bounds.centroidX,
+                            centerY: bestSample.bounds.centroidY,
+                            blob,
+                        });
+                    } catch (e) {
+                        console.warn('[ImageReader] Crop-detection preview failed:', e);
+                    }
+                })();
             }
         }
 

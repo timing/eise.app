@@ -221,6 +221,30 @@ export function useMediabunnyReader() {
 
 			let actualWidth = 0, actualHeight = 0;
 
+			// Tracker for the sharpest frame we've shown so far, plus a helper
+			// to publish a preview blob whenever we find a sharper one. Used
+			// both after crop detection (Pass 1) and inside Pass 2's rankFrame,
+			// so the "Sharpest Frame" preview populates as early as possible.
+			let bestFrameSoFar = null;
+			async function maybePublishBestFrame(frame) {
+				if (!frame?.uint8Buffer || !frame.width || !frame.height) return;
+				if (bestFrameSoFar && frame.sharpness <= bestFrameSoFar.sharpness) return;
+				bestFrameSoFar = frame;
+				try {
+					const src = new Uint8ClampedArray(frame.uint8Buffer.slice(0));
+					const canvas = new OffscreenCanvas(frame.width, frame.height);
+					const ctx = canvas.getContext('2d');
+					ctx.putImageData(new ImageData(src, frame.width, frame.height), 0, 0);
+					const blob = await canvas.convertToBlob({ type: 'image/png' });
+					if (bestFrameSoFar?.index === frame.index) {
+						bestFrameSoFar.blob = blob;
+						emit('best-frame-updated', bestFrameSoFar);
+					}
+				} catch (e) {
+					console.warn('[Mediabunny] Best-frame preview blob failed:', e);
+				}
+			}
+
 			// Helper: create and configure a fresh decoder
 			let decoderError = null;
 			function makeDecoder(outputFn) {
@@ -383,9 +407,11 @@ export function useMediabunnyReader() {
 			// Detect crop region from reservoir samples
 			let cropRegion = null;
 			let reservoirBounds = null;  // saved for seeding the pass-2 ROI
+			// sampleResults declared at outer scope so the crop-detection preview
+			// block below can read it after the MIN_SIZE_FOR_CROP branch closes.
+			let sampleResults = null;
 			const MIN_SIZE_FOR_CROP = 300;
 			if (actualWidth >= MIN_SIZE_FOR_CROP && actualHeight >= MIN_SIZE_FOR_CROP && reservoir.length > 0) {
-				let sampleResults;
 				if (useGPU) {
 					// Chunk the reservoir so no single analyzeBatch exceeds the device's
 					// maxBufferSize. On Macs with maxBufferSize=2GB, a 50-frame 1080p
@@ -507,6 +533,45 @@ export function useMediabunnyReader() {
 				}
 			}
 
+			// Publish the sharpest reservoir sample as an initial preview so the
+			// user sees "here's what we detected" the moment crop detection
+			// finishes, before Pass 2's per-frame ranking has produced anything.
+			if (reservoir.length > 0 && sampleResults?.length === reservoir.length) {
+				let bestIdx = -1, bestSharp = -Infinity;
+				for (let i = 0; i < sampleResults.length; i++) {
+					const s = sampleResults[i]?.sharpness || 0;
+					if (s > bestSharp && sampleResults[i]?.bounds) {
+						bestSharp = s;
+						bestIdx = i;
+					}
+				}
+				if (bestIdx >= 0) {
+					const sample = reservoir[bestIdx];
+					const b = sampleResults[bestIdx].bounds;
+					// If we know a crop region, deliver a cropped preview centered
+					// on the detected planet; otherwise show the full sample.
+					let previewBuffer, previewW, previewH;
+					if (cropRegion) {
+						previewW = previewH = cropRegion.size;
+						previewBuffer = cropRgba(sample.data, actualWidth, actualHeight,
+							cropRegion.size, b.centroidX, b.centroidY);
+					} else {
+						previewW = actualWidth;
+						previewH = actualHeight;
+						previewBuffer = sample.data.buffer.slice(0);
+					}
+					maybePublishBestFrame({
+						index: sample.index,
+						sharpness: bestSharp,
+						width: previewW,
+						height: previewH,
+						uint8Buffer: previewBuffer,
+						centerX: b.centroidX,
+						centerY: b.centroidY,
+					});
+				}
+			}
+
 			// Free sample RGBA — no longer needed
 			reservoir.length = 0;
 
@@ -529,33 +594,8 @@ export function useMediabunnyReader() {
 			let skippedFrames = 0, cutOffFrames = 0, oversizedFrames = 0;
 			let pass2FrameIndex = 0;
 
-			// Track the sharpest frame seen so far and post a preview blob so
-			// VideoFrameProcessor can show it. Matches useDebayerReader behavior
-			// so mediabunny videos also get a live "Sharpest Frame" preview
-			// during Pass 2 instead of just a caption.
-			let bestFrameSoFar = null;
-			async function maybePublishBestFrame(frame) {
-				if (!frame?.uint8Buffer || !frame.width || !frame.height) return;
-				if (bestFrameSoFar && frame.sharpness <= bestFrameSoFar.sharpness) return;
-				bestFrameSoFar = frame;
-				try {
-					// Copy the buffer — uint8Buffer might get transferred as we
-					// hand frames off to the stacker later.
-					const src = new Uint8ClampedArray(frame.uint8Buffer.slice(0));
-					const canvas = new OffscreenCanvas(frame.width, frame.height);
-					const ctx = canvas.getContext('2d');
-					ctx.putImageData(new ImageData(src, frame.width, frame.height), 0, 0);
-					const blob = await canvas.convertToBlob({ type: 'image/png' });
-					// Only publish if we're still the best (another better frame
-					// may have arrived while we were converting).
-					if (bestFrameSoFar?.index === frame.index) {
-						bestFrameSoFar.blob = blob;
-						emit('best-frame-updated', bestFrameSoFar);
-					}
-				} catch (e) {
-					console.warn('[Mediabunny] Best-frame preview blob failed:', e);
-				}
-			}
+			// (bestFrameSoFar + maybePublishBestFrame declared earlier so Pass 1
+			// can also fire an initial preview once crop detection completes.)
 
 			// ROI pre-crop state. Same idea as the SER precrop_worker but the
 			// "cropping" happens inside VideoFrame.copyTo() via its rect parameter,

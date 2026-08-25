@@ -379,6 +379,7 @@ export function useFFmpegReader() {
         let canCropCount = 0;
         const detectedCenters = [];
         const detectedSizes = [];
+        let bestSample = null;  // { data, width, height, index, sharpness, bounds }
 
         for (let batchStart = 0; batchStart < sampleIndices.length; batchStart += BATCH_SIZE) {
             const batchEnd = Math.min(batchStart + BATCH_SIZE, sampleIndices.length);
@@ -390,7 +391,7 @@ export function useFFmpegReader() {
                 try {
                     const pngData = ffmpeg.FS('readFile', pngFilenames[idx]);
                     const rgba = await decodeImageToRgba(pngData);
-                    batch.push({ data: rgba.data, index: idx });
+                    batch.push({ data: rgba.data, index: idx, width: rgba.width, height: rgba.height });
                 } catch (e) {
                     console.warn(`Failed to decode PNG frame ${idx}:`, e);
                 }
@@ -401,11 +402,23 @@ export function useFFmpegReader() {
             // GPU batch analysis
             const results = await analyzeRgbaBatchGpu(batch, header.width, header.height);
 
-            for (const result of results) {
+            for (let j = 0; j < results.length; j++) {
+                const result = results[j];
                 if (result.bounds) {
                     canCropCount++;
                     detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
                     detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
+                    const sharpness = result.sharpness || 0;
+                    if (!bestSample || sharpness > bestSample.sharpness) {
+                        bestSample = {
+                            data: new Uint8ClampedArray(batch[j].data),
+                            width: batch[j].width || header.width,
+                            height: batch[j].height || header.height,
+                            index: batch[j].index,
+                            sharpness,
+                            bounds: result.bounds,
+                        };
+                    }
                 }
             }
 
@@ -416,7 +429,53 @@ export function useFFmpegReader() {
             });
         }
 
-        return computeCropRegionFromDetections(detectedCenters, detectedSizes, canCropCount, sampleIndices.length, header, cropMarginPercent, surfaceMode);
+        const cropRegion = computeCropRegionFromDetections(detectedCenters, detectedSizes, canCropCount, sampleIndices.length, header, cropMarginPercent, surfaceMode);
+
+        // Fire an initial preview so the "Sharpest Frame" panel populates the
+        // moment crop detection finishes, before Pass 2's ranking begins.
+        if (bestSample) publishCropDetectionPreview(bestSample, cropRegion);
+
+        return cropRegion;
+    }
+
+    // Shared helper — used by both PNG-extracted and streamed FFmpeg paths.
+    // Fire-and-forget: builds a preview blob from the sharpest sample's RGBA
+    // (cropped around detected planet if we know one) and emits best-frame-updated.
+    function publishCropDetectionPreview(bestSample, cropRegion) {
+        (async () => {
+            try {
+                let data = bestSample.data;
+                let w = bestSample.width;
+                let h = bestSample.height;
+                if (cropRegion?.size) {
+                    const size = cropRegion.size;
+                    const cx = bestSample.bounds.centroidX;
+                    const cy = bestSample.bounds.centroidY;
+                    const startX = Math.max(0, Math.min(w - size, Math.floor(cx - size / 2)));
+                    const startY = Math.max(0, Math.min(h - size, Math.floor(cy - size / 2)));
+                    const cropped = new Uint8ClampedArray(size * size * 4);
+                    for (let y = 0; y < size; y++) {
+                        const srcOff = ((startY + y) * w + startX) * 4;
+                        cropped.set(data.subarray(srcOff, srcOff + size * 4), y * size * 4);
+                    }
+                    data = cropped; w = size; h = size;
+                }
+                const canvas = new OffscreenCanvas(w, h);
+                canvas.getContext('2d').putImageData(new ImageData(data, w, h), 0, 0);
+                const blob = await canvas.convertToBlob({ type: 'image/png' });
+                emit('best-frame-updated', {
+                    index: bestSample.index,
+                    sharpness: bestSample.sharpness,
+                    width: w,
+                    height: h,
+                    centerX: bestSample.bounds.centroidX,
+                    centerY: bestSample.bounds.centroidY,
+                    blob,
+                });
+            } catch (e) {
+                console.warn('[FFmpegReader] Crop-detection preview failed:', e);
+            }
+        })();
     }
 
     /**
