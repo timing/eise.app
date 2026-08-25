@@ -2407,13 +2407,14 @@ self.addEventListener('message', async (e) => {
 
     if (type === 'get-max-batch-size') {
         const { width, height, bitDepth = 8 } = e.data;
-        // maxBufferSize applies to each buffer individually, not the total. Bound
-        // batchSize by the largest per-frame buffer only, otherwise we're over-
-        // conservative by ~2× and force needless chunking on capable devices.
-        const largestPerFrame = calcLargestPerFrameBufferBytes(width, height, bitDepth);
-        const perFrameBytes = calcPerFrameBufferBytes(width, height, bitDepth);  // reported for diagnostics
+        // Sum every per-frame buffer we'll actually allocate — this is what
+        // physical memory has to hold for one batch slot. The bit-depth
+        // difference is captured inside calcPerFrameBufferBytes (rgbaBpp goes
+        // from 4 to 16 for 16-bit), so 16-bit naturally gets a proportionally
+        // smaller batch. If 8-bit's calculated batch fits, 16-bit's will too.
+        const perFrameBytes = calcPerFrameBufferBytes(width, height, bitDepth);
         const maxBufferSize = device ? device.limits.maxBufferSize : (256 * 1024 * 1024);
-        const maxBatch = Math.max(1, Math.floor(maxBufferSize / (largestPerFrame * 1.2)));
+        const maxBatch = Math.max(1, Math.floor(maxBufferSize / (perFrameBytes * 1.2)));
         self.postMessage({ type: 'max-batch-size', maxBatch, perFrameBytes, maxBufferSize });
         return;
     }
