@@ -1249,11 +1249,26 @@ async function processFiles(files, options = {}) {
 						stackPercentage: effectiveStackPercentage.value,
 						drizzleScale: effectiveDrizzleScale.value,
 						surfaceMode: surfaceMode.value,
-						useWebGPU: effectiveUseGpu.value
+						useWebGPU: effectiveUseGpu.value,
+						isMobile: isMobileDevice.value
 					});
 					return;
 				} catch (mediabunnyErr) {
-					addLog(`Mediabunny failed: ${mediabunnyErr.message}, falling back to FFmpeg`);
+					if (isMobileDevice.value) {
+						// FFmpeg-WASM's ~25 MB bundle + per-frame RAM tends to
+						// tab-crash mobile browsers on anything sizable. Keep
+						// the fallback for small files where it usually works;
+						// hard-fail on larger ones instead of trying and OOM-ing.
+						const MOBILE_FFMPEG_MAX_BYTES = 50 * 1024 * 1024;
+						if (fileToProcess.size > MOBILE_FFMPEG_MAX_BYTES) {
+							addLog(`Mediabunny failed on mobile: ${mediabunnyErr.message}. Skipping FFmpeg fallback — file is ${(fileToProcess.size / 1024 / 1024).toFixed(1)} MB (> ${MOBILE_FFMPEG_MAX_BYTES / 1024 / 1024} MB), likely to OOM the browser.`);
+							throw mediabunnyErr;
+						}
+						addLog(`Mediabunny failed on mobile: ${mediabunnyErr.message}. Attempting FFmpeg fallback — this may still OOM on constrained devices.`);
+					} else {
+						addLog(`Mediabunny failed: ${mediabunnyErr.message}`);
+						addLog('Falling back to FFmpeg (slower, downloads ~25 MB decoder)…');
+					}
 				}
 			} else {
 				addLog(`Mediabunny cannot handle this file: ${check.reason}`);

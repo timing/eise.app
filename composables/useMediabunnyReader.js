@@ -161,7 +161,13 @@ export function useMediabunnyReader() {
 			stackPercentage = 30,
 			drizzleScale = 1.5,
 			surfaceMode = false,
-			useWebGPU = true
+			useWebGPU = true,
+			// isMobile: when true, timing out during Pass 1 keyframe decoding
+			// proceeds with whatever samples were collected instead of throwing.
+			// On desktop we throw so the caller can transparently fall back to
+			// the heavier FFmpeg pipeline. On mobile FFmpeg would OOM anyway,
+			// so we prefer a slightly worse crop detection over a hard failure.
+			isMobile = false
 		} = options;
 
 		resetCaptures();
@@ -361,19 +367,16 @@ export function useMediabunnyReader() {
 			// worth of budget. A genuinely stuck decoder trips this; a slow
 			// device on a big video doesn't.
 			const budgetMs = Math.max(15_000, keyPackets.length * 1_500);
+			const MIN_USABLE_SAMPLES = 5;
+			let decodeAllResolved = false;
 			const decodeAll = (async () => {
 				for (let i = 0; i < keyPackets.length; i++) {
 					if (cancelled || decoderError) break;
 					decoder1.decode(keyPackets[i].toEncodedVideoChunk());
 				}
 				await decoder1.flush();
+				decodeAllResolved = true;
 			})();
-			const timeoutErr = new Promise((_, reject) => {
-				setTimeout(() => reject(new Error(
-					`Video decoder stalled while decoding ${keyPackets.length} keyframes (got ${rawSamples.length} in ${Math.round(budgetMs / 1000)}s). ` +
-					`This is usually a WebCodecs decoder hang on the current browser/codec combination. Try re-encoding to H.264 at a lower resolution, or a different browser.`
-				)), budgetMs);
-			});
 			// Progress ticks: as rawSamples grows via the output callback, we
 			// emit here so the "N / 50" counter advances.
 			const progressTicker = setInterval(() => {
@@ -383,10 +386,24 @@ export function useMediabunnyReader() {
 					total: SAMPLE_SIZE,
 				});
 			}, 100);
+			const timeoutReached = new Promise(resolve => setTimeout(resolve, budgetMs));
 			try {
-				await Promise.race([decodeAll, timeoutErr]);
+				await Promise.race([decodeAll, timeoutReached]);
 			} finally {
 				clearInterval(progressTicker);
+			}
+			if (!decodeAllResolved) {
+				// Budget ran out. On mobile we accept a partial result so the
+				// user's stack still runs; on desktop we throw and let the
+				// caller retry via FFmpeg where the decoder isn't the bottleneck.
+				if (isMobile && rawSamples.length >= MIN_USABLE_SAMPLES) {
+					addLog(`Slow decoder: got ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(budgetMs / 1000)}s. Continuing on mobile with partial samples (FFmpeg fallback would OOM here).`);
+				} else {
+					throw new Error(
+						`Video decoder too slow — only ${rawSamples.length} of ${keyPackets.length} keyframes decoded in ${Math.round(budgetMs / 1000)}s. ` +
+						`This browser/codec combination is likely falling back to software decoding.`
+					);
+				}
 			}
 			decoder1.close();
 
