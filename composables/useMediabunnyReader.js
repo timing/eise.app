@@ -529,6 +529,34 @@ export function useMediabunnyReader() {
 			let skippedFrames = 0, cutOffFrames = 0, oversizedFrames = 0;
 			let pass2FrameIndex = 0;
 
+			// Track the sharpest frame seen so far and post a preview blob so
+			// VideoFrameProcessor can show it. Matches useDebayerReader behavior
+			// so mediabunny videos also get a live "Sharpest Frame" preview
+			// during Pass 2 instead of just a caption.
+			let bestFrameSoFar = null;
+			async function maybePublishBestFrame(frame) {
+				if (!frame?.uint8Buffer || !frame.width || !frame.height) return;
+				if (bestFrameSoFar && frame.sharpness <= bestFrameSoFar.sharpness) return;
+				bestFrameSoFar = frame;
+				try {
+					// Copy the buffer — uint8Buffer might get transferred as we
+					// hand frames off to the stacker later.
+					const src = new Uint8ClampedArray(frame.uint8Buffer.slice(0));
+					const canvas = new OffscreenCanvas(frame.width, frame.height);
+					const ctx = canvas.getContext('2d');
+					ctx.putImageData(new ImageData(src, frame.width, frame.height), 0, 0);
+					const blob = await canvas.convertToBlob({ type: 'image/png' });
+					// Only publish if we're still the best (another better frame
+					// may have arrived while we were converting).
+					if (bestFrameSoFar?.index === frame.index) {
+						bestFrameSoFar.blob = blob;
+						emit('best-frame-updated', bestFrameSoFar);
+					}
+				} catch (e) {
+					console.warn('[Mediabunny] Best-frame preview blob failed:', e);
+				}
+			}
+
 			// ROI pre-crop state. Same idea as the SER precrop_worker but the
 			// "cropping" happens inside VideoFrame.copyTo() via its rect parameter,
 			// so we skip the decoded YUV → RGBA copy work on pixels outside the ROI.
@@ -611,6 +639,10 @@ export function useMediabunnyReader() {
 						bestFramesForStacking[minIdx] = frame;
 					}
 				}
+
+				// Fire-and-forget preview publish — decides internally whether
+				// this frame beats the current best.
+				maybePublishBestFrame(frame);
 			}
 
 			// Crop RGBA buffer around a center point
