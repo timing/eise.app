@@ -569,7 +569,7 @@ export function useImageReader() {
                 const sortedSizes = [...detectedSizes].sort((a, b) => a - b);
                 const medianSize = sortedSizes[Math.floor(sortedSizes.length / 2)];
                 const marginMultiplier = 1 + (cropMarginPercent / 100);
-                let desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
+                const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
                 const maxAllowedSize = Math.min(firstWidth, firstHeight);
 
                 // Calculate median center position
@@ -578,36 +578,27 @@ export function useImageReader() {
                 const medianX = sortedX.length > 0 ? sortedX[Math.floor(sortedX.length / 2)] : firstWidth / 2;
                 const medianY = sortedY.length > 0 ? sortedY[Math.floor(sortedY.length / 2)] : firstHeight / 2;
 
-                // Cap cropSize before it can blow past WebGPU's 4GB per-buffer
-                // limit. The moments buffer scales as cropSize² × 24 × batchSize
-                // (up to ~8 for images); 4096² × 24 × 8 ≈ 3.2GB, safely under the
-                // cap. Large 200%-margin crops of edge-touching planets used to
-                // request ~5GB buffers and trip the "Not initialized" cascade.
-                const MAX_CROP_SIZE = 4096;
-                if (desiredSize > MAX_CROP_SIZE) {
-                    addLog(`Requested crop ${desiredSize}px exceeds ${MAX_CROP_SIZE}px cap — clamping.`);
-                    desiredSize = MAX_CROP_SIZE;
-                }
-
                 // Handle cropSize >= frameSize differently based on mode:
                 // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-                // - Normal mode: Allow crop to exceed frame — the shader pads OOB pixels with
-                //   black so the object stays centered even at large margins.
-                if (desiredSize >= maxAllowedSize && surfaceMode) {
-                    cropRegion = {
-                        size: maxAllowedSize,
-                        referenceCenter: { x: medianX, y: medianY },
-                        medianObjectSize: medianSize
-                    };
-                    addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+                if (desiredSize >= maxAllowedSize) {
+                    if (surfaceMode) {
+                        cropRegion = {
+                            size: maxAllowedSize,
+                            referenceCenter: { x: medianX, y: medianY },
+                            medianObjectSize: medianSize
+                        };
+                        addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                    } else {
+                        addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+                    }
                 } else if (detectedCenters.length > 0) {
                     cropRegion = {
                         size: desiredSize,
                         referenceCenter: { x: medianX, y: medianY },
                         medianObjectSize: medianSize
                     };
-                    const padNote = desiredSize > maxAllowedSize ? ' (padded — exceeds frame)' : '';
-                    addLog(`Detected crop size: ${desiredSize}x${desiredSize}${padNote}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+                    addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
                 } else {
                     cropRegion = { size: desiredSize, medianObjectSize: medianSize };
                     addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
@@ -622,13 +613,7 @@ export function useImageReader() {
 
         // Dynamic batch size based on frame dimensions to stay under GPU memory limit.
         // Floor is 1 (see note in crop-detection pass above).
-        // Use max(srcSize, cropSize) per pixel so batching accounts for
-        // padded crops that are larger than the source frame. The downstream
-        // moments buffer is cropSize² × 24 × batchSize — with batchSize=32 and
-        // cropSize=2500 that's ~4.8GB and blows past WebGPU's 4GB per-buffer
-        // cap. Bounding batchSize by cropSize keeps allocations safe.
-        const analyzeSideSq = Math.max(firstWidth * firstHeight, (cropRegion?.size || 0) ** 2);
-        const analyzeFrameBytes = analyzeSideSq * 24; // moments is the largest per-frame buffer
+        const analyzeFrameBytes = firstWidth * firstHeight * 16; // Float32 RGBA
         const analyzeTargetMemory = 512 * 1024 * 1024; // 512MB
         const ANALYZE_BATCH_SIZE = Math.max(1, Math.min(32, Math.floor(analyzeTargetMemory / analyzeFrameBytes)));
         const frameCenters = new Map(); // Store centers for frameReReader
@@ -866,16 +851,11 @@ export function useImageReader() {
 
                     if (this.cropRegion && Number.isFinite(frame.centerX) && Number.isFinite(frame.centerY)) {
                         const size = this.cropRegion.size;
-                        // Allow negative crop offsets so the object stays centered when
-                        // the requested crop extends past the source frame; fill the
-                        // OOB region with black to match the GPU crop shader behavior.
-                        const cropX = Math.round(frame.centerX - size / 2);
-                        const cropY = Math.round(frame.centerY - size / 2);
+                        const cropX = Math.max(0, Math.min(frameData.width - size, Math.round(frame.centerX - size / 2)));
+                        const cropY = Math.max(0, Math.min(frameData.height - size, Math.round(frame.centerY - size / 2)));
                         const cropped = new OffscreenCanvas(size, size);
                         const cctx = cropped.getContext('2d');
-                        cctx.fillStyle = '#000';
-                        cctx.fillRect(0, 0, size, size);
-                        cctx.drawImage(canvas, cropX, cropY);
+                        cctx.drawImage(canvas, cropX, cropY, size, size, 0, 0, size, size);
                         return await cropped.convertToBlob({ type: 'image/png' });
                     }
                     return await canvas.convertToBlob({ type: 'image/png' });

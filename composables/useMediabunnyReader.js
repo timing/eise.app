@@ -434,13 +434,7 @@ export function useMediabunnyReader() {
 					const sortedY = detectedCenters.map(c => c.y).sort((a, b) => a - b);
 					const medianX = sortedX[Math.floor(sortedX.length / 2)];
 					const medianY = sortedY[Math.floor(sortedY.length / 2)];
-					let desiredSize = Math.ceil(medianSize * (1 + cropMarginPercent / 100) / 2) * 2;
-					// Cap before WebGPU 4GB per-buffer limit (moments ~ cropSize² × 24 × batchSize).
-					const MAX_CROP_SIZE = 4096;
-					if (desiredSize > MAX_CROP_SIZE) {
-						addLog(`Requested crop ${desiredSize}px exceeds ${MAX_CROP_SIZE}px cap — clamping.`);
-						desiredSize = MAX_CROP_SIZE;
-					}
+					const desiredSize = Math.ceil(medianSize * (1 + cropMarginPercent / 100) / 2) * 2;
 					const maxAllowedSize = Math.min(actualWidth, actualHeight);
 
 					// Real planets at 1080p are at least ~15-20px across. A median object
@@ -453,13 +447,16 @@ export function useMediabunnyReader() {
 					// with a clear message rather than proceed to guaranteed-broken output.
 					if (medianSize <= 4) {
 						throw new Error(`Planet detection failed — the detected object was only ${Math.round(medianSize)}px across ${detectedCenters.length} samples. This can happen with very dim planets, unusual video formats, or on some GPUs. Try re-encoding the video at a lower resolution, cropping around the planet in a video editor first, or a different browser.`);
-					} else if (desiredSize >= maxAllowedSize && surfaceMode) {
-						addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize}`);
-						cropRegion = { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+					} else if (desiredSize >= maxAllowedSize) {
+						if (surfaceMode) {
+							addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize}`);
+							cropRegion = { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+						} else {
+							addLog(`Skipping crop: detected size ${desiredSize}px (median: ${Math.round(medianSize)}px) exceeds frame ${maxAllowedSize}px`);
+						}
 					} else {
 						cropRegion = { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-						const padNote = desiredSize > maxAllowedSize ? ' (padded — exceeds frame)' : '';
-						addLog(`Detected crop size: ${desiredSize}x${desiredSize}${padNote}, median object: ${Math.round(medianSize)}px`);
+						addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object: ${Math.round(medianSize)}px`);
 						addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)})`);
 					}
 				}

@@ -883,31 +883,27 @@ export function useDebayerReader() {
         const sizes = boundsResults.map(r => Math.max(r.bounds.width, r.bounds.height)).sort((a, b) => a - b);
         const medianSize = sizes[Math.floor(sizes.length / 2)];
         const margin = 1 + (cropMarginPercent / 100);
-        let cropSize = Math.ceil(medianSize * margin / 2) * 2;
-
-        // Cap cropSize before it can blow past WebGPU's 4GB per-buffer limit
-        // (moments buffer ~ cropSize² × 24 × batchSize). 4096² × 24 × 8 ≈ 3.2GB.
-        const MAX_CROP_SIZE = 4096;
-        if (cropSize > MAX_CROP_SIZE) {
-            addLog(`[DebayerReader] Requested crop ${cropSize}px exceeds ${MAX_CROP_SIZE}px cap — clamping.`);
-            cropSize = MAX_CROP_SIZE;
-        }
+        const cropSize = Math.ceil(medianSize * margin / 2) * 2;
 
         const maxSize = Math.min(metadata.width, metadata.height);
 
-        // Surface mode (lunar/solar) prefers per-frame centering on the full
-        // frame; normal mode always crops around the detected object and lets
-        // the crop shader pad with black if the crop extends past the frame.
-        if (cropSize >= maxSize && surfaceMode) {
-            addLog(`[DebayerReader] Surface mode: using full frame ${maxSize}x${maxSize} with per-frame centering`);
-            return {
-                size: maxSize,
-                medianSize,
-            };
+        // Handle cropSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        if (cropSize >= maxSize) {
+            if (surfaceMode) {
+                addLog(`[DebayerReader] Surface mode: using full frame ${maxSize}x${maxSize} with per-frame centering`);
+                return {
+                    size: maxSize,
+                    medianSize,
+                };
+            } else {
+                addLog(`[DebayerReader] Skipping crop: desired ${cropSize}px exceeds frame ${maxSize}px`);
+                return null;
+            }
         }
 
-        const padNote = cropSize > maxSize ? ' (padded — exceeds frame)' : '';
-        addLog(`[DebayerReader] Detected crop size: ${cropSize}x${cropSize}${padNote} (median object: ${medianSize})`);
+        addLog(`[DebayerReader] Detected crop size: ${cropSize}x${cropSize} (median object: ${medianSize})`);
 
         return {
             size: cropSize,
@@ -1070,15 +1066,8 @@ export function useDebayerReader() {
         // Ask the GPU worker for max batch size — single source of truth
         const is16bit = metadata.pixelDepth > 8;
         const maxBatch = await getGpuMaxBatchSize(metadata.width, metadata.height, is16bit ? 16 : 8);
-        // The worker sizes maxBatch for source-frame pixel counts, but when a
-        // padded crop is larger than the source (e.g. large margin, planet near
-        // the edge), the moments/crop buffers scale by cropSize² instead. Shrink
-        // batch by the pixel-count ratio so we stay under the 4GB per-buffer cap.
-        const srcPixelCount = metadata.width * metadata.height;
-        const cropPixelCount = cropRegion ? (cropRegion.size * cropRegion.size) : srcPixelCount;
-        const cropBatchScale = cropPixelCount > srcPixelCount ? (srcPixelCount / cropPixelCount) : 1;
-        const BATCH_SIZE = Math.max(1, Math.min(256, Math.floor(maxBatch * cropBatchScale)));
-        addLog(`[DebayerReader] Batch size ${BATCH_SIZE} for ${metadata.width}x${metadata.height} ${is16bit ? '16-bit' : '8-bit'}${cropRegion ? `, cropSize=${cropRegion.size}` : ''}`);
+        const BATCH_SIZE = Math.min(256, maxBatch);
+        addLog(`[DebayerReader] Batch size ${BATCH_SIZE} for ${metadata.width}x${metadata.height} ${is16bit ? '16-bit' : '8-bit'}`);
 
         let completedFrames = 0;
 

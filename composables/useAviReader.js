@@ -425,13 +425,7 @@ export function useAviReader() {
 
         // Use median size with margin
         const marginMultiplier = 1 + (cropMarginPercent / 100);
-        let desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
-        // Cap before WebGPU 4GB per-buffer limit (moments ~ cropSize² × 24 × batchSize).
-        const MAX_CROP_SIZE = 4096;
-        if (desiredSize > MAX_CROP_SIZE) {
-            addLog(`Requested crop ${desiredSize}px exceeds ${MAX_CROP_SIZE}px cap — clamping.`);
-            desiredSize = MAX_CROP_SIZE;
-        }
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(aviHeader.width, aviHeader.height);
 
         // Calculate median center position as fallback reference
@@ -440,16 +434,19 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Surface mode uses per-frame centering on the full frame; normal mode
-        // always crops around the detected object and pads with black in the
-        // shader if the crop extends past the source frame.
-        if (desiredSize >= maxAllowedSize && surfaceMode) {
-            addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-            return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+        // Handle cropSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        if (desiredSize >= maxAllowedSize) {
+            if (surfaceMode) {
+                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+            }
+            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+            return null;
         }
 
-        const padNote = desiredSize > maxAllowedSize ? ' (padded — exceeds frame)' : '';
-        addLog(`Detected crop size: ${desiredSize}x${desiredSize}${padNote}, median object size: ${medianSize}, margin: ${cropMarginPercent}% (${canCropCount}/${sampleIndices.length} frames croppable)`);
+        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${medianSize}, margin: ${cropMarginPercent}% (${canCropCount}/${sampleIndices.length} frames croppable)`);
 
         return { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }
@@ -1203,13 +1200,7 @@ export function useAviReader() {
         const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
 
         const marginMultiplier = 1 + (cropMarginPercent / 100);
-        let desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
-        // Cap before WebGPU 4GB per-buffer limit (moments ~ cropSize² × 24 × batchSize).
-        const MAX_CROP_SIZE = 4096;
-        if (desiredSize > MAX_CROP_SIZE) {
-            addLog(`Requested crop ${desiredSize}px exceeds ${MAX_CROP_SIZE}px cap — clamping.`);
-            desiredSize = MAX_CROP_SIZE;
-        }
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(width, height);
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -1217,16 +1208,19 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Surface mode uses per-frame centering on the full frame; normal mode
-        // always crops around the detected object and pads with black in the
-        // shader if the crop extends past the source frame.
-        if (desiredSize >= maxAllowedSize && surfaceMode) {
-            addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-            return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+        // Handle cropSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        if (desiredSize >= maxAllowedSize) {
+            if (surfaceMode) {
+                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+            }
+            addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+            return null;
         }
 
-        const padNote = desiredSize > maxAllowedSize ? ' (padded — exceeds frame)' : '';
-        addLog(`Detected crop size: ${desiredSize}x${desiredSize}${padNote}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
 
         return { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
     }

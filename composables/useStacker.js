@@ -225,26 +225,27 @@ export function useStacker() {
     function cropRawBayer(data, srcWidth, srcHeight, cropSize, centerX, centerY) {
         const halfCrop = Math.floor(cropSize / 2);
 
-        // Allow negative startX/startY so the object stays centered when the
-        // requested crop extends past the source frame. Force even to keep
-        // Bayer phase — see the shader's identical comment about phase drift.
-        let startX = Math.round(centerX - halfCrop) & ~1;
-        let startY = Math.round(centerY - halfCrop) & ~1;
+        // Calculate crop start, ensuring even coordinates for Bayer alignment
+        let startX = Math.round(centerX - halfCrop);
+        let startY = Math.round(centerY - halfCrop);
 
-        // Create output buffer of same type as input, zero-initialized (black pad)
+        // Clamp to image bounds
+        startX = Math.max(0, Math.min(srcWidth - cropSize, startX));
+        startY = Math.max(0, Math.min(srcHeight - cropSize, startY));
+
+        // Ensure even coordinates to preserve Bayer pattern
+        startX = startX & ~1;  // Round down to even
+        startY = startY & ~1;
+
+        // Create output buffer of same type as input
         const OutputType = data instanceof Uint16Array ? Uint16Array : Uint8Array;
         const cropped = new OutputType(cropSize * cropSize);
 
-        // Copy the overlapping region only; leave OOB pixels at 0 (black).
-        const overlapStartX = Math.max(0, startX);
-        const overlapStartY = Math.max(0, startY);
-        const overlapEndX = Math.min(srcWidth, startX + cropSize);
-        const overlapEndY = Math.min(srcHeight, startY + cropSize);
-        for (let y = overlapStartY; y < overlapEndY; y++) {
-            const srcRow = y * srcWidth + overlapStartX;
-            const dstRow = (y - startY) * cropSize + (overlapStartX - startX);
-            const width = overlapEndX - overlapStartX;
-            cropped.set(data.subarray(srcRow, srcRow + width), dstRow);
+        // Copy crop region row by row
+        for (let y = 0; y < cropSize; y++) {
+            const srcOffset = (startY + y) * srcWidth + startX;
+            const dstOffset = y * cropSize;
+            cropped.set(data.subarray(srcOffset, srcOffset + cropSize), dstOffset);
         }
 
         return cropped;

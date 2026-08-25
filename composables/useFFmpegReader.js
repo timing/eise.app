@@ -295,20 +295,17 @@ export function useFFmpegReader() {
         const medianY = detectedCenters[Math.floor(detectedCenters.length / 2)].y;
 
         const marginMultiplier = 1 + (cropMarginPercent / 100);
-        let desiredSize = Math.ceil(maxSize * marginMultiplier);
-        // Cap before WebGPU 4GB per-buffer limit (moments ~ cropSize² × 24 × batchSize).
-        const MAX_CROP_SIZE = 4096;
-        if (desiredSize > MAX_CROP_SIZE) {
-            addLog(`Requested crop ${desiredSize}px exceeds ${MAX_CROP_SIZE}px cap — clamping.`);
-            desiredSize = MAX_CROP_SIZE;
-        }
+        const desiredSize = Math.ceil(maxSize * marginMultiplier);
         const maxAllowedSize = Math.min(width, height);
 
-        // Surface mode uses per-frame centering on the full frame; normal mode
-        // always crops around the detected object and pads with black in the
-        // shader if the crop extends past the source frame.
-        if (desiredSize >= maxAllowedSize && surfaceMode) {
-            return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY } };
+        // Handle cropSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        if (desiredSize >= maxAllowedSize) {
+            if (surfaceMode) {
+                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY } };
+            }
+            return null;
         }
 
         return { size: desiredSize, referenceCenter: { x: medianX, y: medianY } };
@@ -329,13 +326,7 @@ export function useFFmpegReader() {
         const medianSize = sortedSizes.length > 0 ? sortedSizes[Math.floor(sortedSizes.length / 2)] : 0;
 
         const marginMultiplier = 1 + (cropMarginPercent / 100);
-        let desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
-        // Cap before WebGPU 4GB per-buffer limit (moments ~ cropSize² × 24 × batchSize).
-        const MAX_CROP_SIZE = 4096;
-        if (desiredSize > MAX_CROP_SIZE) {
-            addLog(`Requested crop ${desiredSize}px exceeds ${MAX_CROP_SIZE}px cap — clamping.`);
-            desiredSize = MAX_CROP_SIZE;
-        }
+        const desiredSize = Math.ceil(medianSize * marginMultiplier / 2) * 2;
         const maxAllowedSize = Math.min(header.width, header.height);
 
         const sortedX = detectedCenters.map(c => c.x).sort((a, b) => a - b);
@@ -343,16 +334,20 @@ export function useFFmpegReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Surface mode uses per-frame centering on the full frame; normal mode
-        // always crops around the detected object and pads with black in the
-        // shader if the crop extends past the source frame.
-        if (desiredSize >= maxAllowedSize && surfaceMode) {
-            addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-            return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+        // Handle desiredSize >= frameSize differently based on mode:
+        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
+        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        if (desiredSize >= maxAllowedSize) {
+            if (surfaceMode) {
+                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
+                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
+            } else {
+                addLog(`Skipping crop: desired size ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+                return null;
+            }
         }
 
-        const padNote = desiredSize > maxAllowedSize ? ' (padded — exceeds frame)' : '';
-        addLog(`Detected crop size: ${desiredSize}x${desiredSize}${padNote}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
+        addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
         addLog(`Median center: (${Math.round(medianX)}, ${Math.round(medianY)}), frame center: (${Math.round(header.width/2)}, ${Math.round(header.height/2)})`);
 
         // GPU detection is consistent - medianObjectSize can be used for oversized frame filtering
