@@ -88,7 +88,11 @@ const handleWheel = (event) => {
 	// Proportional zoom: 5% per scroll step, feels consistent at any zoom level
 	const factor = event.deltaY < 0 ? 1.035 : 1 / 1.035;
 	zoomLevel.value = Math.max(0.1, Math.min(15, zoomLevel.value * factor));
-	zoomLevel.value = Math.round(zoomLevel.value * 100) / 100;
+	// Round to 0.1% precision, not whole percent — at low zoom (≤ 14%) the
+	// multiplicative step (~3.5%) is smaller than 0.5 percentage points and the
+	// old whole-percent rounding trapped the value (e.g. 14% × 1.035 = 14.49
+	// → rounds back to 14%, both directions stuck).
+	zoomLevel.value = Math.round(zoomLevel.value * 1000) / 1000;
 
 	const newZoom = zoomLevel.value;
 	const zoomChange = newZoom - oldZoom;
