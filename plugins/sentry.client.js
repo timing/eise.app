@@ -1,4 +1,56 @@
 import * as Sentry from '@sentry/vue';
+import { logs } from '@/composables/eventBus';
+import { useProcessingState } from '@/composables/useProcessingState';
+
+// Small ring buffer of recent errors captured by Sentry. Attached to the
+// User Feedback event via onFormOpen so submitters carry the last N JS
+// errors + top stack frames with them.
+const recentErrors = [];
+const MAX_RECENT_ERRORS = 10;
+
+function pushRecentError(event) {
+    try {
+        const exc = event.exception?.values?.[0];
+        if (!exc) return;
+        const frames = (exc.stacktrace?.frames || []).slice(-6).map(f => {
+            const loc = `${f.filename || '?'}:${f.lineno || 0}:${f.colno || 0}`;
+            return `${loc} ${f.function || '<anonymous>'}`;
+        });
+        recentErrors.push({
+            ts: new Date().toISOString(),
+            type: exc.type || 'Error',
+            message: (exc.value || '').slice(0, 500),
+            top_frames: frames,
+        });
+        while (recentErrors.length > MAX_RECENT_ERRORS) recentErrors.shift();
+    } catch (_) { /* never break Sentry */ }
+}
+
+// Runs whenever the feedback form opens — from the widget button OR from
+// `openFeedback()` in useFeedback.js. Both routes now enrich the event.
+function attachFeedbackContext() {
+    try {
+        if (logs.value && logs.value.length > 0) {
+            Sentry.setContext('session_logs', {
+                logs: logs.value.slice(-100),
+                total_log_count: logs.value.length,
+            });
+        }
+        try {
+            const { getInputFilename } = useProcessingState();
+            const filename = getInputFilename?.();
+            if (filename) Sentry.setTag('input_file', String(filename).slice(0, 200));
+        } catch (_) { /* processing state not always accessible */ }
+        if (recentErrors.length > 0) {
+            Sentry.setContext('recent_errors', {
+                count: recentErrors.length,
+                errors: recentErrors,
+            });
+        }
+    } catch (e) {
+        console.warn('Failed to attach feedback context:', e);
+    }
+}
 
 // Skip Sentry entirely for clients that only generate noise:
 //   - Headless bots / crawlers (EISE-J8: Sentry feedback widget crashes when document.body isn't ready)
@@ -30,6 +82,7 @@ export default defineNuxtPlugin(async (nuxtApp) => {
             successMessageText: 'Thank you for your feedback!',
             showBranding: false,
             isEmailRequired: true,
+            onFormOpen: attachFeedbackContext,
         }));
     }
 
@@ -59,6 +112,10 @@ export default defineNuxtPlugin(async (nuxtApp) => {
             if (/abort\(OOM\)|pthread sent an error/i.test(msg)) return null;
             if (/SharedArrayBuffer is not defined|Can't find variable: SharedArrayBuffer/i.test(msg)) return null;
             if (err && err.name === 'FFmpegUnsupportedError') return null;
+            // Mirror the exception into the ring buffer so the NEXT feedback
+            // submission carries it as recent_errors context. Feedback events
+            // themselves have no exception.values — skip those.
+            if (event.exception?.values?.length) pushRecentError(event);
             return event;
         },
     });
