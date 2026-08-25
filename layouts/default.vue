@@ -33,6 +33,7 @@
 		<div class="clearb"></div>
 
 		<aside v-if="showAffiliate" class="affiliate-banner">
+			<p class="affiliate-disclosure">Advertisement</p>
 			<a href="https://www.zwoastro.com/product/seestar-s50-pro/?ref=eiseapp"
 				target="_blank"
 				rel="sponsored noopener nofollow"
@@ -251,6 +252,13 @@ watch(() => route.path, () => {
 	margin: 48px auto 0;
 	padding: 0 20px;
 	text-align: center;
+}
+.affiliate-disclosure {
+	font-size: 11px;
+	text-transform: uppercase;
+	letter-spacing: 1.5px;
+	color: #888;
+	margin: 0 0 8px 0;
 }
 .affiliate-link {
 	display: block;
