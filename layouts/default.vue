@@ -40,7 +40,7 @@
 				data-no-track
 				@click="onAffiliateClick">
 				<img
-					src="/seestar-s50-pro.jpg"
+					src="/seestar-s50-pro.webp"
 					alt="ZWO Seestar S50 Pro smart telescope"
 					loading="lazy"
 					width="2560"
