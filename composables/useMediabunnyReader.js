@@ -281,93 +281,114 @@ export function useMediabunnyReader() {
 
 			// ══════════════════════════════════════════════════════════════
 			// PASS 1 — Crop detection
-			// Decode all packets but only convert ~50 reservoir-sampled frames
-			// to RGBA. Non-sampled frames are decoded and immediately closed,
-			// so only ≤50 × frameSize bytes live in memory at once.
+			// Grab ~50 keyframes spread evenly across the video and decode ONLY
+			// those. Keyframes are self-contained (no dependency on prior
+			// frames), so each requires exactly one decode — no wasted work
+			// walking through the whole video like a linear decode would.
+			//
+			// Tolerance: `getKeyPacket(t)` snaps to the nearest keyframe ≤ t, so
+			// our samples may land within ±(keyframe spacing) of the requested
+			// timestamp. Different target timestamps may also snap to the same
+			// keyframe, giving us fewer than SAMPLE_SIZE unique samples. The
+			// downstream code (crop detection, medianSize, medianCenter) works
+			// fine with any count ≥ 1, so that's not a problem — just log it.
 			// ══════════════════════════════════════════════════════════════
 			emit('set-caption', 'Detecting crop region...');
 
 			const SAMPLE_SIZE = 50;
-			const rawSamples = [];  // { frame: VideoFrame, index: number } — kept alive until converted
+			const rawSamples = [];  // { frame: VideoFrame, index: number }
 			let pass1Count = 0;
 
 			const decoder1 = makeDecoder((frame) => {
 				if (cancelled) { frame.close(); return; }
 				initDims(frame);
-
-				// Reservoir sampling — uniform random sample without knowing total count upfront.
-				// Keeps VideoFrame objects alive; non-selected frames are closed immediately.
-				if (rawSamples.length < SAMPLE_SIZE) {
-					rawSamples.push({ frame, index: pass1Count });
-				} else {
-					const j = Math.floor(Math.random() * (pass1Count + 1));
-					if (j < SAMPLE_SIZE) {
-						rawSamples[j].frame.close(); // release replaced frame
-						rawSamples[j] = { frame, index: pass1Count };
-					} else {
-						frame.close();
-					}
-				}
+				// Every frame the decoder emits was requested — no reservoir
+				// sampling. Just keep it.
+				rawSamples.push({ frame, index: pass1Count });
 				pass1Count++;
 			});
 
 			decoderError = null;
-			// Idle-timeout watchdog: if Pass 1 stops advancing (WebCodecs decoder
-			// hangs mid-file, packet iterator stalls, flush never resolves), throw
-			// a real error after 30s of no progress. Without this the reader can
-			// silently sit on "Detecting crop region…" indefinitely — see Sentry
-			// EISE-ND. The throw propagates to the outer catch which emits an
-			// upload-error dialog + adds the failure to logs so the next feedback
-			// submission carries it as context.
-			const PASS1_IDLE_TIMEOUT_MS = 30_000;
-			let pass1Done = false;
-			let pass1WatchdogSettle;
-			const pass1Watchdog = new Promise((_, reject) => {
-				let lastCount = pass1Count;
-				let lastProgressAt = Date.now();
-				const interval = setInterval(() => {
-					if (pass1Done || cancelled || decoderError) {
-						clearInterval(interval);
-						return;
-					}
-					if (pass1Count !== lastCount) {
-						lastCount = pass1Count;
-						lastProgressAt = Date.now();
-						return;
-					}
-					const idle = Date.now() - lastProgressAt;
-					if (idle > PASS1_IDLE_TIMEOUT_MS) {
-						clearInterval(interval);
-						reject(new Error(
-							`Video decoder stalled during crop detection — no frames decoded for ${Math.round(idle / 1000)}s at frame ${pass1Count}. ` +
-							`This is often a WebCodecs decoder hang on this browser/codec combination. Try re-encoding the video to H.264 at a lower resolution, or a different browser.`
-						));
-					}
-				}, 1000);
-				pass1WatchdogSettle = () => clearInterval(interval);
-			});
 
-			const pass1Work = (async () => {
-				for await (const packet of sink1.packets(firstKeyPacket, undefined, { verifyKeyPackets: true })) {
+			// Duration lets us build evenly-spaced target timestamps. If the
+			// container doesn't expose it (rare), fall back to reservoir-style
+			// linear iteration of the first ~SAMPLE_SIZE keyframes.
+			let duration = 0;
+			try { duration = await videoTrack.computeDuration(); } catch (_) { duration = 0; }
+
+			// Build unique keyframe packets snapped to evenly-spaced timestamps.
+			// Deduplicate on packet timestamp — multiple targets can map to the
+			// same keyframe on videos with sparse keyframes, e.g. long-GOP.
+			const seenKeyTs = new Set();
+			const keyPackets = [];
+			if (duration > 0) {
+				for (let i = 0; i < SAMPLE_SIZE; i++) {
+					if (cancelled) break;
+					// (i + 0.5) so we sample midpoints of 50 buckets rather than
+					// the exact video start/end, which are often not keyframe-
+					// aligned (start is fine, end never is).
+					const ts = ((i + 0.5) / SAMPLE_SIZE) * duration;
+					try {
+						const kp = await sink1.getKeyPacket(ts, { verifyKeyPackets: true });
+						if (!kp) continue;
+						if (seenKeyTs.has(kp.timestamp)) continue;
+						seenKeyTs.add(kp.timestamp);
+						keyPackets.push(kp);
+					} catch (_) { /* skip this target on failure */ }
+				}
+			} else {
+				// No duration — fall back to the first N key packets in decode order.
+				addLog('Video duration unavailable — sampling the first key packets sequentially instead.');
+				let kp = firstKeyPacket;
+				while (kp && keyPackets.length < SAMPLE_SIZE) {
+					if (cancelled) break;
+					if (!seenKeyTs.has(kp.timestamp)) {
+						seenKeyTs.add(kp.timestamp);
+						keyPackets.push(kp);
+					}
+					try { kp = await sink1.getNextKeyPacket(kp, { verifyKeyPackets: true }); } catch (_) { break; }
+				}
+			}
+
+			addLog(`Sampling ${keyPackets.length} keyframes for crop detection (target: ${SAMPLE_SIZE}, duration: ${duration.toFixed(1)}s)`);
+
+			// WebCodecs decoders don't necessarily emit a frame per decode() call
+			// — some codecs buffer internally waiting for more input. So submit
+			// every decode up front, then await flush() to force all outputs.
+			// Progress ticks come from the output callback naturally.
+			//
+			// Wrap the whole submit + flush in one timeout: 15s per keyframe
+			// worth of budget. A genuinely stuck decoder trips this; a slow
+			// device on a big video doesn't.
+			const budgetMs = Math.max(15_000, keyPackets.length * 1_500);
+			const decodeAll = (async () => {
+				for (let i = 0; i < keyPackets.length; i++) {
 					if (cancelled || decoderError) break;
-					if (maxFrames > 0 && pass1Count >= maxFrames) break;
-
-					while (decoder1.decodeQueueSize > 3 && !decoderError) {
-						await new Promise(r => setTimeout(r, 5));
-					}
-
-					decoder1.decode(packet.toEncodedVideoChunk());
+					decoder1.decode(keyPackets[i].toEncodedVideoChunk());
 				}
 				await decoder1.flush();
-				decoder1.close();
 			})();
-
+			const timeoutErr = new Promise((_, reject) => {
+				setTimeout(() => reject(new Error(
+					`Video decoder stalled while decoding ${keyPackets.length} keyframes (got ${rawSamples.length} in ${Math.round(budgetMs / 1000)}s). ` +
+					`This is usually a WebCodecs decoder hang on the current browser/codec combination. Try re-encoding to H.264 at a lower resolution, or a different browser.`
+				)), budgetMs);
+			});
+			// Progress ticks: as rawSamples grows via the output callback, we
+			// emit here so the "N / 50" counter advances.
+			const progressTicker = setInterval(() => {
+				emit('update-loading', {
+					progress: -1,
+					current: rawSamples.length,
+					total: SAMPLE_SIZE,
+				});
+			}, 100);
 			try {
-				await Promise.race([pass1Work, pass1Watchdog]);
+				await Promise.race([decodeAll, timeoutErr]);
 			} finally {
-				pass1Done = true;
-				pass1WatchdogSettle?.();
+				clearInterval(progressTicker);
 			}
+			decoder1.close();
 
 			// Convert sampled VideoFrames to RGBA async (no canvas, preserves source bit depth)
 			const reservoir = await Promise.all(
@@ -378,11 +399,23 @@ export function useMediabunnyReader() {
 				})
 			);
 
+			// Pass 2 (below) still iterates every packet in the video for the
+			// actual analysis + stacking, so it needs the true frame count for
+			// progress + stackPercentage. computePacketStats returns it cheaply
+			// (packet-header scan, no decode). For video tracks packetCount ==
+			// the video's frame count. If unavailable, fall back to a rough
+			// estimate from duration × averageFrameRate, then to sample count.
+			let totalFrames = reservoir.length;
+			try {
+				const stats = await videoTrack.computePacketStats();
+				if (stats?.packetCount > 0) totalFrames = stats.packetCount;
+				else if (stats?.averagePacketRate && duration > 0) totalFrames = Math.round(duration * stats.averagePacketRate);
+			} catch (_) { /* keep the fallback estimate */ }
+			if (maxFrames > 0) totalFrames = Math.min(totalFrames, maxFrames);
 
-			const totalFrames = maxFrames > 0 ? Math.min(pass1Count, maxFrames) : pass1Count;
 			const detectedFullRange = reservoir.length > 0 && !isLimitedRange(reservoir[0].data);
-			addLog(`Pass 1: ${totalFrames} frames, ${reservoir.length} samples for crop detection, detected range: ${detectedFullRange ? 'full (expansion skipped)' : 'limited (expansion applied)'}`);
-			if (totalFrames === 0) throw new Error('No frames decoded from video');
+			addLog(`Pass 1: ${reservoir.length}/${SAMPLE_SIZE} keyframe samples analyzed (video ~${totalFrames} frames), detected range: ${detectedFullRange ? 'full (expansion skipped)' : 'limited (expansion applied)'}`);
+			if (reservoir.length === 0) throw new Error('No frames decoded from video');
 
 			// Diagnostic: peak RGB brightness across sample frames (CPU-side).
 			// If the GPU crop detection returns a phantom 1×1 object at (0,0) but
