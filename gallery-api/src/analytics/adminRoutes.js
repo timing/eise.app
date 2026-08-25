@@ -330,6 +330,42 @@ export function createAnalyticsAdminRoutes({ db }) {
     return c.json({ items: res.rows });
   });
 
+  app.get('/timeseries', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const { from, to } = parseRange(c);
+    const inc = includeAdmin(c);
+    const incBots = includeBots(c);
+    const bucket = c.req.query('bucket') === 'hour' ? 'hour' : 'day';
+    const eventName = String(c.req.query('event_name') || 'pageview').slice(0, 64);
+    const bucketMs = bucket === 'hour' ? 3600000 : 86400000;
+
+    const res = await db.execute({
+      sql: `
+        SELECT (ts / ${bucketMs}) * ${bucketMs} AS bucket_ts,
+               COUNT(*) AS count,
+               COUNT(DISTINCT session_id) AS sessions,
+               COUNT(DISTINCT visitor_hash) AS uniques
+        FROM events
+        WHERE site_id = ? AND event_name = ?
+          AND ts >= ? AND ts < ?
+          AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
+        GROUP BY bucket_ts
+        ORDER BY bucket_ts ASC
+      `,
+      args: [site, eventName, from, to, inc, incBots],
+    });
+
+    return c.json({
+      bucket,
+      bucket_ms: bucketMs,
+      event_name: eventName,
+      range: { from, to },
+      items: res.rows,
+    });
+  });
+
   app.get('/event-detail', async c => {
     const site = siteId(c);
     if (!site) return c.json({ error: 'site_id required' }, 400);
