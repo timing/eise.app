@@ -8,6 +8,7 @@ import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWebGpuAnalyzeWorker } from '@/composables/useWebGpuAnalyzeWorker';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { computePreCropRegion } from '@/composables/useDebayerReader';
+import { reportError } from '@/composables/useSentryReporting';
 
 export function useMediabunnyReader() {
 	const { addLog, emit, on } = useEventBus();
@@ -287,18 +288,62 @@ export function useMediabunnyReader() {
 			});
 
 			decoderError = null;
-			for await (const packet of sink1.packets(firstKeyPacket, undefined, { verifyKeyPackets: true })) {
-				if (cancelled || decoderError) break;
-				if (maxFrames > 0 && pass1Count >= maxFrames) break;
+			// Idle-timeout watchdog: if Pass 1 stops advancing (WebCodecs decoder
+			// hangs mid-file, packet iterator stalls, flush never resolves), throw
+			// a real error after 30s of no progress. Without this the reader can
+			// silently sit on "Detecting crop region…" indefinitely — see Sentry
+			// EISE-ND. The throw propagates to the outer catch which emits an
+			// upload-error dialog + adds the failure to logs so the next feedback
+			// submission carries it as context.
+			const PASS1_IDLE_TIMEOUT_MS = 30_000;
+			let pass1Done = false;
+			let pass1WatchdogSettle;
+			const pass1Watchdog = new Promise((_, reject) => {
+				let lastCount = pass1Count;
+				let lastProgressAt = Date.now();
+				const interval = setInterval(() => {
+					if (pass1Done || cancelled || decoderError) {
+						clearInterval(interval);
+						return;
+					}
+					if (pass1Count !== lastCount) {
+						lastCount = pass1Count;
+						lastProgressAt = Date.now();
+						return;
+					}
+					const idle = Date.now() - lastProgressAt;
+					if (idle > PASS1_IDLE_TIMEOUT_MS) {
+						clearInterval(interval);
+						reject(new Error(
+							`Video decoder stalled during crop detection — no frames decoded for ${Math.round(idle / 1000)}s at frame ${pass1Count}. ` +
+							`This is often a WebCodecs decoder hang on this browser/codec combination. Try re-encoding the video to H.264 at a lower resolution, or a different browser.`
+						));
+					}
+				}, 1000);
+				pass1WatchdogSettle = () => clearInterval(interval);
+			});
 
-				while (decoder1.decodeQueueSize > 3 && !decoderError) {
-					await new Promise(r => setTimeout(r, 5));
+			const pass1Work = (async () => {
+				for await (const packet of sink1.packets(firstKeyPacket, undefined, { verifyKeyPackets: true })) {
+					if (cancelled || decoderError) break;
+					if (maxFrames > 0 && pass1Count >= maxFrames) break;
+
+					while (decoder1.decodeQueueSize > 3 && !decoderError) {
+						await new Promise(r => setTimeout(r, 5));
+					}
+
+					decoder1.decode(packet.toEncodedVideoChunk());
 				}
+				await decoder1.flush();
+				decoder1.close();
+			})();
 
-				decoder1.decode(packet.toEncodedVideoChunk());
+			try {
+				await Promise.race([pass1Work, pass1Watchdog]);
+			} finally {
+				pass1Done = true;
+				pass1WatchdogSettle?.();
 			}
-			await decoder1.flush();
-			decoder1.close();
 
 			// Convert sampled VideoFrames to RGBA async (no canvas, preserves source bit depth)
 			const reservoir = await Promise.all(
@@ -953,6 +998,7 @@ export function useMediabunnyReader() {
 		} catch (err) {
 			console.error('[Mediabunny] Processing failed:', err);
 			addLog(`Error: ${err.message}`);
+			reportError(err, { component: 'useMediabunnyReader', action: 'processVideoFrames' });
 			emit('upload-error', `Video processing failed: ${err.message}`);
 			emit('stop-loading');
 		}
