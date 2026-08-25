@@ -7,6 +7,9 @@
 		<div v-else class="loading-content">
 			<div class="caption" v-if="caption">{{ caption }}</div>
 			<div class="frame-counter" v-if="totalFrames > 0">{{ currentFrame }} / {{ totalFrames }}</div>
+			<div class="frame-counter frame-counter-dots" v-else aria-hidden="true">
+				<span>.</span><span>.</span><span>.</span>
+			</div>
 			<div class="loading-indicator">
 				<div v-if="isIndeterminate" class="indeterminate"></div>
 				<div v-else class="determinate" :style="{ width: progress + '%' }"></div>
@@ -99,6 +102,20 @@ onUnmounted(() => {
 	font-weight: bold;
 	color: #4A90E2;
 	margin-bottom: 10px;
+}
+.frame-counter-dots {
+	letter-spacing: 6px;
+}
+.frame-counter-dots span {
+	display: inline-block;
+	opacity: 0.2;
+	animation: frame-counter-dot 1.4s infinite;
+}
+.frame-counter-dots span:nth-child(2) { animation-delay: 0.2s; }
+.frame-counter-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes frame-counter-dot {
+	0%, 60%, 100% { opacity: 0.2; }
+	30% { opacity: 1; }
 }
 .loading-indicator {
 	height: 8px;
