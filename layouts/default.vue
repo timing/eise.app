@@ -32,6 +32,26 @@
 
 		<div class="clearb"></div>
 
+		<aside v-if="showAffiliate" class="affiliate-banner">
+			<a href="https://www.zwoastro.com/product/seestar-s50-pro/?ref=eiseapp"
+				target="_blank"
+				rel="sponsored noopener nofollow"
+				class="affiliate-link"
+				data-no-track
+				@click="onAffiliateClick">
+				<img
+					src="/seestar-s50-pro.jpg"
+					alt="ZWO Seestar S50 Pro smart telescope"
+					loading="lazy"
+					width="2560"
+					height="1600"
+					class="affiliate-image" />
+				<p class="affiliate-caption">
+					Seestars are perfect for sun, moon, and deep sky. Not planets, but you could give Jupiter a try.
+				</p>
+			</a>
+		</aside>
+
 		<footer class="site-footer" :class="{ 'site-footer--content': !showLogger }">
 			<div class="site-footer-inner">
 				<div class="site-footer-cols">
@@ -105,12 +125,25 @@ async function onLetMeKnowClick(event) {
 	}
 }
 
-// Content pages (about/*, download) don't need the Logs sticky bar — it belongs
+// Content pages (about/*, download) don't need the Logs sticky bar. It belongs
 // to the interactive app flow. Everything else shows it.
 const showLogger = computed(() => {
 	const p = route.path;
 	return !(p.startsWith('/about') || p.startsWith('/download'));
 });
+
+// Hide the affiliate banner on admin pages where it makes no sense.
+const showAffiliate = computed(() => !route.path.startsWith('/admin'));
+
+function onAffiliateClick(event) {
+	if (typeof window !== 'undefined' && window.eise?.track) {
+		window.eise.track('affiliate_click', {
+			partner: 'zwo',
+			product: 'seestar-s50-pro',
+			url: event.currentTarget.href,
+		});
+	}
+}
 
 const runtimeConfig = useRuntimeConfig();
 const buildDate = computed(() => {
@@ -213,6 +246,47 @@ watch(() => route.path, () => {
 	background: #e0e0e0;
 	margin: 4px 0;
 }
+.affiliate-banner {
+	max-width: 520px;
+	margin: 48px auto 0;
+	padding: 0 20px;
+	text-align: center;
+}
+.affiliate-link {
+	display: block;
+	text-decoration: none;
+	color: inherit;
+	border: 0;
+	outline: 0;
+}
+.affiliate-link:focus-visible {
+	outline: 2px solid #8CCF7E;
+	outline-offset: 4px;
+	border-radius: 10px;
+}
+.affiliate-image {
+	display: block;
+	width: 100%;
+	height: auto;
+	border: 0;
+	border-radius: 8px;
+	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+	transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.affiliate-link:hover .affiliate-image {
+	transform: translateY(-2px);
+	box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+.affiliate-caption {
+	margin: 14px 0 0;
+	font-size: 13px;
+	line-height: 1.5;
+	color: rgba(198, 255, 253, 0.7);
+}
+.affiliate-link:hover .affiliate-caption {
+	color: rgba(198, 255, 253, 0.9);
+}
+
 .site-footer {
 	margin-top: 40px;
 	padding: 32px 20px 24px;
