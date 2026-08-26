@@ -951,14 +951,22 @@ section h3 { font-size: 15px; margin-bottom: 8px; color: #333; }
 }
 .stats-table.sub { margin: 4px 0 8px; background: #fafafa; }
 .stats-table.sub th { background: #efefef; }
-.expand-cell { width: 32px; }
+.expand-cell {
+	width: 22px; padding: 6px 2px 6px 4px; text-align: center;
+}
 .chart-cell { width: 40px; text-align: right; }
 .expand-btn {
-	width: 24px; height: 24px; border: 1px solid #ccc; background: white;
-	border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 14px;
-	line-height: 1;
+	width: 18px; height: 18px; border: 1px solid #ddd; background: #fff;
+	border-radius: 50%; cursor: pointer; font-weight: bold; font-size: 11px;
+	color: #666; line-height: 1; padding: 0;
+	display: inline-flex; align-items: center; justify-content: center;
+	transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
-.expand-btn:hover { background: #f0f0f0; }
+.expand-btn:hover { background: #f0f0f0; border-color: #bbb; color: #333; }
+@media (max-width: 640px) {
+	.expand-cell { padding: 4px 0 4px 2px; width: 20px; }
+	.expand-btn { width: 16px; height: 16px; font-size: 10px; }
+}
 .chart-btn {
 	width: 28px; height: 24px; border: 1px solid #ccc; background: white;
 	border-radius: 4px; cursor: pointer; font-size: 12px;

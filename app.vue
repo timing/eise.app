@@ -707,6 +707,11 @@ button:hover, a.button:hover, .tabs a:hover {
 	max-width: none;
 	padding: 24px 32px;
 }
+@media (max-width: 640px) {
+	.page-layout .content.content-card.content-card-dashboard {
+		padding: 16px 12px;
+	}
+}
 .page-layout .content.content-card.content-card-dashboard > :is(h2, h3, h4, p, ul, ol, dl, blockquote) {
 	max-width: none;
 }
