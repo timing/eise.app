@@ -1254,6 +1254,8 @@ async function processFiles(files, options = {}) {
 					});
 					return;
 				} catch (mediabunnyErr) {
+					const fileSizeMb = +(fileToProcess.size / 1024 / 1024).toFixed(1);
+					const reason = mediabunnyErr?.message ? String(mediabunnyErr.message).slice(0, 200) : 'unknown';
 					if (isMobileDevice.value) {
 						// FFmpeg-WASM's ~25 MB bundle + per-frame RAM tends to
 						// tab-crash mobile browsers on anything sizable. Keep
@@ -1262,6 +1264,14 @@ async function processFiles(files, options = {}) {
 						const MOBILE_FFMPEG_MAX_BYTES = 50 * 1024 * 1024;
 						if (fileToProcess.size > MOBILE_FFMPEG_MAX_BYTES) {
 							addLog(`Mediabunny failed on mobile: ${mediabunnyErr.message}. Skipping FFmpeg fallback — file is ${(fileToProcess.size / 1024 / 1024).toFixed(1)} MB (> ${MOBILE_FFMPEG_MAX_BYTES / 1024 / 1024} MB), likely to OOM the browser.`);
+							track('stack_reader_fallback', {
+								...getTrackingContext(),
+								from: 'mediabunny',
+								to: 'aborted',
+								reason,
+								file_size_mb: fileSizeMb,
+								is_mobile: true,
+							});
 							throw mediabunnyErr;
 						}
 						addLog(`Mediabunny failed on mobile: ${mediabunnyErr.message}. Attempting FFmpeg fallback — this may still OOM on constrained devices.`);
@@ -1269,10 +1279,26 @@ async function processFiles(files, options = {}) {
 						addLog(`Mediabunny failed: ${mediabunnyErr.message}`);
 						addLog('Falling back to FFmpeg (slower, downloads ~25 MB decoder)…');
 					}
+					track('stack_reader_fallback', {
+						...getTrackingContext(),
+						from: 'mediabunny',
+						to: 'ffmpeg',
+						reason,
+						file_size_mb: fileSizeMb,
+						is_mobile: isMobileDevice.value,
+					});
 				}
 			} else {
 				addLog(`Mediabunny cannot handle this file: ${check.reason}`);
 				addLog('Falling back to FFmpeg...');
+				track('stack_reader_fallback', {
+					...getTrackingContext(),
+					from: 'mediabunny',
+					to: 'ffmpeg',
+					reason: `unsupported: ${String(check.reason || 'unknown').slice(0, 150)}`,
+					file_size_mb: +(fileToProcess.size / 1024 / 1024).toFixed(1),
+					is_mobile: isMobileDevice.value,
+				});
 			}
 		} else {
 			addLog('CPU mode: using FFmpeg directly');
