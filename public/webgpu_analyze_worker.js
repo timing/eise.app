@@ -647,23 +647,30 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const boundsReductionSize = align4(Math.ceil(requiredSizes.boundsReductionSize * headroom));
     const circularitySize = align4(Math.ceil(requiredSizes.circularitySize * headroom));
 
-    // Fail loudly if any single buffer would exceed maxBufferSize. WebGPU's own
-    // failure mode is silent (invalid buffer + uncaptured validation error), which
-    // masqueraded as "planet detected as 1px at (0,0)" — see Sentry EISE-M2.
-    // Callers should use 'get-max-batch-size' to size batches; this is the guardrail.
+    // Fail loudly if any single buffer would exceed either the physical alloc cap
+    // (maxBufferSize) or the per-binding cap (maxStorageBufferBindingSize — often
+    // much smaller on mobile: 256 MB on Android, vs 2–4 GB maxBufferSize). WebGPU's
+    // own failure mode is silent (invalid buffer + uncaptured validation error),
+    // which masqueraded as "planet detected as 1px at (0,0)" — see Sentry EISE-M2 /
+    // EISE-MT / EISE-NJ. Callers should use 'get-max-batch-size' to size batches;
+    // this is the guardrail.
     const maxBufferSize = device.limits.maxBufferSize;
+    const maxBindingSize = device.limits.maxStorageBufferBindingSize;
+    const effectiveLimit = Math.min(maxBufferSize, maxBindingSize);
     const oversized = [
         ['momentsPixelBuffer', momentsPixelSize],
         ['boundsPixelBuffer', boundsPixelSize],
         ['rgbaBuffer', rgbaBufferSize],
         ['pixelBuffer', pixelBufferSize]
-    ].find(([, size]) => size > maxBufferSize);
+    ].find(([, size]) => size > effectiveLimit);
     if (oversized) {
         const [name, size] = oversized;
         throw new Error(
             `GPU buffer '${name}' would be ${(size / 1024 / 1024).toFixed(0)}MB, ` +
-            `exceeds device maxBufferSize ${(maxBufferSize / 1024 / 1024).toFixed(0)}MB ` +
-            `(batchSize=${batchSize}, ${width}x${height}, bitDepth=${bitDepth}). ` +
+            `exceeds device limit ${(effectiveLimit / 1024 / 1024).toFixed(0)}MB ` +
+            `(maxBufferSize=${(maxBufferSize / 1024 / 1024).toFixed(0)}MB, ` +
+            `maxStorageBufferBindingSize=${(maxBindingSize / 1024 / 1024).toFixed(0)}MB, ` +
+            `batchSize=${batchSize}, ${width}x${height}, bitDepth=${bitDepth}). ` +
             `Query 'get-max-batch-size' before calling analyzeBatch.`
         );
     }
@@ -2407,15 +2414,25 @@ self.addEventListener('message', async (e) => {
 
     if (type === 'get-max-batch-size') {
         const { width, height, bitDepth = 8 } = e.data;
-        // Sum every per-frame buffer we'll actually allocate — this is what
-        // physical memory has to hold for one batch slot. The bit-depth
-        // difference is captured inside calcPerFrameBufferBytes (rgbaBpp goes
-        // from 4 to 16 for 16-bit), so 16-bit naturally gets a proportionally
-        // smaller batch. If 8-bit's calculated batch fits, 16-bit's will too.
+        // Two failure modes to bound against:
+        //  1. Per-buffer WebGPU limits — a single storage buffer must fit in both
+        //     maxBufferSize (physical alloc cap, 2–4 GB desktop) and
+        //     maxStorageBufferBindingSize (per-binding cap, 256 MB on Android).
+        //     Divide by the LARGEST per-frame buffer (moments, 24 B/px).
+        //  2. Total memory pressure — 16-bit sources use much more total memory
+        //     than 8-bit (rgbaBuffer 16 B/px vs 4 B/px), and OOM happens silently
+        //     with an invalid buffer. Divide sumPerFrame by maxBufferSize as a
+        //     rough proxy for total GPU memory budget.
+        // Take min of both to satisfy each constraint. See EISE-M2 / EISE-MT / EISE-NJ.
+        const largestPerFrame = calcLargestPerFrameBufferBytes(width, height, bitDepth);
         const perFrameBytes = calcPerFrameBufferBytes(width, height, bitDepth);
         const maxBufferSize = device ? device.limits.maxBufferSize : (256 * 1024 * 1024);
-        const maxBatch = Math.max(1, Math.floor(maxBufferSize / (perFrameBytes * 1.2)));
-        self.postMessage({ type: 'max-batch-size', maxBatch, perFrameBytes, maxBufferSize });
+        const maxBindingSize = device ? device.limits.maxStorageBufferBindingSize : (128 * 1024 * 1024);
+        const effectiveLimit = Math.min(maxBufferSize, maxBindingSize);
+        const batchByBinding = Math.floor(effectiveLimit / (largestPerFrame * 1.2));
+        const batchByTotal = Math.floor(maxBufferSize / (perFrameBytes * 1.2));
+        const maxBatch = Math.max(1, Math.min(batchByBinding, batchByTotal));
+        self.postMessage({ type: 'max-batch-size', maxBatch, perFrameBytes, maxBufferSize, maxBindingSize });
         return;
     }
 

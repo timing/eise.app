@@ -207,13 +207,30 @@ export function useWebGpuAnalyzeWorker() {
     }
 
     /**
-     * GPU crop and analyze for RGBA frames
+     * GPU crop and analyze for RGBA frames. Chunks larger-than-device batches
+     * so a single dispatch never trips maxBufferSize / maxStorageBufferBindingSize.
+     * See Sentry EISE-MT / EISE-NJ.
      */
     async function cropAndAnalyzeRgbaGpu(frames, srcWidth, srcHeight, cropSize, centers, metadataOnly = false) {
         if (!gpuReady || !gpuWorker) {
             throw new Error('GPU worker not initialized');
         }
+        const maxBatch = await getMaxBatchCached(srcWidth, srcHeight, 8);
+        if (frames.length <= maxBatch) {
+            return dispatchCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, metadataOnly);
+        }
+        addLog(`GPU crop-analyze chunked: ${frames.length} frames / ${maxBatch} per batch (${srcWidth}x${srcHeight})`);
+        const results = [];
+        for (let start = 0; start < frames.length; start += maxBatch) {
+            const chunk = frames.slice(start, start + maxBatch);
+            const chunkCenters = centers ? centers.slice(start, start + maxBatch) : centers;
+            const chunkResults = await dispatchCropAnalyzeBatch(chunk, srcWidth, srcHeight, cropSize, chunkCenters, metadataOnly);
+            results.push(...chunkResults);
+        }
+        return results;
+    }
 
+    async function dispatchCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, metadataOnly) {
         return new Promise((resolve, reject) => {
             const requestId = Date.now() + Math.random();
             const handler = (e) => {
@@ -249,13 +266,28 @@ export function useWebGpuAnalyzeWorker() {
     }
 
     /**
-     * Combined detect + crop + analyze in ONE GPU pass for RGBA frames
+     * Combined detect + crop + analyze in ONE GPU pass for RGBA frames. Chunks
+     * larger-than-device batches. See Sentry EISE-MT / EISE-NJ.
      */
     async function detectCropAnalyzeRgbaGpu(frames, srcWidth, srcHeight, cropSize, threshold = 0.1, metadataOnly = false) {
         if (!gpuReady || !gpuWorker) {
             throw new Error('GPU worker not initialized');
         }
+        const maxBatch = await getMaxBatchCached(srcWidth, srcHeight, 8);
+        if (frames.length <= maxBatch) {
+            return dispatchDetectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, threshold, metadataOnly);
+        }
+        addLog(`GPU detect-crop-analyze chunked: ${frames.length} frames / ${maxBatch} per batch (${srcWidth}x${srcHeight})`);
+        const results = [];
+        for (let start = 0; start < frames.length; start += maxBatch) {
+            const chunk = frames.slice(start, start + maxBatch);
+            const chunkResults = await dispatchDetectCropAnalyzeBatch(chunk, srcWidth, srcHeight, cropSize, threshold, metadataOnly);
+            results.push(...chunkResults);
+        }
+        return results;
+    }
 
+    async function dispatchDetectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, threshold, metadataOnly) {
         return new Promise((resolve, reject) => {
             const requestId = Date.now() + Math.random();
             const handler = (e) => {
