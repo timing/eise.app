@@ -1200,12 +1200,25 @@ export function useMediabunnyReader() {
 		const width = rect.width;
 		const height = rect.height;
 
-		const buffer = new Uint8ClampedArray(width * height * 4);
-		await frame.copyTo(buffer, {
-			format: 'RGBA',
-			rect,
-			layout: [{ offset: 0, stride: width * 4 }]
-		});
+		// Safari's VideoFrame.copyTo() is stricter than Chrome's: it rejects our
+		// tight-stride RGBA layout with "layout size is invalid" (EISE-NG) for
+		// certain frame configurations (portrait video, some NV12 sources).
+		// Canvas draw yields the same 8-bit RGBA as copyTo({format:'RGBA'}) — no
+		// precision loss — but it's the universally-supported path.
+		let buffer;
+		try {
+			buffer = new Uint8ClampedArray(width * height * 4);
+			await frame.copyTo(buffer, {
+				format: 'RGBA',
+				rect,
+				layout: [{ offset: 0, stride: width * 4 }]
+			});
+		} catch (copyErr) {
+			const canvas = new OffscreenCanvas(width, height);
+			const ctx = canvas.getContext('2d', { willReadFrequently: true });
+			ctx.drawImage(frame, rect.x, rect.y, width, height, 0, 0, width, height);
+			buffer = ctx.getImageData(0, 0, width, height).data;
+		}
 
 		// Limited range (luma 16–235) → full range (0–255) expansion, only if needed.
 		// Some cameras (e.g. iOS MOV) encode full-range YUV (yuvj420p / pc range) but the
