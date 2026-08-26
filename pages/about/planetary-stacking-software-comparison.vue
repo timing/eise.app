@@ -132,8 +132,8 @@
 						</tr>
 						<tr>
 							<td class="feature-name">MP4/MOV support</td>
-							<td class="highlight">Yes</td>
-							<td class="highlight">Yes</td>
+							<td class="highlight">Built in</td>
+							<td>Requires user-supplied FFmpeg</td>
 							<td class="highlight">Yes</td>
 							<td>No</td>
 							<td>No</td>
@@ -345,10 +345,11 @@
 
 			<h4>AutoStakkert! - Best for: Maximum stacking quality, Windows users</h4>
 			<p>
-				AutoStakkert! (AS!4) is the gold standard for planetary stacking on Windows.
+				AutoStakkert! is the gold standard for planetary stacking on Windows. The current stable release is AS!4 4.0.11 (January 2024); 4.0.13 (February 2025) is a newer beta build, and there have been no releases since.
 				It offers the most control over alignment points and supports multiple drizzle scales.
-				However, it only handles stacking - you'll need Registax, LuckyStackWorker, or another tool for sharpening.
-				Windows-only, which is problematic for Mac users.
+				SER, AVI, FITS, and image files load natively; MP4, MOV, and HEVC video only work if you separately download FFmpeg and drop <code>ffmpeg.exe</code> into the AutoStakkert! folder.
+				It only handles stacking - you'll need Registax, LuckyStackWorker, or another tool for sharpening.
+				Windows-only (Emil has stated there are no plans for native Mac or Linux builds).
 				<NuxtLink to="/about/autostakkert-vs-eise/">See head-to-head: AutoStakkert! vs Eise.app &rarr;</NuxtLink>
 			</p>
 

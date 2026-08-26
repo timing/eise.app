@@ -4,6 +4,7 @@
 			<h2>AutoStakkert! vs Eise.app - Which Planetary Stacker Should You Use?</h2>
 			<p>
 				AutoStakkert! (by Emil Kraaikamp) has been the industry-standard planetary stacker for over a decade.
+				The current stable release is AutoStakkert!4 4.0.11 (January 2024); 4.0.13 (February 2025) is a newer beta build.
 				Eise.app is a newer browser-based alternative built for people who want to stack a video without installing anything.
 				This page compares the two honestly so you can pick the right tool for your workflow.
 			</p>
@@ -54,9 +55,19 @@
 							<td>No (local, in-browser)</td>
 						</tr>
 						<tr>
-							<td class="feature-name">Input formats</td>
-							<td>SER, AVI, MOV, MP4</td>
-							<td>SER, AVI, MOV, MP4, image sequences</td>
+							<td class="feature-name">Input formats (native)</td>
+							<td>SER, AVI, FITS, image files</td>
+							<td class="highlight">SER, AVI, MP4, MOV, WebM, image sequences</td>
+						</tr>
+						<tr>
+							<td class="feature-name">MP4 / MOV / HEVC</td>
+							<td>Requires user to download FFmpeg and place <code>ffmpeg.exe</code> next to <code>autostakkert.exe</code></td>
+							<td class="highlight">Built in (FFmpeg-WASM bundled, auto-loaded)</td>
+						</tr>
+						<tr>
+							<td class="feature-name">Phone video (iPhone MOV / Android VFR MP4)</td>
+							<td>Works only after the FFmpeg drop-in, and some VFR files still need PIPP first</td>
+							<td class="highlight">Direct drop-in</td>
 						</tr>
 						<tr>
 							<td class="feature-name">Alignment points</td>
@@ -90,7 +101,7 @@
 						</tr>
 						<tr>
 							<td class="feature-name">Development pace</td>
-							<td>Slowed (last public blog activity ~2020)</td>
+							<td>Slow (AS!4 4.0.11 stable Jan 2024, 4.0.13 beta Feb 2025, no releases since)</td>
 							<td class="highlight">Active (weekly changes)</td>
 						</tr>
 						<tr>
@@ -120,6 +131,7 @@
 				<li><strong>You're new to planetary stacking.</strong> Eise.app was designed to work well with defaults. Frame ranking, cropping, alignment, and sensible sharpening are all set up out of the box - you can get to a decent result without knowing what "AP size" or "double stack reference" means yet. Compare to AutoStakkert!, which is powerful but has more settings to learn upfront.</li>
 				<li><strong>You're on macOS or Linux.</strong> No Wine, no CrossOver, no VM. Eise.app runs natively in the browser on Apple Silicon and Linux.</li>
 				<li><strong>You want to try stacking without committing to an install.</strong> Open the page, drop a file, see a result in seconds.</li>
+				<li><strong>You shoot planetary video with a phone or DSLR.</strong> AutoStakkert! reads SER and AVI natively, but MP4, MOV, and HEVC files (typical of iPhone, Android, and mirrorless cameras) only work after you separately download FFmpeg and drop <code>ffmpeg.exe</code> into the AutoStakkert! folder. Eise.app has that layer built in - the same phone clip just opens.</li>
 				<li><strong>You want stacking and post-processing in one tool.</strong> Wavelet sharpening, RGB alignment, deconvolution, and color adjustments are built in - no need to save a TIFF and open Registax or ImPPG afterwards.</li>
 				<li><strong>You want long-term insurance against a tool going stale.</strong> Eise.app is open-source under active development. If maintenance ever slows, the code is on GitHub and forkable. AutoStakkert! is closed-source and its blog has been quiet since around 2020 - the app still works well, but if you rely on it heavily and it ever stops running on a future OS update, you'd be stuck.</li>
 				<li><strong>You're stacking on a shared or work computer.</strong> Nothing to install, no admin rights needed.</li>
@@ -135,6 +147,9 @@
 			</p>
 			<p>
 				<strong>Post-processing.</strong> AutoStakkert! deliberately doesn't do post-processing - the assumption is you'll pass the stacked output to Registax (wavelets), ImPPG (deconvolution), or AstroSurface for sharpening. Eise.app bundles wavelet sharpening, deconvolution, and RGB alignment into the same session.
+			</p>
+			<p>
+				<strong>Video file support.</strong> AutoStakkert!3 and AS!4 read SER, AVI, FITS, and image files directly. For MP4, MOV, and HEVC video (typical of iPhone footage, DSLR/mirrorless clips, and Android recordings), AS! shells out to an external <code>ffmpeg.exe</code> that the user has to download separately and place in the same folder as the AutoStakkert! executable. Without that step, the file simply doesn't open. Variable-frame-rate MP4s from phones often still need a pass through PIPP first. Eise.app bundles FFmpeg-WASM inside the browser app: any supported video format works on drop without any extra downloads or file management.
 			</p>
 			<p>
 				<strong>Privacy.</strong> Both tools process your data locally. AutoStakkert! runs on your machine. Eise.app runs in your browser - nothing is uploaded to a server.

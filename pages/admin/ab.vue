@@ -101,6 +101,8 @@ const { apiBase, authHeader, logout } = inject('adminAuth');
 
 const RANGE_STORAGE_KEY = 'eise-admin-ab-range';
 const EXP_STORAGE_KEY = 'eise-admin-ab-experiment';
+// Shared with /admin/analytics so the site selection persists across both pages.
+const SITE_STORAGE_KEY = 'eise-admin-analytics-site';
 
 const ranges = [
 	{ key: 'today', label: 'Today' },
@@ -311,12 +313,19 @@ onMounted(async () => {
 
 	await fetchSites();
 	if (sites.value.length) {
-		siteId.value = sites.value[0].site_id;
+		let savedSite = null;
+		try { savedSite = localStorage.getItem(SITE_STORAGE_KEY); } catch {}
+		siteId.value = (savedSite && sites.value.some(s => s.site_id === savedSite))
+			? savedSite
+			: sites.value[0].site_id;
 		await fetchExperiments();
 		await fetchAll();
 	}
 });
-watch(siteId, async () => { await fetchExperiments(); });
+watch(siteId, async v => {
+	try { if (v) localStorage.setItem(SITE_STORAGE_KEY, v); } catch {}
+	await fetchExperiments();
+});
 </script>
 
 <style scoped>
