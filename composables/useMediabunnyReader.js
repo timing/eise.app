@@ -1149,8 +1149,11 @@ export function useMediabunnyReader() {
 			console.error('[Mediabunny] Processing failed:', err);
 			addLog(`Error: ${err.message}`);
 			reportError(err, { component: 'useMediabunnyReader', action: 'processVideoFrames' });
-			emit('upload-error', `Video processing failed: ${err.message}`);
-			emit('stop-loading');
+			// Re-throw so the caller (FileUploader) can decide: fall back to
+			// FFmpeg + fire stack_reader_fallback, or surface the error via
+			// its top-level catch. Emitting upload-error/stop-loading here
+			// would short-circuit that decision.
+			throw err;
 		}
 	}
 
