@@ -183,8 +183,8 @@
 				</p>
 			</template>
 
-			<!-- Advanced toggle (variant B only) -->
-			<div v-if="homepageVariant === 'B' && !liteModeClient" class="advanced-toggle-wrapper">
+			<!-- Advanced toggle -->
+			<div v-if="!liteModeClient" class="advanced-toggle-wrapper">
 				<button type="button" class="advanced-toggle" @click="toggleAdvanced">
 					{{ advancedExpanded ? '− Hide advanced settings' : '+ Advanced settings' }}
 				</button>
@@ -330,7 +330,7 @@ import { reportError, UserError } from '@/composables/useSentryReporting';
 import { FFmpegUnsupportedError } from '@/plugins/ffmpeg';
 import { useFeedback } from '@/composables/useFeedback';
 import { useTracking } from '@/composables/useTracking';
-import { useAbTest } from '@/composables/useAbTest';
+import { getVariant } from '@/composables/useAbTest';
 import { useLiteMemoryLimits } from '@/composables/useLiteMemoryLimits';
 
 // Lite mode: auto-enabled on mobile OR when WebGPU unavailable
@@ -344,9 +344,8 @@ const isMobileClient = ref(false); // Only true after mount to avoid hydration m
 const liteModeClient = ref(false); // Only true after mount to avoid hydration mismatch
 
 const { track } = useTracking();
-const homepageVariant = useAbTest('homepage');
 const advancedExpanded = ref(false);
-const showAdvanced = computed(() => homepageVariant.value !== 'B' || advancedExpanded.value);
+const showAdvanced = computed(() => advancedExpanded.value);
 function toggleAdvanced() {
 	advancedExpanded.value = !advancedExpanded.value;
 	try {
@@ -843,9 +842,9 @@ function detectBrightObjectBounds(pixels, width, height) {
 }
 
 // Sample file — served from public/samples/. See public/samples/README.md.
-const SAMPLE_URL = '/samples/jupiter-sample.mp4';
-const SAMPLE_NAME = 'jupiter-sample.mp4';
-const SAMPLE_MIME = 'video/mp4';
+const SAMPLE_URL = '/samples/jupiter-sample.avi';
+const SAMPLE_NAME = 'jupiter-sample.avi';
+const SAMPLE_MIME = 'video/x-msvideo';
 const loadingSample = ref(false);
 
 async function loadSample() {
@@ -1236,7 +1235,10 @@ async function processFiles(files, options = {}) {
 		// Try Mediabunny + WebCodecs first (lighter than FFmpeg, ~50KB vs ~25MB)
 		// Works in both normal and lite mode - especially beneficial for mobile.
 		// When user selected CPU, skip mediabunny entirely and go straight to FFmpeg.
-		if (effectiveUseGpu.value) {
+		// A/B (video_reader): variant B skips mediabunny for GPU users too so we
+		// can compare completion rates against the mediabunny-first default (A).
+		const videoReaderVariant = getVariant('video_reader');
+		if (effectiveUseGpu.value && videoReaderVariant !== 'B') {
 			const { canHandle, processVideoFrames } = useMediabunnyReader();
 			const check = await canHandle(fileToProcess);
 

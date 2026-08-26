@@ -215,6 +215,11 @@ onMounted(async () => {
 	on('cropped-ser-ready', (data) => {
 		croppedSerData.value = data;
 	});
+	on('stack-step', (step) => {
+		// Mid-pipeline funnel checkpoint. Carries reader/gpu/job_id so we can
+		// see how far each attempt gets before dropping to cancel/fail.
+		track('stack_step', { step, ...getTrackingContext() });
+	});
 	on('stack-failed', (data) => {
 		// In batch mode, batch processing handles individual failures
 		if (isBatchProcessing.value) {

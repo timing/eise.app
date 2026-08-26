@@ -11,7 +11,11 @@
 			</div>
 			<div class="control">
 				<label>Experiment</label>
-				<input v-model="experimentName" @change="fetchAll" placeholder="homepage" class="exp-input" />
+				<select v-model="experimentName" @change="fetchAll" class="exp-input">
+					<option v-for="e in experiments" :key="e.name" :value="e.name">
+						{{ e.name }} ({{ e.sessions }})
+					</option>
+				</select>
 			</div>
 			<div class="control">
 				<label>Range</label>
@@ -49,6 +53,10 @@
 		</div>
 
 		<div v-if="error" class="admin-msg error">{{ error }}</div>
+
+		<div v-if="filterLabel" class="filter-callout">
+			<strong>Filtered population:</strong> {{ filterLabel }}
+		</div>
 
 		<section v-if="variants.length">
 			<table class="stats-table">
@@ -119,8 +127,10 @@ const rangeKey = ref('7d');
 const includeAdmin = ref(false);
 const includeBots = ref(false);
 const experimentName = ref('homepage');
+const experiments = ref([]);  // [{ name, sessions, last_ts }]
 
 const variants = ref([]);
+const filterLabel = ref('');
 const loading = ref(false);
 const fetched = ref(false);
 const error = ref('');
@@ -204,6 +214,25 @@ function setRange(k) {
 	fetchAll();
 }
 
+async function fetchExperiments() {
+	if (!siteId.value) return;
+	try {
+		const res = await fetch(`${apiBase}/admin/analytics/ab-experiments?site_id=${encodeURIComponent(siteId.value)}`, {
+			headers: { Authorization: authHeader.value },
+			credentials: 'include',
+		});
+		if (res.status === 401) return logout();
+		if (!res.ok) return;
+		const body = await res.json();
+		experiments.value = body.items || [];
+		// If the saved experiment isn't in the list anymore, still show it so
+		// old A/Bs remain analyzable; drop only if the list is fresh and non-empty.
+		if (experimentName.value && !experiments.value.some(e => e.name === experimentName.value)) {
+			experiments.value = [{ name: experimentName.value, sessions: 0, last_ts: 0 }, ...experiments.value];
+		}
+	} catch {}
+}
+
 async function fetchSites() {
 	loading.value = true;
 	error.value = '';
@@ -246,6 +275,7 @@ async function fetchAll() {
 		if (!res.ok) throw new Error(`ab failed (${res.status})`);
 		const body = await res.json();
 		variants.value = body.variants || [];
+		filterLabel.value = body.filter?.label || '';
 		fetched.value = true;
 	} catch (e) {
 		error.value = e.message;
@@ -282,9 +312,11 @@ onMounted(async () => {
 	await fetchSites();
 	if (sites.value.length) {
 		siteId.value = sites.value[0].site_id;
+		await fetchExperiments();
 		await fetchAll();
 	}
 });
+watch(siteId, async () => { await fetchExperiments(); });
 </script>
 
 <style scoped>
@@ -292,6 +324,12 @@ onMounted(async () => {
 	display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap;
 	margin-bottom: 20px;
 }
+.filter-callout {
+	background: #f7f7f7; border-left: 3px solid #8CCF7E; padding: 10px 14px;
+	border-radius: 4px; font-size: 13px; color: #333; margin-bottom: 16px;
+	line-height: 1.5;
+}
+.filter-callout strong { color: #1a1a1a; }
 .control { display: flex; flex-direction: column; gap: 4px; }
 .control label { font-size: 12px; color: #666; font-weight: bold; }
 .control select, .exp-input {

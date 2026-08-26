@@ -614,6 +614,11 @@ export function useMediabunnyReader() {
 				}
 			}
 
+			// Funnel checkpoint: crop detection is done (or explicitly skipped).
+			// If we got here, mediabunny decoded enough samples to run detection —
+			// the primary "did the reader actually work?" signal.
+			emit('stack-step', 'crop_detected');
+
 			// Publish the sharpest reservoir sample as an initial preview so the
 			// user sees "here's what we detected" the moment crop detection
 			// finishes, before Pass 2's per-frame ranking has produced anything.

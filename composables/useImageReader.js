@@ -666,6 +666,8 @@ export function useImageReader() {
             }
         }
 
+        emit('stack-step', 'crop_detected');
+
         // Second pass: GPU analyze (loading frames on-demand)
         emit('set-caption', cropRegion ? 'Cropping and analyzing images' : 'Analyzing images');
 

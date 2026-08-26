@@ -541,6 +541,7 @@ export function useFFmpegReader() {
             if (cropRegion) {
                 addLog(`Will crop frames to ${cropRegion.size}x${cropRegion.size}`);
             }
+            emit('stack-step', 'crop_detected');
         } else if (!useGpu) {
             addLog(`GPU not available, skipping auto-crop`);
         } else {
@@ -1330,6 +1331,7 @@ export function useFFmpegReader() {
             }
         }
 
+        emit('stack-step', 'crop_detected');
         emit('set-caption', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');
 
         const bestFramesCapacity = Math.max(1, Math.floor(totalFrames * stackPercentage / 100));

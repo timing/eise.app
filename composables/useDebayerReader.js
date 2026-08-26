@@ -1081,6 +1081,7 @@ export function useDebayerReader() {
         if (metadata.width >= MIN_SIZE_FOR_CROP && metadata.height >= MIN_SIZE_FOR_CROP) {
             cropRegion = await detectCropRegion(cropMarginPercent, surfaceMode);
         }
+        emit('stack-step', 'crop_detected');
 
         // Analysis phase - now show loading indicator (after color profile selection)
         emit('start-loading', cropRegion ? 'Cropping and analyzing frames' : 'Analyzing frames');

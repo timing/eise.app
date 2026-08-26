@@ -7,7 +7,7 @@ let humanInteractionTracked = false;
 // Experiments whose variant should be reported with each tracked event.
 // Sent at the top-level `variants` field so the server can attach them to
 // the session once, instead of duplicating on every event's props.
-const ACTIVE_EXPERIMENTS = ['homepage'];
+const ACTIVE_EXPERIMENTS = ['video_reader'];
 
 function activeVariants() {
     const v = {};

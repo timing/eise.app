@@ -392,10 +392,47 @@ export function createAnalyticsAdminRoutes({ db }) {
     return c.json({ items: res.rows });
   });
 
+  // Distinct experiment names ever seen for a site — powers the A/B dropdown
+  // so we can look up historical (finalized) experiments too.
+  app.get('/ab-experiments', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const res = await db.execute({
+      sql: `
+        SELECT DISTINCT j.key AS name,
+               COUNT(DISTINCT s.id) AS sessions,
+               MAX(s.last_ts) AS last_ts
+        FROM sessions s, json_each(s.variants_json) j
+        WHERE s.site_id = ? AND s.variants_json IS NOT NULL
+        GROUP BY j.key
+        ORDER BY last_ts DESC
+      `,
+      args: [site],
+    });
+    return c.json({ items: res.rows });
+  });
+
   // A/B experiment results. Variants are stored once per session in
   // sessions.variants_json (json object like {"homepage": "A"}). Conversion
   // metric: sessions that fired human_interaction AND own-footage stack_start
   // (stack_start without a try_sample event in the same session).
+  //
+  // Some experiments only affect a subset of users (e.g. video_reader only
+  // changes behavior when a user uploads a video-format file). For those, we
+  // restrict the participant pool to sessions that actually reached the code
+  // path — otherwise unaffected users dilute the signal. The `filter` field
+  // in the response labels the applied restriction for the dashboard.
+  const EXPERIMENT_FILTERS = {
+    // video_reader: variant B skips mediabunny for videos. AVI, SER, image,
+    // and CPU-mode paths never touch that branch, so include only sessions
+    // that fired a stack_start on a video-format file.
+    video_reader: {
+      label: 'Restricted to sessions that uploaded a video (mp4/mov/webm/etc.). ' +
+             'SER, AVI, and image uploads are excluded because the variant does not affect them.',
+      predicate: "SUM(CASE WHEN e.event_name = 'stack_start' AND json_extract(e.props_json, '$.file_type') = 'video' THEN 1 ELSE 0 END) > 0",
+    },
+  };
+
   app.get('/ab', async c => {
     const site = siteId(c);
     if (!site) return c.json({ error: 'site_id required' }, 400);
@@ -407,6 +444,8 @@ export function createAnalyticsAdminRoutes({ db }) {
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
     const jsonPath = `$.${name}`;
+    const expFilter = EXPERIMENT_FILTERS[name];
+    const havingClause = expFilter ? `HAVING ${expFilter.predicate}` : '';
 
     const res = await db.execute({
       sql: `
@@ -424,6 +463,7 @@ export function createAnalyticsAdminRoutes({ db }) {
             AND (? = 1 OR e.bot IS NULL)
             AND json_extract(s.variants_json, ?) IS NOT NULL
           GROUP BY s.id, variant
+          ${havingClause}
         )
         SELECT variant,
                COUNT(*) AS participants,
@@ -440,6 +480,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     return c.json({
       name,
       range: { from, to },
+      filter: expFilter ? { label: expFilter.label } : null,
       variants: res.rows.map(r => ({
         variant: r.variant,
         participants: Number(r.participants) || 0,
