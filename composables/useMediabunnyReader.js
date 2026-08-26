@@ -366,29 +366,32 @@ export function useMediabunnyReader() {
 			// Wrap the whole submit + flush in one timeout: 15s per keyframe
 			// worth of budget. A genuinely stuck decoder trips this; a slow
 			// device on a big video doesn't.
-			// Throughput probe: decide fast whether this decoder is actually
-			// usable, rather than sitting through a 75s total-time budget only
-			// to fail at the end. If we get 2 frames out within the probe
-			// window, the decoder is fast enough — we let it run to completion
-			// (however long that takes). If we don't, bail immediately so the
-			// caller can fall back to FFmpeg or hard-fail on mobile.
+			// Two-stage timing check:
+			// 1. THROUGHPUT PROBE — 2 keyframes within 5s (desktop) / 10s (mobile).
+			//    Catches genuinely stuck decoders fast so the user isn't waiting
+			//    a minute+ to discover software fallback is glacial.
+			// 2. TOTAL BUDGET — after the probe passes, the whole Pass 1 must
+			//    finish within 60s (desktop) / 120s (mobile). Catches decoders
+			//    that emit the first frames fast then slow to a crawl (seen on
+			//    Chrome 151 Windows with 24 keyframes running for 15+ min).
 			//
-			// Thresholds chosen to be very generous — a healthy decoder does
-			// 5–60 fps and clears "2 frames" in a fraction of a second. Only
-			// pathological software-decode fallbacks (~7 s per keyframe) miss
-			// this window.
+			// Mobile with ≥ MIN_USABLE_SAMPLES accepts partial results on total-
+			// budget timeout (FFmpeg fallback would OOM anyway); desktop throws
+			// so the caller can auto-fall-back to FFmpeg.
 			const THROUGHPUT_PROBE_MS = isMobile ? 10_000 : 5_000;
+			const TOTAL_BUDGET_MS = isMobile ? 120_000 : 60_000;
 			const PROBE_REQUIRED_SAMPLES = 2;
+			const MIN_USABLE_SAMPLES = 5;
 
+			let decodeAllResolved = false;
 			const decodeAll = (async () => {
 				for (let i = 0; i < keyPackets.length; i++) {
 					if (cancelled || decoderError) break;
 					decoder1.decode(keyPackets[i].toEncodedVideoChunk());
 				}
 				await decoder1.flush();
+				decodeAllResolved = true;
 			})();
-			// Progress ticks: as rawSamples grows via the output callback, we
-			// emit here so the "N / 50" counter advances.
 			const progressTicker = setInterval(() => {
 				emit('update-loading', {
 					progress: -1,
@@ -396,27 +399,37 @@ export function useMediabunnyReader() {
 					total: SAMPLE_SIZE,
 				});
 			}, 100);
-			const probeStart = Date.now();
+
+			const passStart = Date.now();
 			const probe = new Promise((resolve, reject) => {
 				const check = setInterval(() => {
 					if (rawSamples.length >= PROBE_REQUIRED_SAMPLES) {
 						clearInterval(check);
 						resolve();
-					} else if (Date.now() - probeStart >= THROUGHPUT_PROBE_MS) {
+					} else if (Date.now() - passStart >= THROUGHPUT_PROBE_MS) {
 						clearInterval(check);
 						reject(new Error(
-							`Video decoder too slow — only ${rawSamples.length} keyframe(s) in ${Math.round((Date.now() - probeStart) / 1000)}s. ` +
+							`Video decoder too slow — only ${rawSamples.length} keyframe(s) in ${Math.round((Date.now() - passStart) / 1000)}s. ` +
 							`This is usually a software-decode fallback for an unsupported hardware codec. Switching decoders.`
 						));
 					}
 				}, 100);
 			});
+			const totalDeadline = new Promise((_, reject) => {
+				setTimeout(() => reject(Object.assign(
+					new Error(`Video decoder too slow — only ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s. Switching decoders.`),
+					{ isTotalTimeout: true }
+				)), TOTAL_BUDGET_MS);
+			});
 			try {
-				// Probe first — if it rejects, decodeAll is still pending but
-				// we bail. Any queued packets get dropped when we close() below.
 				await probe;
-				// Probe passed: let the decoder finish decoding all the samples.
-				await decodeAll;
+				await Promise.race([decodeAll, totalDeadline]);
+			} catch (err) {
+				if (err?.isTotalTimeout && isMobile && rawSamples.length >= MIN_USABLE_SAMPLES) {
+					addLog(`Slow decoder: got ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s. Continuing on mobile with partial samples (FFmpeg fallback would OOM here).`);
+				} else {
+					throw err;
+				}
 			} finally {
 				clearInterval(progressTicker);
 				try { decoder1.close(); } catch (_) { /* already closing / closed */ }
