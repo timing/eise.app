@@ -379,7 +379,10 @@ export function useMediabunnyReader() {
 			// budget timeout (FFmpeg fallback would OOM anyway); desktop throws
 			// so the caller can auto-fall-back to FFmpeg.
 			const THROUGHPUT_PROBE_MS = isMobile ? 10_000 : 5_000;
-			const TOTAL_BUDGET_MS = isMobile ? 120_000 : 60_000;
+			// Tight total budget: users cancel on long silent waits, and FFmpeg
+			// fallback gives visible progress. Better to fall back at 10-20s than
+			// wait a minute for a stalled decoder that started fast.
+			const TOTAL_BUDGET_MS = isMobile ? 20_000 : 10_000;
 			const PROBE_REQUIRED_SAMPLES = 2;
 			const MIN_USABLE_SAMPLES = 5;
 
