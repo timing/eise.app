@@ -1121,6 +1121,11 @@ async function processFiles(files, options = {}) {
 
 	if( videoFiles.length == 1 ){
 		let fileToProcess = videoFiles[0];
+		// One stack_start per attempt: if mediabunny already fired it, the FFmpeg
+		// fallback branch below skips its own emit so we don't double-count. The
+		// reader context still gets updated so stack_finished/stack_failed carry
+		// the correct reader; the fallback bridge is stack_reader_fallback.
+		let stackStartEmitted = false;
 
 		const MAX_SIZE = 1.9 * 1024 * 1024 * 1024;
 		if (!fileToProcess.name.endsWith('.ser') && !fileToProcess.name.endsWith('.avi') && fileToProcess.size > MAX_SIZE) {
@@ -1239,6 +1244,7 @@ async function processFiles(files, options = {}) {
 				addLog('Using Mediabunny + WebCodecs (lightweight decoder)');
 				setTrackingContext({ file_type: 'video', reader: 'mediabunny', gpu_enabled: effectiveUseGpu.value });
 				emit('processing-started');
+				stackStartEmitted = true;
 				eventBusEmit('start-loading', 'Opening video...');
 
 				try {
@@ -1365,7 +1371,10 @@ async function processFiles(files, options = {}) {
 		// Determine file type for tracking (could be AVI needing FFmpeg or other video format)
 		const ffmpegFileType = fileToProcess.name.endsWith('.avi') ? 'avi' : 'video';
 		setTrackingContext({ file_type: ffmpegFileType, reader: 'ffmpeg', gpu_enabled: effectiveUseGpu.value });
-		emit('processing-started');
+		if (!stackStartEmitted) {
+			emit('processing-started');
+			stackStartEmitted = true;
+		}
 
 		// Run pre-crop detection if enabled
 		let preCropRegion = null;
