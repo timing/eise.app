@@ -47,32 +47,51 @@
 		<div v-if="error" class="admin-msg error">{{ error }}</div>
 
 		<div v-if="summary" class="totals">
-			<div class="stat">
+			<button type="button" class="stat" :class="{ active: chartMetric === 'pageviews' }"
+				@click="pickChartMetric('pageviews')">
 				<div class="stat-label">Pageviews</div>
 				<div class="stat-value">{{ summary.totals.pageviews || 0 }}</div>
-			</div>
-			<div class="stat">
+			</button>
+			<button type="button" class="stat" :class="{ active: chartMetric === 'sessions' }"
+				@click="pickChartMetric('sessions')">
 				<div class="stat-label">
 					Sessions
-					<span class="info-icon">?<span class="info-tooltip">
+					<span class="info-icon" @click.stop>?<span class="info-tooltip">
 						Distinct browsers, identified by a persistent cookie (13-month lifetime).
 						Same browser returning any time in the range counts as 1.
 						Cookie-blocking visitors get a fresh session on each pageview, inflating this count.
 					</span></span>
 				</div>
 				<div class="stat-value">{{ summary.totals.sessions || 0 }}</div>
-			</div>
-			<div class="stat">
+			</button>
+			<button type="button" class="stat" :class="{ active: chartMetric === 'uniques' }"
+				@click="pickChartMetric('uniques')">
 				<div class="stat-label">
 					Daily uniques
-					<span class="info-icon">?<span class="info-tooltip">
+					<span class="info-icon" @click.stop>?<span class="info-tooltip">
 						Distinct visitors per day, identified by a daily-rotating hash of IP + user-agent
 						(works without cookies). Summed across days, so a person visiting on 3 different days
 						counts as 3. Visitors sharing an IP + browser (e.g. behind NAT) collapse into 1.
 					</span></span>
 				</div>
 				<div class="stat-value">{{ totalDailyUniques }}</div>
-			</div>
+			</button>
+			<button type="button" class="stat" :class="{ active: chartMetric === 'event:stack_finished' }"
+				@click="pickChartMetric('event:stack_finished')">
+				<div class="stat-label">Stack finished</div>
+				<div class="stat-value">{{ stackFinishedCount }}</div>
+			</button>
+			<button type="button" class="stat" :class="{ active: chartMetric === 'stack_conversion' }"
+				@click="pickChartMetric('stack_conversion')">
+				<div class="stat-label">
+					Stack conversion
+					<span class="info-icon" @click.stop>?<span class="info-tooltip">
+						stack_finished ÷ stack_start, as a percentage. Measures how often a
+						started stack runs to completion in the range.
+					</span></span>
+				</div>
+				<div class="stat-value">{{ stackConversionLabel }}</div>
+			</button>
 			<div class="stat" v-if="includeAdmin">
 				<div class="stat-label">Admin pageviews</div>
 				<div class="stat-value">{{ summary.totals.admin_pageviews || 0 }}</div>
@@ -87,6 +106,7 @@
 						<option value="pageviews">Pageviews</option>
 						<option value="sessions">Sessions</option>
 						<option value="uniques">Unique visitors</option>
+						<option value="stack_conversion">Stack conversion rate</option>
 						<optgroup v-if="events.length" label="Events">
 							<option v-for="e in events" :key="e.event_name" :value="'event:' + e.event_name">
 								{{ e.event_name }}
@@ -136,9 +156,10 @@
 				<div v-if="chartHover" class="chart-tooltip" :style="tooltipStyle">
 					<div class="tooltip-time">{{ chartHover.label }}</div>
 					<div class="tooltip-value">
-						<strong>{{ chartHover.value }}</strong>
+						<strong>{{ formatChartValue(chartHover.value) }}</strong>
 						{{ chartValueUnit }}
 					</div>
+					<div v-if="chartHover.detail" class="tooltip-detail">{{ chartHover.detail }}</div>
 				</div>
 				<div v-if="!chartValues.length && !chartLoading" class="chart-empty">
 					No data in range.
@@ -375,6 +396,7 @@ const error = ref('');
 const chartMetric = ref('pageviews');
 const chartBucket = ref('day');
 const chartData = ref([]);
+const chartData2 = ref([]);
 const chartLoading = ref(false);
 const chartHover = ref(null);
 const chartEl = ref(null);
@@ -391,6 +413,20 @@ const hasBreakdowns = computed(() =>
 const totalDailyUniques = computed(() => {
 	if (!summary.value?.days) return 0;
 	return summary.value.days.reduce((s, d) => s + (Number(d.daily_uniques) || 0), 0);
+});
+
+function eventCount(name) {
+	const e = events.value.find(x => x.event_name === name);
+	return e ? Number(e.occurrences) || 0 : 0;
+}
+
+const stackFinishedCount = computed(() => eventCount('stack_finished'));
+
+const stackConversionLabel = computed(() => {
+	const starts = eventCount('stack_start');
+	if (!starts) return '—';
+	const pct = (stackFinishedCount.value / starts) * 100;
+	return `${pct.toFixed(1)}%`;
 });
 
 function currentRangeMs() {
@@ -578,14 +614,24 @@ async function fetchChart() {
 	chartLoading.value = true;
 	chartHover.value = null;
 	try {
-		const params = { bucket: chartBucket.value };
-		if (chartMetric.value.startsWith('event:')) {
-			params.event_name = chartMetric.value.slice(6);
+		if (chartMetric.value === 'stack_conversion') {
+			const [starts, finishes] = await Promise.all([
+				apiGet('/admin/analytics/timeseries', { bucket: chartBucket.value, event_name: 'stack_start' }),
+				apiGet('/admin/analytics/timeseries', { bucket: chartBucket.value, event_name: 'stack_finished' }),
+			]);
+			chartData.value = starts.items || [];
+			chartData2.value = finishes.items || [];
 		} else {
-			params.event_name = 'pageview';
+			const params = { bucket: chartBucket.value };
+			if (chartMetric.value.startsWith('event:')) {
+				params.event_name = chartMetric.value.slice(6);
+			} else {
+				params.event_name = 'pageview';
+			}
+			const data = await apiGet('/admin/analytics/timeseries', params);
+			chartData.value = data.items || [];
+			chartData2.value = [];
 		}
-		const data = await apiGet('/admin/analytics/timeseries', params);
-		chartData.value = data.items || [];
 	} catch (err) {
 		error.value = err.message;
 	} finally {
@@ -599,6 +645,11 @@ function chartEvent(name) {
 	nextTick(() => {
 		chartSectionEl.value?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	});
+}
+
+function pickChartMetric(metric) {
+	chartMetric.value = metric;
+	fetchChart();
 }
 
 async function toggleEvent(name) {
@@ -650,13 +701,22 @@ async function toggleRefUrls(host) {
 // ---- Chart computations ----
 
 const chartSeries = computed(() => {
-	if (!chartData.value.length) return [];
+	const isConversion = chartMetric.value === 'stack_conversion';
+	const primary = chartData.value;
+	const secondary = chartData2.value;
+	if (!primary.length && !secondary.length) return [];
 	const bucketMs = chartBucket.value === 'hour' ? 3600000 : 86400000;
 	const map = new Map();
-	for (const row of chartData.value) map.set(Number(row.bucket_ts), row);
+	for (const row of primary) map.set(Number(row.bucket_ts), row);
+	const map2 = new Map();
+	for (const row of secondary) map2.set(Number(row.bucket_ts), row);
 
-	const dataStart = Number(chartData.value[0].bucket_ts);
-	const dataEnd = Number(chartData.value[chartData.value.length - 1].bucket_ts);
+	const allBuckets = [
+		...primary.map(r => Number(r.bucket_ts)),
+		...secondary.map(r => Number(r.bucket_ts)),
+	];
+	const dataStart = Math.min(...allBuckets);
+	const dataEnd = Math.max(...allBuckets);
 
 	const { from, to } = currentRangeMs();
 	let start = from != null ? Math.floor(from / bucketMs) * bucketMs : dataStart;
@@ -673,28 +733,47 @@ const chartSeries = computed(() => {
 	const out = [];
 	for (let t = start; t <= end; t += bucketMs) {
 		const row = map.get(t);
-		out.push(row
-			? { bucket_ts: t, count: Number(row.count) || 0, sessions: Number(row.sessions) || 0, uniques: Number(row.uniques) || 0 }
-			: { bucket_ts: t, count: 0, sessions: 0, uniques: 0 });
+		const row2 = map2.get(t);
+		const count = row ? Number(row.count) || 0 : 0;
+		const count2 = row2 ? Number(row2.count) || 0 : 0;
+		const rate = isConversion && count > 0 ? (count2 / count) * 100 : 0;
+		out.push({
+			bucket_ts: t,
+			count,
+			sessions: row ? Number(row.sessions) || 0 : 0,
+			uniques: row ? Number(row.uniques) || 0 : 0,
+			count2,
+			rate,
+		});
 	}
 	return out;
 });
 
 const chartValues = computed(() => {
+	if (chartMetric.value === 'stack_conversion') {
+		return chartSeries.value.map(r => r.rate);
+	}
 	const field = chartMetric.value === 'sessions' ? 'sessions'
 		: chartMetric.value === 'uniques' ? 'uniques'
 		: 'count';
 	return chartSeries.value.map(r => r[field]);
 });
 
-const chartTotal = computed(() =>
-	chartValues.value.reduce((s, v) => s + v, 0)
-);
+const chartTotal = computed(() => {
+	if (chartMetric.value === 'stack_conversion') {
+		const starts = chartSeries.value.reduce((s, r) => s + r.count, 0);
+		const finishes = chartSeries.value.reduce((s, r) => s + r.count2, 0);
+		if (!starts) return '—';
+		return `${((finishes / starts) * 100).toFixed(1)}%`;
+	}
+	return chartValues.value.reduce((s, v) => s + v, 0);
+});
 
 const chartValueUnit = computed(() => {
 	if (chartMetric.value === 'pageviews') return 'pageviews';
 	if (chartMetric.value === 'sessions') return 'sessions';
 	if (chartMetric.value === 'uniques') return chartBucket.value === 'day' ? 'daily uniques' : 'unique visitors';
+	if (chartMetric.value === 'stack_conversion') return '%';
 	if (chartMetric.value.startsWith('event:')) return chartMetric.value.slice(6);
 	return '';
 });
@@ -719,12 +798,17 @@ const chartPoints = computed(() => {
 	const plotW = chartW.value - pad.left - pad.right;
 	const plotH = chartH - pad.top - pad.bottom;
 	const step = n > 1 ? plotW / (n - 1) : 0;
-	return chartValues.value.map((v, i) => ({
-		x: pad.left + i * step,
-		y: pad.top + plotH * (1 - v / max),
-		v,
-		ts: chartSeries.value[i].bucket_ts,
-	}));
+	const isConversion = chartMetric.value === 'stack_conversion';
+	return chartValues.value.map((v, i) => {
+		const row = chartSeries.value[i];
+		return {
+			x: pad.left + i * step,
+			y: pad.top + plotH * (1 - v / max),
+			v,
+			ts: row.bucket_ts,
+			detail: isConversion ? `${row.count2} / ${row.count} stack_start` : null,
+		};
+	});
 });
 
 const chartPath = computed(() => {
@@ -744,11 +828,22 @@ const chartArea = computed(() => {
 const yTicks = computed(() => {
 	const max = chartMax.value;
 	const plotH = chartH - pad.top - pad.bottom;
-	return [0, 0.25, 0.5, 0.75, 1].map(f => ({
-		y: pad.top + plotH * (1 - f),
-		label: Math.round(max * f),
-	}));
+	const isConversion = chartMetric.value === 'stack_conversion';
+	return [0, 0.25, 0.5, 0.75, 1].map(f => {
+		const v = max * f;
+		return {
+			y: pad.top + plotH * (1 - f),
+			label: isConversion ? `${v.toFixed(v < 10 ? 1 : 0)}%` : Math.round(v),
+		};
+	});
 });
+
+function formatChartValue(v) {
+	if (chartMetric.value === 'stack_conversion') {
+		return (Number(v) || 0).toFixed(1);
+	}
+	return v;
+}
 
 const xTicks = computed(() => {
 	const pts = chartPoints.value;
@@ -803,6 +898,7 @@ function onChartMove(e) {
 		y: nearest.y,
 		value: nearest.v,
 		label: formatBucketFull(nearest.ts),
+		detail: nearest.detail,
 	};
 }
 
@@ -858,6 +954,17 @@ const tooltipStyle = computed(() => {
 .stat {
 	background: #f7f7f7; padding: 12px 20px; border-radius: 6px;
 	min-width: 120px;
+	text-align: left;
+	font: inherit; color: inherit;
+	border: 2px solid transparent;
+}
+button.stat {
+	cursor: pointer;
+	transition: background 0.15s, border-color 0.15s;
+}
+button.stat:hover { background: #eee; }
+button.stat.active {
+	background: #eaf5e5; border-color: #8CCF7E;
 }
 .stat-label {
 	font-size: 11px; text-transform: uppercase; color: #666; margin-bottom: 2px;
@@ -929,6 +1036,7 @@ section h3 { font-size: 15px; margin-bottom: 8px; color: #333; }
 .chart-tooltip .tooltip-time { color: #ccc; font-size: 11px; margin-bottom: 2px; }
 .chart-tooltip .tooltip-value { font-size: 13px; color: #fff; font-weight: 500; }
 .chart-tooltip .tooltip-value strong { font-size: 15px; color: #fff; font-weight: 700; }
+.chart-tooltip .tooltip-detail { color: #ccc; font-size: 11px; margin-top: 2px; }
 .chart-empty, .chart-loading {
 	position: absolute; inset: 0;
 	display: flex; align-items: center; justify-content: center;

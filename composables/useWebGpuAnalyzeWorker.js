@@ -105,11 +105,12 @@ export function useWebGpuAnalyzeWorker() {
     }
 
     /**
-     * Ask the GPU worker how many frames fit in one analyzeBatch call at these
-     * dimensions, given the current device's maxBufferSize. Callers should chunk
-     * larger batches to avoid silent WebGPU allocation failures (Sentry EISE-M2).
+     * Query the GPU worker for batch info at these dimensions. Returns the full
+     * {maxBatch, deviceCanFit, ...} payload. maxBatch is always >= 1 (floored so
+     * callers' chunking loops never divide-by-zero); check deviceCanFit to know
+     * whether a single frame actually fits the device's per-buffer caps.
      */
-    async function getMaxBatchSize(width, height, bitDepth = 8) {
+    async function queryMaxBatchInfo(width, height, bitDepth = 8) {
         if (!gpuReady || !gpuWorker) {
             throw new Error('GPU worker not initialized');
         }
@@ -119,7 +120,7 @@ export function useWebGpuAnalyzeWorker() {
                 if (e.data?.type !== 'max-batch-size') return;
                 clearTimeout(timeout);
                 gpuWorker.removeEventListener('message', handler);
-                resolve(e.data.maxBatch);
+                resolve(e.data);
             };
             gpuWorker.addEventListener('message', handler);
             gpuWorker.postMessage({ type: 'get-max-batch-size', width, height, bitDepth });
@@ -128,6 +129,37 @@ export function useWebGpuAnalyzeWorker() {
                 reject(new Error('GPU worker did not respond to get-max-batch-size'));
             }, 15000);
         });
+    }
+
+    /**
+     * Ask the GPU worker how many frames fit in one analyzeBatch call at these
+     * dimensions, given the current device's maxBufferSize. Callers should chunk
+     * larger batches to avoid silent WebGPU allocation failures (Sentry EISE-M2).
+     * Always >= 1; callers wanting to know whether a single frame fits should
+     * use assertDeviceCanFitFrame instead.
+     */
+    async function getMaxBatchSize(width, height, bitDepth = 8) {
+        return (await queryMaxBatchInfo(width, height, bitDepth)).maxBatch;
+    }
+
+    /**
+     * Bail early with an actionable error when a device cannot fit even a single
+     * frame at these dimensions. Reader composables should call this after
+     * decoding the first frame and learning the true dimensions, before dispatching
+     * any analyze work. Errors are tagged `source: 'device-capability'` so the
+     * caller (FileUploader) can skip the ffmpeg fallback, since ffmpeg feeds the same
+     * analyze worker and would fail identically.
+     */
+    async function assertDeviceCanFitFrame(width, height, bitDepth = 8) {
+        const info = await queryMaxBatchInfo(width, height, bitDepth);
+        if (info.deviceCanFit) return info.maxBatch;
+        const err = new Error(
+            `This device's GPU cannot analyze ${width}×${height} frames: a single frame's ` +
+            `analysis buffer exceeds the per-buffer limit. Try a lower-resolution capture, ` +
+            `or use CPU mode (slower but no size limit).`
+        );
+        err.source = 'device-capability';
+        throw err;
     }
 
     /**
@@ -346,6 +378,7 @@ export function useWebGpuAnalyzeWorker() {
         terminateGpuWorker,
         isGpuReady,
         getMaxBatchSize,
+        assertDeviceCanFitFrame,
         analyzeRgbaBatchGpu,
         cropAndAnalyzeRgbaGpu,
         detectCropAnalyzeRgbaGpu,

@@ -19,7 +19,8 @@ export function useMediabunnyReader() {
 		terminateGpuWorker,
 		analyzeRgbaBatchGpu,
 		detectCropAnalyzeRgbaGpu,
-		getMaxBatchSize
+		getMaxBatchSize,
+		assertDeviceCanFitFrame
 	} = useWebGpuAnalyzeWorker();
 	const { workerUrl } = useWorkerUrl();
 
@@ -486,6 +487,22 @@ export function useMediabunnyReader() {
 			const detectedFullRange = reservoir.length > 0 && !isLimitedRange(reservoir[0].data);
 			addLog(`Pass 1: ${reservoir.length}/${SAMPLE_SIZE} keyframe samples analyzed (video ~${totalFrames} frames), detected range: ${detectedFullRange ? 'full (expansion skipped)' : 'limited (expansion applied)'}`);
 			if (reservoir.length === 0) throw tagErr(new Error('No frames decoded from video'), 'decoder');
+
+			// Bail early when the device's per-buffer cap can't fit a single frame's
+			// analysis buffers at native resolution. Seen on Android Chrome with 4K
+			// video: moments buffer would be ~228 MB while maxStorageBufferBindingSize
+			// caps at 128 MB. Throwing here (source='device-capability') keeps
+			// FileUploader from attempting the ffmpeg fallback — ffmpeg feeds the same
+			// analyze worker and would blow up identically. Better to fail fast with
+			// an actionable message than download 25 MB of decoder to hit the same wall.
+			if (useGPU) {
+				try {
+					await assertDeviceCanFitFrame(actualWidth, actualHeight, 8);
+				} catch (err) {
+					if (err.source === 'device-capability') throw err;
+					throw tagErr(err, 'setup');
+				}
+			}
 
 			// Diagnostic: peak RGB brightness across sample frames (CPU-side).
 			// If the GPU crop detection returns a phantom 1×1 object at (0,0) but

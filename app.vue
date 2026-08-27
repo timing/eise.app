@@ -169,6 +169,29 @@ function detectBrowser() {
 	return browser;
 }
 
+// Watchdog: promotes silent hangs during processing into stack_failed events
+// so "stack_step then silence" sessions (see video_reader A/B analysis) stop
+// looking like abandonment. Fires at most once per run.
+//
+// stackInFlight is a dedicated flag driven by explicit stack lifecycle events
+// (start / finished / failed / cancelled) so cancel-then-hang doesn't emit a
+// bogus stack_failed for the cancelled run. isProcessing.value would work most
+// of the time, but a few code paths leave it true after cancel.
+let stackInFlight = false;
+let lastStackStep = null;
+
+function trackWatchdogFailure(kind, message) {
+	if (!stackInFlight) return;
+	if (isBatchProcessing.value) return;  // Batch mode owns its own error tracking.
+	stackInFlight = false;
+	track('stack_failed', {
+		...getTrackingContext(),
+		reason: `unhandled:${kind}:${String(message || '').slice(0, 150)}`,
+		failed_in: 'watchdog',
+		last_step: lastStackStep || 'none',
+	});
+}
+
 onMounted(async () => {
 	isMounted.value = true;
 	trackHumanInteraction();
@@ -201,6 +224,8 @@ onMounted(async () => {
 	on('color-profile-selected', () => {
 		isSelectingColorProfile.value = false;
 		isProcessing.value = true;
+		stackInFlight = true;
+		lastStackStep = null;
 		// Emit start-loading immediately so VideoFrameProcessor shows loading state
 		eventBusEmit('start-loading', 'Preparing to analyze...');
 		track('stack_start', stackStartProps());
@@ -208,6 +233,8 @@ onMounted(async () => {
 	on('debayer-processing-started', () => {
 		// For SER files where color profile selector was skipped (e.g., forced pattern)
 		isProcessing.value = true;
+		stackInFlight = true;
+		lastStackStep = null;
 		eventBusEmit('start-loading', 'Preparing to analyze...');
 		track('stack_start', stackStartProps());
 	});
@@ -218,6 +245,7 @@ onMounted(async () => {
 	on('stack-step', (step) => {
 		// Mid-pipeline funnel checkpoint. Carries reader/gpu/job_id so we can
 		// see how far each attempt gets before dropping to cancel/fail.
+		lastStackStep = step;
 		track('stack_step', { step, ...getTrackingContext() });
 	});
 	on('stack-failed', (data) => {
@@ -225,6 +253,7 @@ onMounted(async () => {
 		if (isBatchProcessing.value) {
 			return;
 		}
+		stackInFlight = false;  // Explicit failure, watchdog stays quiet.
 		track('stack_failed', getTrackingContext());
 		isProcessing.value = false;
 		const error = data?.error || new Error(`Stacking failed: ${data?.reason || 'unknown reason'}`);
@@ -232,6 +261,19 @@ onMounted(async () => {
 			component: data?.component || 'unknown',
 			action: 'stacking'
 		});
+	});
+	on('cancel-processing', () => { stackInFlight = false; });
+
+	// Watchdog: catch unhandled rejections/errors during processing so the
+	// "stack_step then silence" pattern we saw in the video_reader A/B test
+	// surfaces as stack_failed instead of looking like abandonment. Only fires
+	// while a stack is in flight (isProcessing) and only once per run.
+	window.addEventListener('unhandledrejection', (ev) => {
+		const msg = ev.reason?.message || String(ev.reason || '');
+		trackWatchdogFailure('rejection', msg);
+	});
+	window.addEventListener('error', (ev) => {
+		trackWatchdogFailure('error', ev.message || 'error');
 	});
 });
 
@@ -495,6 +537,7 @@ async function handleStackedImageReady(data) {
 	stackedFloat32Data.value = data.float32Data || null;
 	stackedImageDimensions.value = (data.width && data.height) ? { width: data.width, height: data.height } : null;
 	isProcessing.value = false;
+	stackInFlight = false;
 	track('stack_finished', getTrackingContext());
 	navigateTo('/post-processor/');
 }
@@ -518,6 +561,8 @@ function handleBatchComplete(data) {
 
 function handleProcessingStarted() {
 	isProcessing.value = true;
+	stackInFlight = true;
+	lastStackStep = null;
 	track('stack_start', stackStartProps());
 }
 

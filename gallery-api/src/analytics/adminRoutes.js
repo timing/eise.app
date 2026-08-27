@@ -431,11 +431,16 @@ export function createAnalyticsAdminRoutes({ db }) {
     // video_reader: variant B skips mediabunny for videos. Only sessions that
     // fired a stack_start on a video-format file exercise the differing code
     // path. Success = the video stack actually finished.
+    //
+    // gpu_enabled=1 is required because the mediabunny/ffmpeg branching in
+    // FileUploader.vue is gated on `effectiveUseGpu.value && variant !== 'B'`.
+    // CPU-mode users take the ffmpeg path in BOTH variants — including them
+    // dilutes the pool with sessions that were never affected by the split.
     video_reader: {
       successEvent: 'stack_finished',
-      label: 'Restricted to sessions that uploaded a video (mp4/mov/webm/etc.). ' +
-             'SER, AVI, and image uploads are excluded because the variant does not affect them.',
-      predicate: "SUM(CASE WHEN e.event_name = 'stack_start' AND json_extract(e.props_json, '$.file_type') = 'video' THEN 1 ELSE 0 END) > 0",
+      label: 'Restricted to sessions that started a GPU-mode stack on a video (mp4/mov/webm/etc.). ' +
+             'SER, AVI, image, and CPU-mode uploads are excluded because the variant does not affect them.',
+      predicate: "SUM(CASE WHEN e.event_name = 'stack_start' AND json_extract(e.props_json, '$.file_type') = 'video' AND json_extract(e.props_json, '$.gpu_enabled') = 1 THEN 1 ELSE 0 END) > 0",
     },
   };
 

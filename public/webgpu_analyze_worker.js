@@ -2417,6 +2417,13 @@ self.addEventListener('message', async (e) => {
         //     with an invalid buffer. Divide sumPerFrame by maxBufferSize as a
         //     rough proxy for total GPU memory budget.
         // Take min of both to satisfy each constraint. See EISE-M2 / EISE-MT / EISE-NJ.
+        //
+        // maxBatch is floored to 1 so caller chunking loops (start += maxBatch)
+        // don't infinite-loop. When even a single frame can't fit, the returned
+        // maxBatch is still 1 but `deviceCanFit` is false; callers should use
+        // assertDeviceCanFitFrame() to bail before dispatching analyze work.
+        // Without that guard, analyzeBatch would throw an unhelpful buffer-size
+        // error at allocation time.
         const largestPerFrame = calcLargestPerFrameBufferBytes(width, height, bitDepth);
         const perFrameBytes = calcPerFrameBufferBytes(width, height, bitDepth);
         const maxBufferSize = device ? device.limits.maxBufferSize : (256 * 1024 * 1024);
@@ -2424,8 +2431,10 @@ self.addEventListener('message', async (e) => {
         const effectiveLimit = Math.min(maxBufferSize, maxBindingSize);
         const batchByBinding = Math.floor(effectiveLimit / (largestPerFrame * 1.2));
         const batchByTotal = Math.floor(maxBufferSize / (perFrameBytes * 1.2));
-        const maxBatch = Math.max(1, Math.min(batchByBinding, batchByTotal));
-        self.postMessage({ type: 'max-batch-size', maxBatch, perFrameBytes, maxBufferSize, maxBindingSize });
+        const rawBatch = Math.min(batchByBinding, batchByTotal);
+        const deviceCanFit = rawBatch >= 1;
+        const maxBatch = Math.max(1, rawBatch);
+        self.postMessage({ type: 'max-batch-size', maxBatch, deviceCanFit, perFrameBytes, maxBufferSize, maxBindingSize, largestPerFrame });
         return;
     }
 

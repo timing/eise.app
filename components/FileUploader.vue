@@ -1264,10 +1264,27 @@ async function processFiles(files, options = {}) {
 				} catch (mediabunnyErr) {
 					const fileSizeMb = +(fileToProcess.size / 1024 / 1024).toFixed(1);
 					const reason = mediabunnyErr?.message ? String(mediabunnyErr.message).slice(0, 200) : 'unknown';
-					// mediabunny reader tags throws with .source: setup | decoder | copy | analyze | detect.
-					// Falls back to 'unknown' for unclassified errors so we can spot untagged sites.
+					// mediabunny reader tags throws with .source: setup | decoder | copy | analyze | detect
+					// | device-capability. Falls back to 'unknown' for unclassified errors so we can spot
+					// untagged sites.
 					const failStage = mediabunnyErr?.source || 'unknown';
 					const failLabel = `Reader failed at ${failStage}`;
+					// device-capability = the device's GPU cannot fit a single frame's analysis buffers.
+					// ffmpeg feeds the same analyze worker, so falling back would download 25 MB of
+					// decoder just to hit the same wall. Abort with the actionable message instead.
+					if (failStage === 'device-capability') {
+						addLog(`${failLabel}: ${mediabunnyErr.message}`);
+						track('stack_reader_fallback', {
+							...getTrackingContext(),
+							from: 'mediabunny',
+							to: 'aborted',
+							fail_stage: failStage,
+							reason,
+							file_size_mb: fileSizeMb,
+							is_mobile: isMobileDevice.value,
+						});
+						throw mediabunnyErr;
+					}
 					if (isMobileDevice.value) {
 						// FFmpeg-WASM's ~25 MB bundle + per-frame RAM tends to
 						// tab-crash mobile browsers on anything sizable. Keep
