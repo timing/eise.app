@@ -414,19 +414,25 @@ export function createAnalyticsAdminRoutes({ db }) {
 
   // A/B experiment results. Variants are stored once per session in
   // sessions.variants_json (json object like {"homepage": "A"}). Conversion
-  // metric: sessions that fired human_interaction AND own-footage stack_start
-  // (stack_start without a try_sample event in the same session).
+  // metric: sessions that fired human_interaction AND the experiment's
+  // success event without a try_sample event in the same session.
+  //
+  // Default success event is stack_start; experiments where the variant only
+  // affects the pipeline downstream of the stack starting (e.g. video_reader,
+  // which changes video decoding) override this with stack_finished so the
+  // metric reflects whether the pipeline actually completed.
   //
   // Some experiments only affect a subset of users (e.g. video_reader only
   // changes behavior when a user uploads a video-format file). For those, we
   // restrict the participant pool to sessions that actually reached the code
-  // path — otherwise unaffected users dilute the signal. The `filter` field
-  // in the response labels the applied restriction for the dashboard.
-  const EXPERIMENT_FILTERS = {
-    // video_reader: variant B skips mediabunny for videos. AVI, SER, image,
-    // and CPU-mode paths never touch that branch, so include only sessions
-    // that fired a stack_start on a video-format file.
+  // path so unaffected users don't dilute the signal.
+  const DEFAULT_SUCCESS_EVENT = 'stack_start';
+  const EXPERIMENT_CONFIG = {
+    // video_reader: variant B skips mediabunny for videos. Only sessions that
+    // fired a stack_start on a video-format file exercise the differing code
+    // path. Success = the video stack actually finished.
     video_reader: {
+      successEvent: 'stack_finished',
       label: 'Restricted to sessions that uploaded a video (mp4/mov/webm/etc.). ' +
              'SER, AVI, and image uploads are excluded because the variant does not affect them.',
       predicate: "SUM(CASE WHEN e.event_name = 'stack_start' AND json_extract(e.props_json, '$.file_type') = 'video' THEN 1 ELSE 0 END) > 0",
@@ -444,8 +450,9 @@ export function createAnalyticsAdminRoutes({ db }) {
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
     const jsonPath = `$.${name}`;
-    const expFilter = EXPERIMENT_FILTERS[name];
-    const havingClause = expFilter ? `HAVING ${expFilter.predicate}` : '';
+    const expConfig = EXPERIMENT_CONFIG[name];
+    const successEvent = expConfig?.successEvent || DEFAULT_SUCCESS_EVENT;
+    const havingClause = expConfig?.predicate ? `HAVING ${expConfig.predicate}` : '';
 
     const res = await db.execute({
       sql: `
@@ -453,7 +460,7 @@ export function createAnalyticsAdminRoutes({ db }) {
           SELECT s.id AS session_id,
                  json_extract(s.variants_json, ?) AS variant,
                  MAX(CASE WHEN e.event_name = 'human_interaction' THEN 1 ELSE 0 END) AS did_interact,
-                 MAX(CASE WHEN e.event_name = 'stack_start' THEN 1 ELSE 0 END) AS did_stack_start,
+                 MAX(CASE WHEN e.event_name = ? THEN 1 ELSE 0 END) AS did_succeed,
                  MAX(CASE WHEN e.event_name = 'try_sample' THEN 1 ELSE 0 END) AS did_try_sample
           FROM sessions s
           JOIN events e ON e.session_id = s.id
@@ -468,24 +475,25 @@ export function createAnalyticsAdminRoutes({ db }) {
         SELECT variant,
                COUNT(*) AS participants,
                SUM(did_interact) AS interacted,
-               SUM(CASE WHEN did_stack_start = 1 AND did_try_sample = 0 THEN 1 ELSE 0 END) AS own_stack_start,
-               SUM(CASE WHEN did_interact = 1 AND did_stack_start = 1 AND did_try_sample = 0 THEN 1 ELSE 0 END) AS converted
+               SUM(CASE WHEN did_succeed = 1 AND did_try_sample = 0 THEN 1 ELSE 0 END) AS own_conversion,
+               SUM(CASE WHEN did_interact = 1 AND did_succeed = 1 AND did_try_sample = 0 THEN 1 ELSE 0 END) AS converted
         FROM session_variant
         GROUP BY variant
         ORDER BY variant
       `,
-      args: [jsonPath, site, from, to, inc, incBots, jsonPath],
+      args: [jsonPath, successEvent, site, from, to, inc, incBots, jsonPath],
     });
 
     return c.json({
       name,
       range: { from, to },
-      filter: expFilter ? { label: expFilter.label } : null,
+      success_event: successEvent,
+      filter: expConfig?.label ? { label: expConfig.label } : null,
       variants: res.rows.map(r => ({
         variant: r.variant,
         participants: Number(r.participants) || 0,
         interacted: Number(r.interacted) || 0,
-        own_stack_start: Number(r.own_stack_start) || 0,
+        own_conversion: Number(r.own_conversion) || 0,
         converted: Number(r.converted) || 0,
       })),
     });

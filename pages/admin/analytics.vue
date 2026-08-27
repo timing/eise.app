@@ -926,9 +926,9 @@ section h3 { font-size: 15px; margin-bottom: 8px; color: #333; }
 	white-space: nowrap;
 	z-index: 5;
 }
-.tooltip-time { color: #ccc; font-size: 11px; margin-bottom: 2px; }
-.tooltip-value { font-size: 13px; }
-.tooltip-value strong { font-size: 15px; }
+.chart-tooltip .tooltip-time { color: #ccc; font-size: 11px; margin-bottom: 2px; }
+.chart-tooltip .tooltip-value { font-size: 13px; color: #fff; font-weight: 500; }
+.chart-tooltip .tooltip-value strong { font-size: 15px; color: #fff; font-weight: 700; }
 .chart-empty, .chart-loading {
 	position: absolute; inset: 0;
 	display: flex; align-items: center; justify-content: center;

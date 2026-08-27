@@ -64,9 +64,15 @@
 					<tr>
 						<th>Variant</th>
 						<th title="Distinct sessions bucketed into this variant">People in test</th>
-						<th title="Sessions that fired human_interaction">Engaged</th>
-						<th title="Sessions that stacked their own footage (stack_start without try_sample)">Own stack_start</th>
-						<th title="Own stack_start ÷ engaged">Conversion</th>
+						<th title="Sessions that fired human_interaction">
+							Engaged
+							<div class="event-handle">human_interaction</div>
+						</th>
+						<th :title="`Sessions that fired ${successEvent} without try_sample`">
+							Own conversion
+							<div class="event-handle">{{ successEvent }}</div>
+						</th>
+						<th :title="`Own ${successEvent} ÷ engaged`">Conversion</th>
 						<th title="Relative lift vs variant A">Lift</th>
 						<th title="Two-proportion z-test p-value vs variant A">p-value</th>
 					</tr>
@@ -76,7 +82,7 @@
 						<td class="mono"><strong>{{ row.variant }}</strong></td>
 						<td>{{ row.participants.toLocaleString() }}</td>
 						<td>{{ row.interacted.toLocaleString() }}</td>
-						<td>{{ row.own_stack_start.toLocaleString() }}</td>
+						<td>{{ row.own_conversion.toLocaleString() }}</td>
 						<td>{{ formatRate(row.rate) }}</td>
 						<td :class="liftClass(row.lift)">{{ row.lift == null ? '—' : formatLift(row.lift) }}</td>
 						<td>{{ row.pValue == null ? '—' : row.pValue.toFixed(3) }}</td>
@@ -84,7 +90,7 @@
 				</tbody>
 			</table>
 			<p class="footnote">
-				Conversion = sessions that fired <code>human_interaction</code> <em>and</em> a <code>stack_start</code> without a preceding <code>try_sample</code>, divided by sessions that fired <code>human_interaction</code>. Sample-triggered stacks are excluded from the numerator.
+				Conversion = sessions that fired <code>human_interaction</code> <em>and</em> <code>{{ successEvent }}</code> without a preceding <code>try_sample</code>, divided by sessions that fired <code>human_interaction</code>. Sample-triggered runs are excluded from the numerator.
 			</p>
 		</section>
 
@@ -133,6 +139,7 @@ const experiments = ref([]);  // [{ name, sessions, last_ts }]
 
 const variants = ref([]);
 const filterLabel = ref('');
+const successEvent = ref('stack_start');
 const loading = ref(false);
 const fetched = ref(false);
 const error = ref('');
@@ -181,15 +188,15 @@ function twoProportionPValue(c1, n1, c2, n2) {
 const variantRows = computed(() => {
 	const baseline = variants.value.find(v => v.variant === 'A');
 	return variants.value.map(v => {
-		const rate = v.interacted ? v.own_stack_start / v.interacted : 0;
+		const rate = v.interacted ? v.own_conversion / v.interacted : 0;
 		let lift = null;
 		let pValue = null;
 		if (baseline && baseline.variant !== v.variant && baseline.interacted > 0) {
-			const baseRate = baseline.own_stack_start / baseline.interacted;
+			const baseRate = baseline.own_conversion / baseline.interacted;
 			if (baseRate > 0) lift = (rate - baseRate) / baseRate;
 			pValue = twoProportionPValue(
-				baseline.own_stack_start, baseline.interacted,
-				v.own_stack_start, v.interacted,
+				baseline.own_conversion, baseline.interacted,
+				v.own_conversion, v.interacted,
 			);
 		}
 		return { ...v, rate, lift, pValue };
@@ -278,6 +285,7 @@ async function fetchAll() {
 		const body = await res.json();
 		variants.value = body.variants || [];
 		filterLabel.value = body.filter?.label || '';
+		successEvent.value = body.success_event || 'stack_start';
 		fetched.value = true;
 	} catch (e) {
 		error.value = e.message;
@@ -377,6 +385,12 @@ watch(siteId, async v => {
 .stats-table th {
 	background: #f7f7f7; font-weight: bold; font-size: 11px;
 	text-transform: uppercase; color: #555;
+	vertical-align: bottom;
+}
+.event-handle {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 10px; font-weight: normal; text-transform: none;
+	color: #888; margin-top: 2px;
 }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .lift-positive { color: #2a7a2a; font-weight: bold; }
