@@ -183,47 +183,68 @@ export function useMediabunnyReader() {
 			return e;
 		};
 
-		// Use GPU if available and requested, otherwise CPU workers
-		const useGPU = useWebGPU ? await initializeGpuWorker() : false;
-		let cpuWorkers = [];
-
-		if (!useGPU) {
-			addLog('WebGPU not available, using CPU analysis workers');
-			const CPU_WORKER_COUNT = Math.min(navigator.hardwareConcurrency || 2, 4);
-			for (let i = 0; i < CPU_WORKER_COUNT; i++) {
-				cpuWorkers.push(new Worker(workerUrl('/unified_analyze_worker.js')));
-			}
-			await Promise.all(cpuWorkers.map((worker, i) =>
-				new Promise((resolve, reject) => {
-					const timeout = setTimeout(() => reject(new Error(`CPU worker ${i} timeout`)), 30000);
-					worker.onmessage = (e) => {
-						if (!e.data) { clearTimeout(timeout); reject(new Error('Worker crashed')); return; }
-						if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
-						else if (e.data.type === 'error') { clearTimeout(timeout); reject(new Error(e.data.message)); }
-					};
-					worker.postMessage({ type: 'init' });
-				})
-			));
-		}
-
-		addLog(`Processing video with Mediabunny + WebCodecs (${useGPU ? 'GPU' : 'CPU'})`);
-		emit('set-caption', 'Opening video...');
-
 		try {
-			// Open video with Mediabunny
-			const source = new BlobSource(file);
-			const input = new Input({ source, formats: ALL_FORMATS });
+			// Init GPU or CPU workers. Both init paths can throw; keep them
+			// inside the outer try so any failure surfaces via the outer catch
+			// (Sentry + addLog + rethrow) with fail_stage='setup' instead of
+			// landing in the null/unknown bucket.
+			let useGPU = false;
+			if (useWebGPU) {
+				try {
+					useGPU = await initializeGpuWorker();
+				} catch (err) {
+					throw tagErr(err, 'setup');
+				}
+			}
+			let cpuWorkers = [];
 
-			const videoTracks = await input.getVideoTracks();
-			const videoTrack = videoTracks[0];
-			if (!videoTrack) {
-				throw tagErr(new Error('No video track found'), 'setup');
+			if (!useGPU) {
+				addLog('WebGPU not available, using CPU analysis workers');
+				const CPU_WORKER_COUNT = Math.min(navigator.hardwareConcurrency || 2, 4);
+				for (let i = 0; i < CPU_WORKER_COUNT; i++) {
+					cpuWorkers.push(new Worker(workerUrl('/unified_analyze_worker.js')));
+				}
+				try {
+					await Promise.all(cpuWorkers.map((worker, i) =>
+						new Promise((resolve, reject) => {
+							const timeout = setTimeout(() => reject(new Error(`CPU worker ${i} init timeout`)), 30000);
+							worker.onerror = (e) => { clearTimeout(timeout); reject(new Error(e.message || 'CPU worker onerror')); };
+							worker.onmessage = (e) => {
+								if (!e.data) { clearTimeout(timeout); reject(new Error('Worker crashed')); return; }
+								if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
+								else if (e.data.type === 'error') { clearTimeout(timeout); reject(new Error(e.data.message)); }
+							};
+							worker.postMessage({ type: 'init' });
+						})
+					));
+				} catch (err) {
+					throw tagErr(err, 'setup');
+				}
+			}
+
+			addLog(`Processing video with Mediabunny + WebCodecs (${useGPU ? 'GPU' : 'CPU'})`);
+			emit('set-caption', 'Opening video...');
+
+			// Open video with Mediabunny. Any throw from getVideoTracks /
+			// getDecoderConfig gets tagged 'setup' so analytics can distinguish
+			// container/codec-lookup failures from decoder failures.
+			let videoTrack, decoderConfig;
+			try {
+				const source = new BlobSource(file);
+				const input = new Input({ source, formats: ALL_FORMATS });
+				const videoTracks = await input.getVideoTracks();
+				videoTrack = videoTracks[0];
+				if (!videoTrack) {
+					throw new Error('No video track found');
+				}
+				decoderConfig = await videoTrack.getDecoderConfig();
+			} catch (err) {
+				throw tagErr(err, 'setup');
 			}
 
 			const trackWidth = videoTrack.codedWidth;
 			const trackHeight = videoTrack.codedHeight;
 			const codec = videoTrack.codec;
-			const decoderConfig = await videoTrack.getDecoderConfig();
 
 			const fullCodecString = decoderConfig?.codec || getWebCodecsCodecString(codec, videoTrack);
 			const bitDepth = detectBitDepthFromCodec(fullCodecString);
@@ -234,6 +255,10 @@ export function useMediabunnyReader() {
 				throw tagErr(new Error(`Cannot determine WebCodecs codec string for: ${codec}`), 'setup');
 			}
 			const baseConfig = decoderConfig || { codec: codecString, codedWidth: trackWidth, codedHeight: trackHeight };
+
+			// Funnel checkpoint: container parsed, codec resolved. Everything past
+			// here depends on the decoder + GPU pipeline, not the container.
+			emit('stack-step', 'mediabunny_opened');
 
 			let actualWidth = 0, actualHeight = 0;
 
@@ -261,19 +286,25 @@ export function useMediabunnyReader() {
 				}
 			}
 
-			// Helper: create and configure a fresh decoder
+			// Helper: create and configure a fresh decoder. `dec.configure` can
+			// throw synchronously on unsupported profiles; tag as 'setup' so
+			// the failure lands in the right analytics bucket.
 			let decoderError = null;
 			function makeDecoder(outputFn) {
-				const dec = new VideoDecoder({
-					output: outputFn,
-					error: (e) => {
-						console.error('[WebCodecs] Decoder error:', e);
-						addLog(`Decoder error: ${e.message}`);
-						decoderError = e;
-					}
-				});
-				dec.configure(baseConfig);
-				return dec;
+				try {
+					const dec = new VideoDecoder({
+						output: outputFn,
+						error: (e) => {
+							console.error('[WebCodecs] Decoder error:', e);
+							addLog(`Decoder error: ${e.message}`);
+							decoderError = e;
+						}
+					});
+					dec.configure(baseConfig);
+					return dec;
+				} catch (err) {
+					throw tagErr(err, 'setup');
+				}
 			}
 
 			// Helper: set actual dimensions from first VideoFrame (clamped to strip codec padding)
@@ -290,9 +321,14 @@ export function useMediabunnyReader() {
 				}
 			}
 
-			// Get first key packet — reused for both passes
-			const sink1 = new EncodedPacketSink(videoTrack);
-			const firstKeyPacket = await sink1.getFirstKeyPacket({ verifyKeyPackets: true });
+			// Get first key packet, reused for both passes.
+			let sink1, firstKeyPacket;
+			try {
+				sink1 = new EncodedPacketSink(videoTrack);
+				firstKeyPacket = await sink1.getFirstKeyPacket({ verifyKeyPackets: true });
+			} catch (err) {
+				throw tagErr(err, 'setup');
+			}
 			if (!firstKeyPacket) throw tagErr(new Error('No key frame found in video'), 'setup');
 
 			// ══════════════════════════════════════════════════════════════
@@ -436,6 +472,8 @@ export function useMediabunnyReader() {
 			});
 			try {
 				await probe;
+				// Funnel checkpoint: throughput probe passed, decoder is producing frames.
+				emit('stack-step', 'mediabunny_probe_ok');
 				await Promise.race([decodeAll, totalDeadline]);
 			} catch (err) {
 				if (err?.isTotalTimeout && isMobile && rawSamples.length >= MIN_USABLE_SAMPLES) {
@@ -456,6 +494,9 @@ export function useMediabunnyReader() {
 				throw tagErr(decoderError, 'decoder');
 			}
 
+			// Funnel checkpoint: all requested keyframes decoded (or partial on mobile).
+			emit('stack-step', 'mediabunny_decoded');
+
 			// Convert sampled VideoFrames to RGBA async (no canvas, preserves source bit depth)
 			let reservoir;
 			try {
@@ -469,6 +510,10 @@ export function useMediabunnyReader() {
 			} catch (copyErr) {
 				throw tagErr(copyErr, 'copy');
 			}
+
+			// Funnel checkpoint: all sampled frames converted to RGBA. Everything
+			// past here is analysis, not decode/copy.
+			emit('stack-step', 'mediabunny_copied');
 
 			// Pass 2 (below) still iterates every packet in the video for the
 			// actual analysis + stacking, so it needs the true frame count for
@@ -538,28 +583,60 @@ export function useMediabunnyReader() {
 					// batch would request a ~3GB moments buffer; WebGPU would silently
 					// return an invalid buffer and every frame would be reported as a
 					// 1px "planet" at (0, 0). See Sentry EISE-M2.
-					const maxBatch = await getMaxBatchSize(actualWidth, actualHeight, 8);
-					if (reservoir.length > maxBatch) {
-						addLog(`Chunking crop-detection: ${reservoir.length} samples / ${maxBatch} per GPU batch (maxBufferSize limit)`);
-					}
-					sampleResults = [];
-					for (let start = 0; start < reservoir.length; start += maxBatch) {
-						const chunk = reservoir.slice(start, start + maxBatch);
-						const chunkResults = await analyzeRgbaBatchGpu(chunk, actualWidth, actualHeight);
-						sampleResults.push(...chunkResults);
+					// Any throw from getMaxBatchSize or analyzeRgbaBatchGpu (e.g. mobile
+					// maxStorageBufferBindingSize exceeded, WebGPU validation error,
+					// device-lost cascade) is tagged 'analyze' so it lands in the right
+					// analytics bucket instead of being reported as fail_stage=null.
+					try {
+						const maxBatch = await getMaxBatchSize(actualWidth, actualHeight, 8);
+						if (reservoir.length > maxBatch) {
+							addLog(`Chunking crop-detection: ${reservoir.length} samples / ${maxBatch} per GPU batch (maxBufferSize limit)`);
+						}
+						sampleResults = [];
+						for (let start = 0; start < reservoir.length; start += maxBatch) {
+							const chunk = reservoir.slice(start, start + maxBatch);
+							const chunkResults = await analyzeRgbaBatchGpu(chunk, actualWidth, actualHeight);
+							sampleResults.push(...chunkResults);
+						}
+					} catch (err) {
+						// Preserve upstream tags (e.g. 'device-capability' from the analyze worker).
+						if (err.source) throw err;
+						throw tagErr(err, 'analyze');
 					}
 				} else {
-					// CPU: detect bounds via workers
+					// CPU: detect bounds via workers. Add onerror + 'error' type handler
+					// + timeout so a worker crash doesn't hang forever (previously silent —
+					// contributes to the "stack_step then silence" bucket).
+					const CPU_BOUNDS_TIMEOUT_MS = 60_000;
 					const promises = reservoir.map((frame, i) => {
 						const worker = cpuWorkers[i % cpuWorkers.length];
-						return new Promise((resolve) => {
+						return new Promise((resolve, reject) => {
+							const timeout = setTimeout(() => {
+								worker.removeEventListener('message', handler);
+								worker.removeEventListener('error', onerror);
+								reject(new Error(`CPU bounds worker ${i} timeout after ${CPU_BOUNDS_TIMEOUT_MS / 1000}s`));
+							}, CPU_BOUNDS_TIMEOUT_MS);
+							const cleanup = () => {
+								clearTimeout(timeout);
+								worker.removeEventListener('message', handler);
+								worker.removeEventListener('error', onerror);
+							};
 							const handler = (e) => {
+								if (!e.data) { cleanup(); reject(new Error('CPU bounds worker crashed (empty message)')); return; }
 								if (e.data.type === 'bounds') {
-									worker.removeEventListener('message', handler);
+									cleanup();
 									resolve({ bounds: e.data.bounds.canCrop ? e.data.bounds : null, index: frame.index });
+								} else if (e.data.type === 'error') {
+									cleanup();
+									reject(new Error(e.data.message || 'CPU bounds worker error'));
 								}
 							};
+							const onerror = (e) => {
+								cleanup();
+								reject(new Error(e.message || 'CPU bounds worker onerror'));
+							};
 							worker.addEventListener('message', handler);
+							worker.addEventListener('error', onerror);
 							const buffer = frame.data.buffer.slice(0);
 							worker.postMessage({
 								type: 'detect-bounds-rgba',
@@ -570,8 +647,15 @@ export function useMediabunnyReader() {
 							}, [buffer]);
 						});
 					});
-					sampleResults = await Promise.all(promises);
+					try {
+						sampleResults = await Promise.all(promises);
+					} catch (err) {
+						throw tagErr(err, 'analyze');
+					}
 				}
+				// Funnel checkpoint: crop-detection analysis completed (before the
+				// median-size check that decides whether the crop is usable).
+				emit('stack-step', 'mediabunny_analyzed');
 				const detectedCenters = [], detectedSizes = [];
 				let nullCount = 0, trivialCount = 0;
 				const validBounds = [];  // normalized bounds objects for ROI seeding
@@ -1210,9 +1294,20 @@ export function useMediabunnyReader() {
 			}
 
 		} catch (err) {
+			// Default any untagged throw to source='unknown' and flag it so we
+			// can find the remaining gaps in Sentry (search
+			// `extra.untagged_source:true`). Once no untagged errors appear in
+			// production for a week, every future analytics fail_stage value
+			// should be one of the known tags.
+			const untagged = !err.source;
+			if (untagged) err.source = 'unknown';
 			console.error('[Mediabunny] Processing failed:', err);
 			addLog(`Error: ${err.message}`);
-			reportError(err, { component: 'useMediabunnyReader', action: 'processVideoFrames' });
+			reportError(err, {
+				component: 'useMediabunnyReader',
+				action: 'processVideoFrames',
+				extra: { source: err.source, untagged_source: untagged }
+			});
 			// Re-throw so the caller (FileUploader) can decide: fall back to
 			// FFmpeg + fire stack_reader_fallback, or surface the error via
 			// its top-level catch. Emitting upload-error/stop-loading here
