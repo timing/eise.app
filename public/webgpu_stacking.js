@@ -6,6 +6,7 @@
 // demosaicVngCropShader: VNG + crop in one pass (for batch stacking)
 // rgbaToGrayU8Shader: grayscale extraction for template matching
 import { demosaicVngShader, demosaicVngCropShader, rgbaToGrayU8Shader } from './gpu/shaders.js';
+import { assertBufferFits, checkedStorageBuffer, checkedReadbackBuffer } from './gpu/helpers.js';
 
 // NCC batch template matching shader (moved from webgpu_template_match.js for single-device pipeline)
 const nccBatchShaderCode = `
@@ -1181,15 +1182,22 @@ function getDemosaicBuffers(width, height, batchSize, bitDepth) {
         return cachedDemosaicBuffers;
     }
 
+    const align4 = (size) => Math.ceil(size / 4) * 4;
+    const headroom = 1.1;
+    const inputBufferSize = align4(Math.ceil(inputSize * headroom));
+    const outputBufferSize = align4(Math.ceil(outputSize * headroom));
+
+    // Assert BEFORE destroying old cached buffers so a throw leaves state intact
+    assertBufferFits(stackDevice, inputBufferSize, 'demosaic.inputBuffer');
+    assertBufferFits(stackDevice, outputBufferSize, 'demosaic.outputBuffer');
+
     // Cleanup old buffers
     if (cachedDemosaicBuffers) {
         Object.values(cachedDemosaicBuffers).forEach(buf => {
             if (buf && buf.destroy) buf.destroy();
         });
+        cachedDemosaicBuffers = null;
     }
-
-    const align4 = (size) => Math.ceil(size / 4) * 4;
-    const headroom = 1.1;
 
     cachedDemosaicBuffers = {
         paramsBuffer: stackDevice.createBuffer({
@@ -1197,11 +1205,11 @@ function getDemosaicBuffers(width, height, batchSize, bitDepth) {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         }),
         inputBuffer: stackDevice.createBuffer({
-            size: align4(Math.ceil(inputSize * headroom)),
+            size: inputBufferSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
         }),
         outputBuffer: stackDevice.createBuffer({
-            size: align4(Math.ceil(outputSize * headroom)),
+            size: outputBufferSize,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
         })
     };
@@ -1271,10 +1279,11 @@ async function demosaicVngBatch(frames, width, height, bayerPattern, bitDepth, s
     pass.end();
 
     // Readback
-    const readbackBuffer = stackDevice.createBuffer({
-        size: pixelCount * batchSize * 16,  // Float32 RGBA
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
+    const readbackBuffer = checkedReadbackBuffer(
+        stackDevice,
+        pixelCount * batchSize * 16,  // Float32 RGBA
+        'demosaicVngBatch.readbackBuffer'
+    );
     encoder.copyBufferToBuffer(buffers.outputBuffer, 0, readbackBuffer, 0, pixelCount * batchSize * 16);
 
     stackQueue.submit([encoder.finish()]);
@@ -1323,25 +1332,31 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
-    const inputBuffer = stackDevice.createBuffer({
-        size: Math.ceil(inputSize / 4) * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    });
+    const inputBuffer = checkedStorageBuffer(
+        stackDevice,
+        Math.ceil(inputSize / 4) * 4,
+        'demosaicVngCropBatch.inputBuffer',
+        { copyDst: true }
+    );
 
     const centersBuffer = stackDevice.createBuffer({
         size: batchSize * 8,  // 2 f32 per center
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
 
-    const rgbaOutputBuffer = stackDevice.createBuffer({
-        size: rgbaOutputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-    });
+    const rgbaOutputBuffer = checkedStorageBuffer(
+        stackDevice,
+        rgbaOutputSize,
+        'demosaicVngCropBatch.rgbaOutputBuffer',
+        { copySrc: true }
+    );
 
-    const grayOutputBuffer = stackDevice.createBuffer({
-        size: grayOutputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-    });
+    const grayOutputBuffer = checkedStorageBuffer(
+        stackDevice,
+        grayOutputSize,
+        'demosaicVngCropBatch.grayOutputBuffer',
+        { copySrc: true, copyDst: true }
+    );
 
     // Pack raw Bayer data into input buffer
     const inputData = new Uint8Array(srcPixelCount * batchSize * bytesPerPixel);
@@ -1398,10 +1413,12 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
     pass.end();
 
     // Apply 7x7 Gaussian blur to grayscale (matches batch path for consistent template matching)
-    const blurredGrayBuffer = stackDevice.createBuffer({
-        size: grayOutputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-    });
+    const blurredGrayBuffer = checkedStorageBuffer(
+        stackDevice,
+        grayOutputSize,
+        'demosaicVngCropBatch.blurredGrayBuffer',
+        { copySrc: true }
+    );
     const blurParamsBuffer = stackDevice.createBuffer({
         size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
@@ -1425,14 +1442,16 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
     blurPass.end();
 
     // Readback both buffers
-    const rgbaReadback = stackDevice.createBuffer({
-        size: rgbaOutputSize,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
-    const grayReadback = stackDevice.createBuffer({
-        size: grayOutputSize,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
+    const rgbaReadback = checkedReadbackBuffer(
+        stackDevice,
+        rgbaOutputSize,
+        'demosaicVngCropBatch.rgbaReadback'
+    );
+    const grayReadback = checkedReadbackBuffer(
+        stackDevice,
+        grayOutputSize,
+        'demosaicVngCropBatch.grayReadback'
+    );
 
     encoder.copyBufferToBuffer(rgbaOutputBuffer, 0, rgbaReadback, 0, rgbaOutputSize);
     encoder.copyBufferToBuffer(blurredGrayBuffer, 0, grayReadback, 0, grayOutputSize);
@@ -1484,15 +1503,19 @@ async function extractGrayscale(rgbaData, width, height, batchSize) {
     const bufferSize = Math.ceil(totalPixels / 4) * 4;
 
     // Create buffers
-    const rgbaBuffer = stackDevice.createBuffer({
-        size: rgbaData.byteLength,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    });
+    const rgbaBuffer = checkedStorageBuffer(
+        stackDevice,
+        rgbaData.byteLength,
+        'extractGrayscale.rgbaBuffer',
+        { copyDst: true }
+    );
 
-    const grayBuffer = stackDevice.createBuffer({
-        size: bufferSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-    });
+    const grayBuffer = checkedStorageBuffer(
+        stackDevice,
+        bufferSize,
+        'extractGrayscale.grayBuffer',
+        { copySrc: true, copyDst: true }
+    );
 
     const paramsBuffer = stackDevice.createBuffer({
         size: 16,
@@ -1532,10 +1555,11 @@ async function extractGrayscale(rgbaData, width, height, batchSize) {
     pass.end();
 
     // Readback
-    const readbackBuffer = stackDevice.createBuffer({
-        size: bufferSize,
-        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
+    const readbackBuffer = checkedReadbackBuffer(
+        stackDevice,
+        bufferSize,
+        'extractGrayscale.readbackBuffer'
+    );
     encoder.copyBufferToBuffer(grayBuffer, 0, readbackBuffer, 0, bufferSize);
 
     stackQueue.submit([encoder.finish()]);
@@ -1572,12 +1596,6 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
         return cachedStackBuffers;
     }
 
-    if (cachedStackBuffers) {
-        Object.values(cachedStackBuffers).forEach(buf => {
-            if (buf && buf.destroy) buf.destroy();
-        });
-    }
-
     const headroom = 1.1;
     // Helper to align buffer sizes to multiple of 4 (WebGPU requirement)
     const align4 = (size) => Math.ceil(size / 4) * 4;
@@ -1585,6 +1603,21 @@ function getStackingBuffers(inWidth, inHeight, outWidth, outHeight, numAPs) {
     const frameSizeAligned = align4(Math.ceil(requiredSizes.frameSize * headroom));
     const apSizeAligned = align4(Math.ceil(requiredSizes.apSize * headroom));
     const accumSizeAligned = align4(Math.ceil(requiredSizes.accumSize * headroom));
+
+    // Assert BEFORE destroying old cached buffers so a throw leaves state intact.
+    // frameBuffer and accum* dominate: frame is Float32 RGBA (16 B/px) at input
+    // resolution, accum* are per-channel at output (drizzle-scaled) resolution.
+    const extra = `in=${inWidth}x${inHeight}, out=${outWidth}x${outHeight}, numAPs=${numAPs}`;
+    assertBufferFits(stackDevice, frameSizeAligned, 'stacking.frameBuffer', { extra });
+    assertBufferFits(stackDevice, accumSizeAligned, 'stacking.accumBuffer', { extra });
+    assertBufferFits(stackDevice, accumSizeAligned, 'stacking.readbackBuffer', { binding: false, extra });
+
+    if (cachedStackBuffers) {
+        Object.values(cachedStackBuffers).forEach(buf => {
+            if (buf && buf.destroy) buf.destroy();
+        });
+        cachedStackBuffers = null;
+    }
 
     // Create buffer pools for batched processing
     const frameBuffers = [];
@@ -2002,27 +2035,34 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
-    const inputBuffer = stackDevice.createBuffer({
-        size: Math.ceil(inputSize / 4) * 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-    });
+    const inputBuffer = checkedStorageBuffer(
+        stackDevice,
+        Math.ceil(inputSize / 4) * 4,
+        'demosaicVngCropBatchGpu.inputBuffer',
+        { copyDst: true }
+    );
 
     const centersBuffer = stackDevice.createBuffer({
         size: batchSize * 8,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
 
-    // RGBA stays on GPU for warp+accumulate
-    const rgbaGpuBuffer = stackDevice.createBuffer({
-        size: rgbaOutputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-    });
+    // RGBA stays on GPU for warp+accumulate. This is the buffer that hit 398MB in
+    // Sentry EISE-NJ on mobile Chrome (batch=N × cropSize² × 16 B for Float32 RGBA).
+    const rgbaGpuBuffer = checkedStorageBuffer(
+        stackDevice,
+        rgbaOutputSize,
+        'demosaicVngCropBatchGpu.rgbaGpuBuffer',
+        { copySrc: true }
+    );
 
     // Grayscale stays on GPU for template matching AND brightness computation
-    const grayGpuBuffer = stackDevice.createBuffer({
-        size: grayOutputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-    });
+    const grayGpuBuffer = checkedStorageBuffer(
+        stackDevice,
+        grayOutputSize,
+        'demosaicVngCropBatchGpu.grayGpuBuffer',
+        { copySrc: true, copyDst: true }
+    );
 
     // Pack and upload raw Bayer data
     const inputData = new Uint8Array(srcPixelCount * batchSize * bytesPerPixel);
@@ -2052,10 +2092,12 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
     stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
 
     // Create blurred grayscale buffer (blur suppresses demosaic artifacts for template matching)
-    const blurredGrayBuffer = stackDevice.createBuffer({
-        size: grayOutputSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
-    });
+    const blurredGrayBuffer = checkedStorageBuffer(
+        stackDevice,
+        grayOutputSize,
+        'demosaicVngCropBatchGpu.blurredGrayBuffer',
+        { copySrc: true, copyDst: true }
+    );
 
     // Run VNG demosaic
     const encoder = stackDevice.createCommandEncoder();

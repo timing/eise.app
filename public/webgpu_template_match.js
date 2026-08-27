@@ -11,6 +11,8 @@
 // - The NCC computation itself still uses f32 internally for accumulation precision
 // Reference templates remain f32 (small and reused across all frames, negligible savings)
 
+import { assertBufferFits } from './gpu/helpers.js';
+
 let gpuDevice = null;
 let gpuQueue = null;
 let nccPipeline = null;
@@ -1000,19 +1002,29 @@ function getBatchBuffers(numFrames, numAPs, templateSize, frameSize) {
         return cachedBatchBuffers;
     }
 
-    // Destroy old buffers
-    if (cachedBatchBuffers) {
-        Object.values(cachedBatchBuffers).forEach(buf => {
-            if (buf && buf.destroy) buf.destroy();
-        });
-    }
-
     // Create new buffers with headroom
     const headroom = 1.2;
     const templatesSize = align4(Math.ceil(requiredSizes.templatesSize * headroom));
     const framesSize = align4(Math.ceil(requiredSizes.framesSize * headroom));
     const apPosSize = align4(Math.ceil(requiredSizes.apPosSize * headroom));
     const resultsSize = align4(Math.ceil(requiredSizes.resultsSize * headroom));
+
+    // Assert BEFORE destroying old cached buffers so a throw leaves state intact.
+    // framesBuffer dominates: numFrames * frameSize / 4 bytes for packed u8 grayscale,
+    // which is what hit the 128MB mobile Chrome storage binding cap in EISE-NJ.
+    const extra = `numFrames=${numFrames}, numAPs=${numAPs}, templateSize=${templateSize}, frameSize=${frameSize}`;
+    assertBufferFits(gpuDevice, templatesSize, 'batchMatch.templatesBuffer', { extra });
+    assertBufferFits(gpuDevice, framesSize, 'batchMatch.framesBuffer', { extra });
+    assertBufferFits(gpuDevice, resultsSize, 'batchMatch.resultsBuffer', { extra });
+    assertBufferFits(gpuDevice, resultsSize, 'batchMatch.readbackBuffer', { binding: false, extra });
+
+    // Destroy old buffers
+    if (cachedBatchBuffers) {
+        Object.values(cachedBatchBuffers).forEach(buf => {
+            if (buf && buf.destroy) buf.destroy();
+        });
+        cachedBatchBuffers = null;
+    }
 
     cachedBatchBuffers = {
         paramsBuffer: gpuDevice.createBuffer({
@@ -1191,12 +1203,6 @@ function getTwoPhaseBuffers(numFrames, numAPs, templateSize, frameSize) {
         return cachedTwoPhaseBuffers;
     }
 
-    if (cachedTwoPhaseBuffers) {
-        Object.values(cachedTwoPhaseBuffers).forEach(buf => {
-            if (buf && buf.destroy) buf.destroy();
-        });
-    }
-
     const headroom = 1.2;
     const templatesSize = align4(Math.ceil(requiredSizes.templatesSize * headroom));
     const templatesBlurredSize = align4(Math.ceil(requiredSizes.templatesBlurredSize * headroom));
@@ -1204,6 +1210,22 @@ function getTwoPhaseBuffers(numFrames, numAPs, templateSize, frameSize) {
     const blurredSize = align4(Math.ceil(requiredSizes.blurredSize * headroom));
     const apPosSize = align4(Math.ceil(requiredSizes.apPosSize * headroom));
     const resultsSize = align4(Math.ceil(requiredSizes.resultsSize * headroom));
+
+    // Assert BEFORE destroying old cached buffers so a throw leaves state intact.
+    const extra = `numFrames=${numFrames}, numAPs=${numAPs}, templateSize=${templateSize}, frameSize=${frameSize}`;
+    assertBufferFits(gpuDevice, templatesSize, 'twoPhase.templatesBuffer', { extra });
+    assertBufferFits(gpuDevice, templatesBlurredSize, 'twoPhase.templatesBlurredBuffer', { extra });
+    assertBufferFits(gpuDevice, framesSize, 'twoPhase.framesBuffer', { extra });
+    assertBufferFits(gpuDevice, blurredSize, 'twoPhase.blurredBuffer', { extra });
+    assertBufferFits(gpuDevice, resultsSize, 'twoPhase.resultsBuffer', { extra });
+    assertBufferFits(gpuDevice, resultsSize, 'twoPhase.readbackBuffer', { binding: false, extra });
+
+    if (cachedTwoPhaseBuffers) {
+        Object.values(cachedTwoPhaseBuffers).forEach(buf => {
+            if (buf && buf.destroy) buf.destroy();
+        });
+        cachedTwoPhaseBuffers = null;
+    }
 
     cachedTwoPhaseBuffers = {
         paramsBuffer: gpuDevice.createBuffer({
@@ -1449,12 +1471,20 @@ function getBuffers(numAPs, patchSize, searchRadius) {
         return cachedBuffers;
     }
 
+    // Assert BEFORE destroying old cached buffers so a throw leaves state intact.
+    const extra = `numAPs=${numAPs}, patchSize=${patchSize}, searchRadius=${searchRadius}`;
+    assertBufferFits(gpuDevice, templatesBytes, 'singleMatch.templatesBuffer', { extra });
+    assertBufferFits(gpuDevice, searchBytes, 'singleMatch.searchBuffer', { extra });
+    assertBufferFits(gpuDevice, resultsBytes, 'singleMatch.resultsBuffer', { extra });
+    assertBufferFits(gpuDevice, resultsBytes, 'singleMatch.readbackBuffer', { binding: false, extra });
+
     if (cachedBuffers) {
         cachedBuffers.paramsBuffer.destroy();
         cachedBuffers.templatesBuffer.destroy();
         cachedBuffers.searchBuffer.destroy();
         cachedBuffers.resultsBuffer.destroy();
         cachedBuffers.readbackBuffer.destroy();
+        cachedBuffers = null;
     }
 
     cachedBuffers = {

@@ -151,3 +151,79 @@ export function readbackBuffer(device, size) {
         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
     });
 }
+
+// ============================================================
+// Buffer Size Guards
+// ============================================================
+//
+// WebGPU exposes two per-buffer caps that oversized allocations silently violate:
+//   1. maxBufferSize (physical alloc cap, 2-4 GB desktop, still large on mobile)
+//   2. maxStorageBufferBindingSize (per-binding cap when bound as storage,
+//      2 GB desktop but 128 MB on many mobile Chrome builds)
+//
+// Exceeding either produces an invalid buffer and a cascade of validation errors
+// downstream (see Sentry EISE-M2 / EISE-MT / EISE-NJ). These helpers fail loudly
+// at allocation time with an actionable message instead.
+
+function _mb(bytes) {
+    return (bytes / 1024 / 1024).toFixed(0);
+}
+
+/**
+ * Throw if `size` exceeds the device's per-buffer limits. Does not allocate.
+ * Call this before destroying cached buffers so a throw leaves state intact.
+ *
+ * @param {GPUDevice} device
+ * @param {number} size - Intended buffer size in bytes
+ * @param {string} name - Buffer name for the error message
+ * @param {Object} [options]
+ * @param {boolean} [options.binding=true] - Whether the buffer will be bound as
+ *   storage. If true (default), checks against min(maxBufferSize,
+ *   maxStorageBufferBindingSize). If false (e.g. MAP_READ readback buffers that
+ *   are never bound), checks only against maxBufferSize.
+ * @param {string} [options.extra] - Extra context appended to the error message
+ *   (e.g. "batchSize=64, 1920x1080, bitDepth=16").
+ */
+export function assertBufferFits(device, size, name, { binding = true, extra = '' } = {}) {
+    const maxBufferSize = device.limits.maxBufferSize;
+    const maxBinding = device.limits.maxStorageBufferBindingSize;
+    const limit = binding ? Math.min(maxBufferSize, maxBinding) : maxBufferSize;
+    if (size > limit) {
+        const suffix = extra ? `, ${extra}` : '';
+        throw new Error(
+            `GPU buffer '${name}' would be ${_mb(size)}MB, exceeds device limit ${_mb(limit)}MB ` +
+            `(maxBufferSize=${_mb(maxBufferSize)}MB, maxStorageBufferBindingSize=${_mb(maxBinding)}MB${suffix}). ` +
+            `Reduce batch size or frame size.`
+        );
+    }
+}
+
+/**
+ * Storage buffer allocation guarded by assertBufferFits. Use for buffers whose
+ * size scales with input dimensions (image size, batch size, frame count).
+ * Skip for tiny fixed-size buffers like uniform params.
+ *
+ * @param {GPUDevice} device
+ * @param {number} size
+ * @param {string} name - Buffer name for the error message
+ * @param {Object} [options] - Same as storageBuffer(): { copySrc, copyDst }
+ * @returns {GPUBuffer}
+ */
+export function checkedStorageBuffer(device, size, name, options = {}) {
+    assertBufferFits(device, size, name);
+    return storageBuffer(device, size, options);
+}
+
+/**
+ * Readback buffer allocation guarded by assertBufferFits with binding:false
+ * (MAP_READ buffers are never bound as storage, so only maxBufferSize applies).
+ *
+ * @param {GPUDevice} device
+ * @param {number} size
+ * @param {string} name - Buffer name for the error message
+ * @returns {GPUBuffer}
+ */
+export function checkedReadbackBuffer(device, size, name) {
+    assertBufferFits(device, size, name, { binding: false });
+    return readbackBuffer(device, size);
+}

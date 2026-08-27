@@ -32,7 +32,8 @@ import {
     createPipeline,
     storageBuffer,
     uniformBuffer,
-    readbackBuffer
+    readbackBuffer,
+    assertBufferFits
 } from './gpu/helpers.js';
 
 console.log('webgpu_analyze_worker.js loaded (v4)');
@@ -627,13 +628,6 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         return cachedAnalyzeBuffers;
     }
 
-    // Destroy old buffers if they exist
-    if (cachedAnalyzeBuffers) {
-        Object.values(cachedAnalyzeBuffers).flat().forEach(buf => {
-            if (buf && buf.destroy) buf.destroy();
-        });
-    }
-
     // Create new buffers with some headroom for slight size variations
     const headroom = 1.2; // 20% extra
     // Helper to align buffer sizes to multiple of 4 (WebGPU requirement)
@@ -647,32 +641,31 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const boundsReductionSize = align4(Math.ceil(requiredSizes.boundsReductionSize * headroom));
     const circularitySize = align4(Math.ceil(requiredSizes.circularitySize * headroom));
 
-    // Fail loudly if any single buffer would exceed either the physical alloc cap
-    // (maxBufferSize) or the per-binding cap (maxStorageBufferBindingSize — often
-    // much smaller on mobile: 256 MB on Android, vs 2–4 GB maxBufferSize). WebGPU's
-    // own failure mode is silent (invalid buffer + uncaptured validation error),
-    // which masqueraded as "planet detected as 1px at (0,0)" — see Sentry EISE-M2 /
-    // EISE-MT / EISE-NJ. Callers should use 'get-max-batch-size' to size batches;
-    // this is the guardrail.
-    const maxBufferSize = device.limits.maxBufferSize;
-    const maxBindingSize = device.limits.maxStorageBufferBindingSize;
-    const effectiveLimit = Math.min(maxBufferSize, maxBindingSize);
-    const oversized = [
+    // Fail loudly if any scaling buffer would exceed the device's per-buffer caps.
+    // WebGPU's own failure mode is silent (invalid buffer + cascade of validation
+    // errors), which masqueraded as "planet detected as 1px at (0,0)". See Sentry
+    // EISE-M2 / EISE-MT / EISE-NJ. Callers should use 'get-max-batch-size' to size
+    // batches; this is the guardrail. Shared helper is in gpu/helpers.js so
+    // stacking/template-match workers can use the same guard.
+    //
+    // Assert BEFORE destroying old cached buffers so a throw leaves state intact
+    // (a subsequent call with valid dims can still reuse the previous cache).
+    const extra = `batchSize=${batchSize}, ${width}x${height}, bitDepth=${bitDepth}. Query 'get-max-batch-size' before calling analyzeBatch`;
+    for (const [name, size] of [
         ['momentsPixelBuffer', momentsPixelSize],
         ['boundsPixelBuffer', boundsPixelSize],
         ['rgbaBuffer', rgbaBufferSize],
         ['pixelBuffer', pixelBufferSize]
-    ].find(([, size]) => size > effectiveLimit);
-    if (oversized) {
-        const [name, size] = oversized;
-        throw new Error(
-            `GPU buffer '${name}' would be ${(size / 1024 / 1024).toFixed(0)}MB, ` +
-            `exceeds device limit ${(effectiveLimit / 1024 / 1024).toFixed(0)}MB ` +
-            `(maxBufferSize=${(maxBufferSize / 1024 / 1024).toFixed(0)}MB, ` +
-            `maxStorageBufferBindingSize=${(maxBindingSize / 1024 / 1024).toFixed(0)}MB, ` +
-            `batchSize=${batchSize}, ${width}x${height}, bitDepth=${bitDepth}). ` +
-            `Query 'get-max-batch-size' before calling analyzeBatch.`
-        );
+    ]) {
+        assertBufferFits(device, size, name, { extra });
+    }
+
+    // Destroy old buffers if they exist
+    if (cachedAnalyzeBuffers) {
+        Object.values(cachedAnalyzeBuffers).flat().forEach(buf => {
+            if (buf && buf.destroy) buf.destroy();
+        });
+        cachedAnalyzeBuffers = null;
     }
 
     // Helper to create array of N identical buffers for concurrent batch support
