@@ -186,9 +186,9 @@ This results in inverted naming:
 
 ## Sentry Error Tracking
 
-**Access Sentry issues via API:**
+**Interactive: use the Sentry MCP** (via the `sentry-issues` skill). Prefer MCP tools like `get_sentry_resource`, `search_issues`, `search_events`, and `analyze_issue_with_seer` over the shell script — they return structured issue data (stacktraces, tags, session logs, trace IDs) in one call. Org `eiseapp`, project `eise`.
 
-Auth token and org/project slugs are in `config/sentry-env.sh` (source it first).
+**Scripting / CI: use the shell script.** Auth token and org/project slugs are in `config/sentry-env.sh` (source it first).
 
 For a single issue by short ID (e.g. `EISE-J8`), use the helper — it makes both API calls and prints a summary or full JSON:
 ```bash
