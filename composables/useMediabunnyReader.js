@@ -173,6 +173,15 @@ export function useMediabunnyReader() {
 		resetCaptures();
 		cancelled = false;
 
+		// Tag errors with a `source` so the caller can distinguish where the
+		// mediabunny pipeline actually failed (setup/codec vs decoder vs
+		// per-frame RGBA copy vs downstream analyze worker).
+		const tagErr = (err, source) => {
+			const e = err instanceof Error ? err : new Error(String(err));
+			if (!e.source) e.source = source;
+			return e;
+		};
+
 		// Use GPU if available and requested, otherwise CPU workers
 		const useGPU = useWebGPU ? await initializeGpuWorker() : false;
 		let cpuWorkers = [];
@@ -207,7 +216,7 @@ export function useMediabunnyReader() {
 			const videoTracks = await input.getVideoTracks();
 			const videoTrack = videoTracks[0];
 			if (!videoTrack) {
-				throw new Error('No video track found');
+				throw tagErr(new Error('No video track found'), 'setup');
 			}
 
 			const trackWidth = videoTrack.codedWidth;
@@ -221,7 +230,7 @@ export function useMediabunnyReader() {
 
 			const codecString = decoderConfig?.codec || getWebCodecsCodecString(codec, videoTrack);
 			if (!codecString) {
-				throw new Error(`Cannot determine WebCodecs codec string for: ${codec}`);
+				throw tagErr(new Error(`Cannot determine WebCodecs codec string for: ${codec}`), 'setup');
 			}
 			const baseConfig = decoderConfig || { codec: codecString, codedWidth: trackWidth, codedHeight: trackHeight };
 
@@ -283,7 +292,7 @@ export function useMediabunnyReader() {
 			// Get first key packet — reused for both passes
 			const sink1 = new EncodedPacketSink(videoTrack);
 			const firstKeyPacket = await sink1.getFirstKeyPacket({ verifyKeyPackets: true });
-			if (!firstKeyPacket) throw new Error('No key frame found in video');
+			if (!firstKeyPacket) throw tagErr(new Error('No key frame found in video'), 'setup');
 
 			// ══════════════════════════════════════════════════════════════
 			// PASS 1 — Crop detection
@@ -431,21 +440,34 @@ export function useMediabunnyReader() {
 				if (err?.isTotalTimeout && isMobile && rawSamples.length >= MIN_USABLE_SAMPLES) {
 					addLog(`Slow decoder: got ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s. Continuing on mobile with partial samples (FFmpeg fallback would OOM here).`);
 				} else {
-					throw err;
+					// probe/deadline errors originate from the VideoDecoder pipeline
+					throw tagErr(err, 'decoder');
 				}
 			} finally {
 				clearInterval(progressTicker);
 				try { decoder1.close(); } catch (_) { /* already closing / closed */ }
 			}
 
+			// If the VideoDecoder.error callback fired during pass 1, surface it.
+			// Otherwise a bad decoder silently produces zero samples and we
+			// misattribute the "No frames decoded" throw to something else.
+			if (decoderError) {
+				throw tagErr(decoderError, 'decoder');
+			}
+
 			// Convert sampled VideoFrames to RGBA async (no canvas, preserves source bit depth)
-			const reservoir = await Promise.all(
-				rawSamples.map(async ({ frame, index }) => {
-					const data = await videoFrameToRgba(frame, actualWidth, actualHeight);
-					frame.close();
-					return { data, index };
-				})
-			);
+			let reservoir;
+			try {
+				reservoir = await Promise.all(
+					rawSamples.map(async ({ frame, index }) => {
+						const data = await videoFrameToRgba(frame, actualWidth, actualHeight);
+						frame.close();
+						return { data, index };
+					})
+				);
+			} catch (copyErr) {
+				throw tagErr(copyErr, 'copy');
+			}
 
 			// Pass 2 (below) still iterates every packet in the video for the
 			// actual analysis + stacking, so it needs the true frame count for
@@ -463,7 +485,7 @@ export function useMediabunnyReader() {
 
 			const detectedFullRange = reservoir.length > 0 && !isLimitedRange(reservoir[0].data);
 			addLog(`Pass 1: ${reservoir.length}/${SAMPLE_SIZE} keyframe samples analyzed (video ~${totalFrames} frames), detected range: ${detectedFullRange ? 'full (expansion skipped)' : 'limited (expansion applied)'}`);
-			if (reservoir.length === 0) throw new Error('No frames decoded from video');
+			if (reservoir.length === 0) throw tagErr(new Error('No frames decoded from video'), 'decoder');
 
 			// Diagnostic: peak RGB brightness across sample frames (CPU-side).
 			// If the GPU crop detection returns a phantom 1×1 object at (0,0) but
@@ -598,7 +620,7 @@ export function useMediabunnyReader() {
 					// too small relative to the frame for stacking to align correctly. Stop
 					// with a clear message rather than proceed to guaranteed-broken output.
 					if (medianSize <= 4) {
-						throw new Error(`Planet detection failed — the detected object was only ${Math.round(medianSize)}px across ${detectedCenters.length} samples. This can happen with very dim planets, unusual video formats, or on some GPUs. Try re-encoding the video at a lower resolution, cropping around the planet in a video editor first, or a different browser.`);
+						throw tagErr(new Error(`Planet detection failed — the detected object was only ${Math.round(medianSize)}px across ${detectedCenters.length} samples. This can happen with very dim planets, unusual video formats, or on some GPUs. Try re-encoding the video at a lower resolution, cropping around the planet in a video editor first, or a different browser.`), 'detect');
 					} else if (desiredSize >= maxAllowedSize) {
 						if (surfaceMode) {
 							addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize}`);
@@ -1074,6 +1096,16 @@ export function useMediabunnyReader() {
 			let packetsSinceFlush = 0;
 
 			decoderError = null;
+			// processBatch fans out to the analyze worker (GPU or CPU). Any
+			// error here is downstream of decode, tag as 'analyze' so we can
+			// distinguish it from decoder/copy failures in analytics.
+			const runBatch = async (batch) => {
+				try {
+					await processBatch(batch);
+				} catch (analyzeErr) {
+					throw tagErr(analyzeErr, 'analyze');
+				}
+			};
 			for await (const packet of sink2.packets(firstKeyPacket2, undefined, { verifyKeyPackets: true })) {
 				if (cancelled || decoderError) break;
 				if (maxFrames > 0 && pass2FrameIndex >= maxFrames) break;
@@ -1088,7 +1120,7 @@ export function useMediabunnyReader() {
 					await decoder2.flush();
 					const batch = currentBatch;
 					currentBatch = [];
-					await processBatch(batch);
+					await runBatch(batch);
 					packetsSinceFlush = 0;
 				}
 
@@ -1102,8 +1134,15 @@ export function useMediabunnyReader() {
 			}
 			// Drain remaining
 			await decoder2.flush();
-			await processBatch(currentBatch);
+			await runBatch(currentBatch);
 			currentBatch = [];
+
+			// A pass-2 decoder failure was silently suppressed by the loop's
+			// `if (decoderError) break;` guard. Surface it now so we don't hand
+			// back a truncated, unusable set of frames to the stacker.
+			if (decoderError) {
+				throw tagErr(decoderError, 'decoder');
+			}
 
 			decoder2.close();
 			input.dispose();

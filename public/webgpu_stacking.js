@@ -15,9 +15,10 @@ struct Params {
     searchWidth: u32,
     searchHeight: u32,
     numAPs: u32,
-    numFrames: u32,
+    numFrames: u32,     // frames to process in this dispatch (workgroup dim)
     frameWidth: u32,
     frameHeight: u32,
+    frameStart: u32,    // offset into grayGpuBuffer + results buffer for this sub-dispatch
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -95,13 +96,18 @@ fn main(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(workgroup_id) wid: vec3<u32>
 ) {
-    let frameIdx = wid.x / params.numAPs;
+    let localFrameIdx = wid.x / params.numAPs;
     let apIdx = wid.x % params.numAPs;
     let threadIdx = lid.x;
 
-    if (frameIdx >= params.numFrames || apIdx >= params.numAPs) {
+    if (localFrameIdx >= params.numFrames || apIdx >= params.numAPs) {
         return;
     }
+
+    // Real index into the shared grayGpuBuffer + results buffer. Sub-dispatches
+    // pass a frameStart offset so we can size each dispatch by TDR budget while
+    // keeping the underlying frame data in one big zero-copy buffer.
+    let frameIdx = localFrameIdx + params.frameStart;
 
     let searchRadius = i32((params.searchWidth - params.templateWidth) / 2u);
     let gridSize = u32(2 * searchRadius + 1);
@@ -661,6 +667,12 @@ let stackReinitializing = false;
 let stackReinitAttempts = 0;
 const STACK_MAX_REINIT_ATTEMPTS = 3;
 
+// Learned per-device cost coefficient for NCC dispatches: ms per unit of work
+// (frames × APs × searchPositions × patchSize²). Sized dispatches by this so
+// a single submit stays well under Windows GPU TDR (~2s). Reset on device loss
+// so the fresh device gets its own calibration.
+let stackingDeviceCostMs = null;
+
 // Forward declaration for auto-recovery
 let reinitializeStackingGpu = null;
 
@@ -708,6 +720,7 @@ async function safeStackMapAsync(buffer, mode) {
             stackDevice = null;
             stackQueue = null;
             isStackingReady = false;
+            stackingDeviceCostMs = null;
 
             // Try to recover
             if (reinitializeStackingGpu && stackReinitAttempts < STACK_MAX_REINIT_ATTEMPTS) {
@@ -1021,6 +1034,7 @@ async function initStackingGPU() {
             isStackingReady = false;
             cachedStackBuffers = null;
             cachedStackConfig = null;
+            stackingDeviceCostMs = null;
 
             // Unblock any in-flight mapAsync calls that may be hung
             if (fireStackDeviceLost) {
@@ -2259,9 +2273,11 @@ async function matchTemplatesFromGpuBuffer(grayGpuBuffer, refGrayData, width, he
         }
     }
 
-    // Create buffers for template matching
+    // Create buffers for template matching. Params grew by one u32 (frameStart)
+    // to let a single big grayGpuBuffer be processed in smaller sub-dispatches;
+    // pad to 16-byte alignment for uniform binding.
     const paramsBuffer = stackDevice.createBuffer({
-        size: 32,
+        size: 48,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
@@ -2286,10 +2302,8 @@ async function matchTemplatesFromGpuBuffer(grayGpuBuffer, refGrayData, width, he
         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
     });
 
-    // Upload data
+    // Upload data (templates + AP positions are constant for the whole batch)
     const searchSize = patchSize + 2 * searchRadius;
-    const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, batchSize, width, height]);
-    stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
     stackQueue.writeBuffer(templatesBuffer, 0, refTemplates);
     stackQueue.writeBuffer(apPosBuffer, 0, apPositions);
 
@@ -2305,18 +2319,71 @@ async function matchTemplatesFromGpuBuffer(grayGpuBuffer, refGrayData, width, he
         ]
     });
 
-    // Run NCC
-    const encoder = stackDevice.createCommandEncoder();
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(nccBatchPipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(batchSize * numAPs, 1, 1);
-    pass.end();
+    // Adaptive dispatch sizing. Same TDR reasoning as
+    // webgpu_template_match.js:matchTemplatesBatchGPU: cost per dispatch is
+    // quadratic in searchRadius and can blow past Windows GPU TDR (~2s) for
+    // large (frames × APs × searchArea) products. Size each sub-dispatch by
+    // measured per-unit cost, targeting well below TDR.
+    const searchPositions = (2 * searchRadius + 1) * (2 * searchRadius + 1);
+    const workPerFrame = numAPs * searchPositions * patchSize * patchSize;
+    const MAX_WORKGROUPS_X = 65535;
+    const workgroupCap = Math.max(1, Math.floor(MAX_WORKGROUPS_X / numAPs));
 
-    encoder.copyBufferToBuffer(resultsBuffer, 0, readbackBuffer, 0, resultsSize);
-    stackQueue.submit([encoder.finish()]);
+    const TARGET_MS = 300;
+    const MAX_MS = 800;
+    const MIN_MS = 80;
+    const framesFromCost = stackingDeviceCostMs != null && stackingDeviceCostMs > 0
+        ? Math.max(1, Math.floor(TARGET_MS / (workPerFrame * stackingDeviceCostMs)))
+        : 8;
+    let framesPerDispatch = Math.min(workgroupCap, Math.min(batchSize, framesFromCost));
 
-    // Read results (small - only shifts, not image data)
+    const src = stackingDeviceCostMs != null ? 'learned' : 'default';
+    console.log(`[stacking] NCC: ${batchSize} frames, ${framesPerDispatch} frames/dispatch (${src}), cap ${workgroupCap}, target ${TARGET_MS}ms, ${numAPs} APs, radius ${searchRadius}`);
+
+    let frameStart = 0;
+    while (frameStart < batchSize) {
+        const sub = Math.min(framesPerDispatch, batchSize - frameStart);
+        const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, sub, width, height, frameStart, 0, 0, 0]);
+        stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
+
+        const t0 = performance.now();
+        const encoder = stackDevice.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(nccBatchPipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(sub * numAPs, 1, 1);
+        pass.end();
+        stackQueue.submit([encoder.finish()]);
+        await stackQueue.onSubmittedWorkDone();
+        const elapsed = performance.now() - t0;
+
+        if (workPerFrame > 0 && sub > 0) {
+            const sample = elapsed / (sub * workPerFrame);
+            const alpha = 0.3;
+            stackingDeviceCostMs = stackingDeviceCostMs == null ? sample : stackingDeviceCostMs * (1 - alpha) + sample * alpha;
+        }
+
+        frameStart += sub;
+        if (frameStart < batchSize) {
+            if (elapsed > MAX_MS && framesPerDispatch > 1) {
+                framesPerDispatch = Math.max(1, Math.floor(framesPerDispatch / 2));
+                console.log(`[stacking] NCC dispatch ${elapsed.toFixed(0)}ms > ${MAX_MS}ms, shrinking to ${framesPerDispatch} frames/dispatch`);
+            } else if (elapsed < MIN_MS && framesPerDispatch < workgroupCap) {
+                const grown = Math.min(workgroupCap, framesPerDispatch * 2);
+                if (grown !== framesPerDispatch) {
+                    framesPerDispatch = grown;
+                    console.log(`[stacking] NCC dispatch ${elapsed.toFixed(0)}ms < ${MIN_MS}ms, growing to ${framesPerDispatch} frames/dispatch`);
+                }
+            }
+        }
+    }
+
+    // Copy all results out in one shot (small buffer, ~9 KB for 500 APs)
+    const copyEncoder = stackDevice.createCommandEncoder();
+    copyEncoder.copyBufferToBuffer(resultsBuffer, 0, readbackBuffer, 0, resultsSize);
+    stackQueue.submit([copyEncoder.finish()]);
+
+    // Read results
     await safeStackMapAsync(readbackBuffer, GPUMapMode.READ);
     const resultsData = new Float32Array(readbackBuffer.getMappedRange().slice(0));
     readbackBuffer.unmap();
@@ -2459,9 +2526,10 @@ async function matchTemplatesFullyGpu(grayGpuBuffer, refGrayData, width, height,
         }
     }
 
-    // Create buffers
+    // Create buffers. Params has 9 u32s (last is frameStart for sub-dispatch);
+    // pad to 48 bytes for uniform alignment.
     const paramsBuffer = stackDevice.createBuffer({
-        size: 32,
+        size: 48,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
 
@@ -2497,10 +2565,8 @@ async function matchTemplatesFullyGpu(grayGpuBuffer, refGrayData, width, height,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
     });
 
-    // Upload data
+    // Upload constant data (templates, AP positions, search positions)
     const searchSize = patchSize + 2 * searchRadius;
-    const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, batchSize, width, height]);
-    stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
     stackQueue.writeBuffer(templatesBuffer, 0, refTemplates);
     stackQueue.writeBuffer(apPositionsBuffer, 0, apPositions);
     stackQueue.writeBuffer(searchPosBuffer, 0, searchPositions);
@@ -2517,18 +2583,62 @@ async function matchTemplatesFullyGpu(grayGpuBuffer, refGrayData, width, height,
         ]
     });
 
-    // Run NCC
-    const encoder = stackDevice.createCommandEncoder();
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(nccBatchPipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(batchSize * numAPs, 1, 1);
-    pass.end();
+    // Adaptive dispatch sizing to stay well under Windows GPU TDR (~2s per
+    // dispatch). Cost scales as frames × APs × searchArea × patchArea; use a
+    // learned per-device coefficient shared with matchTemplatesFromGpuBuffer.
+    const nccSearchPositions = (2 * searchRadius + 1) * (2 * searchRadius + 1);
+    const workPerFrame = numAPs * nccSearchPositions * patchSize * patchSize;
+    const MAX_WORKGROUPS_X = 65535;
+    const workgroupCap = Math.max(1, Math.floor(MAX_WORKGROUPS_X / numAPs));
 
-    stackQueue.submit([encoder.finish()]);
+    const TARGET_MS = 300;
+    const MAX_MS = 800;
+    const MIN_MS = 80;
+    const framesFromCost = stackingDeviceCostMs != null && stackingDeviceCostMs > 0
+        ? Math.max(1, Math.floor(TARGET_MS / (workPerFrame * stackingDeviceCostMs)))
+        : 8;
+    let framesPerDispatch = Math.min(workgroupCap, Math.min(batchSize, framesFromCost));
 
-    // Wait for NCC computation to complete before returning GPU buffers
-    await stackDevice.queue.onSubmittedWorkDone();
+    const src = stackingDeviceCostMs != null ? 'learned' : 'default';
+    console.log(`[stacking] NCC(fullyGpu): ${batchSize} frames, ${framesPerDispatch} frames/dispatch (${src}), cap ${workgroupCap}, target ${TARGET_MS}ms, ${numAPs} APs, radius ${searchRadius}`);
+
+    let frameStart = 0;
+    while (frameStart < batchSize) {
+        const sub = Math.min(framesPerDispatch, batchSize - frameStart);
+        const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, sub, width, height, frameStart, 0, 0, 0]);
+        stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
+
+        const t0 = performance.now();
+        const encoder = stackDevice.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(nccBatchPipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(sub * numAPs, 1, 1);
+        pass.end();
+        stackQueue.submit([encoder.finish()]);
+        await stackDevice.queue.onSubmittedWorkDone();
+        const elapsed = performance.now() - t0;
+
+        if (workPerFrame > 0 && sub > 0) {
+            const sample = elapsed / (sub * workPerFrame);
+            const alpha = 0.3;
+            stackingDeviceCostMs = stackingDeviceCostMs == null ? sample : stackingDeviceCostMs * (1 - alpha) + sample * alpha;
+        }
+
+        frameStart += sub;
+        if (frameStart < batchSize) {
+            if (elapsed > MAX_MS && framesPerDispatch > 1) {
+                framesPerDispatch = Math.max(1, Math.floor(framesPerDispatch / 2));
+                console.log(`[stacking] NCC(fullyGpu) dispatch ${elapsed.toFixed(0)}ms > ${MAX_MS}ms, shrinking to ${framesPerDispatch} frames/dispatch`);
+            } else if (elapsed < MIN_MS && framesPerDispatch < workgroupCap) {
+                const grown = Math.min(workgroupCap, framesPerDispatch * 2);
+                if (grown !== framesPerDispatch) {
+                    framesPerDispatch = grown;
+                    console.log(`[stacking] NCC(fullyGpu) dispatch ${elapsed.toFixed(0)}ms < ${MIN_MS}ms, growing to ${framesPerDispatch} frames/dispatch`);
+                }
+            }
+        }
+    }
 
     // Cleanup temp buffers (keep shiftsGpuBuffer and apPositionsBuffer!)
     paramsBuffer.destroy();

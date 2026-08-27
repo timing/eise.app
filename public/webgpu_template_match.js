@@ -757,6 +757,7 @@ async function initWebGPU() {
             cachedBatchConfig = null;
             cachedTwoPhaseBuffers = null;
             cachedTwoPhaseConfig = null;
+            resetDeviceCost();
 
             // Attempt automatic recovery
             if (matchReinitAttempts < MATCH_MAX_REINIT_ATTEMPTS) {
@@ -872,6 +873,13 @@ reinitializeMatchGpu = async function() {
  * @param searchOffset - Optional {dx, dy} to offset search region in frames (for drift tracking)
  *                       Templates are always extracted from original AP positions in reference
  */
+// Learned per-device cost coefficient: ms per unit of dispatch work, where
+// "unit" = frames × APs × searchPositions × patchSize². Persists across calls
+// so we don't re-calibrate every stack. EMA to smooth over per-dispatch noise.
+// Reset on device loss/reinit so the new device gets fresh calibration.
+let deviceCostMs = null;
+function resetDeviceCost() { deviceCostMs = null; }
+
 async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height, alignmentPoints, patchSize, searchRadius, searchOffset = null) {
     if (!isInitialized) {
         const ok = await initWebGPU();
@@ -880,34 +888,87 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
 
     const numFrames = frameGrayDatas.length;
     const numAPs = alignmentPoints.length;
+    const searchPositions = (2 * searchRadius + 1) * (2 * searchRadius + 1);
+    const workPerFrame = numAPs * searchPositions * patchSize * patchSize;
 
-    // WebGPU limit: max workgroups per dimension is 65535
-    // We dispatch (numFrames * numAPs) workgroups in X dimension
+    // Two upper bounds on chunk size:
+    //  1. WebGPU dispatchWorkgroups X-dim limit (65535). We dispatch
+    //     frames*APs workgroups, so frames per dispatch ≤ 65535/APs.
+    //  2. Empirical time budget per dispatch. Windows GPU TDR fires at ~2s and
+    //     kills the device (see DXGI_ERROR_DEVICE_HUNG crashes where a single
+    //     43-frame × 1507-AP dispatch exceeded the budget). Cost scales as
+    //     frames × APs × searchPositions × patchSize², so from a measured
+    //     per-unit cost we can size dispatches to hit a safe target.
     const MAX_WORKGROUPS_X = 65535;
-    const maxFramesPerBatch = Math.floor(MAX_WORKGROUPS_X / numAPs);
+    const workgroupCap = Math.max(1, Math.floor(MAX_WORKGROUPS_X / numAPs));
 
-    const effectivePatchSize = patchSize;
-    const matchFn = matchTemplatesBatchGPUSimple;
+    const TARGET_MS = 300;   // aim for dispatches around this
+    const MAX_MS = 800;      // shrink if a dispatch exceeds this
+    const MIN_MS = 80;       // grow if a dispatch is well under this
 
-    // If we can fit all frames in one batch, use the simple path
-    if (numFrames * numAPs <= MAX_WORKGROUPS_X) {
-        return await matchFn(refGrayData, frameGrayDatas, width, height, alignmentPoints, effectivePatchSize, searchRadius, searchOffset);
-    }
-
-    // Need to batch frames to stay within workgroup limits
-    console.log(`Template matching: batching ${numFrames} frames into chunks of ${maxFramesPerBatch} (${numAPs} APs)`);
+    // First call: conservative default of 8. Subsequent calls: derive from the
+    // learned cost. Clamped to the workgroup cap either way.
+    const framesFromCost = deviceCostMs != null && deviceCostMs > 0
+        ? Math.max(1, Math.floor(TARGET_MS / (workPerFrame * deviceCostMs)))
+        : 8;
+    let framesPerBatch = Math.min(workgroupCap, framesFromCost);
 
     const allShifts = [];
+    let batchStart = 0;
+    let logged = false;
+    while (batchStart < numFrames) {
+        if (!logged) {
+            const src = deviceCostMs != null ? 'learned' : 'default';
+            console.log(`Template matching: ${numFrames} frames, starting at ${framesPerBatch} frames/dispatch (${src}), cap ${workgroupCap}, target ${TARGET_MS}ms, ${numAPs} APs, radius ${searchRadius}`);
+            logged = true;
+        }
 
-    for (let batchStart = 0; batchStart < numFrames; batchStart += maxFramesPerBatch) {
-        const batchEnd = Math.min(batchStart + maxFramesPerBatch, numFrames);
+        const batchEnd = Math.min(batchStart + framesPerBatch, numFrames);
         const batchFrames = frameGrayDatas.slice(batchStart, batchEnd);
 
-        const batchShifts = await matchFn(
-            refGrayData, batchFrames, width, height, alignmentPoints, effectivePatchSize, searchRadius, searchOffset
-        );
-
+        const t0 = performance.now();
+        let batchShifts;
+        try {
+            batchShifts = await matchTemplatesBatchGPUSimple(
+                refGrayData, batchFrames, width, height, alignmentPoints, patchSize, searchRadius, searchOffset
+            );
+        } catch (err) {
+            const msg = (err && err.message) || '';
+            if (msg === 'GPU_DEVICE_RECOVERED') {
+                // The dispatch tripped device loss (likely TDR). Recovery
+                // succeeded and cached buffers were destroyed by the lost
+                // handler, so we can safely retry the same range on the fresh
+                // device, but with a smaller dispatch. Halving is aggressive
+                // enough to escape the TDR cliff in a couple of retries.
+                framesPerBatch = Math.max(1, Math.floor(framesPerBatch / 2));
+                console.warn(`Template match GPU device loss, retrying at ${framesPerBatch} frames/dispatch`);
+                continue;
+            }
+            throw err;
+        }
         allShifts.push(...batchShifts);
+
+        const elapsed = performance.now() - t0;
+        if (workPerFrame > 0 && batchFrames.length > 0) {
+            const sample = elapsed / (batchFrames.length * workPerFrame);
+            const alpha = 0.3;
+            deviceCostMs = deviceCostMs == null ? sample : deviceCostMs * (1 - alpha) + sample * alpha;
+        }
+
+        if (batchEnd < numFrames) {
+            if (elapsed > MAX_MS && framesPerBatch > 1) {
+                framesPerBatch = Math.max(1, Math.floor(framesPerBatch / 2));
+                console.log(`Template match dispatch ${elapsed.toFixed(0)}ms > ${MAX_MS}ms, shrinking to ${framesPerBatch} frames/dispatch`);
+            } else if (elapsed < MIN_MS && framesPerBatch < workgroupCap) {
+                const grown = Math.min(workgroupCap, framesPerBatch * 2);
+                if (grown !== framesPerBatch) {
+                    framesPerBatch = grown;
+                    console.log(`Template match dispatch ${elapsed.toFixed(0)}ms < ${MIN_MS}ms, growing to ${framesPerBatch} frames/dispatch`);
+                }
+            }
+        }
+
+        batchStart = batchEnd;
     }
 
     return allShifts;
