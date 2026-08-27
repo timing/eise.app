@@ -47,6 +47,19 @@
 		<div v-if="error" class="admin-msg error">{{ error }}</div>
 
 		<div v-if="summary" class="totals">
+			<div class="stat stat-live" v-if="live">
+				<div class="stat-label">
+					<span class="live-dot" :class="{ idle: !live.visitors }"></span>
+					Live (5m)
+					<span class="info-icon" @click.stop>?<span class="info-tooltip">
+						Distinct visitors with a pageview in the last 5 minutes,
+						with total pageviews below. Same filters as the rest of the
+						dashboard (admin, bots). Refreshes every 15 seconds.
+					</span></span>
+				</div>
+				<div class="stat-value">{{ live.visitors }}</div>
+				<div class="stat-sub">{{ live.pageviews }} pageview{{ live.pageviews === 1 ? '' : 's' }}</div>
+			</div>
 			<button type="button" class="stat" :class="{ active: chartMetric === 'pageviews' }"
 				@click="pickChartMetric('pageviews')">
 				<div class="stat-label">Pageviews</div>
@@ -393,6 +406,10 @@ const breakdowns = ref({ country: [], device: [], os: [], browser: [] });
 const loading = ref(false);
 const error = ref('');
 
+const live = ref(null);
+const LIVE_INTERVAL_MS = 15000;
+let liveTimer = null;
+
 const chartMetric = ref('pageviews');
 const chartBucket = ref('day');
 const chartData = ref([]);
@@ -495,11 +512,17 @@ onMounted(async () => {
 			? savedSite
 			: sites.value[0].site_id;
 		await fetchAll();
+		startLivePolling();
 	}
 
 	watch(siteId, v => {
 		try { if (v) localStorage.setItem(SITE_STORAGE_KEY, v); } catch {}
+		if (v) startLivePolling();
 	});
+
+	watch([includeAdmin, includeBots], () => fetchLive());
+
+	document.addEventListener('visibilitychange', onVisibilityChange);
 
 	await nextTick();
 	measureChart();
@@ -514,6 +537,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
 	if (chartResizeObserver) chartResizeObserver.disconnect();
 	window.removeEventListener('resize', measureChart);
+	document.removeEventListener('visibilitychange', onVisibilityChange);
+	stopLivePolling();
 });
 
 function measureChart() {
@@ -575,6 +600,39 @@ async function fetchSites() {
 	} finally {
 		loading.value = false;
 	}
+}
+
+async function fetchLive() {
+	if (!siteId.value) return;
+	try {
+		const params = new URLSearchParams();
+		params.set('site_id', siteId.value);
+		params.set('include_admin', includeAdmin.value ? '1' : '0');
+		params.set('include_bots', includeBots.value ? '1' : '0');
+		const res = await fetch(`${apiBase}/admin/analytics/live?${params.toString()}`, {
+			headers: { Authorization: authHeader.value },
+			credentials: 'include',
+		});
+		if (res.status === 401) return logout();
+		if (!res.ok) return;
+		live.value = await res.json();
+	} catch {}
+}
+
+function startLivePolling() {
+	stopLivePolling();
+	fetchLive();
+	liveTimer = setInterval(() => {
+		if (document.visibilityState === 'visible') fetchLive();
+	}, LIVE_INTERVAL_MS);
+}
+
+function stopLivePolling() {
+	if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+}
+
+function onVisibilityChange() {
+	if (document.visibilityState === 'visible') fetchLive();
 }
 
 async function fetchAll() {
@@ -971,6 +1029,25 @@ button.stat.active {
 	display: flex; align-items: center; gap: 4px;
 }
 .stat-value { font-size: 22px; font-weight: bold; color: #111; }
+.stat-sub { font-size: 11px; color: #666; margin-top: 2px; }
+
+.live-dot {
+	display: inline-block;
+	width: 8px; height: 8px; border-radius: 50%;
+	background: #8CCF7E;
+	box-shadow: 0 0 0 0 rgba(140, 207, 126, 0.7);
+	animation: live-pulse 1.8s ease-out infinite;
+}
+.live-dot.idle {
+	background: #bbb;
+	animation: none;
+	box-shadow: none;
+}
+@keyframes live-pulse {
+	0%   { box-shadow: 0 0 0 0 rgba(140, 207, 126, 0.6); }
+	70%  { box-shadow: 0 0 0 6px rgba(140, 207, 126, 0); }
+	100% { box-shadow: 0 0 0 0 rgba(140, 207, 126, 0); }
+}
 
 .info-icon {
 	display: inline-flex; align-items: center; justify-content: center;

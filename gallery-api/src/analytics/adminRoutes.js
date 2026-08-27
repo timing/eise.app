@@ -366,6 +366,36 @@ export function createAnalyticsAdminRoutes({ db }) {
     });
   });
 
+  app.get('/live', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const inc = includeAdmin(c);
+    const incBots = includeBots(c);
+    const windowMs = 5 * 60 * 1000;
+    const now = Date.now();
+    const from = now - windowMs;
+
+    const res = await db.execute({
+      sql: `
+        SELECT COUNT(*) AS pageviews,
+               COUNT(DISTINCT visitor_hash) AS visitors
+        FROM events
+        WHERE site_id = ? AND event_name = 'pageview'
+          AND ts >= ?
+          AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
+      `,
+      args: [site, from, inc, incBots],
+    });
+    const row = res.rows[0] || { pageviews: 0, visitors: 0 };
+    return c.json({
+      window_ms: windowMs,
+      now,
+      pageviews: Number(row.pageviews) || 0,
+      visitors: Number(row.visitors) || 0,
+    });
+  });
+
   app.get('/event-detail', async c => {
     const site = siteId(c);
     if (!site) return c.json({ error: 'site_id required' }, 400);
