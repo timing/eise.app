@@ -2554,6 +2554,9 @@ canvas {
 	padding: 25px 30px;
 	max-width: 400px;
 	width: 90%;
+	max-height: 100%;
+	overflow-y: auto;
+	box-sizing: border-box;
 	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
 }
 .export-popup h3 {
@@ -2712,8 +2715,9 @@ canvas {
 	padding: 25px 30px;
 	max-width: 500px;
 	width: 90%;
-	max-height: 80vh;
+	max-height: 100%;
 	overflow-y: auto;
+	box-sizing: border-box;
 	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
 }
 .help-popup h3 {

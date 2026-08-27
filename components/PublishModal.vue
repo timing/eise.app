@@ -187,6 +187,9 @@ function close() {
 	padding: 25px 30px;
 	max-width: 460px;
 	width: 90%;
+	max-height: 100%;
+	overflow-y: auto;
+	box-sizing: border-box;
 	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
 }
 .publish-popup h3 {
