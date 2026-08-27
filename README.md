@@ -52,5 +52,3 @@ Falls back to CPU processing on older browsers.
 
 Happy Stacking,
 Tijmen
-
-
