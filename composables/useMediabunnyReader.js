@@ -1316,6 +1316,12 @@ export function useMediabunnyReader() {
 				}
 				setPass2QueueSize(decoder2.decodeQueueSize);
 
+				// The backpressure loop above exits on `!decoderError`, so if the
+				// error callback fired mid-wait we'd fall through and hit
+				// `VideoDecoder is not configured` here (Safari tears the decoder
+				// down on error). See EISE-P5.
+				if (decoderError) break;
+
 				decoder2.decode(chunk);
 				packetsSinceFlush++;
 			}
