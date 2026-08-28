@@ -980,28 +980,21 @@ export function useMediabunnyReader() {
 				});
 			}
 
-			// Called after each decoder flush — converts VideoFrames to RGBA, then analyzes.
-			// Frames are closed after conversion; RGBA is freed after processing.
+			// Called after each decoder flush — analyzes an already-RGBA batch.
+			// The RGBA copy and VideoFrame.close() happen in the decoder output
+			// callback so decoder-pool slots are freed as fast as they're produced;
+			// see the callback for the deadlock rationale.
 			async function processBatch(batch) {
 				if (batch.length === 0) return;
 
-				// Snapshot ROI so it stays consistent across the batch even if a
-				// concurrent batch mutates preCropRegion (belt-and-braces; batches
-				// are processed serially today, but be defensive).
+				// ROI snapshot for the downstream coord shifts. The RGBA copy
+				// already applied the ROI at output time; here we just need the
+				// dimensions and the offsets used to map ROI-local → full-frame.
 				const roi = roiActive() ? preCropRegion : null;
 				const roiW = roi ? roi.width : actualWidth;
 				const roiH = roi ? roi.height : actualHeight;
 
-				// Convert VideoFrames to RGBA async. When ROI is active, copyTo
-				// only copies the ROI pixels — decode still runs on the full frame
-				// (codec constraint), but the per-frame RGBA copy shrinks to ROI.
-				const rgbaBatch = await Promise.all(
-					batch.map(async ({ frame, index }) => {
-						const data = await videoFrameToRgba(frame, actualWidth, actualHeight, roi);
-						frame.close();
-						return { data, index };
-					})
-				);
+				const rgbaBatch = batch;
 
 				// Coordinates returned by GPU/CPU are ROI-local when ROI is active;
 				// bounds fields need to be shifted back to full-frame coords before
@@ -1218,11 +1211,36 @@ export function useMediabunnyReader() {
 
 			// currentBatch is hoisted above the outer try for cleanup on error paths
 
+			// In-flight RGBA conversions. WebCodecs fires the output callback and
+			// discards any Promise it returns, so we must track them here and
+			// await them before batching — otherwise decoder2.flush() can
+			// resolve while some frames are still copying, leading to a
+			// short/misordered batch (and stragglers leaking into the next).
+			const pendingConversions = new Set();
+
 			decoder2 = makeDecoder((frame) => {
 				if (cancelled) { frame.close(); return; }
-				// Store raw VideoFrame — conversion to RGBA happens async in processBatch
-				currentBatch.push({ frame, index: pass2FrameIndex++ });
-				bumpPass2Frame();
+				// Convert to RGBA + close the VideoFrame IMMEDIATELY, before the
+				// decoder's frame pool fills. Holding raw VideoFrames in
+				// currentBatch was pinning 30–60 output surfaces (BATCH_SIZE + GOP)
+				// against a HW pool of ~10–16 slots, causing the decoder to
+				// silently stop producing frames — see 4K stalls in jobs 00venzdh,
+				// 00og7ibu, 01ao14gr, all frozen at ~10 frames out.
+				const index = pass2FrameIndex++;
+				const p = (async () => {
+					try {
+						const data = await videoFrameToRgba(frame, actualWidth, actualHeight, roiActive() ? preCropRegion : null);
+						frame.close();
+						currentBatch.push({ data, index });
+						bumpPass2Frame();
+					} catch (e) {
+						try { frame.close(); } catch (_) {}
+						if (!decoderError) decoderError = e;
+					} finally {
+						pendingConversions.delete(p);
+					}
+				})();
+				pendingConversions.add(p);
 			});
 
 			const sink2 = new EncodedPacketSink(videoTrack);
@@ -1266,6 +1284,11 @@ export function useMediabunnyReader() {
 				// once we've accumulated at least BATCH_SIZE frames.
 				if (packetsSinceFlush >= BATCH_SIZE && chunk.type === 'key') {
 					await decoder2.flush();
+					// flush() only waits for decode; the output callback fires
+					// async RGBA copies that WebCodecs doesn't track. Drain
+					// them before consuming currentBatch so the batch is
+					// complete and no stragglers land in the next batch.
+					if (pendingConversions.size) await Promise.all([...pendingConversions]);
 					const batch = currentBatch;
 					currentBatch = [];
 					await runBatch(batch);
@@ -1298,6 +1321,7 @@ export function useMediabunnyReader() {
 			}
 			// Drain remaining
 			await decoder2.flush();
+			if (pendingConversions.size) await Promise.all([...pendingConversions]);
 			await runBatch(currentBatch);
 			currentBatch = [];
 
