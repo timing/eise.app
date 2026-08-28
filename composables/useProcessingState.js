@@ -139,7 +139,13 @@ export function useProcessingState() {
     function getTrackingContext() {
         // Always carry the job id so every stack_* event can be joined for
         // one attempt in analytics without extra plumbing at each call site.
-        return { ...trackingContext.value, stack_job_id: stackJobId.value || null };
+        // stacking_mode rides along so we can filter continuous vs single
+        // runs on any downstream event without joining back to stack_start.
+        return {
+            ...trackingContext.value,
+            stack_job_id: stackJobId.value || null,
+            stacking_mode: stackingMode.value || null,
+        };
     }
 
     function clearTrackingContext() {
