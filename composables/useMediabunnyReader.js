@@ -421,9 +421,11 @@ export function useMediabunnyReader() {
 			//    that emit the first frames fast then slow to a crawl (seen on
 			//    Chrome 151 Windows with 24 keyframes running for 15+ min).
 			//
-			// Mobile with ≥ MIN_USABLE_SAMPLES accepts partial results on total-
-			// budget timeout (FFmpeg fallback would OOM anyway); desktop throws
-			// so the caller can auto-fall-back to FFmpeg.
+			// On total-budget timeout, any device with ≥ MIN_USABLE_SAMPLES
+			// continues with partial results. Evidence: most fallbacks came a
+			// couple of keyframes short of the target and ffmpeg-fallback then
+			// re-does decode work we already have samples for. Probe failures
+			// (genuinely stuck decoder) still throw so the caller can fall back.
 			const THROUGHPUT_PROBE_MS = isMobile ? 10_000 : 5_000;
 			// Tight total budget: users cancel on long silent waits, and FFmpeg
 			// fallback gives visible progress. Better to fall back at 10-20s than
@@ -476,8 +478,15 @@ export function useMediabunnyReader() {
 				emit('stack-step', 'mediabunny_probe_ok');
 				await Promise.race([decodeAll, totalDeadline]);
 			} catch (err) {
-				if (err?.isTotalTimeout && isMobile && rawSamples.length >= MIN_USABLE_SAMPLES) {
-					addLog(`Slow decoder: got ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s. Continuing on mobile with partial samples (FFmpeg fallback would OOM here).`);
+				// Accept partial samples on ANY device when the total budget expires
+				// and we have enough usable keyframes. Evidence from the checkpoint
+				// timings shows most "too slow" fallbacks passed the probe and were
+				// close to done (e.g. 13/15 in 10s); ffmpeg-fallback then adds
+				// wall-clock + a decode we already partly did. Keep the throw for
+				// probe-failure (genuinely stuck) and any non-timeout error.
+				if (err?.isTotalTimeout && rawSamples.length >= MIN_USABLE_SAMPLES) {
+					addLog(`Slow decoder: got ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s. Continuing with partial samples.`);
+					emit('stack-step', 'mediabunny_partial_samples');
 				} else {
 					// probe/deadline errors originate from the VideoDecoder pipeline
 					throw tagErr(err, 'decoder');
@@ -494,7 +503,8 @@ export function useMediabunnyReader() {
 				throw tagErr(decoderError, 'decoder');
 			}
 
-			// Funnel checkpoint: all requested keyframes decoded (or partial on mobile).
+			// Funnel checkpoint: all requested keyframes decoded (or partial samples
+			// accepted after total-budget timeout with >= MIN_USABLE_SAMPLES).
 			emit('stack-step', 'mediabunny_decoded');
 
 			// Convert sampled VideoFrames to RGBA async (no canvas, preserves source bit depth)
