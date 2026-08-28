@@ -38,6 +38,20 @@ const stackingMode = ref('single'); // 'single' or 'continuous'
 const continuousStackingResults = ref([]); // Stores [pct, blob, sharpness] for comparison
 const batchStartIndex = ref(0); // Initial index for BatchPostProcessor
 
+// Non-reactive telemetry for mediabunny pass 2 loop. Plain scalars so hot-path
+// increments don't trigger Vue reactivity. Read once per stack_ping in app.vue
+// so we can pin *which* await is stalling: packet iterator, decoder output
+// callback, backpressure spin, or GPU analyze batch.
+let pass2Counters = { packet_count: 0, frame_index: 0, batch_count: 0, last_frame_ts: 0, decode_queue_size: null };
+export function resetPass2Counters() {
+    pass2Counters = { packet_count: 0, frame_index: 0, batch_count: 0, last_frame_ts: 0, decode_queue_size: null };
+}
+export function bumpPass2Packet() { pass2Counters.packet_count++; }
+export function bumpPass2Frame() { pass2Counters.frame_index++; pass2Counters.last_frame_ts = Date.now(); }
+export function bumpPass2Batch() { pass2Counters.batch_count++; }
+export function setPass2QueueSize(n) { pass2Counters.decode_queue_size = n; }
+export function getPass2Counters() { return { ...pass2Counters }; }
+
 export function useProcessingState() {
     function setInputFilename(filename) {
         // Store full filename for error reporting

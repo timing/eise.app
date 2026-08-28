@@ -9,7 +9,7 @@ import { ref, computed, provide, defineAsyncComponent, watch } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useStacker, WebGPUUnavailableError } from '@/composables/useStacker';
 import { useTracking } from '@/composables/useTracking';
-import { useProcessingState } from '@/composables/useProcessingState';
+import { useProcessingState, getPass2Counters } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
 import { useLiteMode } from '@/composables/useLiteMode';
 import { useContinuousStacking } from '@/composables/useContinuousStacking';
@@ -250,6 +250,19 @@ function stackPingSnapshot() {
 	if (typeof performance !== 'undefined' && performance.memory) {
 		snap.mem_used_mb = Math.round(performance.memory.usedJSHeapSize / 1024 / 1024);
 		snap.mem_limit_mb = Math.round(performance.memory.jsHeapSizeLimit / 1024 / 1024);
+	}
+	// Pass-2 telemetry: only include when we've reached a mediabunny step
+	// AND at least one counter has moved. Lets us pin the exact stall point
+	// (iterator vs decoder output vs backpressure vs batch) instantly.
+	if (lastStackStep && lastStackStep.startsWith('mediabunny_')) {
+		const c = getPass2Counters();
+		if (c.packet_count || c.frame_index || c.batch_count || c.decode_queue_size != null) {
+			snap.pass2_packets = c.packet_count;
+			snap.pass2_frames = c.frame_index;
+			snap.pass2_batches = c.batch_count;
+			if (c.decode_queue_size != null) snap.pass2_queue = c.decode_queue_size;
+			if (c.last_frame_ts) snap.pass2_ms_since_frame = now - c.last_frame_ts;
+		}
 	}
 	return snap;
 }

@@ -272,9 +272,22 @@ function buildDetail(body) {
 			const memPart = p.mem_used_mb != null ? ` · mem ${p.mem_used_mb}/${p.mem_limit_mb || '?'} MB` : '';
 			const visPart = p.visibility && p.visibility !== 'visible' ? ` · ${p.visibility}` : '';
 			const stepPart = p.last_step && p.last_step !== 'none' ? ` · @${p.last_step}` : '';
+			// pass-2 stall diagnostics: shows exactly which of the four awaits is stuck
+			let pass2Part = '';
+			if (p.pass2_packets != null || p.pass2_frames != null) {
+				const q = p.pass2_queue != null ? `q${p.pass2_queue}` : '';
+				const since = p.pass2_ms_since_frame != null ? `${(p.pass2_ms_since_frame / 1000).toFixed(1)}s-since-frame` : '';
+				const parts = [
+					`pkt ${p.pass2_packets || 0}`,
+					`frm ${p.pass2_frames || 0}`,
+					`bat ${p.pass2_batches || 0}`,
+					q, since,
+				].filter(Boolean);
+				pass2Part = ` · ${parts.join(' ')}`;
+			}
 			lines.push({
 				kind: 'ping', rel,
-				text: `─── ping #${pingIdx}${stepPart}${memPart}${visPart} ───`,
+				text: `─── ping #${pingIdx}${stepPart}${memPart}${visPart}${pass2Part} ───`,
 			});
 			if (logCursor === -1) {
 				// First ping seen: adopt its cursor as trail start; skipped pre-run logs aren't a gap.
@@ -411,6 +424,8 @@ function formatRel(ms) {
 .admin-table tbody tr.row-failed.selected { background: #fbe4e4; }
 .admin-table tbody tr.row-silent { background: #fff9e6; }
 .admin-table tbody tr.row-silent.selected { background: #f5eabf; }
+.admin-table tbody tr.row-cancelled { background: #fff9e6; }
+.admin-table tbody tr.row-cancelled.selected { background: #f5eabf; }
 .mono { font-family: 'SFMono-Regular', Menlo, Consolas, monospace; }
 .ts { white-space: nowrap; color: #555; }
 .val-warn { color: #a33; font-weight: bold; }
@@ -421,7 +436,7 @@ function formatRel(ms) {
 }
 .badge-finished  { background: #d6f0d6; color: #2a5a2a; }
 .badge-failed    { background: #f0d6d6; color: #7a2a2a; }
-.badge-cancelled { background: #e5e5e5; color: #444; }
+.badge-cancelled { background: #fff4d6; color: #7a5a00; }
 .badge-silent    { background: #fff4d6; color: #7a5a00; }
 .badge-pending   { background: #e5e5e5; color: #444; }
 

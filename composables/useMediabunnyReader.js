@@ -8,6 +8,7 @@ import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWebGpuAnalyzeWorker } from '@/composables/useWebGpuAnalyzeWorker';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { computePreCropRegion } from '@/composables/useDebayerReader';
+import { resetPass2Counters, bumpPass2Packet, bumpPass2Frame, bumpPass2Batch, setPass2QueueSize } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
 
 export function useMediabunnyReader() {
@@ -1224,11 +1225,18 @@ export function useMediabunnyReader() {
 				if (cancelled) { frame.close(); return; }
 				// Store raw VideoFrame — conversion to RGBA happens async in processBatch
 				currentBatch.push({ frame, index: pass2FrameIndex++ });
+				bumpPass2Frame();
 			});
 
 			const sink2 = new EncodedPacketSink(videoTrack);
 			const firstKeyPacket2 = await sink2.getFirstKeyPacket({ verifyKeyPackets: true });
 			let packetsSinceFlush = 0;
+
+			// Reset pass-2 telemetry so this run's counters don't reflect any
+			// prior attempt. Read by app.vue's stack_ping snapshot to pin which
+			// await is stalling: packet iterator, decoder output, backpressure,
+			// or batch analyze.
+			resetPass2Counters();
 
 			// Funnel checkpoint: Pass 2 has been set up and is about to start
 			// iterating packets. Distinguishes "died in Pass 2 setup" from
@@ -1243,11 +1251,13 @@ export function useMediabunnyReader() {
 			const runBatch = async (batch) => {
 				try {
 					await processBatch(batch);
+					bumpPass2Batch();
 				} catch (analyzeErr) {
 					throw tagErr(analyzeErr, 'analyze');
 				}
 			};
 			for await (const packet of sink2.packets(firstKeyPacket2, undefined, { verifyKeyPackets: true })) {
+				bumpPass2Packet();
 				if (cancelled || decoderError) break;
 				if (maxFrames > 0 && pass2FrameIndex >= maxFrames) break;
 
@@ -1267,8 +1277,10 @@ export function useMediabunnyReader() {
 
 				// Backpressure: wait for decoder to catch up if queue is too deep
 				while (decoder2.decodeQueueSize > 3 && !decoderError) {
+					setPass2QueueSize(decoder2.decodeQueueSize);
 					await new Promise(r => setTimeout(r, 5));
 				}
+				setPass2QueueSize(decoder2.decodeQueueSize);
 
 				decoder2.decode(chunk);
 				packetsSinceFlush++;
