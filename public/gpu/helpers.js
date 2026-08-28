@@ -185,6 +185,9 @@ function _mb(bytes) {
  *   (e.g. "batchSize=64, 1920x1080, bitDepth=16").
  */
 export function assertBufferFits(device, size, name, { binding = true, extra = '' } = {}) {
+    if (!device) {
+        throw new Error('GPU device was lost during operation. Please reload the page.');
+    }
     const maxBufferSize = device.limits.maxBufferSize;
     const maxBinding = device.limits.maxStorageBufferBindingSize;
     const limit = binding ? Math.min(maxBufferSize, maxBinding) : maxBufferSize;
