@@ -1241,13 +1241,13 @@ async function processFiles(files, options = {}) {
 
 		if (!needsFfmpeg) return;
 
-		// Try Mediabunny + WebCodecs first (lighter than FFmpeg, ~50KB vs ~25MB)
-		// Works in both normal and lite mode - especially beneficial for mobile.
-		// When user selected CPU, skip mediabunny entirely and go straight to FFmpeg.
-		// A/B (video_reader): variant B skips mediabunny for GPU users too so we
-		// can compare completion rates against the mediabunny-first default (A).
-		const videoReaderVariant = getVariant('video_reader');
-		if (effectiveUseGpu.value && videoReaderVariant !== 'B') {
+		// Try Mediabunny + WebCodecs first (lighter than FFmpeg, ~50KB vs ~25MB).
+		// Works in both normal and lite mode. When user selected CPU, skip
+		// mediabunny entirely and go straight to FFmpeg.
+		// (Formerly gated on video_reader A/B variant A — rolled back so every
+		// GPU user hits mediabunny and we get the fullest pass-2 telemetry
+		// coverage while we work through the remaining 4K stall investigation.)
+		if (effectiveUseGpu.value) {
 			const { canHandle, processVideoFrames } = useMediabunnyReader();
 			const check = await canHandle(fileToProcess);
 
