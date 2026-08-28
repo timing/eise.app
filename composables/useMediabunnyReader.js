@@ -1300,16 +1300,20 @@ export function useMediabunnyReader() {
 					setPass2QueueSize(decoder2.decodeQueueSize);
 					// Stall watchdog: if the decoder has emitted at least one
 					// frame but hasn't produced any in PASS2_STALL_TIMEOUT_MS,
-					// bail. Throwing 'decoder' triggers FileUploader's FFmpeg
-					// fallback instead of the multi-minute silent hang we saw
-					// in jobs 00og7ibu, 01ao14gr, 00venzdh.
+					// bail. Tag as `decoder-stall` (not plain `decoder`) so
+					// FileUploader can SKIP the FFmpeg fallback for this case
+					// specifically — by Pass 2 stall time we've already decoded
+					// thousands of frames and heap is 5-10+ GB. Adding a 25 MB
+					// FFmpeg wasm download and running it on that stressed heap
+					// routinely OOMs the tab (see prod job 01w7id3f: 10 GB →
+					// 12 GB → tab killed silently, no terminal event).
 					const counters = getPass2Counters();
 					if (counters.frame_index > 0 && counters.last_frame_ts) {
 						const stallMs = Date.now() - counters.last_frame_ts;
 						if (stallMs > PASS2_STALL_TIMEOUT_MS) {
 							throw tagErr(new Error(
 								`Decoder stalled: no frame output in ${stallMs}ms (queue=${decoder2.decodeQueueSize}, frames_out=${counters.frame_index}, packets_in=${counters.packet_count})`
-							), 'decoder');
+							), 'decoder-stall');
 						}
 					}
 					await new Promise(r => setTimeout(r, 5));

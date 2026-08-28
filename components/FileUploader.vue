@@ -1273,9 +1273,9 @@ async function processFiles(files, options = {}) {
 				} catch (mediabunnyErr) {
 					const fileSizeMb = +(fileToProcess.size / 1024 / 1024).toFixed(1);
 					const reason = mediabunnyErr?.message ? String(mediabunnyErr.message).slice(0, 200) : 'unknown';
-					// mediabunny reader tags throws with .source: setup | decoder | copy | analyze | detect
-					// | device-capability. Falls back to 'unknown' for unclassified errors so we can spot
-					// untagged sites.
+					// mediabunny reader tags throws with .source: setup | decoder | decoder-stall |
+					// copy | analyze | detect | device-capability. Falls back to 'unknown' for
+					// unclassified errors so we can spot untagged sites.
 					const failStage = mediabunnyErr?.source || 'unknown';
 					const failLabel = `Reader failed at ${failStage}`;
 					// device-capability = the device's GPU cannot fit a single frame's analysis buffers.
@@ -1292,6 +1292,44 @@ async function processFiles(files, options = {}) {
 							file_size_mb: fileSizeMb,
 							is_mobile: isMobileDevice.value,
 						});
+						throw mediabunnyErr;
+					}
+					// decoder-stall = Pass 2 decoded thousands of frames then the
+					// WebCodecs decoder silently stopped emitting outputs. By this
+					// point the browser heap is 5-10+ GB with ranked-frame RGBA
+					// buffers. Downloading + running 25 MB of FFmpeg wasm on that
+					// stressed heap OOMs the tab in the wild (prod job 01w7id3f
+					// went 10 GB → 12 GB → tab killed). Abort with an actionable
+					// card instead of dragging the user through a second OOM.
+					if (failStage === 'decoder-stall') {
+						addLog(`${failLabel}: ${mediabunnyErr.message}. Skipping FFmpeg fallback — the browser is already under heavy memory pressure after Pass 2, and loading FFmpeg would very likely crash the tab.`);
+						track('stack_reader_fallback', {
+							...getTrackingContext(),
+							from: 'mediabunny',
+							to: 'aborted',
+							fail_stage: failStage,
+							reason,
+							file_size_mb: fileSizeMb,
+							is_mobile: isMobileDevice.value,
+						});
+						showActionableError(
+							'The video decoder stalled after processing thousands of frames — this happens on some 4K and large HEVC videos, and continuing would very likely crash the browser tab.',
+							[
+								{
+									label: 'Set a Max Frames limit in advanced settings',
+									description: 'Capping the decoder to a smaller number of frames stops Pass 2 before it hits the stall point. Try lower values until it completes.'
+								},
+								{
+									label: 'Try a shorter clip or lower resolution',
+									description: 'Trim the video (30-60 s is usually plenty for planetary stacking) or downscale to 1080p and try again.'
+								},
+								{
+									label: 'Download the Eise desktop app',
+									description: 'The Mac, Windows and Linux builds have a proper decoder without the browser memory ceiling.',
+									url: '/download/'
+								}
+							]
+						);
 						throw mediabunnyErr;
 					}
 					if (isMobileDevice.value) {
