@@ -421,11 +421,12 @@ export function useMediabunnyReader() {
 			//    that emit the first frames fast then slow to a crawl (seen on
 			//    Chrome 151 Windows with 24 keyframes running for 15+ min).
 			//
-			// On total-budget timeout, any device with ≥ MIN_USABLE_SAMPLES
-			// continues with partial results. Evidence: most fallbacks came a
-			// couple of keyframes short of the target and ffmpeg-fallback then
-			// re-does decode work we already have samples for. Probe failures
-			// (genuinely stuck decoder) still throw so the caller can fall back.
+			// On total-budget timeout, continue with partial samples only if we
+			// got enough AND the decode rate was healthy. Rate gate exists
+			// because Pass 2 uses the same VideoDecoder and has no timeout of
+			// its own — accepting partials from a catastrophically slow decoder
+			// commits us to a Pass 2 crawl with no ffmpeg fallback. Better to
+			// bail out to ffmpeg now, while we know it's crappy, than later.
 			const THROUGHPUT_PROBE_MS = isMobile ? 10_000 : 5_000;
 			// Tight total budget: users cancel on long silent waits, and FFmpeg
 			// fallback gives visible progress. Better to fall back at 10-20s than
@@ -433,6 +434,12 @@ export function useMediabunnyReader() {
 			const TOTAL_BUDGET_MS = isMobile ? 20_000 : 10_000;
 			const PROBE_REQUIRED_SAMPLES = 2;
 			const MIN_USABLE_SAMPLES = 5;
+			// Minimum decode rate at total-budget timeout to be worth continuing
+			// into Pass 2. 0.5 kf/s ≈ 2s per keyframe. Below this, Pass 2 (which
+			// also decodes P/B frames) will take minutes. Threshold picked from
+			// prod fallback reasons: healthy tail sits at 1+ kf/s (e.g. 13/15 in
+			// 10s = 1.3), catastrophic sits at ≤0.2 kf/s (e.g. 4/31 in 120s = 0.03).
+			const MIN_USABLE_RATE_KFPS = 0.5;
 
 			let decodeAllResolved = false;
 			const decodeAll = (async () => {
@@ -478,15 +485,24 @@ export function useMediabunnyReader() {
 				emit('stack-step', 'mediabunny_probe_ok');
 				await Promise.race([decodeAll, totalDeadline]);
 			} catch (err) {
-				// Accept partial samples on ANY device when the total budget expires
-				// and we have enough usable keyframes. Evidence from the checkpoint
-				// timings shows most "too slow" fallbacks passed the probe and were
-				// close to done (e.g. 13/15 in 10s); ffmpeg-fallback then adds
-				// wall-clock + a decode we already partly did. Keep the throw for
-				// probe-failure (genuinely stuck) and any non-timeout error.
-				if (err?.isTotalTimeout && rawSamples.length >= MIN_USABLE_SAMPLES) {
-					addLog(`Slow decoder: got ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s. Continuing with partial samples.`);
-					emit('stack-step', 'mediabunny_partial_samples');
+				// Total-budget timeout: continue with partial samples only if we
+				// have enough AND the rate is healthy enough that Pass 2 will not
+				// crawl. Probe failures and other errors always throw so the
+				// caller can fall back to ffmpeg.
+				if (err?.isTotalTimeout) {
+					const elapsedS = (Date.now() - passStart) / 1000;
+					const rate = elapsedS > 0 ? rawSamples.length / elapsedS : 0;
+					const enoughSamples = rawSamples.length >= MIN_USABLE_SAMPLES;
+					const fastEnough = rate >= MIN_USABLE_RATE_KFPS;
+					if (enoughSamples && fastEnough) {
+						addLog(`Slow decoder: got ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s (${rate.toFixed(2)} kf/s). Continuing with partial samples.`);
+						emit('stack-step', 'mediabunny_partial_samples');
+					} else {
+						addLog(`Slow decoder: ${rawSamples.length}/${keyPackets.length} keyframes at ${rate.toFixed(2)} kf/s. ` +
+							(!enoughSamples ? `Below ${MIN_USABLE_SAMPLES}-sample floor.` : `Below ${MIN_USABLE_RATE_KFPS} kf/s rate threshold.`) +
+							` Falling back to ffmpeg before Pass 2 crawls.`);
+						throw tagErr(err, 'decoder');
+					}
 				} else {
 					// probe/deadline errors originate from the VideoDecoder pipeline
 					throw tagErr(err, 'decoder');
