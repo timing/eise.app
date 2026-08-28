@@ -27,6 +27,7 @@
 					<option value="failed">Failed</option>
 					<option value="cancelled">Cancelled</option>
 					<option value="silent">Silent (no terminal)</option>
+					<option value="continuous">Continuous artifact</option>
 					<option value="pending">Pending / no start</option>
 				</select>
 			</div>
@@ -56,6 +57,7 @@
 						<tr>
 							<th>When</th>
 							<th>Job</th>
+							<th>Session</th>
 							<th>Outcome</th>
 							<th>OS</th>
 							<th>Reader</th>
@@ -74,6 +76,7 @@
 							@click="selectJob(j.job_id)">
 							<td class="ts">{{ formatTs(j.last_ts) }}</td>
 							<td class="mono">{{ j.job_id }}</td>
+							<td class="mono" :title="j.session_id">{{ shortSession(j.session_id) }}</td>
 							<td><span :class="'badge badge-' + j.outcome">{{ j.outcome }}</span></td>
 							<td>{{ formatDevice(j) }}</td>
 							<td>{{ j.reader || '—' }}</td>
@@ -106,6 +109,9 @@
 							{{ formatDur(detail.duration_ms) }}
 							<template v-if="detail.session_info">
 								· {{ formatDeviceLong(detail.session_info) }}
+							</template>
+							<template v-if="detail.session_id">
+								· <span class="mono session-full" :title="detail.session_id">session {{ detail.session_id }}</span>
 							</template>
 						</div>
 					</div>
@@ -358,6 +364,7 @@ function buildDetail(body) {
 		gpu_enabled: meta.gpu_enabled,
 		duration_ms: lastTs - firstTs,
 		session_info: body.session_info || null,
+		session_id: events[0]?.session_id || null,
 		lines,
 		gaps,
 	};
@@ -366,6 +373,13 @@ function buildDetail(body) {
 // Table cell: OS only, e.g. "iOS". Falls back to '—'.
 function formatDevice(row) {
 	return row.os || '—';
+}
+
+// Session UUID → first 8 hex chars. Full ID lives in the row's title tooltip
+// so you can copy it, or check the detail-meta which shows the full string.
+function shortSession(id) {
+	if (!id) return '—';
+	return String(id).slice(0, 8);
 }
 
 // Detail meta: OS · Browser · Country. Skips 'mobile'/'desktop' — OS already conveys it.
@@ -458,6 +472,7 @@ function formatRel(ms) {
 .badge-failed    { background: #f0d6d6; color: #7a2a2a; }
 .badge-cancelled { background: #fff4d6; color: #7a5a00; }
 .badge-silent    { background: #fff4d6; color: #7a5a00; }
+.badge-continuous { background: #e5edf5; color: #2a4a7a; }
 .badge-pending   { background: #e5e5e5; color: #444; }
 
 .detail-pane {
@@ -467,6 +482,7 @@ function formatRel(ms) {
 .detail-head { display: flex; justify-content: space-between; align-items: center; margin: 0 0 10px; gap: 8px; flex-wrap: wrap; }
 .detail-head .badge { margin-left: 8px; }
 .detail-meta { color: #666; font-size: 12px; }
+.session-full { color: #888; font-size: 11px; }
 
 .terminal {
 	background: #0f0f0f; color: #d8d8d8; border-radius: 4px;

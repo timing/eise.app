@@ -596,6 +596,15 @@ export function createAnalyticsAdminRoutes({ db }) {
       else if (r.failed) outcomeVal = 'failed';
       else if (r.cancelled) outcomeVal = 'cancelled';
       else if (r.started) outcomeVal = 'silent';  // Started but no terminal event.
+      // Continuous-stacking artifact — legacy bucket. Historically, every
+      // post-processor Prev/Next click called setInputFilename which minted a
+      // new stack_job_id, and the ping timer from the parent stack (which
+      // handleStackedImageReady doesn't stop in continuous mode) would tag a
+      // couple of pings with that fresh id, producing dozens of "jobs" per
+      // session that were really UI navigation. Fixed by splitting
+      // setInputFilename from startNewStackJob; existing rows keep this label
+      // for continuity, new sessions shouldn't produce it after deploy.
+      else if (r.pings > 0 && !r.steps) outcomeVal = 'continuous';
       return { ...r, outcome: outcomeVal };
     });
     if (outcome) items = items.filter(x => x.outcome === outcome);

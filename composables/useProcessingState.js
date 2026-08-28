@@ -53,14 +53,21 @@ export function setPass2QueueSize(n) { pass2Counters.decode_queue_size = n; }
 export function getPass2Counters() { return { ...pass2Counters }; }
 
 export function useProcessingState() {
+    // Set filename only (display / export). Does NOT mint a new stack_job_id
+    // — post-processor Prev/Next navigation calls this to update the export
+    // name and we don't want each click to spawn a phantom job in analytics.
     function setInputFilename(filename) {
-        // Store full filename for error reporting
         inputFilenameWithExt.value = filename;
-        // Strip extension and store base name for output naming
         inputFilename.value = filename.replace(/\.[^/.]+$/, '');
-        // Fresh job identifier for this attempt. 8 base-36 chars ≈ 40 bits of
-        // entropy per attempt — enough to avoid collisions within any user's
-        // session without bloating props payloads.
+    }
+
+    // Call this at the start of a genuine new stack attempt (fresh file
+    // selection). Sets filename AND mints a new stack_job_id so all
+    // stack_start / stack_step / stack_ping / stack_finished events for this
+    // attempt share one identifier. 8 base-36 chars ≈ 40 bits of entropy —
+    // enough for uniqueness within a session without bloating props.
+    function startNewStackJob(filename) {
+        setInputFilename(filename);
         stackJobId.value = shortJobHash(`${filename}|${Date.now()}|${Math.random()}`);
     }
 
@@ -142,6 +149,7 @@ export function useProcessingState() {
     return {
         inputFilename,
         setInputFilename,
+        startNewStackJob,
         getOutputFilename,
         getInputFilename,
         minApQuality,

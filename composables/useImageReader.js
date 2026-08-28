@@ -482,9 +482,36 @@ export function useImageReader() {
         const frameBytesEst = firstWidth * firstHeight * 16;
         if (frameBytesEst > MAX_FRAME_BYTES) {
             const mp = (firstWidth * firstHeight / 1e6).toFixed(1);
-            const msg = `Frames are too large: ${firstWidth}×${firstHeight} (${mp}MP). Downscale below ~4000×4000 and try again.`;
-            addLog(msg);
-            emit('upload-error', msg);
+            const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+            if (isMobile) {
+                // Mobile browsers hit the GPU-buffer cap first, and "downscale
+                // your photos" is a lame ask for someone shooting on a modern
+                // phone — direct them at the desktop site / app instead.
+                const msg = `Your photos are ${firstWidth}×${firstHeight} (${mp}MP), too large for a mobile browser. Open eise.app on a laptop or desktop for photos this size.`;
+                addLog(msg);
+                emit('upload-error', {
+                    message: msg,
+                    alternatives: [
+                        {
+                            label: 'Open eise.app in Chrome or Firefox on a laptop',
+                            description: 'Desktop browsers have much larger GPU buffers and handle these photos directly.'
+                        },
+                        {
+                            label: 'Download the Eise desktop app',
+                            description: 'The Mac, Windows and Linux builds handle full-resolution photos, no downscaling needed.',
+                            url: '/download/'
+                        },
+                        {
+                            label: 'Downscale before uploading',
+                            description: `Resize below ~4000×4000 (currently ${firstWidth}×${firstHeight}) if you want to keep going on mobile.`
+                        }
+                    ]
+                });
+            } else {
+                const msg = `Frames are too large: ${firstWidth}×${firstHeight} (${mp}MP). Downscale below ~4000×4000 and try again.`;
+                addLog(msg);
+                emit('upload-error', msg);
+            }
             emit('stop-loading');
             return;
         }

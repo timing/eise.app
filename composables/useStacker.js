@@ -1400,9 +1400,12 @@ export function useStacker() {
                 emit('update-loading', { progress, current: stackedCount, total: frameCount });
             }
 
-            addLog('GPU stacking complete, finalizing...');
+            addLog('GPU stacking complete, preparing image for Post Processor...');
+            emit('set-caption', 'Preparing image for Post Processor...');
+            emit('update-loading', { progress: 95, current: frameCount, total: frameCount });
 
             // Finalize and get result
+            const tFinalize = performance.now();
             const result = await new Promise((resolve, reject) => {
                 const handler = (e) => {
                     if (e.data.type === 'stack-complete') {
@@ -1416,6 +1419,7 @@ export function useStacker() {
                 gpuWorker.addEventListener('message', handler);
                 gpuWorker.postMessage({ type: 'finalize-stacking' });
             });
+            addLog(`Image ready (${((performance.now() - tFinalize) / 1000).toFixed(1)}s)`);
 
             // Cleanup and terminate
             gpuWorker.postMessage({ type: 'cleanup' });

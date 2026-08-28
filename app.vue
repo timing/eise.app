@@ -403,8 +403,11 @@ onMounted(async () => {
 	// (~15 catch-all failure sites, from FFmpeg OOM to worker-caught GPU faults).
 	// Without this hook those never reach the analytics beacon — the user sees
 	// the failure, we don't. Route them through the enriched stack_failed path.
-	on('upload-error', (message) => {
+	// Payload may be a plain string OR `{ message, alternatives }` (actionable
+	// card variant) — unwrap so analytics doesn't log `[object Object]`.
+	on('upload-error', (payload) => {
 		if (!stackInFlight) return;
+		const message = typeof payload === 'string' ? payload : (payload?.message || 'unknown');
 		trackWatchdogFailure('upload_error', message);
 	});
 

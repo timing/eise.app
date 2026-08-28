@@ -603,9 +603,16 @@ const effectivePixfrac = computed(() => drizzleMethod.value === 'drizzle' ? pixf
 // Migrate old drizzleMode setting to new drizzleMethod
 watch(effectivePixfrac, (val) => setSharedPixfrac(val), { immediate: true });
 
-// Listen for upload errors to display them
-on('upload-error', (message) => {
-	errorMessage.value = message;
+// Listen for upload errors to display them. Accepts either a plain string
+// (renders as a bare message) or `{ message, alternatives }` — the object
+// form promotes the error to the actionable card with clickable options
+// (used e.g. for "photos too large" on mobile pointing at the desktop app).
+on('upload-error', (payload) => {
+	if (payload && typeof payload === 'object' && Array.isArray(payload.alternatives)) {
+		showActionableError(payload.message, payload.alternatives);
+	} else {
+		errorMessage.value = typeof payload === 'string' ? payload : payload?.message || 'Unknown error';
+	}
 });
 
 // Guard so we only fire one stack_failed per processing run — a reader can
@@ -1059,17 +1066,19 @@ const isRawFile = (file) => RAW_EXTENSIONS.some(ext => file.name.toLowerCase().e
 
 async function processFiles(files, options = {}) {
 	const { skipBatchChoice = false } = options;
-	const { setInputFilename, setTrackingContext, setStackingMode } = useProcessingState();
+	const { startNewStackJob, setTrackingContext, setStackingMode } = useProcessingState();
 
 	setStackingMode(qualityMode.value === 'continuous' ? 'continuous' : 'single');
 
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser') || file.name.endsWith('.avi'));
 	const imageFiles = files.filter(file => file.type.startsWith('image/'));
 
-	// Set the input filename for output file naming
+	// Set the input filename AND mint a fresh stack_job_id — this is the entry
+	// point for a genuine new stack attempt (each retry = new job). Post-
+	// processor Prev/Next navigation only calls setInputFilename (no new id).
 	const primaryFile = videoFiles[0] || imageFiles[0];
 	if (primaryFile) {
-		setInputFilename(primaryFile.name);
+		startNewStackJob(primaryFile.name);
 		addLog(`File: ${primaryFile.name}`);
 	}
 
