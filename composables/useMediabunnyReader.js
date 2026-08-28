@@ -228,10 +228,10 @@ export function useMediabunnyReader() {
 			// Open video with Mediabunny. Any throw from getVideoTracks /
 			// getDecoderConfig gets tagged 'setup' so analytics can distinguish
 			// container/codec-lookup failures from decoder failures.
-			let videoTrack, decoderConfig;
+			let videoTrack, decoderConfig, input;
 			try {
 				const source = new BlobSource(file);
-				const input = new Input({ source, formats: ALL_FORMATS });
+				input = new Input({ source, formats: ALL_FORMATS });
 				const videoTracks = await input.getVideoTracks();
 				videoTrack = videoTracks[0];
 				if (!videoTrack) {

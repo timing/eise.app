@@ -50,7 +50,14 @@ const loginPass = ref('');
 const loginError = ref('');
 
 onMounted(() => {
-	const stored = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(STORAGE_KEY) : null;
+	let stored = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
+	if (!stored && typeof sessionStorage !== 'undefined') {
+		stored = sessionStorage.getItem(STORAGE_KEY);
+		if (stored) {
+			localStorage.setItem(STORAGE_KEY, stored);
+			sessionStorage.removeItem(STORAGE_KEY);
+		}
+	}
 	if (stored) {
 		authHeader.value = stored;
 		authed.value = true;
@@ -68,12 +75,12 @@ async function doLogin() {
 	if (!res.ok) { loginError.value = `Login failed (${res.status})`; return; }
 	authHeader.value = header;
 	authed.value = true;
-	sessionStorage.setItem(STORAGE_KEY, header);
+	localStorage.setItem(STORAGE_KEY, header);
 	loginPass.value = '';
 }
 
 function logout() {
-	sessionStorage.removeItem(STORAGE_KEY);
+	localStorage.removeItem(STORAGE_KEY);
 	authHeader.value = '';
 	authed.value = false;
 }
