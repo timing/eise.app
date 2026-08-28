@@ -114,10 +114,16 @@ export function opencvToGpuPattern(opencvPattern) {
  */
 export function flipFrameVertically(buffer, width, height, bytesPerPixel = 1) {
     const src = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-    const dst = new Uint8Array(src.length);
     const rowBytes = width * bytesPerPixel;
+    const expectedSize = height * rowBytes;
+    const dst = new Uint8Array(expectedSize);
+    const availableRows = Math.min(height, Math.floor(src.length / rowBytes));
 
-    for (let y = 0; y < height; y++) {
+    if (availableRows < height) {
+        console.warn(`[AVI] Truncated frame: got ${src.length} bytes, expected ${expectedSize} (${availableRows}/${height} rows)`);
+    }
+
+    for (let y = 0; y < availableRows; y++) {
         const srcOffset = y * rowBytes;
         const dstOffset = (height - 1 - y) * rowBytes;
         dst.set(src.subarray(srcOffset, srcOffset + rowBytes), dstOffset);
