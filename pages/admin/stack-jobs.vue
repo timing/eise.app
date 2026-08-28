@@ -249,7 +249,9 @@ function buildDetail(body) {
 	const lastTs = events[events.length - 1].ts;
 	const lines = [];
 	const gaps = [];
-	let logCursor = 0;
+	// -1 means "not seen a ping yet"; first ping sets it to that ping's
+	// log_cursor so pre-run logs aren't counted as a gap.
+	let logCursor = -1;
 	let firstOutcome = 'silent';
 	const meta = { reader: null, file_type: null, gpu_enabled: null };
 	let pingIdx = 0;
@@ -274,10 +276,15 @@ function buildDetail(body) {
 				kind: 'ping', rel,
 				text: `─── ping #${pingIdx}${stepPart}${memPart}${visPart} ───`,
 			});
-			if (typeof p.log_cursor === 'number' && p.log_cursor !== logCursor) {
+			if (logCursor === -1) {
+				// First ping seen: adopt its cursor as trail start; skipped pre-run logs aren't a gap.
+				logCursor = typeof p.log_cursor === 'number' ? p.log_cursor : 0;
+			} else if (typeof p.log_cursor === 'number' && p.log_cursor !== logCursor) {
 				const missing = p.log_cursor - logCursor;
-				lines.push({ kind: 'gap', rel: null, text: `⋯ ${missing} log line${missing === 1 ? '' : 's'} missing (dropped ping or over-cap burst) ⋯` });
-				gaps.push({ at_ping: pingIdx, missing });
+				if (missing > 0) {
+					lines.push({ kind: 'gap', rel: null, text: `⋯ ${missing} log line${missing === 1 ? '' : 's'} missing (dropped ping or over-cap burst) ⋯` });
+					gaps.push({ at_ping: pingIdx, missing });
+				}
 			}
 			if (typeof p.log_dropped === 'number' && p.log_dropped > 0) {
 				lines.push({ kind: 'gap', rel: null, text: `⋯ ${p.log_dropped} oldest lines in this ping's burst dropped at cap ⋯` });
@@ -293,7 +300,8 @@ function buildDetail(body) {
 		} else if (ev.event_name === 'stack_failed') {
 			// Fill in any lines the tail knows about that the pings didn't ship.
 			if (Array.isArray(p.logs_tail) && typeof p.log_total === 'number') {
-				const missingCount = Math.max(0, p.log_total - logCursor);
+				const baseline = logCursor === -1 ? 0 : logCursor;
+				const missingCount = Math.max(0, p.log_total - baseline);
 				if (missingCount > 0) {
 					const take = p.logs_tail.slice(-missingCount);
 					if (missingCount > take.length) {

@@ -9,6 +9,10 @@
     var body = {
       site_id: siteId,
       event: event,
+      // client_ts pins the event to its emit time so bursts (stack_start +
+      // immediate stack_ping) don't get reordered by concurrent-POST arrival
+      // jitter. Server verifies + clamps to ±10min skew before trusting it.
+      client_ts: Date.now(),
       path: location.pathname + location.search,
       referrer: document.referrer || null,
     };

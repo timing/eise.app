@@ -125,7 +125,15 @@ export function createAnalyticsRoutes({ db, env }) {
     if (!ref.host && utm.source) {
       ref.host = String(utm.source).toLowerCase().slice(0, 128);
     }
-    const ts = Date.now();
+    // Prefer client_ts when it's within a sane skew window. Server-side ts
+    // reorders bursty stack_start/stack_ping/stack_step sequences because
+    // concurrent POSTs land in nondeterministic order. Clamp to ±10min so a
+    // malicious client can't post future-dated or ancient events.
+    const serverTs = Date.now();
+    const clientTs = Number(body.client_ts);
+    const ts = (Number.isFinite(clientTs) && Math.abs(serverTs - clientTs) < 10 * 60 * 1000)
+      ? clientTs
+      : serverTs;
 
     const cookies = parseCookies(c.req.header('cookie'));
     const roleToken = cookies[ROLE_COOKIE];
