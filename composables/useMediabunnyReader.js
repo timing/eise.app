@@ -46,28 +46,26 @@ export function useMediabunnyReader() {
 			return { supported: false, reason: 'WebCodecs not supported in this browser' };
 		}
 
-		// Try to probe the file with Mediabunny
+		// Try to probe the file with Mediabunny. Always dispose the input on
+		// exit — the previous version returned early on unsupported codecs
+		// without disposing, leaking file handles and Blob source buffers
+		// across every failed probe.
+		let input = null;
 		try {
 			const source = new BlobSource(file);
-			const input = new Input({ source, formats: ALL_FORMATS });
+			input = new Input({ source, formats: ALL_FORMATS });
 
-			// Get video tracks (this probes the file)
 			const videoTracks = await input.getVideoTracks();
 			if (!videoTracks || videoTracks.length === 0) {
-				input.dispose();
 				return { supported: false, reason: 'No video tracks found' };
 			}
 
 			const track = videoTracks[0];
 			const codec = track.codec;
-
-			// Get decoder config from track
 			const decoderConfig = await track.getDecoderConfig();
 
-			// Check if WebCodecs can decode this codec
 			const codecString = decoderConfig?.codec || getWebCodecsCodecString(codec, track);
 			if (!codecString) {
-				input.dispose();
 				return { supported: false, reason: `Unsupported codec: ${codec}` };
 			}
 
@@ -76,9 +74,6 @@ export function useMediabunnyReader() {
 				codedWidth: track.codedWidth,
 				codedHeight: track.codedHeight
 			});
-
-			input.dispose();
-
 			if (!decoderSupport.supported) {
 				return { supported: false, reason: `WebCodecs cannot decode ${codec}` };
 			}
@@ -87,6 +82,8 @@ export function useMediabunnyReader() {
 		} catch (err) {
 			console.warn('[Mediabunny] Probe failed:', err);
 			return { supported: false, reason: err.message };
+		} finally {
+			try { input?.dispose(); } catch (_) { /* already disposed */ }
 		}
 	}
 
@@ -183,6 +180,18 @@ export function useMediabunnyReader() {
 			return e;
 		};
 
+		// Resources that live across the pipeline. Hoisted so the outer
+		// finally block can clean them up on any error path — otherwise
+		// VideoFrames (GPU-backed), decoders, mediabunny input, and CPU
+		// workers all leak on throw, compounding across retries. See Gemini's
+		// mediabunny performance audit + section 11.18.
+		let input = null;
+		let decoder1 = null;
+		let decoder2 = null;
+		let cpuWorkers = [];
+		const rawSamples = [];      // Pass 1 in-flight VideoFrames
+		let currentBatch = [];      // Pass 2 in-flight VideoFrames
+
 		try {
 			// Init GPU or CPU workers. Both init paths can throw; keep them
 			// inside the outer try so any failure surfaces via the outer catch
@@ -196,7 +205,6 @@ export function useMediabunnyReader() {
 					throw tagErr(err, 'setup');
 				}
 			}
-			let cpuWorkers = [];
 
 			if (!useGPU) {
 				addLog('WebGPU not available, using CPU analysis workers');
@@ -228,7 +236,7 @@ export function useMediabunnyReader() {
 			// Open video with Mediabunny. Any throw from getVideoTracks /
 			// getDecoderConfig gets tagged 'setup' so analytics can distinguish
 			// container/codec-lookup failures from decoder failures.
-			let videoTrack, decoderConfig, input;
+			let videoTrack, decoderConfig;
 			try {
 				const source = new BlobSource(file);
 				input = new Input({ source, formats: ALL_FORMATS });
@@ -348,10 +356,10 @@ export function useMediabunnyReader() {
 			emit('set-caption', 'Detecting crop region...');
 
 			const SAMPLE_SIZE = 50;
-			const rawSamples = [];  // { frame: VideoFrame, index: number }
+			// rawSamples is hoisted above the outer try for cleanup on error paths
 			let pass1Count = 0;
 
-			const decoder1 = makeDecoder((frame) => {
+			decoder1 = makeDecoder((frame) => {
 				if (cancelled) { frame.close(); return; }
 				initDims(frame);
 				// Every frame the decoder emits was requested — no reservoir
@@ -1210,9 +1218,9 @@ export function useMediabunnyReader() {
 				});
 			}
 
-			let currentBatch = [];
+			// currentBatch is hoisted above the outer try for cleanup on error paths
 
-			const decoder2 = makeDecoder((frame) => {
+			decoder2 = makeDecoder((frame) => {
 				if (cancelled) { frame.close(); return; }
 				// Store raw VideoFrame — conversion to RGBA happens async in processBatch
 				currentBatch.push({ frame, index: pass2FrameIndex++ });
@@ -1360,6 +1368,19 @@ export function useMediabunnyReader() {
 			// its top-level catch. Emitting upload-error/stop-loading here
 			// would short-circuit that decision.
 			throw err;
+		} finally {
+			// Best-effort cleanup on ALL paths (success + error). On the
+			// success path most of these are already closed/disposed by the
+			// pipeline — the try/catch(_) makes double-close safe. On error
+			// paths, this is the only thing preventing GPU memory (undrained
+			// VideoFrames) and file handles (mediabunny Input) from
+			// accumulating across retries, which browsers throttle over time.
+			for (const s of rawSamples) { try { s.frame?.close(); } catch (_) {} }
+			for (const s of currentBatch) { try { s.frame?.close(); } catch (_) {} }
+			try { decoder1?.close(); } catch (_) {}
+			try { decoder2?.close(); } catch (_) {}
+			try { input?.dispose(); } catch (_) {}
+			for (const w of cpuWorkers) { try { w.terminate(); } catch (_) {} }
 		}
 	}
 
