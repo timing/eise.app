@@ -14,7 +14,7 @@ import { reportError } from '@/composables/useSentryReporting';
 import { useLiteMode } from '@/composables/useLiteMode';
 import { useContinuousStacking } from '@/composables/useContinuousStacking';
 
-const { on, emit: eventBusEmit, addLog } = useEventBus();
+const { on, emit: eventBusEmit, addLog, logs } = useEventBus();
 const { stackFramesLocally } = useStacker();
 const {
 	runContinuousStacking,
@@ -179,16 +179,126 @@ function detectBrowser() {
 // of the time, but a few code paths leave it true after cancel.
 let stackInFlight = false;
 let lastStackStep = null;
+let lastStackStepTs = 0;
+
+// stack_ping: 2s heartbeat emitted while a stack is in flight. Fills the
+// blind spot between stack_step checkpoints — half the silent-death bucket
+// in the mediabunny funnel lives in a >2min gap after `crop_detected` with
+// no telemetry (section 11.15+ of MEDIABUNNY_RELIABILITY.md). The heartbeat
+// carries: last stack_step reached, time since that step, time since start,
+// tab visibility (a hidden tab may be throttled and look "silent"), heap
+// usage where the browser exposes it, and the running counts / last message
+// of any unhandled errors or rejections caught by the watchdog.
+const STACK_PING_INTERVAL_MS = 2000;
+const STACK_PING_MAX = 300;  // Safety: cap at 10 minutes to prevent runaway.
+const MAX_LOGS_PER_PING = 20;      // Cap per-ping log burst; overflow tracked via log_dropped.
+const MAX_LOG_LINE_CHARS = 200;    // Per-line truncation — no unbounded strings on the wire.
+const MAX_LOGS_ON_FAILURE = 50;    // Guaranteed tail on stack_failed regardless of ping delivery.
+let stackPingTimer = null;
+let stackPingCount = 0;
+let stackStartTs = 0;
+let unhandledErrorCount = 0;
+let lastUnhandledError = null;
+let lastLogCursor = 0;  // Index into logs.value already shipped; ping ships delta from here.
+
+// Returns new log lines since the last ping (capped, truncated) plus accounting
+// fields. Advances the cursor. Null if nothing new. Attached to stack_ping so
+// silent mediabunny deaths surface WHY, not just where, in the ping trail.
+function getLogDelta() {
+	const cursor = lastLogCursor;
+	const total = logs.value.length;
+	if (total <= cursor) return null;
+	let sliceStart = cursor;
+	if (total - cursor > MAX_LOGS_PER_PING) {
+		sliceStart = total - MAX_LOGS_PER_PING;  // Keep the freshest lines when burst > cap.
+	}
+	const lines = logs.value.slice(sliceStart).map(l => String(l).slice(0, MAX_LOG_LINE_CHARS));
+	lastLogCursor = total;
+	return {
+		logs: lines,
+		log_cursor: cursor,
+		log_total: total,
+		log_dropped: sliceStart - cursor,
+	};
+}
+
+// Returns the last N log lines, truncated. Used on stack_failed as a
+// belt-and-suspenders context payload — even if some pings never reached the
+// beacon (network flakiness), the terminal event carries the pre-death tail.
+function getLogTail(n = MAX_LOGS_ON_FAILURE) {
+	const total = logs.value.length;
+	if (!total) return null;
+	return {
+		logs_tail: logs.value.slice(-n).map(l => String(l).slice(0, MAX_LOG_LINE_CHARS)),
+		log_total: total,
+	};
+}
+
+function stackPingSnapshot() {
+	const now = Date.now();
+	const snap = {
+		...getTrackingContext(),
+		ping_seq: stackPingCount,
+		last_step: lastStackStep || 'none',
+		ms_since_step: lastStackStepTs ? now - lastStackStepTs : null,
+		ms_since_start: stackStartTs ? now - stackStartTs : null,
+		visibility: typeof document !== 'undefined' ? document.visibilityState : null,
+		errors: unhandledErrorCount,
+	};
+	if (lastUnhandledError) snap.last_error = String(lastUnhandledError).slice(0, 150);
+	// performance.memory is Chrome-only; noop elsewhere.
+	if (typeof performance !== 'undefined' && performance.memory) {
+		snap.mem_used_mb = Math.round(performance.memory.usedJSHeapSize / 1024 / 1024);
+		snap.mem_limit_mb = Math.round(performance.memory.jsHeapSizeLimit / 1024 / 1024);
+	}
+	return snap;
+}
+
+function emitStackPing() {
+	const snap = stackPingSnapshot();
+	const delta = getLogDelta();
+	if (delta) Object.assign(snap, delta);
+	track('stack_ping', snap);
+	stackPingCount++;
+}
+
+function startStackPing() {
+	if (stackPingTimer) return;  // Already running.
+	stackStartTs = Date.now();
+	lastStackStepTs = 0;
+	stackPingCount = 0;
+	unhandledErrorCount = 0;
+	lastUnhandledError = null;
+	lastLogCursor = logs.value.length;  // Only ship logs from this run onward.
+	// Fire once immediately so we can tell "processing started" from
+	// "processing entered and instantly died" (first ping vs no ping).
+	emitStackPing();
+	stackPingTimer = setInterval(() => {
+		if (stackPingCount >= STACK_PING_MAX) { stopStackPing(); return; }
+		emitStackPing();
+	}, STACK_PING_INTERVAL_MS);
+}
+
+function stopStackPing() {
+	if (!stackPingTimer) return;
+	clearInterval(stackPingTimer);
+	stackPingTimer = null;
+}
 
 function trackWatchdogFailure(kind, message) {
 	if (!stackInFlight) return;
 	if (isBatchProcessing.value) return;  // Batch mode owns its own error tracking.
 	stackInFlight = false;
+	// Snapshot BEFORE stopping pings so we ship the same mem/visibility/timing
+	// context the pings were carrying, plus the fresh error the listener set.
+	const snap = stackPingSnapshot();
+	const tail = getLogTail();  // Guaranteed pre-death log tail even if pings dropped.
+	stopStackPing();
 	track('stack_failed', {
-		...getTrackingContext(),
+		...snap,
+		...(tail || {}),
 		reason: `unhandled:${kind}:${String(message || '').slice(0, 150)}`,
 		failed_in: 'watchdog',
-		last_step: lastStackStep || 'none',
 	});
 }
 
@@ -229,6 +339,7 @@ onMounted(async () => {
 		// Emit start-loading immediately so VideoFrameProcessor shows loading state
 		eventBusEmit('start-loading', 'Preparing to analyze...');
 		track('stack_start', stackStartProps());
+		startStackPing();
 	});
 	on('debayer-processing-started', () => {
 		// For SER files where color profile selector was skipped (e.g., forced pattern)
@@ -237,6 +348,7 @@ onMounted(async () => {
 		lastStackStep = null;
 		eventBusEmit('start-loading', 'Preparing to analyze...');
 		track('stack_start', stackStartProps());
+		startStackPing();
 	});
 	on('quality-selection-ready', handleQualitySelectionReady);
 	on('cropped-ser-ready', (data) => {
@@ -246,6 +358,7 @@ onMounted(async () => {
 		// Mid-pipeline funnel checkpoint. Carries reader/gpu/job_id so we can
 		// see how far each attempt gets before dropping to cancel/fail.
 		lastStackStep = step;
+		lastStackStepTs = Date.now();
 		track('stack_step', { step, ...getTrackingContext() });
 	});
 	on('stack-failed', (data) => {
@@ -254,7 +367,16 @@ onMounted(async () => {
 			return;
 		}
 		stackInFlight = false;  // Explicit failure, watchdog stays quiet.
-		track('stack_failed', getTrackingContext());
+		const snap = stackPingSnapshot();
+		const tail = getLogTail();
+		stopStackPing();
+		track('stack_failed', {
+			...snap,
+			...(tail || {}),
+			reason: String(data?.reason || 'unknown').slice(0, 150),
+			component: String(data?.component || 'unknown').slice(0, 60),
+			failed_in: 'event',
+		});
 		isProcessing.value = false;
 		const error = data?.error || new Error(`Stacking failed: ${data?.reason || 'unknown reason'}`);
 		reportError(error, {
@@ -262,18 +384,32 @@ onMounted(async () => {
 			action: 'stacking'
 		});
 	});
-	on('cancel-processing', () => { stackInFlight = false; });
+	on('cancel-processing', () => { stackInFlight = false; stopStackPing(); });
+
+	// Every `upload-error` bus emit paints a red banner in FileUploader.vue
+	// (~15 catch-all failure sites, from FFmpeg OOM to worker-caught GPU faults).
+	// Without this hook those never reach the analytics beacon — the user sees
+	// the failure, we don't. Route them through the enriched stack_failed path.
+	on('upload-error', (message) => {
+		if (!stackInFlight) return;
+		trackWatchdogFailure('upload_error', message);
+	});
 
 	// Watchdog: catch unhandled rejections/errors during processing so the
 	// "stack_step then silence" pattern we saw in the video_reader A/B test
 	// surfaces as stack_failed instead of looking like abandonment. Only fires
 	// while a stack is in flight (isProcessing) and only once per run.
+	// Also increments the counters that ride along on stack_ping so we can
+	// see WHEN in the ping timeline an error appeared, not just that one did.
 	window.addEventListener('unhandledrejection', (ev) => {
 		const msg = ev.reason?.message || String(ev.reason || '');
+		if (stackInFlight) { unhandledErrorCount++; lastUnhandledError = `rejection:${msg}`; }
 		trackWatchdogFailure('rejection', msg);
 	});
 	window.addEventListener('error', (ev) => {
-		trackWatchdogFailure('error', ev.message || 'error');
+		const msg = ev.message || 'error';
+		if (stackInFlight) { unhandledErrorCount++; lastUnhandledError = `error:${msg}`; }
+		trackWatchdogFailure('error', msg);
 	});
 });
 
@@ -538,6 +674,7 @@ async function handleStackedImageReady(data) {
 	stackedImageDimensions.value = (data.width && data.height) ? { width: data.width, height: data.height } : null;
 	isProcessing.value = false;
 	stackInFlight = false;
+	stopStackPing();
 	track('stack_finished', getTrackingContext());
 	navigateTo('/post-processor/');
 }
@@ -564,6 +701,7 @@ function handleProcessingStarted() {
 	stackInFlight = true;
 	lastStackStep = null;
 	track('stack_start', stackStartProps());
+	startStackPing();
 }
 
 async function handlePostProcessing(data) {

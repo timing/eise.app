@@ -13,7 +13,7 @@ import {
 } from './session.js';
 import { ROLE_COOKIE, verifyRoleToken } from './roleCookie.js';
 
-const MAX_PROPS_BYTES = 4096;
+const MAX_PROPS_BYTES = 16384;  // Bumped from 4KB to fit stack_ping log deltas + stack_failed log tails.
 const MAX_EVENT_NAME_LEN = 64;
 const MAX_PATH_LEN = 2048;
 

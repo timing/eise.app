@@ -534,5 +534,94 @@ export function createAnalyticsAdminRoutes({ db }) {
     });
   });
 
+  // Stack jobs: one row per stack_job_id, aggregating stack_* events for the
+  // mediabunny reliability debugging surface. Terminal state derived from
+  // whether stack_finished / stack_failed / stack_cancelled fired.
+  app.get('/stack-jobs', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const { from, to } = parseRange(c);
+    const inc = includeAdmin(c);
+    const incBots = includeBots(c);
+    const limit = limitArg(c, 100);
+    const outcome = String(c.req.query('outcome') || '').toLowerCase();
+
+    const res = await db.execute({
+      sql: `
+        SELECT json_extract(props_json, '$.stack_job_id') AS job_id,
+               MIN(session_id) AS session_id,
+               MIN(ts) AS first_ts,
+               MAX(ts) AS last_ts,
+               COUNT(*) AS events,
+               SUM(CASE WHEN event_name = 'stack_step' THEN 1 ELSE 0 END) AS steps,
+               SUM(CASE WHEN event_name = 'stack_ping' THEN 1 ELSE 0 END) AS pings,
+               MAX(CASE WHEN event_name = 'stack_start' THEN 1 ELSE 0 END) AS started,
+               MAX(CASE WHEN event_name = 'stack_finished' THEN 1 ELSE 0 END) AS finished,
+               MAX(CASE WHEN event_name = 'stack_failed' THEN 1 ELSE 0 END) AS failed,
+               MAX(CASE WHEN event_name = 'stack_cancelled' THEN 1 ELSE 0 END) AS cancelled,
+               MAX(json_extract(props_json, '$.reader')) AS reader,
+               MAX(json_extract(props_json, '$.file_type')) AS file_type,
+               MAX(json_extract(props_json, '$.gpu_enabled')) AS gpu_enabled,
+               MAX(CASE WHEN event_name = 'stack_step'
+                        THEN json_extract(props_json, '$.step') END) AS any_step,
+               MAX(CASE WHEN event_name = 'stack_ping'
+                        THEN CAST(json_extract(props_json, '$.errors') AS INTEGER) END) AS max_errors,
+               MAX(CASE WHEN event_name = 'stack_ping'
+                        THEN CAST(json_extract(props_json, '$.mem_used_mb') AS INTEGER) END) AS max_mem_mb,
+               MAX(CASE WHEN event_name = 'stack_failed'
+                        THEN json_extract(props_json, '$.reason') END) AS fail_reason
+        FROM events
+        WHERE site_id = ?
+          AND event_name LIKE 'stack\\_%' ESCAPE '\\'
+          AND json_extract(props_json, '$.stack_job_id') IS NOT NULL
+          AND ts >= ? AND ts < ?
+          AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)
+        GROUP BY job_id
+        ORDER BY last_ts DESC
+        LIMIT ?
+      `,
+      args: [site, from, to, inc, incBots, limit],
+    });
+
+    let items = res.rows.map(r => {
+      let outcomeVal = 'pending';
+      if (r.finished) outcomeVal = 'finished';
+      else if (r.failed) outcomeVal = 'failed';
+      else if (r.cancelled) outcomeVal = 'cancelled';
+      else if (r.started) outcomeVal = 'silent';  // Started but no terminal event.
+      return { ...r, outcome: outcomeVal };
+    });
+    if (outcome) items = items.filter(x => x.outcome === outcome);
+    return c.json({ range: { from, to }, items });
+  });
+
+  app.get('/stack-jobs/:jobId', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    // Job IDs are 8 base-36 chars per useProcessingState.js:shortJobHash.
+    const jobId = String(c.req.param('jobId') || '').slice(0, 32);
+    if (!/^[a-z0-9]+$/i.test(jobId)) return c.json({ error: 'invalid job id' }, 400);
+
+    const res = await db.execute({
+      sql: `
+        SELECT event_name, ts, session_id, props_json
+        FROM events
+        WHERE site_id = ?
+          AND json_extract(props_json, '$.stack_job_id') = ?
+        ORDER BY ts ASC
+        LIMIT 5000
+      `,
+      args: [site, jobId],
+    });
+
+    const items = res.rows.map(r => {
+      let props = null;
+      try { props = r.props_json ? JSON.parse(r.props_json) : null; } catch (_) {}
+      return { event_name: r.event_name, ts: r.ts, session_id: r.session_id, props };
+    });
+    return c.json({ job_id: jobId, items });
+  });
+
   return app;
 }

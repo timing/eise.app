@@ -23,6 +23,7 @@
 				<nav class="admin-tabs">
 					<NuxtLink to="/admin" class="admin-tab" active-class="active" exact-active-class="active" :exact="true">Submissions</NuxtLink>
 					<NuxtLink to="/admin/analytics" class="admin-tab" active-class="active">Analytics</NuxtLink>
+					<NuxtLink to="/admin/stack-jobs" class="admin-tab" active-class="active">Stack jobs</NuxtLink>
 					<NuxtLink to="/admin/ab" class="admin-tab" active-class="active">A/B</NuxtLink>
 					<span class="admin-tabs-spacer" />
 					<button class="btn-secondary" @click="logout">Sign out</button>
