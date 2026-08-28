@@ -8,7 +8,16 @@ import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWebGpuAnalyzeWorker } from '@/composables/useWebGpuAnalyzeWorker';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { computePreCropRegion } from '@/composables/useDebayerReader';
-import { resetPass2Counters, bumpPass2Packet, bumpPass2Frame, bumpPass2Batch, setPass2QueueSize } from '@/composables/useProcessingState';
+import { resetPass2Counters, bumpPass2Packet, bumpPass2Frame, bumpPass2Batch, setPass2QueueSize, getPass2Counters } from '@/composables/useProcessingState';
+
+// If the WebCodecs decoder swallows chunks but stops producing frames, the
+// backpressure spin below hangs forever (queue stays > 3, `!decoderError` stays
+// true, no new decode calls, no error callback fires). Observed on 4K HEVC on
+// Windows Edge (jobs 00og7ibu, 01ao14gr) and 4K H.264 High on mobile Chrome
+// (00venzdh) — every case froze at `pac=22 fra=10 bat=0 q=4` for minutes to
+// hours until the user rage-cancelled. This watchdog gives up after N seconds
+// of zero frame output so FileUploader can trigger the FFmpeg fallback.
+const PASS2_STALL_TIMEOUT_MS = 12000;
 import { reportError } from '@/composables/useSentryReporting';
 
 export function useMediabunnyReader() {
@@ -442,13 +451,6 @@ export function useMediabunnyReader() {
 			// wait a minute for a stalled decoder that started fast.
 			const TOTAL_BUDGET_MS = isMobile ? 20_000 : 10_000;
 			const PROBE_REQUIRED_SAMPLES = 2;
-			const MIN_USABLE_SAMPLES = 5;
-			// Minimum decode rate at total-budget timeout to be worth continuing
-			// into Pass 2. 0.5 kf/s ≈ 2s per keyframe. Below this, Pass 2 (which
-			// also decodes P/B frames) will take minutes. Threshold picked from
-			// prod fallback reasons: healthy tail sits at 1+ kf/s (e.g. 13/15 in
-			// 10s = 1.3), catastrophic sits at ≤0.2 kf/s (e.g. 4/31 in 120s = 0.03).
-			const MIN_USABLE_RATE_KFPS = 0.5;
 
 			let decodeAllResolved = false;
 			const decodeAll = (async () => {
@@ -494,28 +496,23 @@ export function useMediabunnyReader() {
 				emit('stack-step', 'mediabunny_probe_ok');
 				await Promise.race([decodeAll, totalDeadline]);
 			} catch (err) {
-				// Total-budget timeout: continue with partial samples only if we
-				// have enough AND the rate is healthy enough that Pass 2 will not
-				// crawl. Probe failures and other errors always throw so the
-				// caller can fall back to ffmpeg.
+				// Any Pass 1 shortfall — probe failure OR total-budget timeout —
+				// now falls back to ffmpeg. Prod telemetry (jobs 00og7ibu,
+				// 01ao14gr, 00venzdh) shows the "continue with partial samples"
+				// path reliably deadlocked in Pass 2's backpressure spin: all
+				// three crashes had 10 keyframes at 1.0 kf/s, cleared the old
+				// enough+fast thresholds, then froze in Pass 2 for minutes. If
+				// Pass 1 couldn't keep up in its own budget, Pass 2 (which also
+				// decodes P/B frames) has near-zero chance of working — and the
+				// 12s Pass 2 stall watchdog is a safety net, not the primary
+				// signal. Skipping straight to ffmpeg saves that 12s wait.
 				if (err?.isTotalTimeout) {
 					const elapsedS = (Date.now() - passStart) / 1000;
 					const rate = elapsedS > 0 ? rawSamples.length / elapsedS : 0;
-					const enoughSamples = rawSamples.length >= MIN_USABLE_SAMPLES;
-					const fastEnough = rate >= MIN_USABLE_RATE_KFPS;
-					if (enoughSamples && fastEnough) {
-						addLog(`Slow decoder: got ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s (${rate.toFixed(2)} kf/s). Continuing with partial samples.`);
-						emit('stack-step', 'mediabunny_partial_samples');
-					} else {
-						addLog(`Slow decoder: ${rawSamples.length}/${keyPackets.length} keyframes at ${rate.toFixed(2)} kf/s. ` +
-							(!enoughSamples ? `Below ${MIN_USABLE_SAMPLES}-sample floor.` : `Below ${MIN_USABLE_RATE_KFPS} kf/s rate threshold.`) +
-							` Falling back to ffmpeg before Pass 2 crawls.`);
-						throw tagErr(err, 'decoder');
-					}
-				} else {
-					// probe/deadline errors originate from the VideoDecoder pipeline
-					throw tagErr(err, 'decoder');
+					addLog(`Slow decoder: ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s (${rate.toFixed(2)} kf/s). Falling back to ffmpeg — Pass 2 deadlocks on all observed slow-Pass-1 videos.`);
+					emit('stack-step', 'mediabunny_pass1_too_slow');
 				}
+				throw tagErr(err, 'decoder');
 			} finally {
 				clearInterval(progressTicker);
 				try { decoder1.close(); } catch (_) { /* already closing / closed */ }
@@ -1278,6 +1275,20 @@ export function useMediabunnyReader() {
 				// Backpressure: wait for decoder to catch up if queue is too deep
 				while (decoder2.decodeQueueSize > 3 && !decoderError) {
 					setPass2QueueSize(decoder2.decodeQueueSize);
+					// Stall watchdog: if the decoder has emitted at least one
+					// frame but hasn't produced any in PASS2_STALL_TIMEOUT_MS,
+					// bail. Throwing 'decoder' triggers FileUploader's FFmpeg
+					// fallback instead of the multi-minute silent hang we saw
+					// in jobs 00og7ibu, 01ao14gr, 00venzdh.
+					const counters = getPass2Counters();
+					if (counters.frame_index > 0 && counters.last_frame_ts) {
+						const stallMs = Date.now() - counters.last_frame_ts;
+						if (stallMs > PASS2_STALL_TIMEOUT_MS) {
+							throw tagErr(new Error(
+								`Decoder stalled: no frame output in ${stallMs}ms (queue=${decoder2.decodeQueueSize}, frames_out=${counters.frame_index}, packets_in=${counters.packet_count})`
+							), 'decoder');
+						}
+					}
 					await new Promise(r => setTimeout(r, 5));
 				}
 				setPass2QueueSize(decoder2.decodeQueueSize);
