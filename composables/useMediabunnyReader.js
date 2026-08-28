@@ -1222,6 +1222,12 @@ export function useMediabunnyReader() {
 			const firstKeyPacket2 = await sink2.getFirstKeyPacket({ verifyKeyPackets: true });
 			let packetsSinceFlush = 0;
 
+			// Funnel checkpoint: Pass 2 has been set up and is about to start
+			// iterating packets. Distinguishes "died in Pass 2 setup" from
+			// "died mid-loop". Section 11.15 showed users vanishing between
+			// crop_detected and stack_finished; this is the first Pass 2 waypoint.
+			emit('stack-step', 'mediabunny_pass2_started');
+
 			decoderError = null;
 			// processBatch fans out to the analyze worker (GPU or CPU). Any
 			// error here is downstream of decode, tag as 'analyze' so we can
@@ -1274,6 +1280,12 @@ export function useMediabunnyReader() {
 			decoder2.close();
 			input.dispose();
 
+			// Funnel checkpoint: Pass 2 packet loop completed and all batches
+			// have been analyzed. Distinguishes "died mid-Pass-2" from
+			// "died in the post-Pass-2 stacking step". Only reached if every
+			// packet was decoded, every batch analyzed, and no decoder error.
+			emit('stack-step', 'mediabunny_pass2_drained');
+
 			// Clean up CPU workers (GPU worker cleaned up by terminateGpuWorker)
 			cpuWorkers.forEach(w => w.terminate());
 			cpuWorkers = [];
@@ -1288,6 +1300,11 @@ export function useMediabunnyReader() {
 
 			// Manual threshold mode: keep all uint8Buffers for quality selector
 			if (manualThreshold) {
+				// Funnel branch: user is in manual/continuous quality mode. The
+				// stacker handoff never happens; instead we hand ranked frames
+				// to the UI for the user to pick a threshold. This is a
+				// legitimate terminal outcome from mediabunny's perspective.
+				emit('stack-step', 'mediabunny_pass2_manual');
 				const allFramesSorted = [...allAnalyzedFrames].sort((a, b) => b.sharpness - a.sharpness);
 				emit('quality-selection-ready', {
 					frames: allFramesSorted,
@@ -1302,6 +1319,10 @@ export function useMediabunnyReader() {
 			// Stack best frames
 			emit('set-caption', 'Stacking frames...');
 			addLog(`Stacking ${bestFramesForStacking.length} frames`);
+			// Funnel checkpoint: about to hand off to the stacker. Sessions
+			// that reach here but never fire stack_finished / stack_failed are
+			// dying inside stackFramesLocally (template match, warp, accumulate).
+			emit('stack-step', 'mediabunny_pass2_stacking');
 
 			const stackResult = await stackFramesLocally(
 				bestFramesForStacking,
