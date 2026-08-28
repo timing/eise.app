@@ -57,6 +57,7 @@
 							<th>When</th>
 							<th>Job</th>
 							<th>Outcome</th>
+							<th>OS</th>
 							<th>Reader</th>
 							<th>File</th>
 							<th>GPU</th>
@@ -74,6 +75,7 @@
 							<td class="ts">{{ formatTs(j.last_ts) }}</td>
 							<td class="mono">{{ j.job_id }}</td>
 							<td><span :class="'badge badge-' + j.outcome">{{ j.outcome }}</span></td>
+							<td>{{ formatDevice(j) }}</td>
 							<td>{{ j.reader || '—' }}</td>
 							<td>{{ j.file_type || '—' }}</td>
 							<td>{{ j.gpu_enabled == null ? '—' : (j.gpu_enabled ? 'yes' : 'no') }}</td>
@@ -102,6 +104,9 @@
 							{{ detail.reader || '?' }} · {{ detail.file_type || '?' }} ·
 							GPU {{ detail.gpu_enabled == null ? '?' : (detail.gpu_enabled ? 'on' : 'off') }} ·
 							{{ formatDur(detail.duration_ms) }}
+							<template v-if="detail.session_info">
+								· {{ formatDeviceLong(detail.session_info) }}
+							</template>
 						</div>
 					</div>
 
@@ -352,9 +357,24 @@ function buildDetail(body) {
 		file_type: meta.file_type,
 		gpu_enabled: meta.gpu_enabled,
 		duration_ms: lastTs - firstTs,
+		session_info: body.session_info || null,
 		lines,
 		gaps,
 	};
+}
+
+// Table cell: OS only, e.g. "iOS". Falls back to '—'.
+function formatDevice(row) {
+	return row.os || '—';
+}
+
+// Detail meta: OS · Browser · Country. Skips 'mobile'/'desktop' — OS already conveys it.
+function formatDeviceLong(info) {
+	const parts = [];
+	if (info.os) parts.push(info.os);
+	if (info.browser) parts.push(info.browser);
+	if (info.country) parts.push(info.country);
+	return parts.join(' · ');
 }
 
 function formatTs(ts) {

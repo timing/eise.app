@@ -548,37 +548,43 @@ export function createAnalyticsAdminRoutes({ db }) {
 
     const res = await db.execute({
       sql: `
-        SELECT json_extract(props_json, '$.stack_job_id') AS job_id,
-               MIN(session_id) AS session_id,
-               MIN(ts) AS first_ts,
-               MAX(ts) AS last_ts,
-               COUNT(*) AS events,
-               SUM(CASE WHEN event_name = 'stack_step' THEN 1 ELSE 0 END) AS steps,
-               SUM(CASE WHEN event_name = 'stack_ping' THEN 1 ELSE 0 END) AS pings,
-               MAX(CASE WHEN event_name = 'stack_start' THEN 1 ELSE 0 END) AS started,
-               MAX(CASE WHEN event_name = 'stack_finished' THEN 1 ELSE 0 END) AS finished,
-               MAX(CASE WHEN event_name = 'stack_failed' THEN 1 ELSE 0 END) AS failed,
-               MAX(CASE WHEN event_name = 'stack_cancelled' THEN 1 ELSE 0 END) AS cancelled,
-               MAX(json_extract(props_json, '$.reader')) AS reader,
-               MAX(json_extract(props_json, '$.file_type')) AS file_type,
-               MAX(json_extract(props_json, '$.gpu_enabled')) AS gpu_enabled,
-               MAX(CASE WHEN event_name = 'stack_step'
-                        THEN json_extract(props_json, '$.step') END) AS any_step,
-               MAX(CASE WHEN event_name = 'stack_ping'
-                        THEN CAST(json_extract(props_json, '$.errors') AS INTEGER) END) AS max_errors,
-               MAX(CASE WHEN event_name = 'stack_ping'
-                        THEN CAST(json_extract(props_json, '$.mem_used_mb') AS INTEGER) END) AS max_mem_mb,
-               MAX(CASE WHEN event_name = 'stack_failed'
-                        THEN json_extract(props_json, '$.reason') END) AS fail_reason
-        FROM events
-        WHERE site_id = ?
-          AND event_name LIKE 'stack\\_%' ESCAPE '\\'
-          AND json_extract(props_json, '$.stack_job_id') IS NOT NULL
-          AND ts >= ? AND ts < ?
-          AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
-        GROUP BY job_id
-        ORDER BY last_ts DESC
+        WITH j AS (
+          SELECT json_extract(props_json, '$.stack_job_id') AS job_id,
+                 MIN(session_id) AS session_id,
+                 MIN(ts) AS first_ts,
+                 MAX(ts) AS last_ts,
+                 COUNT(*) AS events,
+                 SUM(CASE WHEN event_name = 'stack_step' THEN 1 ELSE 0 END) AS steps,
+                 SUM(CASE WHEN event_name = 'stack_ping' THEN 1 ELSE 0 END) AS pings,
+                 MAX(CASE WHEN event_name = 'stack_start' THEN 1 ELSE 0 END) AS started,
+                 MAX(CASE WHEN event_name = 'stack_finished' THEN 1 ELSE 0 END) AS finished,
+                 MAX(CASE WHEN event_name = 'stack_failed' THEN 1 ELSE 0 END) AS failed,
+                 MAX(CASE WHEN event_name = 'stack_cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                 MAX(json_extract(props_json, '$.reader')) AS reader,
+                 MAX(json_extract(props_json, '$.file_type')) AS file_type,
+                 MAX(json_extract(props_json, '$.gpu_enabled')) AS gpu_enabled,
+                 MAX(CASE WHEN event_name = 'stack_step'
+                          THEN json_extract(props_json, '$.step') END) AS any_step,
+                 MAX(CASE WHEN event_name = 'stack_ping'
+                          THEN CAST(json_extract(props_json, '$.errors') AS INTEGER) END) AS max_errors,
+                 MAX(CASE WHEN event_name = 'stack_ping'
+                          THEN CAST(json_extract(props_json, '$.mem_used_mb') AS INTEGER) END) AS max_mem_mb,
+                 MAX(CASE WHEN event_name = 'stack_failed'
+                          THEN json_extract(props_json, '$.reason') END) AS fail_reason
+          FROM events
+          WHERE site_id = ?
+            AND event_name LIKE 'stack\\_%' ESCAPE '\\'
+            AND json_extract(props_json, '$.stack_job_id') IS NOT NULL
+            AND ts >= ? AND ts < ?
+            AND (? = 1 OR COALESCE(role, '') != 'admin')
+            AND (? = 1 OR bot IS NULL)
+          GROUP BY job_id
+        )
+        SELECT j.*,
+               s.ua_device AS device, s.ua_os AS os, s.ua_browser AS browser
+        FROM j
+        LEFT JOIN sessions s ON s.id = j.session_id
+        ORDER BY j.last_ts DESC
         LIMIT ?
       `,
       args: [site, from, to, inc, incBots, limit],
@@ -620,7 +626,20 @@ export function createAnalyticsAdminRoutes({ db }) {
       try { props = r.props_json ? JSON.parse(r.props_json) : null; } catch (_) {}
       return { event_name: r.event_name, ts: r.ts, session_id: r.session_id, props };
     });
-    return c.json({ job_id: jobId, items });
+
+    // One session's UA info is enough — a stack job lives inside a single session.
+    let session_info = null;
+    const sessionId = items[0]?.session_id;
+    if (sessionId) {
+      const s = await db.execute({
+        sql: 'SELECT ua_device, ua_os, ua_browser, country FROM sessions WHERE id = ? LIMIT 1',
+        args: [sessionId],
+      });
+      const row = s.rows[0];
+      if (row) session_info = { device: row.ua_device, os: row.ua_os, browser: row.ua_browser, country: row.country };
+    }
+
+    return c.json({ job_id: jobId, session_info, items });
   });
 
   return app;
