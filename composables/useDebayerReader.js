@@ -13,6 +13,11 @@
  * Memory-efficient: stores only metadata during analysis, re-reads frames for stacking.
  */
 
+// Bounds smaller than this are edge noise or hot pixels, not a stackable target.
+const MIN_BOUNDS_SIZE = 8;
+
+const NO_TARGET_MESSAGE = 'No planet or moon detected in your images. eise.app is a planetary stacker, so try images that show a bright, compact target. If you\'re imaging the surface of the Sun or Moon (where the target fills the frame), enable Surface mode.';
+
 import { useEventBus } from '@/composables/eventBus';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { useStacker } from '@/composables/useStacker';
@@ -873,8 +878,13 @@ export function useDebayerReader() {
             results.push(...subResults);
         }
 
-        // Calculate crop region from bounds
-        const boundsResults = results.filter(r => r.bounds && r.bounds.width > 0);
+        // Calculate crop region from bounds — filter out tiny bounds (edge noise / hot pixels)
+        // so a landscape/generic photo doesn't produce a 2x2 crop that fails everything downstream.
+        const boundsResults = results.filter(r => {
+            if (!r.bounds || !(r.bounds.width > 0)) return false;
+            const size = Math.max(r.bounds.width, r.bounds.height);
+            return size >= MIN_BOUNDS_SIZE;
+        });
         if (boundsResults.length < sampleCount * 0.5) {
             addLog(`[DebayerReader] Only ${boundsResults.length}/${sampleCount} frames have valid bounds, skipping auto-crop`);
             return null;
@@ -1455,9 +1465,10 @@ export function useDebayerReader() {
         if (bestFramesForStacking.length === 0) {
             let errorMsg = 'No valid frames could be processed for stacking.';
 
-            if (cutOffFrameCount > 0 && cutOffFrameCount >= completedFrames * 0.9) {
-                // Most or all frames were cut-off
-                errorMsg = `All ${cutOffFrameCount} frames were rejected because the object touches the frame edge. Please select "Surface" mode for close-up Moon/Sun images, or use a wider field of view.`;
+            if (cutOffFrameCount > 0 && cutOffFrameCount >= completedFrames * 0.9 && !surfaceMode) {
+                // Most or all frames were cut-off in Planet mode — this pattern also
+                // matches "no target detected" (bounds hit tiny edge artifacts).
+                errorMsg = NO_TARGET_MESSAGE;
             }
 
             addLog(`[DebayerReader] ${errorMsg}`);

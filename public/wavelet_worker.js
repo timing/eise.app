@@ -41,31 +41,35 @@ self.addEventListener('message', async (e) => {
 
 	console.log(`[wavelet_worker] luminanceOnly=${globalLuminanceOnly}, is16bit=${globalIs16bit}`);
 
-	initializeSubWorkers();
+	try {
+		initializeSubWorkers();
 
-	if (globalLuminanceOnly) {
-		// Luminance-only mode: extract luminance, sharpen it, apply back
-		globalOriginalData = imageData; // Keep reference to original
-		pendingResults = 1; // Only one channel to process
+		if (globalLuminanceOnly) {
+			// Luminance-only mode: extract luminance, sharpen it, apply back
+			globalOriginalData = imageData; // Keep reference to original
+			pendingResults = 1; // Only one channel to process
 
-		const luminance = globalIs16bit
-			? extractLuminance16(imageData)
-			: extractLuminance(imageData);
+			const luminance = globalIs16bit
+				? extractLuminance16(imageData)
+				: extractLuminance(imageData);
 
-		// Send only luminance to first worker
-		workers[0].postMessage({ imageData: luminance, width, height, amount, radius, is16bit: globalIs16bit });
-	} else {
-		// Original RGB mode: sharpen each channel independently
-		globalOriginalData = null;
-		pendingResults = 3;
+			// Send only luminance to first worker
+			workers[0].postMessage({ imageData: luminance, width, height, amount, radius, is16bit: globalIs16bit });
+		} else {
+			// Original RGB mode: sharpen each channel independently
+			globalOriginalData = null;
+			pendingResults = 3;
 
-		const channelData = globalIs16bit
-			? extractChannelData16(imageData)
-			: extractChannelData(imageData);
+			const channelData = globalIs16bit
+				? extractChannelData16(imageData)
+				: extractChannelData(imageData);
 
-		channelData.forEach((channel, index) => {
-			workers[index].postMessage({ imageData: channel, width, height, amount, radius, is16bit: globalIs16bit });
-		});
+			channelData.forEach((channel, index) => {
+				workers[index].postMessage({ imageData: channel, width, height, amount, radius, is16bit: globalIs16bit });
+			});
+		}
+	} catch (err) {
+		self.postMessage({ error: err && err.message ? err.message : String(err), taskId: globalTaskId });
 	}
 });
 
@@ -76,32 +80,38 @@ function handleWorkerResponse(index) {
 
 		// When all channels are processed
 		if (pendingResults === 0) {
-			let result;
+			try {
+				let result;
 
-			if (globalLuminanceOnly) {
-				// Apply sharpened luminance back to original RGB
-				const sharpenedLuminance = channelDataResults[0];
-				result = globalIs16bit
-					? applyLuminanceToRgb16(globalOriginalData, sharpenedLuminance)
-					: applyLuminanceToRgb(globalOriginalData, sharpenedLuminance);
+				if (globalLuminanceOnly) {
+					// Apply sharpened luminance back to original RGB
+					const sharpenedLuminance = channelDataResults[0];
+					result = globalIs16bit
+						? applyLuminanceToRgb16(globalOriginalData, sharpenedLuminance)
+						: applyLuminanceToRgb(globalOriginalData, sharpenedLuminance);
+					globalOriginalData = null;
+				} else {
+					// Merge sharpened RGB channels
+					result = globalIs16bit
+						? mergeChannelsIntoImageData16(channelDataResults)
+						: mergeChannelsIntoImageData(channelDataResults);
+				}
+
+				if (globalIs16bit) {
+					self.postMessage({ imageData: result, taskId: globalTaskId, is16bit: true });
+				} else {
+					const mergedData = new Uint8ClampedArray(result);
+					const imageData = new ImageData(mergedData, globalWidth, globalHeight);
+					self.postMessage({ imageData, taskId: globalTaskId }, [mergedData.buffer]);
+				}
+			} catch (err) {
+				self.postMessage({ error: err && err.message ? err.message : String(err), taskId: globalTaskId });
+			} finally {
+				// Reset for next processing
+				pendingResults = globalLuminanceOnly ? 1 : 3;
+				channelDataResults[0] = channelDataResults[1] = channelDataResults[2] = null;
 				globalOriginalData = null;
-			} else {
-				// Merge sharpened RGB channels
-				result = globalIs16bit
-					? mergeChannelsIntoImageData16(channelDataResults)
-					: mergeChannelsIntoImageData(channelDataResults);
 			}
-
-			if (globalIs16bit) {
-				self.postMessage({ imageData: result, taskId: globalTaskId, is16bit: true });
-			} else {
-				const mergedData = new Uint8ClampedArray(result);
-				const imageData = new ImageData(mergedData, globalWidth, globalHeight);
-				self.postMessage({ imageData, taskId: globalTaskId }, [mergedData.buffer]);
-			}
-
-			// Reset for next processing
-			pendingResults = globalLuminanceOnly ? 1 : 3;
 		}
 	};
 }

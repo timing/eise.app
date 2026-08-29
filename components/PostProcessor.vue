@@ -1211,9 +1211,18 @@ function waveletSharpenInWorker16(data, width, height, amount, radius, luminance
 
 	return new Promise((resolve, reject) => {
 		function handleWorkerMsg(e) {
-			const { imageData: resultData, taskId, is16bit } = e.data;
-
 			waveletWorkers[workerId].removeEventListener('message', handleWorkerMsg);
+
+			if (!e.data) {
+				reject(new Error('Wavelet worker returned no data (likely out of memory)'));
+				return;
+			}
+			if (e.data.error) {
+				reject(new Error(`Wavelet worker error: ${e.data.error}`));
+				return;
+			}
+
+			const { imageData: resultData, taskId, is16bit } = e.data;
 
 			if (currentTask === taskId || taskId > lastReturnedTaskId16) {
 				lastReturnedTaskId16 = taskId;
@@ -1244,8 +1253,18 @@ function usmSharpenInWorker16(data, width, height, radius, amount, threshold, lu
 
 	return new Promise((resolve, reject) => {
 		function handleWorkerMsg(e) {
-			const { imageData: resultData, taskId, is16bit } = e.data;
 			usmWorker.removeEventListener('message', handleWorkerMsg);
+
+			if (!e.data) {
+				reject(new Error('USM worker returned no data (likely out of memory)'));
+				return;
+			}
+			if (e.data.error) {
+				reject(new Error(`USM worker error: ${e.data.error}`));
+				return;
+			}
+
+			const { imageData: resultData, taskId, is16bit } = e.data;
 
 			if (currentTask === taskId || taskId > lastUsmTaskId16) {
 				lastUsmTaskId16 = taskId;

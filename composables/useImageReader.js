@@ -11,6 +11,12 @@ import { decodeTIFF } from '@/utils/tiffDecoder.js';
 // Native image formats that browsers can decode directly
 const NATIVE_FORMATS = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'];
 
+// Bounds smaller than this are edge noise or hot pixels, not a stackable target.
+// Filters out landscape/generic photos incorrectly fed to a planetary stacker.
+const MIN_BOUNDS_SIZE = 8;
+
+const NO_TARGET_MESSAGE = 'No planet or moon detected in your images. eise.app is a planetary stacker, so try images that show a bright, compact target. If you\'re imaging the surface of the Sun or Moon (where the target fills the frame), enable Surface mode.';
+
 // Check if file is a TIFF
 function isTiffFile(file) {
     const fileName = file.name?.toLowerCase() || '';
@@ -579,10 +585,13 @@ export function useImageReader() {
 
                     for (let j = 0; j < results.length; j++) {
                         const result = results[j];
-                        if (result.bounds) {
+                        const boundsSize = result.bounds
+                            ? (result.bounds.size || Math.max(result.bounds.width, result.bounds.height))
+                            : 0;
+                        if (result.bounds && boundsSize >= MIN_BOUNDS_SIZE) {
                             canCropCount++;
                             detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
-                            detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
+                            detectedSizes.push(boundsSize);
                             const sharpness = result.sharpness || 0;
                             if (!bestSample || sharpness > bestSample.sharpness) {
                                 // Copy the RGBA — batchFrames drops out of scope next iteration.
@@ -647,6 +656,18 @@ export function useImageReader() {
                 }
             } else {
                 addLog(`Only ${canCropCount}/${sampleIndices.length} images can be cropped. Skipping auto-crop.`);
+
+                // If almost no frames had a compact target, this isn't planetary
+                // content — surface a clear error instead of stacking landscape
+                // photos into garbage. Skip in Surface mode: sun/moon closeups
+                // legitimately have no compact target.
+                if (!surfaceMode && canCropCount < sampleIndices.length * 0.1) {
+                    addLog(NO_TARGET_MESSAGE);
+                    emit('upload-error', NO_TARGET_MESSAGE);
+                    emit('stack-failed', { component: 'useImageReader', reason: 'no compact target detected', details: { canCropCount, sampleCount: sampleIndices.length } });
+                    emit('stop-loading');
+                    return;
+                }
             }
 
             // Publish an initial best-frame preview from the sharpest sample so
@@ -989,8 +1010,13 @@ export function useImageReader() {
                 height: stackResult.height
             });
         } else {
-            addLog('Stacking failed - no valid frames');
-            emit('stack-failed', { component: 'useImageReader', reason: 'no valid frames' });
+            const allCutOff = cutOffFrames > 0 && cutOffFrames >= frameCount * 0.9;
+            const errorMsg = (allCutOff && !surfaceMode)
+                ? NO_TARGET_MESSAGE
+                : 'Stacking failed - no valid frames';
+            addLog(errorMsg);
+            emit('upload-error', errorMsg);
+            emit('stack-failed', { component: 'useImageReader', reason: 'no valid frames', details: { cutOffFrames, skippedFrames, oversizedFrames, frameCount } });
             emit('stop-loading');
         }
     }

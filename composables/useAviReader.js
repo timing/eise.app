@@ -8,6 +8,11 @@ import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { useLiteMemoryLimits } from '@/composables/useLiteMemoryLimits';
 import { useWebGpuAnalyzeWorker } from '@/composables/useWebGpuAnalyzeWorker';
 
+// Bounds smaller than this are edge noise or hot pixels, not a stackable target.
+const MIN_BOUNDS_SIZE = 8;
+
+const NO_TARGET_MESSAGE = 'No planet or moon detected in your images. eise.app is a planetary stacker, so try images that show a bright, compact target. If you\'re imaging the surface of the Sun or Moon (where the target fills the frame), enable Surface mode.';
+
 // Import from new parser module
 import {
     isEasyAviFourCC,
@@ -389,7 +394,7 @@ export function useAviReader() {
 
             const promise = processFrameWithWorker(worker, dataToWorker, [frameBuffer])
                 .then(result => {
-                    if (result.bounds && result.bounds.canCrop) {
+                    if (result.bounds && result.bounds.canCrop && result.bounds.size >= MIN_BOUNDS_SIZE) {
                         canCropCount++;
                         maxSize = Math.max(maxSize, result.bounds.size);
                         // Use actual detected center (not derived from clamped crop coords)
@@ -1069,10 +1074,10 @@ export function useAviReader() {
             const totalSkipped = cutOffFrames + skippedFrames + oversizedFrames;
             let errorMsg = 'Stacking failed: no valid frames could be processed.';
 
-            if (cutOffFrames === frameCount) {
-                errorMsg = `All ${frameCount} frames were rejected because the object touches the frame edge. Try selecting "Surface" mode for close-up Moon/Sun images, or use a wider field of view.`;
-            } else if (cutOffFrames > frameCount * 0.9) {
-                errorMsg = `${cutOffFrames} of ${frameCount} frames were rejected (object touching edge). Try "Surface" mode or ensure the planet is fully in frame.`;
+            if (cutOffFrames === frameCount && !surfaceMode) {
+                errorMsg = NO_TARGET_MESSAGE;
+            } else if (cutOffFrames > frameCount * 0.9 && !surfaceMode) {
+                errorMsg = NO_TARGET_MESSAGE;
             } else if (skippedFrames === frameCount) {
                 errorMsg = `All ${frameCount} frames failed during analysis. The video may be corrupted or contain no recognizable content.`;
             } else if (totalSkipped > 0) {
@@ -1176,10 +1181,13 @@ export function useAviReader() {
             const results = await analyzeRgbaBatchGpu(batch, width, height);
 
             for (const result of results) {
-                if (result.bounds) {
+                const boundsSize = result.bounds
+                    ? (result.bounds.size || Math.max(result.bounds.width, result.bounds.height))
+                    : 0;
+                if (result.bounds && boundsSize >= MIN_BOUNDS_SIZE) {
                     canCropCount++;
                     detectedCenters.push({ x: result.bounds.centroidX, y: result.bounds.centroidY });
-                    detectedSizes.push(result.bounds.size || Math.max(result.bounds.width, result.bounds.height));
+                    detectedSizes.push(boundsSize);
                 }
             }
 
