@@ -13,8 +13,9 @@ import { useProcessingState, getPass2Counters } from '@/composables/useProcessin
 import { reportError } from '@/composables/useSentryReporting';
 import { useLiteMode } from '@/composables/useLiteMode';
 import { useContinuousStacking } from '@/composables/useContinuousStacking';
+import { useStackLogTelemetry } from '@/composables/useStackLogTelemetry';
 
-const { on, emit: eventBusEmit, addLog, logs } = useEventBus();
+const { on, emit: eventBusEmit, addLog } = useEventBus();
 const { stackFramesLocally } = useStacker();
 const {
 	runContinuousStacking,
@@ -25,13 +26,34 @@ const {
 } = useContinuousStacking();
 
 const { track, trackHumanInteraction } = useTracking();
-const { getTrackingContext, getInputFilename } = useProcessingState();
+const {
+	getTrackingContext,
+	getStackJobProps,
+	getInputFilename,
+	markStackStart,
+	markStackStep,
+	markStackStop,
+} = useProcessingState();
+const { resetLogCursor, getLogDelta, handleDeltaAckFailure, getLogTail } = useStackLogTelemetry();
+
+// Device baseline: iOS has no performance.memory, so mem_used_mb on stack_ping is
+// null there. navigator.deviceMemory (GB, rounded) and hardwareConcurrency give a
+// static device-class signal we can bucket iOS silents against. Read once at start
+// and ship on stack_start; per-ping updates aren't useful (values never change).
+function deviceBaselineProps() {
+	if (typeof navigator === 'undefined') return {};
+	const out = {};
+	if (typeof navigator.deviceMemory === 'number') out.device_memory_gb = navigator.deviceMemory;
+	if (typeof navigator.hardwareConcurrency === 'number') out.hardware_concurrency = navigator.hardwareConcurrency;
+	return out;
+}
 
 function stackStartProps() {
 	const filename = getInputFilename();
 	return {
 		...getTrackingContext(),
 		filename: filename ? String(filename).slice(0, 200) : undefined,
+		...deviceBaselineProps(),
 	};
 }
 const router = useRouter();
@@ -191,48 +213,14 @@ let lastStackStepTs = 0;
 // of any unhandled errors or rejections caught by the watchdog.
 const STACK_PING_INTERVAL_MS = 2000;
 const STACK_PING_MAX = 300;  // Safety: cap at 10 minutes to prevent runaway.
-const MAX_LOGS_PER_PING = 20;      // Cap per-ping log burst; overflow tracked via log_dropped.
-const MAX_LOG_LINE_CHARS = 200;    // Per-line truncation — no unbounded strings on the wire.
-const MAX_LOGS_ON_FAILURE = 50;    // Guaranteed tail on stack_failed regardless of ping delivery.
+// Log delta / tail helpers live in useStackLogTelemetry so cancel sites in
+// FileUploader / VideoFrameProcessor can attach `logs_tail` to their terminal
+// events without plumbing through the bus.
 let stackPingTimer = null;
 let stackPingCount = 0;
 let stackStartTs = 0;
 let unhandledErrorCount = 0;
 let lastUnhandledError = null;
-let lastLogCursor = 0;  // Index into logs.value already shipped; ping ships delta from here.
-
-// Returns new log lines since the last ping (capped, truncated) plus accounting
-// fields. Advances the cursor. Null if nothing new. Attached to stack_ping so
-// silent mediabunny deaths surface WHY, not just where, in the ping trail.
-function getLogDelta() {
-	const cursor = lastLogCursor;
-	const total = logs.value.length;
-	if (total <= cursor) return null;
-	let sliceStart = cursor;
-	if (total - cursor > MAX_LOGS_PER_PING) {
-		sliceStart = total - MAX_LOGS_PER_PING;  // Keep the freshest lines when burst > cap.
-	}
-	const lines = logs.value.slice(sliceStart).map(l => String(l).slice(0, MAX_LOG_LINE_CHARS));
-	lastLogCursor = total;
-	return {
-		logs: lines,
-		log_cursor: cursor,
-		log_total: total,
-		log_dropped: sliceStart - cursor,
-	};
-}
-
-// Returns the last N log lines, truncated. Used on stack_failed as a
-// belt-and-suspenders context payload — even if some pings never reached the
-// beacon (network flakiness), the terminal event carries the pre-death tail.
-function getLogTail(n = MAX_LOGS_ON_FAILURE) {
-	const total = logs.value.length;
-	if (!total) return null;
-	return {
-		logs_tail: logs.value.slice(-n).map(l => String(l).slice(0, MAX_LOG_LINE_CHARS)),
-		log_total: total,
-	};
-}
 
 function stackPingSnapshot() {
 	const now = Date.now();
@@ -271,7 +259,13 @@ function emitStackPing() {
 	const snap = stackPingSnapshot();
 	const delta = getLogDelta();
 	if (delta) Object.assign(snap, delta);
-	track('stack_ping', snap);
+	// track() returns Promise<boolean> from the eise beacon. On failure, push
+	// this ping's log lines back into the retry buffer so the next successful
+	// ping prepends them. Silent failures (network hiccup, throttled hidden tab)
+	// used to lose those lines because getLogDelta advanced the cursor eagerly.
+	track('stack_ping', snap).then((ok) => {
+		if (!ok && delta) handleDeltaAckFailure(delta);
+	});
 	stackPingCount++;
 }
 
@@ -282,7 +276,11 @@ function startStackPing() {
 	stackPingCount = 0;
 	unhandledErrorCount = 0;
 	lastUnhandledError = null;
-	lastLogCursor = logs.value.length;  // Only ship logs from this run onward.
+	resetLogCursor();  // Only ship logs from this run onward; drain the retry buffer too.
+	// Sync trace state so terminal fires in other components (FileUploader
+	// cancel, VideoFrameProcessor cancel) can pick up ms_since_start / last_step
+	// via getStackJobProps() without plumbing.
+	markStackStart();
 	// Fire once immediately so we can tell "processing started" from
 	// "processing entered and instantly died" (first ping vs no ping).
 	emitStackPing();
@@ -296,6 +294,7 @@ function stopStackPing() {
 	if (!stackPingTimer) return;
 	clearInterval(stackPingTimer);
 	stackPingTimer = null;
+	markStackStop();
 }
 
 function trackWatchdogFailure(kind, message) {
@@ -307,6 +306,8 @@ function trackWatchdogFailure(kind, message) {
 	const snap = stackPingSnapshot();
 	const tail = getLogTail();  // Guaranteed pre-death log tail even if pings dropped.
 	stopStackPing();
+	// snap already carries getTrackingContext() via stackPingSnapshot(), plus
+	// live last_step/ms_since_step/mem — no need to add getStackJobProps here.
 	track('stack_failed', {
 		...snap,
 		...(tail || {}),
@@ -372,6 +373,7 @@ onMounted(async () => {
 		// see how far each attempt gets before dropping to cancel/fail.
 		lastStackStep = step;
 		lastStackStepTs = Date.now();
+		markStackStep(step);  // Mirror to shared trace so other components' terminals see it.
 		track('stack_step', { step, ...getTrackingContext() });
 	});
 	on('stack-failed', (data) => {
@@ -383,6 +385,7 @@ onMounted(async () => {
 		const snap = stackPingSnapshot();
 		const tail = getLogTail();
 		stopStackPing();
+		// snap carries base context + live trace; no need to re-add getStackJobProps.
 		track('stack_failed', {
 			...snap,
 			...(tail || {}),
@@ -691,7 +694,12 @@ async function handleStackedImageReady(data) {
 	isProcessing.value = false;
 	stackInFlight = false;
 	stopStackPing();
-	track('stack_finished', getTrackingContext());
+	// getStackJobProps ships last_step + ms_since_start, so we can tell a fast
+	// crop_detected→finished from a long finalization tail. getLogTail() ships
+	// the last ~50 log lines so the admin viewer can back-fill any lines added
+	// between the last ping and the terminal (finished used to ship no logs).
+	const tail = getLogTail();
+	track('stack_finished', { ...getStackJobProps(), ...(tail || {}) });
 	navigateTo('/post-processor/');
 }
 

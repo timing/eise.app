@@ -5,6 +5,10 @@
   var siteId = (script && script.dataset.site) || cfg.siteId || 'eise-prod';
   var lastPath = null;
 
+  // Returns a Promise<boolean> that resolves to true if the beacon reached the
+  // server (2xx) and false otherwise. Never rejects. Callers that don't care
+  // can ignore the return value. stack_ping delivery uses it to keep undelivered
+  // log lines in a retry buffer instead of losing them on a dropped fetch.
   function send(event, extra) {
     var body = {
       site_id: siteId,
@@ -21,14 +25,16 @@
     if (extra && extra.variants) body.variants = extra.variants;
     if (extra && extra.user_id) body.user_id = extra.user_id;
     try {
-      fetch(endpoint + '/event', {
+      return fetch(endpoint + '/event', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         keepalive: true,
-      }).catch(function () {});
-    } catch (e) {}
+      }).then(function (r) { return !!(r && r.ok); }, function () { return false; });
+    } catch (e) {
+      return Promise.resolve(false);
+    }
   }
 
   function pageview() {
@@ -40,7 +46,7 @@
 
   window.eise = window.eise || {};
   window.eise.track = function (event, props, extra) {
-    send(event, {
+    return send(event, {
       props: props,
       variants: extra && extra.variants ? extra.variants : undefined,
     });

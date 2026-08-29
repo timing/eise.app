@@ -66,12 +66,14 @@ import { onMounted, ref, watch, defineProps, onBeforeUpdate, nextTick } from 'vu
 import { useEventBus } from '@/composables/eventBus';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
+import { useStackLogTelemetry } from '@/composables/useStackLogTelemetry';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { useFeedback } from '@/composables/useFeedback';
 
 const { on, addLog, emit } = useEventBus();
 const { track } = useTracking();
-const { getTrackingContext } = useProcessingState();
+const { getTrackingContext, getStackJobProps } = useProcessingState();
+const { getLogTail } = useStackLogTelemetry();
 const { workerUrl } = useWorkerUrl();
 const { openFeedback } = useFeedback();
 
@@ -267,7 +269,8 @@ onMounted(async () => {
 
 
 function cancelProcessing() {
-	track('stack_cancelled', getTrackingContext());
+	const tail = getLogTail();
+	track('stack_cancelled', { ...getStackJobProps(), ...(tail || {}), reason: 'user_click' });
 	emit('stop-loading');
 	emit('cancel-processing');
 	showCancelledMessage.value = true;

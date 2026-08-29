@@ -29,9 +29,11 @@ const pixfrac = ref(1.0);
 
 // Tracking context for analytics
 const trackingContext = ref({
-    file_type: null,  // 'ser', 'avi', 'video', 'images'
-    reader: null,     // 'debayer', 'avi', 'ffmpeg', 'image'
-    gpu_enabled: null // true/false
+    file_type: null,     // 'ser', 'avi', 'video', 'images'
+    reader: null,        // 'debayer', 'avi', 'ffmpeg', 'image' — current reader (rewritten on fallback)
+    initial_reader: null,// First reader chosen for this job; never overwritten by fallback. Lets
+                         // analytics tell "mediabunny failed then ffmpeg failed" from "ffmpeg failed".
+    gpu_enabled: null    // true/false
 });
 
 const stackingMode = ref('single'); // 'single' or 'continuous'
@@ -52,6 +54,11 @@ export function bumpPass2Batch() { pass2Counters.batch_count++; }
 export function setPass2QueueSize(n) { pass2Counters.decode_queue_size = n; }
 export function getPass2Counters() { return { ...pass2Counters }; }
 
+// Trace state written by app.vue on start / stack-step / stop, read by any
+// terminal fire site via getStackJobProps. Module-scoped (not per-composable-call)
+// so that mark* from one component and read from another see the same jobTrace.
+const jobTrace = { lastStep: null, lastStepTs: 0, startTs: 0 };
+
 export function useProcessingState() {
     // Set filename only (display / export). Does NOT mint a new stack_job_id
     // — post-processor Prev/Next navigation calls this to update the export
@@ -69,6 +76,9 @@ export function useProcessingState() {
     function startNewStackJob(filename) {
         setInputFilename(filename);
         stackJobId.value = shortJobHash(`${filename}|${Date.now()}|${Math.random()}`);
+        // Reset initial_reader so the next setTrackingContext claims it. Without
+        // this, a second attempt would inherit the previous job's initial_reader.
+        trackingContext.value = { file_type: null, reader: null, initial_reader: null, gpu_enabled: null };
     }
 
     function getStackJobId() {
@@ -133,7 +143,17 @@ export function useProcessingState() {
     }
 
     function setTrackingContext({ file_type, reader, gpu_enabled }) {
-        trackingContext.value = { file_type, reader, gpu_enabled };
+        // initial_reader is sticky per job: whoever calls setTrackingContext first
+        // owns it, and later fallback calls (mediabunny -> ffmpeg) only rewrite
+        // `reader`. Lets analytics attribute silent/failed jobs to the real starting
+        // reader instead of just the one active at terminal time.
+        const prev = trackingContext.value;
+        trackingContext.value = {
+            file_type,
+            reader,
+            initial_reader: prev.initial_reader || reader,
+            gpu_enabled,
+        };
     }
 
     function getTrackingContext() {
@@ -148,8 +168,29 @@ export function useProcessingState() {
         };
     }
 
+    // Terminal-event helper. stack_job_id is the join key (already in tracking
+    // context), so we don't repeat filename here — that lives on stack_start.
+    // What terminals DO need beyond the base context: the trace state
+    // (last_step, ms_since_step, ms_since_start) so a cancel or event-based
+    // stack_failed carries the same "where did we die" signal that watchdog
+    // stack_failed already has via stackPingSnapshot. app.vue writes trace
+    // state on start / step / stop.
+    function getStackJobProps() {
+        const now = Date.now();
+        return {
+            ...getTrackingContext(),
+            last_step: jobTrace.lastStep || 'none',
+            ms_since_step: jobTrace.lastStepTs ? now - jobTrace.lastStepTs : null,
+            ms_since_start: jobTrace.startTs ? now - jobTrace.startTs : null,
+        };
+    }
+
+    function markStackStart() { jobTrace.startTs = Date.now(); jobTrace.lastStep = null; jobTrace.lastStepTs = 0; }
+    function markStackStep(step) { jobTrace.lastStep = step; jobTrace.lastStepTs = Date.now(); }
+    function markStackStop() { jobTrace.startTs = 0; jobTrace.lastStep = null; jobTrace.lastStepTs = 0; }
+
     function clearTrackingContext() {
-        trackingContext.value = { file_type: null, reader: null, gpu_enabled: null };
+        trackingContext.value = { file_type: null, reader: null, initial_reader: null, gpu_enabled: null };
     }
 
     return {
@@ -178,6 +219,10 @@ export function useProcessingState() {
         getBatchStartIndex,
         setTrackingContext,
         getTrackingContext,
+        getStackJobProps,
+        markStackStart,
+        markStackStep,
+        markStackStop,
         clearTrackingContext,
         getStackJobId,
     };

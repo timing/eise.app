@@ -21,8 +21,11 @@ function activeVariants() {
 }
 
 export function useTracking() {
+    // Returns Promise<boolean> from the eise beacon: true if the event landed
+    // (2xx), false if it didn't. Callers that don't care can ignore it. Used by
+    // stack_ping to keep undelivered log lines in a retry queue.
     function track(event, metadata = null) {
-        if (typeof window === 'undefined') return;
+        if (typeof window === 'undefined') return Promise.resolve(false);
 
         const variants = activeVariants();
 
@@ -35,8 +38,10 @@ export function useTracking() {
 
         // eise analytics: props stays clean; variants travel separately.
         if (window.eise && typeof window.eise.track === 'function') {
-            window.eise.track(event, metadata, { variants });
+            const p = window.eise.track(event, metadata, { variants });
+            return (p && typeof p.then === 'function') ? p : Promise.resolve(true);
         }
+        return Promise.resolve(false);
     }
 
     function trackHumanInteraction() {

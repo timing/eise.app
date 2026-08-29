@@ -325,6 +325,7 @@ import { useFFmpegReader } from '@/composables/useFFmpegReader';
 import { useMediabunnyReader } from '@/composables/useMediabunnyReader';
 import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
+import { useStackLogTelemetry } from '@/composables/useStackLogTelemetry';
 import { useBatchProcessing, formatFileSize } from '@/composables/useBatchProcessing';
 import { reportError, UserError } from '@/composables/useSentryReporting';
 import { FFmpegUnsupportedError } from '@/plugins/ffmpeg';
@@ -593,7 +594,8 @@ watch([selectedFiles, isMobileDevice, liteMode], () => {
 }, { immediate: true });
 
 const { addLog, emit: eventBusEmit, on, logs } = useEventBus();
-const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatchSize, setPixfrac: setSharedPixfrac, getTrackingContext } = useProcessingState();
+const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatchSize, setPixfrac: setSharedPixfrac, getTrackingContext, getStackJobProps } = useProcessingState();
+const { getLogTail } = useStackLogTelemetry();
 
 // Sync stacking settings to shared state for stacker to use
 watch(minApQuality, (val) => setSharedMinApQuality(val), { immediate: true });
@@ -623,8 +625,13 @@ function trackStackFailed(reason, extraProps) {
 	if (stackFailedFired) return;
 	stackFailedFired = true;
 	const first = selectedFiles.value?.[0];
+	const tail = getLogTail();
+	// getStackJobProps ships last_step / ms_since_step / ms_since_start so we
+	// can pin where in the funnel the failure landed even without a ping snapshot.
+	// logs_tail belt-and-suspenders the pre-failure context if pings dropped.
 	track('stack_failed', {
-		...getTrackingContext(),
+		...getStackJobProps(),
+		...(tail || {}),
 		reason: reason ? String(reason).slice(0, 200) : 'unknown',
 		filename: first?.name ? String(first.name).slice(0, 200) : undefined,
 		file_count: selectedFiles.value?.length || 0,
@@ -913,7 +920,12 @@ async function startProcessing() {
 }
 
 function cancelProcessing() {
-	track('stack_cancelled', getTrackingContext());
+	// getStackJobProps carries last_step + ms_since_start so we can tell "user
+	// clicked cancel at 2s" (mis-click) from "cancelled at 3min while stuck at
+	// mediabunny_pass2_stacking" (fed up with a slow reader). logs_tail brings
+	// the pre-cancel log context so cancels are debuggable too.
+	const tail = getLogTail();
+	track('stack_cancelled', { ...getStackJobProps(), ...(tail || {}), reason: 'user_click' });
 	isProcessing.value = false;
 	selectedFiles.value = [];
 	if (fileInput.value) {

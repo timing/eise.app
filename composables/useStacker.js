@@ -685,6 +685,9 @@ export function useStacker() {
             const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropSize, cropSize, surfaceMode);
             const { alignmentPoints, patchSize, searchRadius } = alignmentData;
             addLog(`Alignment prepared: ${alignmentPoints.length} APs`);
+            // G3 checkpoint: AP grid ready. In pipelined mode template-matching
+            // interleaves with accumulation so there's no separate "matched" step.
+            emit('stack-step', 'stack_ap_grid_built');
 
             // Calculate reference brightness for normalization
             // calcMeanBrightness returns 0-255 scale for both formats
@@ -936,6 +939,9 @@ export function useStacker() {
                 batchStart = batchEnd;
             }
 
+            // G3 checkpoint: accumulation loop done, finalize is next.
+            emit('stack-step', 'stack_accumulated');
+
             // Step 5: Finalize stacking
             emit('set-caption', 'Finalizing...');
             const result = await new Promise((resolve, reject) => {
@@ -951,6 +957,9 @@ export function useStacker() {
                 gpuStackWorker.addEventListener('message', handler);
                 gpuStackWorker.postMessage({ type: 'finalize-stacking' });
             });
+            // G3 checkpoint: finalized blob back from GPU. If we die between here
+            // and stacked-image-ready, it's in the JS post-encode path, not GPU.
+            emit('stack-step', 'stack_finalized');
 
             // Cleanup
             gpuStackWorker.postMessage({ type: 'cleanup' });
@@ -1179,6 +1188,8 @@ export function useStacker() {
             const alignmentData = prepareAlignmentData(refFrameData, surfaceMode);
             const { alignmentPoints, refGrayData, patchSize, searchRadius } = alignmentData;
             addLog(`Alignment prepared: ${alignmentPoints.length} APs, reference frame ${refIndex}`);
+            // G3 checkpoint: AP grid ready.
+            emit('stack-step', 'stack_ap_grid_built');
 
             // Step 3: Run template matching on GPU in batches
             emit('set-caption', 'GPU template matching...');
@@ -1305,6 +1316,8 @@ export function useStacker() {
             } else {
                 addLog('GPU batch alignment complete');
             }
+            // G3 checkpoint: template matching done, accumulation next.
+            emit('stack-step', 'stack_template_matched');
 
             // Step 4: GPU Stacking - stream frames in batches to avoid memory issues
             emit('set-caption', 'GPU stacking...');
@@ -1403,6 +1416,8 @@ export function useStacker() {
             addLog('GPU stacking complete, preparing image for Post Processor...');
             emit('set-caption', 'Preparing image for Post Processor...');
             emit('update-loading', { progress: 95, current: frameCount, total: frameCount });
+            // G3 checkpoint: accumulation done, finalize next.
+            emit('stack-step', 'stack_accumulated');
 
             // Finalize and get result
             const tFinalize = performance.now();
@@ -1420,6 +1435,8 @@ export function useStacker() {
                 gpuWorker.postMessage({ type: 'finalize-stacking' });
             });
             addLog(`Image ready (${((performance.now() - tFinalize) / 1000).toFixed(1)}s)`);
+            // G3 checkpoint: finalized blob back from GPU.
+            emit('stack-step', 'stack_finalized');
 
             // Cleanup and terminate
             gpuWorker.postMessage({ type: 'cleanup' });
