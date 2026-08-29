@@ -11,12 +11,13 @@ let gpuWorker = null;
 let gpuReady = false;
 let initPromise = null;
 let logListenerAttached = false;
+let deviceLostListenerAttached = false;
 // Cache getMaxBatchSize results per (width, height, bitDepth) — the underlying
 // message round-trip is ~1ms but adds up on hot paths. Cleared on terminate.
 const maxBatchCache = new Map();
 
 export function useWebGpuAnalyzeWorker() {
-    const { addLog } = useEventBus();
+    const { addLog, emit } = useEventBus();
     const { workerUrl } = useWorkerUrl();
 
     // Route worker-side {type: 'log'} messages into the app logger + Sentry.
@@ -31,6 +32,27 @@ export function useWebGpuAnalyzeWorker() {
             addLog(message);
             if (level === 'error') {
                 reportError(new Error(message), { component: 'useWebGpuAnalyzeWorker', action: 'workerLog' });
+            }
+        });
+    }
+
+    // Route worker-side device.lost / auto-recovery events into stack-step
+    // analytics. Before this, the worker posted device-lost-recovering and
+    // device-recovered but no one listened, so we couldn't tell whether the
+    // 13 `GPU device was lost` failures in the analytics were "never tried
+    // recovery", "tried and failed", or "tried repeatedly". Now every step
+    // shows up in the funnel so we can measure the recovery success rate.
+    function attachDeviceLostListener() {
+        if (deviceLostListenerAttached || !gpuWorker) return;
+        deviceLostListenerAttached = true;
+        gpuWorker.addEventListener('message', (e) => {
+            if (!e.data) return;
+            if (e.data.type === 'device-lost-recovering') {
+                addLog(`GPU device lost, auto-recovery starting: ${e.data.message || ''}`);
+                emit('stack-step', 'gpu_device_lost');
+            } else if (e.data.type === 'device-recovered') {
+                addLog('GPU device recovered');
+                emit('stack-step', 'gpu_device_recovered');
             }
         });
     }
@@ -74,6 +96,7 @@ export function useWebGpuAnalyzeWorker() {
                 });
                 gpuReady = true;
                 attachWorkerLogListener();
+                attachDeviceLostListener();
                 addLog('GPU analyze worker initialized');
                 return true;
             } catch (error) {
@@ -100,6 +123,7 @@ export function useWebGpuAnalyzeWorker() {
             gpuReady = false;
             initPromise = null;
             logListenerAttached = false;
+            deviceLostListenerAttached = false;
             maxBatchCache.clear();
         }
     }

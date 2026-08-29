@@ -51,6 +51,31 @@
       variants: extra && extra.variants ? extra.variants : undefined,
     });
   };
+
+  // navigator.sendBeacon() variant for pagehide / tab-close. fetch() with
+  // keepalive:true isn't reliable on iOS Safari when the tab is actually going
+  // away — sendBeacon is the browser-guaranteed delivery path for that moment.
+  // Returns true if the beacon was queued (does NOT mean delivered), false if
+  // the browser refused (payload too big, disabled, etc.). Fire-and-forget.
+  window.eise.sendBeacon = function (event, props) {
+    if (typeof navigator === 'undefined' || typeof navigator.sendBeacon !== 'function') return false;
+    try {
+      var body = {
+        site_id: siteId,
+        event: event,
+        client_ts: Date.now(),
+        path: location.pathname + location.search,
+        referrer: document.referrer || null,
+      };
+      if (props) body.props = props;
+      // Blob with explicit JSON MIME so the server parses it identically to
+      // fetch()-posted events.
+      var blob = new Blob([JSON.stringify(body)], { type: 'application/json' });
+      return navigator.sendBeacon(endpoint + '/event', blob);
+    } catch (e) {
+      return false;
+    }
+  };
   window.eise.pageview = pageview;
   window.eise.experiment = function (name) {
     return fetch(endpoint + '/experiment/' + encodeURIComponent(name) + '?site_id=' + encodeURIComponent(siteId), {

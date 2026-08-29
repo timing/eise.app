@@ -1398,6 +1398,13 @@ export function useMediabunnyReader() {
 				surfaceMode
 			);
 
+			// Funnel checkpoint: pass2 stacking returned control. Whether or not
+			// stackResult is truthy, we made it past the stacker call. Between
+			// mediabunny_pass2_stacking and this event = time spent inside the
+			// stacker. If a job dies AFTER this fires, the failure is downstream
+			// (postProcessing handoff, blob encoding, navigation).
+			emit('stack-step', 'mediabunny_pass2_finished');
+
 			if (stackResult) {
 				emit('postProcessing', stackResult.blob, stackResult.float32Data, stackResult.width, stackResult.height);
 			} else {

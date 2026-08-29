@@ -202,6 +202,9 @@ function detectBrowser() {
 let stackInFlight = false;
 let lastStackStep = null;
 let lastStackStepTs = 0;
+// One-shot guard for the pagehide/visibilitychange abandoned beacon (see the
+// pagehide handler below). Reset on each stack start.
+let stackAbandonedFired = false;
 
 // stack_ping: 2s heartbeat emitted while a stack is in flight. Fills the
 // blind spot between stack_step checkpoints — half the silent-death bucket
@@ -276,6 +279,7 @@ function startStackPing() {
 	stackPingCount = 0;
 	unhandledErrorCount = 0;
 	lastUnhandledError = null;
+	stackAbandonedFired = false;  // Fresh job: allow one abandoned event again.
 	resetLogCursor();  // Only ship logs from this run onward; drain the retry buffer too.
 	// Sync trace state so terminal fires in other components (FileUploader
 	// cancel, VideoFrameProcessor cancel) can pick up ms_since_start / last_step
@@ -430,7 +434,37 @@ onMounted(async () => {
 		if (stackInFlight) { unhandledErrorCount++; lastUnhandledError = `error:${msg}`; }
 		trackWatchdogFailure('error', msg);
 	});
+
+	// Tab-close / navigation beacon. Silent jobs are dominated by "≤1 ping ever"
+	// (60-90% per bucket) with ~50% of them showing the session was still alive
+	// afterwards — meaning the ping stream broke, not the JS. On iOS Safari
+	// specifically, keepalive:true fetches often don't survive real pagehide.
+	// navigator.sendBeacon is the browser-guaranteed delivery for that exact
+	// moment. One-shot per job: guarded by stackAbandonedFired so hidden->
+	// visible->hidden doesn't double-fire.
+	window.addEventListener('pagehide', () => fireStackAbandoned('pagehide'));
+	// Plan-B: iOS Safari can freeze a hidden tab and kill it later without ever
+	// running pagehide. Fire on hidden too — better to have an early snapshot
+	// than nothing. If the user comes back visibility=visible we don't undo it,
+	// but the guard keeps us from re-firing on the next hide.
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') fireStackAbandoned('hidden');
+	});
 });
+
+function fireStackAbandoned(at) {
+	if (!stackInFlight || stackAbandonedFired) return;
+	if (typeof window === 'undefined' || !window.eise || typeof window.eise.sendBeacon !== 'function') return;
+	stackAbandonedFired = true;
+	const snap = stackPingSnapshot();
+	const tail = getLogTail();
+	// Fire-and-forget — sendBeacon queues the request even as the tab dies.
+	window.eise.sendBeacon('stack_abandoned', {
+		...snap,
+		...(tail || {}),
+		abandoned_at: at,  // 'pagehide' | 'hidden' — disambiguates silence-cause in analytics.
+	});
+}
 
 const { getStackingMode, setContinuousResults } = useProcessingState();
 

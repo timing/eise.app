@@ -911,10 +911,39 @@ async function startProcessing() {
 		});
 		trackStackFailed(error?.message, { failed_in: 'processFiles' });
 		const errorMsg = error.message || 'An error occurred during processing';
-		// Set error and stop processing - FileUploader will show with error visible
 		isProcessing.value = false;
-		setErrorFromException(error, errorMsg);
 		eventBusEmit('stop-loading');
+
+		// Device-lost failures used to surface as "Please reload the page" text
+		// with no recovery path. The worker's auto-recovery already retries, so
+		// by the time we see this the retry has been exhausted. Route to the
+		// actionable card so users have a real next step instead of just a wall
+		// of red text. Detection matches the worker error strings verbatim.
+		if (/GPU device (was|is) lost/i.test(errorMsg)) {
+			showActionableError(
+				"The browser's GPU dropped out mid-processing. This can happen on machines with limited GPU memory or when the driver crashes under pressure. Auto-recovery was attempted but didn't stick.",
+				[
+					{
+						label: 'Retry the same file',
+						description: 'Close this message and click Process again. A fresh GPU adapter is often granted after a short wait, especially if you close other GPU-heavy tabs first.'
+					},
+					{
+						label: 'Reload the page and try again',
+						description: 'Fresh page = fresh WebGPU device. This is the surest fix when the driver got itself into a bad state.',
+						url: '/'
+					},
+					{
+						label: 'Download the Eise desktop app',
+						description: 'The Mac, Windows and Linux builds use a dedicated GPU context that survives what browsers cannot.',
+						url: '/download/'
+					}
+				]
+			);
+			return;
+		}
+
+		// Everything else: show the raw error message.
+		setErrorFromException(error, errorMsg);
 		eventBusEmit('show-error');
 	}
 }
