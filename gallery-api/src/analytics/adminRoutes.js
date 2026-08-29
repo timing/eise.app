@@ -570,7 +570,11 @@ export function createAnalyticsAdminRoutes({ db }) {
                  MAX(CASE WHEN event_name = 'stack_ping'
                           THEN CAST(json_extract(props_json, '$.mem_used_mb') AS INTEGER) END) AS max_mem_mb,
                  MAX(CASE WHEN event_name = 'stack_failed'
-                          THEN json_extract(props_json, '$.reason') END) AS fail_reason
+                          THEN json_extract(props_json, '$.reason') END) AS fail_reason,
+                 MAX(CASE WHEN event_name = 'stack_rating'
+                          THEN CAST(json_extract(props_json, '$.rating') AS INTEGER) END) AS rating,
+                 MAX(CASE WHEN event_name = 'stack_rating'
+                          THEN json_extract(props_json, '$.comment') END) AS rating_comment
           FROM events
           WHERE site_id = ?
             AND event_name LIKE 'stack\\_%' ESCAPE '\\'

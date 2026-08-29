@@ -68,6 +68,7 @@
 							<th class="num">Errs</th>
 							<th class="num">Mem MB</th>
 							<th class="num">Dur</th>
+							<th class="num">Rating</th>
 						</tr>
 					</thead>
 					<tbody>
@@ -87,6 +88,13 @@
 							<td class="num" :class="{ 'val-warn': j.max_errors > 0 }">{{ j.max_errors || 0 }}</td>
 							<td class="num">{{ j.max_mem_mb || '—' }}</td>
 							<td class="num">{{ formatDur(j.last_ts - j.first_ts) }}</td>
+							<td class="num rating-cell" :title="j.rating_comment || ''">
+								<template v-if="j.rating">
+									<span class="rating-stars-cell">{{ '★'.repeat(j.rating) }}<span class="rating-stars-empty">{{ '★'.repeat(5 - j.rating) }}</span></span>
+									<span v-if="j.rating_comment" class="rating-comment-marker" title="Has comment">💬</span>
+								</template>
+								<template v-else>—</template>
+							</td>
 						</tr>
 					</tbody>
 				</table>
@@ -351,6 +359,11 @@ function buildDetail(body) {
 			if (firstOutcome === 'silent') firstOutcome = 'cancelled';
 		} else if (ev.event_name === 'stack_reader_fallback') {
 			lines.push({ kind: 'step', rel, text: `stack_reader_fallback → ${p.to || '?'} (from ${p.from || '?'})` });
+		} else if (ev.event_name === 'stack_rating') {
+			const rating = Number(p.rating) || 0;
+			const stars = rating > 0 ? '★'.repeat(rating) + '☆'.repeat(Math.max(0, 5 - rating)) : '(no stars)';
+			const commentPart = p.comment ? ` — "${p.comment}"` : '';
+			lines.push({ kind: 'rating', rel, text: `stack_rating ${stars} (${rating}/5)${commentPart}` });
 		} else {
 			lines.push({ kind: 'other', rel, text: `${ev.event_name} ${JSON.stringify(p).slice(0, 120)}` });
 		}
@@ -503,4 +516,10 @@ function formatRel(ms) {
 .line-cancel .line-body { color: #d8b070; }
 .line-gap .line-body { color: #d8b070; font-style: italic; }
 .line-other .line-body { color: #b0b0b0; }
+.line-rating .line-body { color: #ffc107; font-weight: bold; }
+
+.rating-cell { white-space: nowrap; }
+.rating-stars-cell { color: #ffc107; letter-spacing: -1px; }
+.rating-stars-empty { color: #ddd; }
+.rating-comment-marker { margin-left: 4px; font-size: 11px; }
 </style>

@@ -204,6 +204,9 @@
 				</template>
 				<template #toolbar>
 					<div class="toolbar-actions">
+						<button v-if="canRate" class="btn-primary btn-rate" @click="openRatingPopup" title="Rate this stack">
+							★ Rate
+						</button>
 						<button class="btn-primary btn-publish" @click="openPublishModal('toolbar')" title="Publish to Eise Gallery">
 							✨ Publish
 						</button>
@@ -281,6 +284,44 @@
 		</div>
 	</div>
 
+	<!-- Rating Popup -->
+	<div v-if="showRatingPopup" class="rating-popup-overlay" @click.self="closeRatingPopup">
+		<div class="rating-popup">
+			<button class="popup-close-x" aria-label="Close" @click="closeRatingPopup" :disabled="ratingSubmitting">×</button>
+			<h3>Rate this stack</h3>
+			<p class="popup-intro">How happy are you with the result? Optional comment helps us improve.</p>
+
+			<div class="rating-stars" role="radiogroup" aria-label="Rating">
+				<button v-for="n in 5" :key="n"
+					type="button"
+					class="star-btn"
+					:class="{ active: n <= (hoverRating || currentRating) }"
+					:aria-label="`${n} star${n === 1 ? '' : 's'}`"
+					:aria-checked="currentRating === n"
+					role="radio"
+					@mouseenter="hoverRating = n"
+					@mouseleave="hoverRating = 0"
+					@click="currentRating = n">
+					{{ n <= (hoverRating || currentRating) ? '★' : '☆' }}
+				</button>
+			</div>
+
+			<textarea
+				v-model="ratingComment"
+				class="rating-comment"
+				rows="4"
+				placeholder="Anything to add? (optional)"
+				:disabled="ratingSubmitting"
+			></textarea>
+
+			<div class="rating-actions">
+				<button class="btn-primary" :disabled="!currentRating || ratingSubmitting" @click="submitRating">
+					{{ ratingSubmitting ? 'Sending...' : 'Send rating' }}
+				</button>
+			</div>
+		</div>
+	</div>
+
 	<PublishModal
 		v-if="showPublishModal"
 		:canvas="publishCanvas"
@@ -316,7 +357,7 @@ const directFileInput = ref(null);
 
 const { track } = useTracking();
 const { openFeedbackAfterDownload } = useFeedback();
-const { inputFilename, getOutputFilename } = useProcessingState();
+const { inputFilename, getOutputFilename, getStackJobId } = useProcessingState();
 const { workerUrl } = useWorkerUrl();
 const { captureProcessedImage, canExport, generateComparisonVideo, getExportStatus } = useComparisonExport();
 
@@ -334,6 +375,59 @@ const showHelpPopup = ref(false);
 const showPublishModal = ref(false);
 const didExport = ref(false);
 const publishCanvas = ref(null);
+
+// Rating popup state. Rate button appears whenever a live stack_job_id exists
+// (i.e. we arrived here via a stacking run, not a direct file load) and the
+// job hasn't been rated yet in this session. Fires as a stack_rating tracking
+// event; stack_job_id rides along via getTrackingContext so analytics joins
+// the rating to the same job as the rest of its stack_* events.
+const showRatingPopup = ref(false);
+const currentRating = ref(0);
+const hoverRating = ref(0);
+const ratingComment = ref('');
+const ratingSubmitting = ref(false);
+const ratedJobIds = ref(new Set());
+
+const canRate = computed(() => {
+	const jobId = getStackJobId();
+	if (!jobId) return false;
+	return !ratedJobIds.value.has(jobId);
+});
+
+function openRatingPopup() {
+	currentRating.value = 0;
+	hoverRating.value = 0;
+	ratingComment.value = '';
+	showRatingPopup.value = true;
+	track('rate_open', { source: 'toolbar' });
+}
+
+function closeRatingPopup() {
+	if (ratingSubmitting.value) return;
+	showRatingPopup.value = false;
+}
+
+async function submitRating() {
+	if (!currentRating.value || ratingSubmitting.value) return;
+	ratingSubmitting.value = true;
+	try {
+		const jobId = getStackJobId();
+		const comment = (ratingComment.value || '').trim().slice(0, 1000);
+		await track('stack_rating', {
+			rating: currentRating.value,
+			comment: comment || null,
+			has_comment: comment.length > 0,
+		});
+		if (jobId) {
+			const next = new Set(ratedJobIds.value);
+			next.add(jobId);
+			ratedJobIds.value = next;
+		}
+		showRatingPopup.value = false;
+	} finally {
+		ratingSubmitting.value = false;
+	}
+}
 
 // Features list - shared between main page and help popup
 const features = [
@@ -2287,6 +2381,10 @@ canvas {
 	align-items: center;
 	gap: 8px;
 }
+.toolbar-actions > button {
+	font-size: 14px;
+	line-height: 1;
+}
 
 /* Kebab menu */
 .kebab-menu {
@@ -2684,6 +2782,87 @@ canvas {
 }
 .btn-publish:hover {
 	background-color: #5a7aec;
+}
+.btn-rate {
+	background-color: #ffc107;
+	color: #111;
+}
+.btn-rate:hover {
+	background-color: #ff9800;
+	color: #111;
+}
+
+/* Rating popup */
+.rating-popup-overlay {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: rgba(0, 0, 0, 0.6);
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	z-index: 1000;
+}
+.rating-popup {
+	position: relative;
+	background: #fefefe;
+	color: #333;
+	border-radius: 10px;
+	padding: 25px 30px;
+	max-width: 400px;
+	width: 90%;
+	box-sizing: border-box;
+	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+}
+.rating-popup h3 {
+	margin: 0 0 15px 0;
+	color: #333;
+	font-size: 18px;
+}
+.rating-stars {
+	display: flex;
+	justify-content: center;
+	gap: 4px;
+	margin: 20px 0;
+}
+.star-btn {
+	background: transparent;
+	border: none;
+	cursor: pointer;
+	font-size: 40px;
+	line-height: 1;
+	padding: 4px 6px;
+	color: #ccc;
+	transition: color 0.15s, transform 0.1s;
+}
+.star-btn:hover,
+.star-btn.active {
+	color: #ffc107;
+}
+.star-btn:hover {
+	transform: scale(1.1);
+}
+.rating-comment {
+	width: 100%;
+	padding: 10px;
+	border: 1px solid #ccc;
+	border-radius: 5px;
+	font-size: 14px;
+	font-family: inherit;
+	box-sizing: border-box;
+	resize: vertical;
+	min-height: 80px;
+}
+.rating-comment:focus {
+	outline: none;
+	border-color: #8CCF7E;
+}
+.rating-actions {
+	display: flex;
+	justify-content: center;
+	margin-top: 15px;
 }
 .export-popup,
 .help-popup { position: relative; }
