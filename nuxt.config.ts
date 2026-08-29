@@ -34,6 +34,11 @@ const sentryRelease =
 // Without a token the plugin is a no-op, so local `nuxt generate` still works.
 const sentryUploadEnabled = !!process.env.SENTRY_AUTH_TOKEN;
 
+// Shared build-time cache-bust tag used for both beacon.js and runtimeConfig
+// buildTimestamp (workers via useWorkerUrl). Same value everywhere so a single
+// deploy invalidates them all in lockstep.
+const buildTimestamp = Date.now();
+
 export default defineNuxtConfig({
 	devtools: { enabled: true },
 	app: {
@@ -61,7 +66,11 @@ export default defineNuxtConfig({
 					'data-hostname': analyticsHostname,
 				},
 				{
-					src: '/beacon.js',
+					// Query-string bust so a new deploy = new URL. Cloudflare and
+					// browsers both key by query string, so returning visitors don't
+					// stay on the stale copy for max-age (currently 5min per
+					// config/cloudflare_headers.txt). Same buildTimestamp workers use.
+					src: `/beacon.js?v=${buildTimestamp}`,
 					async: true,
 					defer: true,
 					'data-endpoint': beaconEndpoint,
@@ -85,7 +94,7 @@ export default defineNuxtConfig({
 	},
 	runtimeConfig: {
 		public: {
-			buildTimestamp: Date.now(), // Unix timestamp in ms, set at build time
+			buildTimestamp, // Unix timestamp in ms, shared with beacon.js script tag
 			sentryRelease
 		}
 	},
