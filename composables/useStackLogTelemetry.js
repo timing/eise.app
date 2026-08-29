@@ -25,6 +25,11 @@ export const MAX_LOG_LINE_CHARS = 160;
 export const MAX_LOGS_ON_FAILURE = 50;
 
 let lastLogCursor = 0;
+// Pinned by markLogStart() when processFiles knows a new job is beginning.
+// resetLogCursor() prefers this value when set so pre-run addLog lines like
+// "File: X.mp4" are captured, even though startStackPing runs much later.
+// null = not pinned (fall back to "current tip").
+let pinnedLogStart = null;
 // Lines that were included in a ping delta whose fetch never landed. Prepended
 // to the next successful delta. Capped so a run of consecutive failures doesn't
 // grow this array unboundedly.
@@ -34,8 +39,23 @@ const MAX_UNSHIPPED_LINES = 200;
 export function useStackLogTelemetry() {
     const { logs } = useEventBus();
 
+    // Pin the cursor at the moment a new job begins. Called from processFiles
+    // right after startNewStackJob — before the "File: X.mp4" addLog and every
+    // downstream reader log. logs.value never clears across the SPA lifetime,
+    // so without this pin, resetLogCursor at startStackPing would set the
+    // cursor to logs.value.length (past the filename) and pings would ship
+    // nothing pre-run. Cleared by resetLogCursor after use.
+    function markLogStart() {
+        pinnedLogStart = logs.value.length;
+    }
+
     function resetLogCursor() {
-        lastLogCursor = logs.value.length;
+        // Prefer the pinned index so we capture the whole job's log stream from
+        // its very first addLog. If nothing pinned (edge cases like the SER
+        // color-profile flow that skips processFiles' entry point), fall back
+        // to "current tip" — same behavior as before this change.
+        lastLogCursor = pinnedLogStart != null ? pinnedLogStart : logs.value.length;
+        pinnedLogStart = null;
         unshippedLines = [];
     }
 
@@ -101,6 +121,7 @@ export function useStackLogTelemetry() {
     }
 
     return {
+        markLogStart,
         resetLogCursor,
         getLogDelta,
         handleDeltaAckFailure,

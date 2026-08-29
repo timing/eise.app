@@ -595,7 +595,7 @@ watch([selectedFiles, isMobileDevice, liteMode], () => {
 
 const { addLog, emit: eventBusEmit, on, logs } = useEventBus();
 const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatchSize, setPixfrac: setSharedPixfrac, getTrackingContext, getStackJobProps } = useProcessingState();
-const { getLogTail } = useStackLogTelemetry();
+const { getLogTail, markLogStart } = useStackLogTelemetry();
 
 // Sync stacking settings to shared state for stacker to use
 watch(minApQuality, (val) => setSharedMinApQuality(val), { immediate: true });
@@ -1120,6 +1120,12 @@ async function processFiles(files, options = {}) {
 	const primaryFile = videoFiles[0] || imageFiles[0];
 	if (primaryFile) {
 		startNewStackJob(primaryFile.name);
+		// Pin the log-shipping cursor to THIS moment so the first stack_ping
+		// includes "File: X" and all downstream pre-processing-started logs.
+		// Must run before addLog below and before any reader logs — logs.value
+		// carries over from previous stacks and startStackPing would otherwise
+		// mark the filename as already-shipped.
+		markLogStart();
 		addLog(`File: ${primaryFile.name}`);
 	}
 
