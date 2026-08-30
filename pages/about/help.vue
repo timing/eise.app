@@ -96,6 +96,20 @@
 				<dt>Colors look wrong</dt>
 				<dd>Enable "Auto color balance" in the Post Processor, or manually adjust saturation and RGB alignment.</dd>
 
+				<dt>Seestar logo watermark on my captures</dt>
+				<dd>
+					<p>You can turn off the logo watermark directly inside the Seestar app so future captures and saves no longer include it:</p>
+					<img src="/seestar-logo-disable.jpg" alt="Seestar app screenshot showing the corner logo watermark on a planet capture" class="troubleshooting-image" />
+					<ol>
+						<li>Open the Seestar app.</li>
+						<li>Tap <strong>Me</strong> in the bottom right corner.</li>
+						<li>Tap the <strong>Settings</strong> icon (gear/cog wheel) in the top right.</li>
+						<li>Locate <strong>Image Watermark</strong> and toggle it <strong>Off</strong>.</li>
+					</ol>
+					<p>Once toggled off, any images or MP4 videos saved or processed through the app will no longer include the corner logo or bottom watermark banner.</p>
+					<p><em>Note:</em> for files you have already saved to your photo library with the logo baked in, you will need to crop or edit them manually.</p>
+				</dd>
+
 				<dt>Batch export "Select folder" doesn't work</dt>
 				<dd>
 					<p>The folder selection feature uses the File System Access API to save multiple files without prompting for each one.</p>
