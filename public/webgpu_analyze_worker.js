@@ -958,20 +958,34 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         buffers.reductionParamsBuffer, buffers.boundsBuffer, buffers.boundsReductionBuffer
     ]);
 
-    // Execute all passes in a single command encoder
-    const encoder = device.createCommandEncoder();
-
-    // Grayscale (skip if already computed by fused demosaic+gray)
+    // Split the analyze pipeline across three queue.submit calls so the Windows
+    // graphics driver's Timeout Detection & Recovery (TDR, default ~2s per
+    // submit) doesn't kill the device on big images. Windows Chrome/Edge/Opera
+    // GPU-device-lost errors on 4000×3000+ frames traced back to a single 12MP
+    // moments dispatch pushing the whole encoder past TDR. Buffers persist
+    // across submits, so no data resend needed. Overhead per extra submit is a
+    // few µs; the compute we're breaking up is orders of magnitude larger.
     let pass;
+    let encoder;
+
+    // Submit 1: grayscale (skip if fused demosaic+gray already produced it above).
     if (!grayAlreadyComputed) {
+        encoder = device.createCommandEncoder();
         pass = encoder.beginComputePass();
         pass.setPipeline(grayPipeline);
         pass.setBindGroup(0, grayBindGroup);
         pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
         pass.end();
+        logGpuSubmit(grayOnly ? 'analyzeBatch:grayscale(grayOnly)' : 'analyzeBatch:grayscale');
+        queue.submit([encoder.finish()]);
     }
 
-    // Combined pass: Tenengrad + Moments + Bounds (all read from grayBuffer, independent outputs)
+    // Submit 2: heavy per-pixel work (tenengrad + moments + bounds). All three
+    // read from grayBuffer with independent outputs, so still cheap to bundle
+    // into one compute pass — but isolating them in their own submit is what
+    // gives the TDR watchdog a fresh window. Moments (24 B/px write) is the
+    // hot loop; putting it here on its own gives the most TDR headroom.
+    encoder = device.createCommandEncoder();
     pass = encoder.beginComputePass();
     pass.setPipeline(tenengradPipeline);
     pass.setBindGroup(0, lapBindGroup);
@@ -983,8 +997,17 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     pass.setBindGroup(0, boundsBindGroup);
     pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
     pass.end();
+    logGpuSubmit('analyzeBatch:tenengrad+moments+bounds');
+    queue.submit([encoder.finish()]);
 
-    // Combined pass: All reductions (independent of each other)
+    // Submit 3: reductions + circularity + readback copies. Reduction shaders
+    // are workgroup-count sized (tiny compared to per-pixel work), circularity
+    // is a single batchSize/64 dispatch — total cost here is orders of
+    // magnitude below the heavy pass, but keeping them in a separate submit
+    // means the mapAsync we await below fences on THIS submit, not the heavy
+    // one, so the GPU can start the readback copies as soon as reductions
+    // finish while the driver is done with the heavy pass.
+    encoder = device.createCommandEncoder();
     pass = encoder.beginComputePass();
     pass.setPipeline(reductionPipeline);
     pass.setBindGroup(0, reductionBindGroup);
@@ -997,14 +1020,14 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     pass.dispatchWorkgroups(numWorkgroups, batchSize, 1);
     pass.end();
 
-    // Circularity final pass: must run after moments reduction completes
+    // Circularity final pass: must run after moments reduction completes.
     pass = encoder.beginComputePass();
     pass.setPipeline(circularityFinalPipeline);
     pass.setBindGroup(0, circularityBindGroup);
     pass.dispatchWorkgroups(Math.ceil(batchSize / 64), 1, 1);
     pass.end();
 
-    // Copy results for readback
+    // Copy results for readback.
     const reductionCopySize = batchSize * numWorkgroups * 2 * 4;
     const circularityCopySize = batchSize * 4 * 4;  // 4 floats per frame: circ, cx, cy, tiltAngle (computed on GPU)
     const boundsCopySize = batchSize * numWorkgroups * 4 * 4;
@@ -1023,7 +1046,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         encoder.copyBufferToBuffer(buffers.grayBuffer, 0, buffers.grayReadback, 0, grayCopySize);
     }
 
-    logGpuSubmit(grayOnly ? 'analyzeBatch:analysis+readback(grayOnly)' : 'analyzeBatch:analysis+readback');
+    logGpuSubmit(grayOnly ? 'analyzeBatch:reductions+readback(grayOnly)' : 'analyzeBatch:reductions+readback');
     queue.submit([encoder.finish()]);
 
     // Read back results
@@ -1380,8 +1403,12 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         buffers.reductionParamsBuffer, buffers.momentsBuffer, buffers.momentsReductionBuffer
     ]);
 
-    // Execute all passes in a single command encoder
-    const encoder = device.createCommandEncoder();
+    // Split the crop+analyze pipeline across two queue.submit calls: the
+    // first covers the crop/demosaic pass that reads at full source resolution
+    // (TDR risk on Windows for large frames); the second covers the
+    // cropSize-sized grayscale/tenengrad/moments/reductions that follow. See
+    // analyzeBatch for the equivalent split — same TDR reasoning.
+    let encoder = device.createCommandEncoder();
 
     // Clear packed gray buffer before demosaic (atomicOr needs zeros)
     const packedGraySize = Math.ceil(batchSize * cropPixelCount / 4) * 4;
@@ -1507,8 +1534,23 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         pass.end();
     }
 
+    // Submit 1: initial crop / demosaic. This pass reads srcW×srcH input per
+    // frame (full source resolution) even though it writes to a cropSize×
+    // cropSize output — that per-frame read work is what puts this dispatch
+    // at TDR risk on Windows for big images (source is the same 4000×3000+
+    // that trips the analyzeBatch heavy pass). Everything AFTER this runs at
+    // cropSize×cropSize, orders of magnitude smaller, so we only need to
+    // isolate this one for TDR mitigation.
+    logGpuSubmit('cropAnalyzeBatch:crop-demosaic');
+    queue.submit([encoder.finish()]);
+
+    // Rebuild the encoder for the crop-sized work that follows. Buffers
+    // persist across submits, so no state is lost.
+    let pass;
+    encoder = device.createCommandEncoder();
+
     // Grayscale pass
-    let pass = encoder.beginComputePass();
+    pass = encoder.beginComputePass();
     pass.setPipeline(grayPipeline);
     pass.setBindGroup(0, grayBindGroup);
     pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
@@ -1549,8 +1591,10 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     encoder.copyBufferToBuffer(buffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, croppedRgbaCopySize);
     encoder.copyBufferToBuffer(buffers.packedGrayBuffer, 0, packedGrayReadbackBuf, 0, packedGraySize);
 
-    // Single submit for all passes
-    logGpuSubmit('cropAnalyzeBatch:all+readback');
+    // Submit 2: crop-sized grayscale/tenengrad/moments/reductions + readbacks.
+    // All at cropSize×cropSize (typically 300-800 px), so this whole submit
+    // is orders of magnitude smaller than Submit 1 — no TDR concern.
+    logGpuSubmit('cropAnalyzeBatch:analysis+readback');
     queue.submit([encoder.finish()]);
 
     // Rotate buffers for next batch (so next batch uses alternate set)
