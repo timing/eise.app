@@ -21,7 +21,8 @@ import {
     rgbaCropShader,
     mono16CropFloat32Shader,
     demosaicCropShader,
-    demosaicGrayShader
+    demosaicGrayShader,
+    rgbaDownscale2xShader
 } from './gpu/shaders.js';
 
 import {
@@ -390,6 +391,15 @@ let boundsReductionPipeline = null;
 let centroidPipeline = null;
 let blurPipeline = null;  // Gaussian blur for noise reduction before bounds detection
 let sharpnessFinalPipeline = null;  // Final reduction: workgroup sums → 2 floats per frame
+// 2× box-filter downscale for the low-res crop-detect path. Lazily created on
+// first analyzeBatch call that requests lowResCropDetect: we don't want to pay
+// the pipeline compile cost on init for users who never enable the setting.
+let rgbaDownscale2xPipeline = null;
+// Downsampled RGBA output buffer (packed u8, 4 B/px, sized for downsampled
+// dimensions × batchSize). Reused across analyzeBatch calls when dimensions
+// haven't changed. Nulled when analyzeBuffers cache invalidates.
+let cachedDownscaleBuffer = null;
+let cachedDownscaleConfig = null;  // { dsWidth, dsHeight, batchSize }
 
 // Cached buffers for reuse across batches
 let cachedAnalyzeBuffers = null;
@@ -503,6 +513,7 @@ async function init() {
     centroidPipeline = await createPipeline(device, centroidShader, 'centroid');
     blurPipeline = await createPipeline(device, blurShader, 'blur');
     sharpnessFinalPipeline = await createPipeline(device, sharpnessFinalShader, 'sharpnessFinal');
+    rgbaDownscale2xPipeline = await createPipeline(device, rgbaDownscale2xShader, 'rgbaDownscale2x');
 
     isReady = true;
     deviceLost = false;
@@ -584,21 +595,37 @@ function calcLargestPerFrameBufferBytes(width, height, bitDepth = 8) {
     );
 }
 
-function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
+function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8, analyzeWidth = width, analyzeHeight = height) {
+    // Input dimensions (used for pixelBuffer / rgbaBuffer sizing — the raw
+    // frame we uploaded from the reader always lives at source resolution).
     const pixelCount = width * height;
-    const numWorkgroups = Math.ceil(pixelCount / 256);
+    // Analysis dimensions (used for every downstream buffer — grayscale onward).
+    // When lowResCropDetect is off, analyze* == src*, so behavior is unchanged.
+    // When on, analyze* is src/2 so momentsPixelBuffer at 24 B/px fits under
+    // maxStorageBufferBindingSize on constrained mobile GPUs.
+    const analyzePixelCount = analyzeWidth * analyzeHeight;
+    const numWorkgroups = Math.ceil(analyzePixelCount / 256);
     const rgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
 
     const requiredSizes = {
         batchSize,
         pixelCount,
+        analyzePixelCount,
         numWorkgroups,
         bitDepth,
         paramsSize: 16,
+        // Input container: full source resolution.
         pixelBufferSize: batchSize * pixelCount * 4,
         rgbaBufferSize: batchSize * pixelCount * rgbaBytesPerPixel,
-        momentsPixelSize: batchSize * pixelCount * 6 * 4,
-        boundsPixelSize: batchSize * pixelCount * 4 * 4,
+        // Downscaled RGBA staging — only allocated at real size when analyze
+        // dims differ from source. Otherwise a 16-byte placeholder so bind
+        // groups can still reference the buffer without conditional plumbing.
+        // WebGPU requires storage buffers to be non-empty.
+        downscaledRgbaSize: (analyzeWidth < width) ? batchSize * analyzePixelCount * 4 : 16,
+        // Analysis buffers: sized off analyze dims so moments fits when downsampling.
+        analyzeBufferSize: batchSize * analyzePixelCount * 4,
+        momentsPixelSize: batchSize * analyzePixelCount * 6 * 4,
+        boundsPixelSize: batchSize * analyzePixelCount * 4 * 4,
         reductionSize: batchSize * numWorkgroups * 2 * 4,
         momentsReductionSize: batchSize * numWorkgroups * 6 * 4,
         boundsReductionSize: batchSize * numWorkgroups * 4 * 4,
@@ -614,6 +641,8 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     if (cachedAnalyzeBuffers && cachedAnalyzeConfig &&
         cachedAnalyzeConfig.pixelBufferSize >= requiredSizes.pixelBufferSize &&
         cachedAnalyzeConfig.rgbaBufferSize >= requiredSizes.rgbaBufferSize &&
+        cachedAnalyzeConfig.analyzeBufferSize >= requiredSizes.analyzeBufferSize &&
+        cachedAnalyzeConfig.downscaledRgbaSize >= requiredSizes.downscaledRgbaSize &&
         cachedAnalyzeConfig.momentsPixelSize >= requiredSizes.momentsPixelSize &&
         cachedAnalyzeConfig.boundsPixelSize >= requiredSizes.boundsPixelSize &&
         cachedAnalyzeConfig.reductionSize >= requiredSizes.reductionSize &&
@@ -623,6 +652,7 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         // Update config with current batch params
         cachedAnalyzeConfig.batchSize = batchSize;
         cachedAnalyzeConfig.pixelCount = pixelCount;
+        cachedAnalyzeConfig.analyzePixelCount = analyzePixelCount;
         cachedAnalyzeConfig.numWorkgroups = numWorkgroups;
         cachedAnalyzeConfig.bitDepth = bitDepth;
         return cachedAnalyzeBuffers;
@@ -634,6 +664,8 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     const align4 = (size) => Math.ceil(size / 4) * 4;
     const pixelBufferSize = align4(Math.ceil(requiredSizes.pixelBufferSize * headroom));
     const rgbaBufferSize = align4(Math.ceil(requiredSizes.rgbaBufferSize * headroom));  // 4x larger for 16-bit
+    const analyzeBufferSize = align4(Math.ceil(requiredSizes.analyzeBufferSize * headroom));
+    const downscaledRgbaSize = align4(Math.ceil(requiredSizes.downscaledRgbaSize * headroom));
     const momentsPixelSize = align4(Math.ceil(requiredSizes.momentsPixelSize * headroom));
     const boundsPixelSize = align4(Math.ceil(requiredSizes.boundsPixelSize * headroom));
     const reductionSize = align4(Math.ceil(requiredSizes.reductionSize * headroom));
@@ -650,7 +682,7 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     //
     // Assert BEFORE destroying old cached buffers so a throw leaves state intact
     // (a subsequent call with valid dims can still reuse the previous cache).
-    const extra = `batchSize=${batchSize}, ${width}x${height}, bitDepth=${bitDepth}. Query 'get-max-batch-size' before calling analyzeBatch`;
+    const extra = `batchSize=${batchSize}, src=${width}x${height}, analyze=${analyzeWidth}x${analyzeHeight}, bitDepth=${bitDepth}. Query 'get-max-batch-size' before calling analyzeBatch`;
     for (const [name, size] of [
         ['momentsPixelBuffer', momentsPixelSize],
         ['boundsPixelBuffer', boundsPixelSize],
@@ -676,15 +708,23 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
 
     cachedAnalyzeBuffers = {
         paramsBuffer: uniformBuffer(device, 32),  // 8 u32 values for demosaic params
+        // Input container: full source resolution. This is where the reader's
+        // uploaded frame data lands before demosaic (Bayer) or before downscale
+        // (low-res crop-detect). Size scales with source, not analyze dims.
         inputBuffers: createBufferArray(pixelBufferSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
-        // RGBA buffer: 4x larger for 16-bit to hold Float32 output (preserves precision for stacking)
+        // RGBA buffer: 4x larger for 16-bit to hold Float32 output (preserves precision for stacking).
+        // Always at source resolution — input container for RGBA-input paths.
         rgbaBuffer: storageBuffer(device, rgbaBufferSize, { copySrc: true, copyDst: true }),
-        grayBuffer: storageBuffer(device, pixelBufferSize, { copySrc: true, copyDst: true }),
-        grayReadback: readbackBuffer(device, pixelBufferSize),
-        // Blurred grayscale for noise reduction before bounds detection
-        blurredGrayBuffer: storageBuffer(device, pixelBufferSize),
-        tenengradBuffer: storageBuffer(device, pixelBufferSize),
-        laplacianBuffer: storageBuffer(device, pixelBufferSize),
+        // Downscaled RGBA staging (packed u8, 4 B/px). See requiredSizes above:
+        // 16-byte placeholder when downsample is off, real size when on.
+        downscaledRgbaBuffer: storageBuffer(device, downscaledRgbaSize, { copyDst: true, copySrc: true }),
+        // Analysis-scale buffers (grayscale onward). Sized off analyze dims —
+        // half source when downsampling, full source otherwise.
+        grayBuffer: storageBuffer(device, analyzeBufferSize, { copySrc: true, copyDst: true }),
+        grayReadback: readbackBuffer(device, analyzeBufferSize),
+        blurredGrayBuffer: storageBuffer(device, analyzeBufferSize),
+        tenengradBuffer: storageBuffer(device, analyzeBufferSize),
+        laplacianBuffer: storageBuffer(device, analyzeBufferSize),
         reductionBuffer: storageBuffer(device, reductionSize, { copySrc: true }),
         momentsBuffer: storageBuffer(device, momentsPixelSize),
         momentsReductionBuffer: storageBuffer(device, momentsReductionSize, { copySrc: true }),
@@ -696,8 +736,10 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
         circularityBuffer: storageBuffer(device, circularitySize, { copySrc: true }),
         circularityParamsBuffer: uniformBuffer(device, 16),
         circularityReadback: readbackBuffer(device, circularitySize),
-        // RGBA readback: matches rgbaBuffer size for 16-bit Float32 support
+        // RGBA readback: matches rgbaBuffer size for 16-bit Float32 support (always at source resolution).
         rgbaReadback: readbackBuffer(device, rgbaBufferSize),
+        // Uniform buffer for the downscale shader (srcW/H, dstW/H, batchSize + padding).
+        downscaleParamsBuffer: uniformBuffer(device, 32),
         boundsBuffer: storageBuffer(device, boundsPixelSize),
         boundsReductionBuffer: storageBuffer(device, boundsReductionSize, { copySrc: true }),
         boundsParamsBuffer: uniformBuffer(device, 16),
@@ -707,10 +749,13 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8) {
     cachedAnalyzeConfig = {
         batchSize,
         pixelCount,
+        analyzePixelCount,
         numWorkgroups,
         bitDepth,
         pixelBufferSize,
-        rgbaBufferSize,  // Tracks 16-bit vs 8-bit output size
+        rgbaBufferSize,
+        analyzeBufferSize,
+        downscaledRgbaSize,
         momentsPixelSize,
         boundsPixelSize,
         reductionSize,
@@ -735,25 +780,39 @@ function cleanupAnalyzeBuffers() {
     }
 }
 
-async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false, grayOnly = false) {
+async function analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly = false, grayOnly = false, lowResCropDetect = false) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
     const batchSize = frames.length;
     const pixelCount = width * height;
-    const numWorkgroups = Math.ceil(pixelCount / 256);
 
     // Determine if we need demosaic (bayerPattern >= 0 means Bayer data)
     const needsDemosaic = bayerPattern >= 0;
 
-    // Memory safeguard using actual buffer sizes (single source of truth: calcPerFrameBufferBytes)
-    // No artificial memory limit — the GPU will throw from createBuffer() if it truly can't allocate.
-    // Callers should use get-max-batch-size to pick sensible batch sizes, but we don't block here.
-
     // Detect bit depth early so we allocate correct buffer sizes
     // 16-bit SER: needs 4x larger RGBA buffer for Float32 output (preserves precision)
     const bitDepth = needsDemosaic ? detectBitDepth(frames) : 8;
-    console.log(`[GPU] analyzeBatch: bitDepth=${bitDepth}, batchSize=${batchSize}, needsDemosaic=${needsDemosaic}`);
+
+    // Low-res crop-detect: 2× box-filter downscale before grayscale, so the
+    // moments/bounds/tenengrad buffers are sized off half-dims. Only supported
+    // for 8-bit RGBA input (the packed-u8 downscale shader). Bayer + 16-bit
+    // paths ignore the flag and run at full source resolution. Also gated on
+    // "big enough to matter" — sub-64px frames get no benefit from halving and
+    // the downscale shader assumes analyze dims are strictly smaller than
+    // source dims (see the downscaledRgbaSize placeholder path in
+    // getAnalyzeBuffers). Buffer-exceeds failures in the wild are all
+    // 4000×3000+ smartphone photos anyway.
+    const SIZE_FLOOR = 64;
+    const downsample = lowResCropDetect && !needsDemosaic && bitDepth === 8
+        && width >= SIZE_FLOOR && height >= SIZE_FLOOR;
+    const factor = downsample ? 2 : 1;
+    const analyzeWidth = downsample ? Math.ceil(width / factor) : width;
+    const analyzeHeight = downsample ? Math.ceil(height / factor) : height;
+    const analyzePixelCount = analyzeWidth * analyzeHeight;
+    const numWorkgroups = Math.ceil(analyzePixelCount / 256);
+
+    console.log(`[GPU] analyzeBatch: bitDepth=${bitDepth}, batchSize=${batchSize}, needsDemosaic=${needsDemosaic}, downsample=${downsample}${downsample ? ` (${width}×${height}→${analyzeWidth}×${analyzeHeight})` : ''}`);
 
     // Wait for analyze slot BEFORE getting buffers (only 1 analyzeBatch at a time since buffers aren't double-buffered)
     await acquireAnalyzeSlot();
@@ -761,7 +820,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     try {
 
     // Get cached buffers (creates if needed, reuses if possible)
-    const buffers = getAnalyzeBuffers(batchSize, width, height, bitDepth);
+    const buffers = getAnalyzeBuffers(batchSize, width, height, bitDepth, analyzeWidth, analyzeHeight);
     let grayAlreadyComputed = false;
 
     if (needsDemosaic) {
@@ -904,23 +963,45 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         }
     }
 
-    // Update params for grayscale/tenengrad
-    queue.writeBuffer(buffers.paramsBuffer, 0, new Uint32Array([width, height, batchSize, 0]));
+    // Low-res crop-detect: run the 2× box-filter downscale before grayscale.
+    // Reads rgbaBuffer (full source), writes downscaledRgbaBuffer at half dims.
+    // Its own submit so the driver sees a clear boundary (also gives TDR a
+    // fresh window; same reasoning as the analyzeBatch split above).
+    if (downsample) {
+        const dsParams = new ArrayBuffer(32);
+        new Uint32Array(dsParams, 0, 5).set([width, height, analyzeWidth, analyzeHeight, batchSize]);
+        queue.writeBuffer(buffers.downscaleParamsBuffer, 0, dsParams);
+        const dsBindGroup = createBindGroup(device, rgbaDownscale2xPipeline, [
+            buffers.downscaleParamsBuffer, buffers.rgbaBuffer, buffers.downscaledRgbaBuffer
+        ]);
+        const encoder = device.createCommandEncoder();
+        addComputePass(encoder, rgbaDownscale2xPipeline, dsBindGroup,
+            [Math.ceil(analyzeWidth / 16), Math.ceil(analyzeHeight / 16), batchSize]);
+        logGpuSubmit('analyzeBatch:rgba-downscale-2x');
+        queue.submit([encoder.finish()]);
+    }
+
+    // Update params for grayscale/tenengrad. Dimensions here (and for every
+    // shader below) are ANALYZE dims — half source when downsampling, full
+    // source otherwise. Only the downscale shader above sees source dims.
+    queue.writeBuffer(buffers.paramsBuffer, 0, new Uint32Array([analyzeWidth, analyzeHeight, batchSize, 0]));
 
     // Update reduction params
-    queue.writeBuffer(buffers.reductionParamsBuffer, 0, new Uint32Array([width, height, batchSize, pixelCount]));
+    queue.writeBuffer(buffers.reductionParamsBuffer, 0, new Uint32Array([analyzeWidth, analyzeHeight, batchSize, analyzePixelCount]));
 
     // Update moments params (with threshold)
     const momentsParamsData = new ArrayBuffer(16);
-    new Uint32Array(momentsParamsData, 0, 3).set([width, height, batchSize]);
+    new Uint32Array(momentsParamsData, 0, 3).set([analyzeWidth, analyzeHeight, batchSize]);
     new Float32Array(momentsParamsData, 12, 1).set([threshold]);
     queue.writeBuffer(buffers.momentsParamsBuffer, 0, momentsParamsData);
 
     // Create bind groups (must recreate each time)
-    // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
+    // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32).
+    // Grayscale reads from downscaledRgbaBuffer when downsampling, rgbaBuffer otherwise.
     const grayPipeline = bitDepth === 16 ? grayscaleFloat32Pipeline : grayscalePipeline;
+    const grayInputBuffer = downsample ? buffers.downscaledRgbaBuffer : buffers.rgbaBuffer;
     const grayBindGroup = createBindGroup(device, grayPipeline, [
-        buffers.paramsBuffer, buffers.rgbaBuffer, buffers.grayBuffer
+        buffers.paramsBuffer, grayInputBuffer, buffers.grayBuffer
     ]);
     const lapBindGroup = createBindGroup(device, tenengradPipeline, [
         buffers.paramsBuffer, buffers.grayBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer
@@ -935,11 +1016,13 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         buffers.reductionParamsBuffer, buffers.momentsBuffer, buffers.momentsReductionBuffer
     ]);
 
-    // Circularity final pass: compute circularity from summed moments on GPU
-    // Circularity params: numWorkgroups, batchSize, defaultCenterX, defaultCenterY
+    // Circularity final pass: compute circularity from summed moments on GPU.
+    // Default centroid used when moments come back as all-zero (fallback for
+    // low-signal frames) — must be in analyze coord space since the shader
+    // outputs coordinates that the JS below will scale back to source.
     const circularityParamsData = new ArrayBuffer(16);
     new Uint32Array(circularityParamsData, 0, 2).set([numWorkgroups, batchSize]);
-    new Float32Array(circularityParamsData, 8, 2).set([width / 2, height / 2]);
+    new Float32Array(circularityParamsData, 8, 2).set([analyzeWidth / 2, analyzeHeight / 2]);
     queue.writeBuffer(buffers.circularityParamsBuffer, 0, circularityParamsData);
     const circularityBindGroup = createBindGroup(device, circularityFinalPipeline, [
         buffers.circularityParamsBuffer, buffers.momentsReductionBuffer, buffers.circularityBuffer
@@ -947,7 +1030,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
 
     // Update bounds params (same threshold as moments)
     const boundsParamsData = new ArrayBuffer(16);
-    new Uint32Array(boundsParamsData, 0, 3).set([width, height, batchSize]);
+    new Uint32Array(boundsParamsData, 0, 3).set([analyzeWidth, analyzeHeight, batchSize]);
     new Float32Array(boundsParamsData, 12, 1).set([threshold]);
     queue.writeBuffer(buffers.boundsParamsBuffer, 0, boundsParamsData);
 
@@ -969,12 +1052,14 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     let encoder;
 
     // Submit 1: grayscale (skip if fused demosaic+gray already produced it above).
+    // Workgroup counts here (and the tenengrad/moments/bounds pass below) are
+    // ANALYZE-sized so the shaders never step past the analyze buffer bounds.
     if (!grayAlreadyComputed) {
         encoder = device.createCommandEncoder();
         pass = encoder.beginComputePass();
         pass.setPipeline(grayPipeline);
         pass.setBindGroup(0, grayBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
+        pass.dispatchWorkgroups(Math.ceil(analyzeWidth / 16), Math.ceil(analyzeHeight / 16), batchSize);
         pass.end();
         logGpuSubmit(grayOnly ? 'analyzeBatch:grayscale(grayOnly)' : 'analyzeBatch:grayscale');
         queue.submit([encoder.finish()]);
@@ -989,13 +1074,13 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     pass = encoder.beginComputePass();
     pass.setPipeline(tenengradPipeline);
     pass.setBindGroup(0, lapBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
+    pass.dispatchWorkgroups(Math.ceil(analyzeWidth / 16), Math.ceil(analyzeHeight / 16), batchSize);
     pass.setPipeline(momentsPipeline);
     pass.setBindGroup(0, momentsBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
+    pass.dispatchWorkgroups(Math.ceil(analyzeWidth / 16), Math.ceil(analyzeHeight / 16), batchSize);
     pass.setPipeline(boundsPipeline);
     pass.setBindGroup(0, boundsBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(width / 16), Math.ceil(height / 16), batchSize);
+    pass.dispatchWorkgroups(Math.ceil(analyzeWidth / 16), Math.ceil(analyzeHeight / 16), batchSize);
     pass.end();
     logGpuSubmit('analyzeBatch:tenengrad+moments+bounds');
     queue.submit([encoder.finish()]);
@@ -1031,16 +1116,19 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     const reductionCopySize = batchSize * numWorkgroups * 2 * 4;
     const circularityCopySize = batchSize * 4 * 4;  // 4 floats per frame: circ, cx, cy, tiltAngle (computed on GPU)
     const boundsCopySize = batchSize * numWorkgroups * 4 * 4;
-    // RGBA copy size: 4x larger for 16-bit (Float32 output vs packed Uint8)
+    // RGBA copy size: 4x larger for 16-bit (Float32 output vs packed Uint8).
+    // rgbaBuffer stays at SOURCE resolution regardless of downsample, so the
+    // reader always gets full-res preview pixels back.
     const rgbaBytesPerPixel = bitDepth === 16 ? 16 : 4;
     const rgbaCopySize = batchSize * pixelCount * rgbaBytesPerPixel;
 
     encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, buffers.reductionReadback, 0, reductionCopySize);
     encoder.copyBufferToBuffer(buffers.circularityBuffer, 0, buffers.circularityReadback, 0, circularityCopySize);
     encoder.copyBufferToBuffer(buffers.boundsReductionBuffer, 0, buffers.boundsReadback, 0, boundsCopySize);
-    // Skip RGBA and grayscale readback in grayOnly mode (saves significant bandwidth)
-    // Grayscale buffer is always float32 (4 bytes per pixel)
-    const grayCopySize = batchSize * pixelCount * 4;
+    // Skip RGBA and grayscale readback in grayOnly mode (saves significant bandwidth).
+    // Grayscale buffer is float32 at ANALYZE resolution (half source when
+    // downsampling), so the copy size follows analyzePixelCount, not pixelCount.
+    const grayCopySize = batchSize * analyzePixelCount * 4;
     if (!grayOnly) {
         encoder.copyBufferToBuffer(buffers.rgbaBuffer, 0, buffers.rgbaReadback, 0, rgbaCopySize);
         encoder.copyBufferToBuffer(buffers.grayBuffer, 0, buffers.grayReadback, 0, grayCopySize);
@@ -1095,23 +1183,32 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
             laplacianSum += reductionData[idx + 1];
         }
 
-        // Scale by 255² = 65025 to match CPU which uses 0-255 grayscale (we use 0-1)
-        const tenengradMean = (tenengradSum / pixelCount) * 65025;
-        const laplacianMean = (laplacianSum / pixelCount) * 65025;
+        // Sharpness is a normalized per-pixel intensity metric — scale-invariant
+        // enough that computing the mean over analyzePixelCount (matching what
+        // the shader actually processed) keeps the values comparable to the
+        // non-downsampled path. Scale by 255² to match CPU 0-255 convention.
+        const tenengradMean = (tenengradSum / analyzePixelCount) * 65025;
+        const laplacianMean = (laplacianSum / analyzePixelCount) * 65025;
 
         // Combined sharpness = geometric mean of Tenengrad and Laplacian
         // Geometric mean naturally balances metrics regardless of their absolute scales
         const sharpness = Math.sqrt(tenengradMean * laplacianMean);
 
-        // Get circularity, centroid, and tilt angle from GPU (computed in circularityFinalShader)
+        // Get circularity, centroid, and tilt angle from GPU (computed in
+        // circularityFinalShader). These are in ANALYZE-coordinate space when
+        // downsampling — scale back to source coordinates below.
         const circIdx = i * 4;
         const circularity = circularityData[circIdx];
-        const centroidX = circularityData[circIdx + 1];
-        const centroidY = circularityData[circIdx + 2];
+        const rawCentroidX = circularityData[circIdx + 1];
+        const rawCentroidY = circularityData[circIdx + 2];
         const tiltAngle = circularityData[circIdx + 3];
+        const centroidX = rawCentroidX * factor;
+        const centroidY = rawCentroidY * factor;
 
-        // Calculate bounds from partial reductions
-        let minX = width, minY = height, maxX = 0, maxY = 0;
+        // Calculate bounds from partial reductions. Bounds come back in
+        // analyze-coord space; clamp against analyze dims here, then scale
+        // to source coords when building the bounds object.
+        let minX = analyzeWidth, minY = analyzeHeight, maxX = 0, maxY = 0;
         for (let w = 0; w < numWorkgroups; w++) {
             const idx = (i * numWorkgroups + w) * 4;
             const wMinX = boundsData[idx];
@@ -1124,14 +1221,16 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
             if (wMaxY > maxY) maxY = wMaxY;
         }
 
-        // Build bounds object (null if no bright pixels detected)
+        // Build bounds object (null if no bright pixels detected). x/y/width/
+        // height are scaled to source coords so downstream code (crop selection
+        // in useImageReader) doesn't need to know about the downsample factor.
         let bounds = null;
-        if (maxX >= minX && maxY >= minY && minX < width && minY < height) {
+        if (maxX >= minX && maxY >= minY && minX < analyzeWidth && minY < analyzeHeight) {
             bounds = {
-                x: minX,
-                y: minY,
-                width: maxX - minX + 1,
-                height: maxY - minY + 1,
+                x: minX * factor,
+                y: minY * factor,
+                width: (maxX - minX + 1) * factor,
+                height: (maxY - minY + 1) * factor,
                 centroidX,
                 centroidY
             };
@@ -2488,10 +2587,10 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, grayOnly = false } = e.data;
+        const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, grayOnly = false, lowResCropDetect = false } = e.data;
 
         try {
-            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, grayOnly);
+            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, grayOnly, lowResCropDetect);
             // Transfer uint8Buffer or float32Buffer depending on mode (none in grayOnly mode)
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'analyze-result', requestId, results }, transferables);

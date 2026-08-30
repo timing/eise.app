@@ -37,6 +37,14 @@ const trackingContext = ref({
 });
 
 const stackingMode = ref('single'); // 'single' or 'continuous'
+// When true, crop-detection analyze runs at half resolution (fixed 2× box-
+// filter downscale). Trade-off: ~1 source-pixel error in the initial centroid,
+// well inside the 8 px template-match search radius; in exchange the
+// momentsPixelBuffer drops from 24 B/px × sourcePixels to a quarter of that,
+// which is what fixes the Android momentsPixelBuffer-exceeds-device-limit
+// failures on 4000×3000+ smartphone photos. Default is initialized in
+// FileUploader based on isMobileDevice: on by default on mobile, off on desktop.
+const lowResCropDetect = ref(false);
 const continuousStackingResults = ref([]); // Stores [pct, blob, sharpness] for comparison
 const batchStartIndex = ref(0); // Initial index for BatchPostProcessor
 
@@ -126,6 +134,14 @@ export function useProcessingState() {
         return stackingMode.value;
     }
 
+    function setLowResCropDetect(value) {
+        lowResCropDetect.value = !!value;
+    }
+
+    function getLowResCropDetect() {
+        return lowResCropDetect.value;
+    }
+
     function setContinuousResults(results) {
         continuousStackingResults.value = results;
     }
@@ -211,6 +227,9 @@ export function useProcessingState() {
         stackingMode,
         setStackingMode,
         getStackingMode,
+        lowResCropDetect,
+        setLowResCropDetect,
+        getLowResCropDetect,
         continuousStackingResults,
         setContinuousResults,
         getContinuousResults,

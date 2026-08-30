@@ -6,6 +6,7 @@ import { useEventBus } from '@/composables/eventBus';
 import { useStacker } from '@/composables/useStacker';
 import { reportError } from '@/composables/useSentryReporting';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
+import { useProcessingState } from '@/composables/useProcessingState';
 import { decodeTIFF } from '@/utils/tiffDecoder.js';
 
 // Native image formats that browsers can decode directly
@@ -61,6 +62,7 @@ async function probeImageFileDimensions(file) {
 
 export function useImageReader() {
     const { addLog, emit } = useEventBus();
+    const { getLowResCropDetect } = useProcessingState();
     const { stackFramesLocally } = useStacker();
     const { workerUrl } = useWorkerUrl();
 
@@ -222,6 +224,11 @@ export function useImageReader() {
     }
 
     async function dispatchAnalyzeBatch(frames, width, height) {
+        // Ride the shared setting from useProcessingState onto every message.
+        // Worker only actually downsamples for 8-bit RGBA (which is all this
+        // reader ever sends), so gating the flag here on getLowResCropDetect()
+        // is what determines whether the crop-detect pass uses half resolution.
+        const lowResCropDetect = getLowResCropDetect();
         return new Promise((resolve, reject) => {
             const requestId = Date.now() + Math.random();
             const handler = (e) => {
@@ -246,7 +253,8 @@ export function useImageReader() {
                 height,
                 bayerPattern: -1, // RGBA input, no demosaic
                 threshold: 0.1,
-                requestId
+                requestId,
+                lowResCropDetect
             });
         });
     }

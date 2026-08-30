@@ -792,6 +792,72 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // RGBA to u8 grayscale shader for template matching
 // Input: Float32 RGBA (0.0-1.0), Output: u8 grayscale (one byte per pixel)
+// 2×2 box-filter downscale from packed-u8 RGBA (input: u32 array, 4 bytes/px)
+// to packed-u8 RGBA output at half width×half height. Used by the low-res
+// crop-detect path so momentsPixelBuffer at src/2 × src/2 fits under the
+// device's maxStorageBufferBindingSize for 4000×3000+ smartphone photos.
+// Output centroid/bounds coordinates are scaled ×2 back to source space in
+// the analyzeBatch result-building code.
+export const rgbaDownscale2xShader = `
+struct Params {
+    srcWidth: u32,
+    srcHeight: u32,
+    dstWidth: u32,
+    dstHeight: u32,
+    batchSize: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> src: array<u32>;         // packed RGBA, 4 B/px
+@group(0) @binding(2) var<storage, read_write> dst: array<u32>;   // packed RGBA, 4 B/px
+
+@compute @workgroup_size(16, 16, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dx = gid.x;
+    let dy = gid.y;
+    let f = gid.z;
+    if (dx >= params.dstWidth || dy >= params.dstHeight || f >= params.batchSize) {
+        return;
+    }
+
+    // 2×2 source block; clamp against odd source dimensions.
+    let sx0 = dx * 2u;
+    let sy0 = dy * 2u;
+    let srcStride = params.srcWidth;
+    let srcFrameStride = params.srcWidth * params.srcHeight;
+
+    var rSum: u32 = 0u;
+    var gSum: u32 = 0u;
+    var bSum: u32 = 0u;
+    var aSum: u32 = 0u;
+    var cnt: u32 = 0u;
+    for (var oy: u32 = 0u; oy < 2u; oy = oy + 1u) {
+        for (var ox: u32 = 0u; ox < 2u; ox = ox + 1u) {
+            let sx = sx0 + ox;
+            let sy = sy0 + oy;
+            if (sx < params.srcWidth && sy < params.srcHeight) {
+                let sIdx = f * srcFrameStride + sy * srcStride + sx;
+                let packed = src[sIdx];
+                rSum = rSum + (packed & 0xFFu);
+                gSum = gSum + ((packed >> 8u) & 0xFFu);
+                bSum = bSum + ((packed >> 16u) & 0xFFu);
+                aSum = aSum + ((packed >> 24u) & 0xFFu);
+                cnt = cnt + 1u;
+            }
+        }
+    }
+    let r = rSum / cnt;
+    let g = gSum / cnt;
+    let b = bSum / cnt;
+    let a = aSum / cnt;
+    let dIdx = f * params.dstWidth * params.dstHeight + dy * params.dstWidth + dx;
+    dst[dIdx] = r | (g << 8u) | (b << 16u) | (a << 24u);
+}
+`;
+
 export const rgbaToGrayU8Shader = `
 struct Params {
     width: u32,

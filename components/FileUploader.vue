@@ -268,6 +268,18 @@
 					GPU is much faster and is the default. Only pick CPU if the GPU path produces bad results or crashes on your file. CPU processing can take many minutes even for short clips.
 				</p>
 			</template>
+
+			<template v-if="useGPU && showAdvanced">
+				<div class="separator"></div>
+				<h4>Crop detection precision <span class="info-icon" @click="showLowResCropDetectInfo = !showLowResCropDetectInfo">ⓘ</span></h4>
+				<label class="checkbox-option">
+					<input type="checkbox" v-model="lowResCropDetectValue" />
+					Low-res crop detection (halves memory needed)
+				</label>
+				<p v-if="showLowResCropDetectInfo" class="info-text">
+					Runs the initial "where's the object" detection at half resolution. The final stack still uses your full-resolution frames — only the detection step is coarser. Turn this on if you see "GPU buffer would exceed device limit" errors on large photos; turn it off if you want the initial detection at full precision. Default is on for mobile devices where per-buffer memory limits are tight.
+				</p>
+			</template>
 		</template>
 	</div>
 
@@ -410,6 +422,21 @@ const showFrameSelectionInfo = ref(false);
 const showStackingModeInfo = ref(false);
 const showContinuousInfo = ref(false);
 const showProcessingBackendInfo = ref(false);
+const showLowResCropDetectInfo = ref(false);
+
+// Pull the shared processing state early: the watch() below references
+// lowResCropDetectValue and hits a TDZ error if the destructure lives after.
+// Only the reactive refs are pulled up here; the imperative helpers stay near
+// their call sites for clarity.
+const {
+	setMinApQuality: setSharedMinApQuality,
+	setApPatchSize: setSharedApPatchSize,
+	setPixfrac: setSharedPixfrac,
+	getTrackingContext,
+	getStackJobProps,
+	lowResCropDetect: lowResCropDetectValue,
+	setLowResCropDetect,
+} = useProcessingState();
 
 // User-selectable backend. Only takes effect when GPU is otherwise available;
 // effectiveUseGpu below computes what actually gets used.
@@ -470,6 +497,9 @@ function loadSettings() {
 			if (settings.processingBackend === 'gpu' || settings.processingBackend === 'cpu') {
 				processingBackend.value = settings.processingBackend;
 			}
+			if (typeof settings.lowResCropDetect === 'boolean') {
+				setLowResCropDetect(settings.lowResCropDetect);
+			}
 		}
 	} catch (e) {
 		console.warn('Failed to load settings:', e);
@@ -491,7 +521,8 @@ function saveSettings() {
 			apPatchSize: apPatchSize.value,
 			pixfrac: pixfrac.value,
 			drizzleMethod: drizzleMethod.value,
-			processingBackend: processingBackend.value
+			processingBackend: processingBackend.value,
+			lowResCropDetect: lowResCropDetectValue.value
 		};
 		localStorage.setItem('eise-settings', JSON.stringify(settings));
 	} catch (e) {
@@ -500,9 +531,21 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, pixfrac, processingBackend], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, pixfrac, processingBackend, lowResCropDetectValue], saveSettings);
 
 onMounted(async () => {
+	// Read the raw persisted setting BEFORE loadSettings runs, so we can tell
+	// "user has never touched this" (apply the mobile default) from "user
+	// explicitly toggled it" (respect their choice, don't fight them).
+	let hadLowResSetting = false;
+	try {
+		const raw = localStorage.getItem('eise-settings');
+		if (raw) {
+			const parsed = JSON.parse(raw);
+			hadLowResSetting = typeof parsed?.lowResCropDetect === 'boolean';
+		}
+	} catch {}
+
 	loadSettings();
 	try {
 		advancedExpanded.value = localStorage.getItem('eise-advanced-expanded') === 'true';
@@ -514,6 +557,14 @@ onMounted(async () => {
 	if (liteMode.value) {
 		enableMaxFrames.value = true;
 		selectedMaxFrames.value = 100;
+	}
+
+	// Mobile default: enable low-res crop detection unless the user already
+	// chose otherwise. Runs after loadSettings so a persisted `false` isn't
+	// overwritten. isMobile is injected at layout level so it's authoritative
+	// (matches the value the FFmpeg-fallback code uses, isMobileDevice below).
+	if (!hadLowResSetting && isMobile.value) {
+		setLowResCropDetect(true);
 	}
 });
 
@@ -594,7 +645,6 @@ watch([selectedFiles, isMobileDevice, liteMode], () => {
 }, { immediate: true });
 
 const { addLog, emit: eventBusEmit, on, logs } = useEventBus();
-const { setMinApQuality: setSharedMinApQuality, setApPatchSize: setSharedApPatchSize, setPixfrac: setSharedPixfrac, getTrackingContext, getStackJobProps } = useProcessingState();
 const { getLogTail, markLogStart } = useStackLogTelemetry();
 
 // Sync stacking settings to shared state for stacker to use
