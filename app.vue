@@ -768,6 +768,24 @@ async function handlePostProcessing(data) {
 	}
 	selectedFile.value = data;
 	isProcessing.value = false;
+	// Mirror handleStackedImageReady's terminal handling — but only when a
+	// stack was actually in flight. `postProcessing` is also emitted from
+	// FileUploader for the single-image "straight to post-processor" flow
+	// (no stacking); in that case there's no stack_start to pair with, so
+	// firing stack_finished would create a phantom terminal. When we DID
+	// stack: clear stackInFlight so the watchdog stops classifying downstream
+	// navigation errors as stack_failed (the stale-bundle chunk-load
+	// "Cannot read properties of undefined (reading 'default')" hit us this
+	// way right after a fresh deploy), and emit stack_finished so the
+	// video-path terminal-outcome analytics reflect what actually happened
+	// (the "0/74 mediabunny mobile finished" stat was an artifact of this
+	// handler never emitting the completion event).
+	if (stackInFlight) {
+		stackInFlight = false;
+		stopStackPing();
+		const tail = getLogTail();
+		track('stack_finished', { ...getStackJobProps(), ...(tail || {}) });
+	}
 	navigateTo('/post-processor/');
 }
 </script>
