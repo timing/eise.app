@@ -103,7 +103,7 @@
 					<ol>
 						<li>Open the Seestar app.</li>
 						<li>Tap <strong>Me</strong> in the bottom right corner.</li>
-						<li>Tap the <strong>Settings</strong> icon (gear/cog wheel) in the top right.</li>
+						<li>Tap <strong>Device Management</strong>.</li>
 						<li>Locate <strong>Image Watermark</strong> and toggle it <strong>Off</strong>.</li>
 					</ol>
 					<p>Once toggled off, any images or MP4 videos saved or processed through the app will no longer include the corner logo or bottom watermark banner.</p>
