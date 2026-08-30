@@ -7,5 +7,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   onUpdateReady: (cb) => {
     ipcRenderer.on('update-ready', () => cb());
-  }
+  },
+  startPowerSaveBlocker: () => ipcRenderer.invoke('power-save-blocker-start'),
+  stopPowerSaveBlocker: () => ipcRenderer.invoke('power-save-blocker-stop'),
+  getPlatformInfo: () => ipcRenderer.invoke('get-platform-info'),
+  consumeFirstLaunch: () => ipcRenderer.invoke('consume-first-launch')
 });

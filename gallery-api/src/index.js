@@ -62,7 +62,11 @@ export function createApp(env) {
   const rateLimitMax = Number(env.RATE_LIMIT_MAX_PER_HOUR || 5);
   const rateLimitWindowMs = 60 * 60 * 1000;
 
-  const origins = (env.CORS_ORIGIN || 'http://localhost:3000,https://eise.app').split(',').map(s => s.trim());
+  const envOrigins = (env.CORS_ORIGIN || 'http://localhost:3000,https://eise.app').split(',').map(s => s.trim());
+  // Always accept the Electron custom-scheme origin so beacon/gallery calls from
+  // installed desktop apps land regardless of what CORS_ORIGIN happens to be set
+  // to on the deployed worker.
+  const origins = [...new Set([...envOrigins, 'app://eise'])];
   app.use('*', cors({
     origin: origins,
     allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],

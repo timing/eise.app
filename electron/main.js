@@ -1,4 +1,4 @@
-const { app, BrowserWindow, session, shell, ipcMain } = require('electron');
+const { app, BrowserWindow, session, shell, ipcMain, powerSaveBlocker } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { registerScheme, registerHandler } = require('./protocol');
@@ -37,7 +37,8 @@ function createWindow(appFilesDir) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false // needed for WebWorker GPU access
+      sandbox: false, // needed for WebWorker GPU access
+      backgroundThrottling: false // keep stacking running when minimized/hidden
     }
   });
 
@@ -77,14 +78,55 @@ function createWindow(appFilesDir) {
   return win;
 }
 
-// IPC handlers
-ipcMain.handle('get-app-version', () => {
+function readAppVersion() {
   try {
     const pkg = require('../package.json');
     return pkg.version || 'dev';
   } catch {
     return 'dev';
   }
+}
+
+// IPC handlers
+ipcMain.handle('get-app-version', () => readAppVersion());
+
+ipcMain.handle('get-platform-info', () => ({
+  platform: process.platform,
+  arch: process.arch,
+  app_version: readAppVersion(),
+  electron_version: process.versions.electron,
+  chrome_version: process.versions.chrome,
+}));
+
+// Returns true the very first time it's called for this install, false forever
+// after. State is persisted to a small JSON file in userData so it survives app
+// updates but not a full uninstall/reinstall (which is what we want — a reinstall
+// should count as a fresh first launch).
+ipcMain.handle('consume-first-launch', () => {
+  try {
+    const marker = path.join(app.getPath('userData'), 'first-launch.json');
+    if (fs.existsSync(marker)) return false;
+    fs.writeFileSync(marker, JSON.stringify({ ts: Date.now(), version: readAppVersion() }));
+    return true;
+  } catch (e) {
+    console.warn('consume-first-launch failed:', e);
+    return false;
+  }
+});
+
+let powerSaveBlockerId = null;
+ipcMain.handle('power-save-blocker-start', () => {
+  if (powerSaveBlockerId !== null && powerSaveBlocker.isStarted(powerSaveBlockerId)) {
+    return powerSaveBlockerId;
+  }
+  powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+  return powerSaveBlockerId;
+});
+ipcMain.handle('power-save-blocker-stop', () => {
+  if (powerSaveBlockerId !== null && powerSaveBlocker.isStarted(powerSaveBlockerId)) {
+    powerSaveBlocker.stop(powerSaveBlockerId);
+  }
+  powerSaveBlockerId = null;
 });
 
 app.whenReady().then(() => {

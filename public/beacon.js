@@ -3,6 +3,14 @@
   var cfg = (window.__EISE_BEACON__ || {});
   var endpoint = (script && script.dataset.endpoint) || cfg.endpoint || 'https://gallery.eise.app/a';
   var siteId = (script && script.dataset.site) || cfg.siteId || 'eise-prod';
+  // Detect Electron at runtime and route to the desktop segment, no matter which
+  // bundle served this beacon. The Electron preload exposes window.electronAPI
+  // synchronously before the first script runs, so it's safe to read here. This
+  // keeps the desktop attribution stable even after the auto-updater swaps in
+  // the web-flavored bundle from https://eise.app/.
+  if (typeof window !== 'undefined' && window.electronAPI) {
+    siteId = 'eise-electron';
+  }
   var lastPath = null;
 
   // Returns a Promise<boolean> that resolves to true if the beacon reached the

@@ -25,7 +25,25 @@
 		<loc>https://eise.app/about/registax-vs-eise/</loc>
 	</url>
 	<url>
+		<loc>https://eise.app/admin/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/admin/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/admin/ab/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/admin/analytics/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/admin/stack-jobs/</loc>
+	</url>
+	<url>
 		<loc>https://eise.app/download/</loc>
+	</url>
+	<url>
+		<loc>https://eise.app/gallery/</loc>
 	</url>
 	<url>
 		<loc>https://eise.app/planetary-stacking-mac/</loc>

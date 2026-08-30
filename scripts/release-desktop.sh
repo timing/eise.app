@@ -51,9 +51,13 @@ console.log('Updated package.json version to ' + process.argv[1]);
 " "$VERSION"
 
 # --- Generate static files (includes version.json via postgenerate) ---
+# EISE_BUILD_TARGET=electron matches npm run electron:build so the bundle baked
+# into every desktop release is identical to a local electron:build. Without
+# this, the release script would produce a web-flavored bundle and the desktop
+# app would report analytics as the web build until it auto-updated.
 echo ""
-echo "=== Running nuxt generate ==="
-npm run generate
+echo "=== Running nuxt generate (electron target) ==="
+EISE_BUILD_TARGET=electron npm run generate
 
 # --- Clean previous build artifacts ---
 DIST="electron-dist"
@@ -74,24 +78,29 @@ npx electron-builder --linux --config "$BUILDER_CONFIG"
 
 # --- Collect built files ---
 DMG=""
-EXE=""
+EXE_X64=""
+EXE_ARM64=""
 APPIMAGE=""
 DEB=""
 
+# electron-builder emits three Windows installers when both x64 and arm64 are
+# configured: `-win-x64.exe`, `-win-arm64.exe`, and a fatter combined `-win.exe`.
+# We ship the two per-arch installers and skip the combined one (368MB vs 200MB).
 while IFS= read -r -d '' f; do
   case "$f" in
     *.blockmap) continue ;;
     *uninstaller*) continue ;;
-    *.dmg)      [ -z "$DMG" ] && DMG="$f" ;;
-    *.exe)      [ -z "$EXE" ] && EXE="$f" ;;
-    *.AppImage) [ -z "$APPIMAGE" ] && APPIMAGE="$f" ;;
-    *.deb)      [ -z "$DEB" ] && DEB="$f" ;;
+    *.dmg)              [ -z "$DMG" ] && DMG="$f" ;;
+    *-win-x64.exe)      [ -z "$EXE_X64" ] && EXE_X64="$f" ;;
+    *-win-arm64.exe)    [ -z "$EXE_ARM64" ] && EXE_ARM64="$f" ;;
+    *.AppImage)         [ -z "$APPIMAGE" ] && APPIMAGE="$f" ;;
+    *.deb)              [ -z "$DEB" ] && DEB="$f" ;;
   esac
 done < <(find "$DIST" -maxdepth 1 -type f -print0)
 
 echo ""
 echo "=== Built artifacts ==="
-for f in "$DMG" "$EXE" "$APPIMAGE" "$DEB"; do
+for f in "$DMG" "$EXE_X64" "$EXE_ARM64" "$APPIMAGE" "$DEB"; do
   if [ -n "$f" ] && [ -f "$f" ]; then
     echo "  $(basename "$f") ($(du -h "$f" | cut -f1 | xargs))"
   fi
@@ -102,10 +111,11 @@ echo ""
 echo "=== Creating GitHub Release ${TAG} ==="
 
 ASSETS=()
-[ -n "$DMG" ] && [ -f "$DMG" ] && ASSETS+=("$DMG")
-[ -n "$EXE" ] && [ -f "$EXE" ] && ASSETS+=("$EXE")
-[ -n "$APPIMAGE" ] && [ -f "$APPIMAGE" ] && ASSETS+=("$APPIMAGE")
-[ -n "$DEB" ] && [ -f "$DEB" ] && ASSETS+=("$DEB")
+[ -n "$DMG" ]       && [ -f "$DMG" ]       && ASSETS+=("$DMG")
+[ -n "$EXE_X64" ]   && [ -f "$EXE_X64" ]   && ASSETS+=("$EXE_X64")
+[ -n "$EXE_ARM64" ] && [ -f "$EXE_ARM64" ] && ASSETS+=("$EXE_ARM64")
+[ -n "$APPIMAGE" ]  && [ -f "$APPIMAGE" ]  && ASSETS+=("$APPIMAGE")
+[ -n "$DEB" ]       && [ -f "$DEB" ]       && ASSETS+=("$DEB")
 
 gh release create "$TAG" "${ASSETS[@]}" \
   --repo "$REPO" \
@@ -115,10 +125,11 @@ Desktop release ${VERSION}
 
 **Downloads:**
 - **macOS:** $(basename "$DMG")
-- **Windows:** $(basename "$EXE")
+- **Windows (x64):** $(basename "$EXE_X64")
+- **Windows (ARM64):** $(basename "$EXE_ARM64")
 - **Linux:** $(basename "$APPIMAGE") / $(basename "$DEB")
 
-All processing happens locally on your machine — no data is uploaded.
+All processing happens locally on your machine, no data is uploaded.
 Auto-updates are built in: the app checks for web updates in the background.
 EOF
 )"
@@ -130,14 +141,15 @@ echo "=== Updating download page ==="
 # Pass all values as arguments to node, not via string interpolation
 node -e "
 const fs = require('fs');
-const [version, baseUrl, dmgName, exeName, appImageName, debName] = process.argv.slice(1);
+const [version, baseUrl, dmgName, exeX64Name, exeArm64Name, appImageName, debName] = process.argv.slice(1);
 let page = fs.readFileSync('pages/download.vue', 'utf8');
 
 const urlBlock = [
   \"const RELEASE_VERSION = '\" + version + \"';\",
   'const DOWNLOAD_URLS = {',
   \"  mac: '\" + baseUrl + '/' + dmgName + \"',\",
-  \"  windows: '\" + baseUrl + '/' + encodeURIComponent(exeName) + \"',\",
+  \"  windows: '\" + baseUrl + '/' + encodeURIComponent(exeX64Name) + \"',\",
+  \"  windowsArm64: '\" + baseUrl + '/' + encodeURIComponent(exeArm64Name) + \"',\",
   \"  linux: '\" + baseUrl + '/' + appImageName + \"',\",
   \"  deb: '\" + baseUrl + '/' + debName + \"',\",
   '};',
@@ -152,7 +164,7 @@ if (page.includes('const RELEASE_VERSION')) {
 fs.writeFileSync('pages/download.vue', page);
 console.log('Updated pages/download.vue');
 " "$VERSION" "https://github.com/${REPO}/releases/latest/download" \
-  "$(basename "$DMG")" "$(basename "$EXE")" "$(basename "$APPIMAGE")" "$(basename "$DEB")"
+  "$(basename "$DMG")" "$(basename "$EXE_X64")" "$(basename "$EXE_ARM64")" "$(basename "$APPIMAGE")" "$(basename "$DEB")"
 
 echo ""
 echo "=== Done! ==="

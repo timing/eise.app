@@ -47,13 +47,54 @@
 				/>
 			</div>
 
-			<div class="current-option">
-				<h3>Or use the web version</h3>
-				<p>
-					No download needed —
-					<NuxtLink to="/">start stacking</NuxtLink> right in your browser.
-					Same features, works on any device with a modern browser.
-				</p>
+			<div class="comparison">
+				<h3>Desktop app vs. web version</h3>
+				<p>Stacking uses the same WebGPU pipeline in both, so end results are identical. The desktop build changes what runs in the background and what depends on a network connection.</p>
+
+				<table class="compare-table">
+					<thead>
+						<tr>
+							<th></th>
+							<th>Desktop app</th>
+							<th>Web (eise.app)</th>
+						</tr>
+					</thead>
+					<tbody>
+						<tr>
+							<th scope="row">Runs while minimized</th>
+							<td class="yes">Full speed</td>
+							<td class="no">Throttled by the browser when the tab is backgrounded</td>
+						</tr>
+						<tr>
+							<th scope="row">Works offline</th>
+							<td class="yes">Fully offline after install</td>
+							<td class="no">Needs a connection to load the app</td>
+						</tr>
+						<tr>
+							<th scope="row">Updates</th>
+							<td>Checks in the background, applies on next launch</td>
+							<td>Latest version on every page load</td>
+						</tr>
+						<tr>
+							<th scope="row">WebGPU</th>
+							<td class="yes">Always available (bundled Chromium with WebGPU enabled)</td>
+							<td>Depends on the browser (Chrome, Edge, and recent Safari support it; some browsers still fall back to the slower CPU path)</td>
+						</tr>
+						<tr>
+							<th scope="row">Stacking speed</th>
+							<td colspan="2" class="same">Same. Both use WebGPU when available, so the compute is identical.</td>
+						</tr>
+						<tr>
+							<th scope="row">Privacy</th>
+							<td colspan="2" class="same">Same. All processing happens on your machine, no frames leave the device in either version.</td>
+						</tr>
+						<tr>
+							<th scope="row">Install size</th>
+							<td>~200 MB (bundled Chromium runtime)</td>
+							<td class="yes">Nothing to install</td>
+						</tr>
+					</tbody>
+				</table>
 			</div>
 		</div>
 	</div>
@@ -63,13 +104,13 @@
 import { useTracking } from '~/composables/useTracking';
 import MailingListForm from '@/components/MailingListForm.vue';
 const { track } = useTracking();
-const RELEASE_VERSION = '2026.08.16';
+const RELEASE_VERSION = '2026.08.30';
 const DOWNLOAD_URLS = {
-  mac: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-mac-arm64.dmg',
-  windows: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-win-x64.exe',
-  windowsArm64: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-win-arm64.exe',
-  linux: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-linux-arm64.AppImage',
-  deb: 'https://github.com/timing/eise.app/releases/download/v2026.08.16/Eise-2026.8.16-linux-arm64.deb',
+  mac: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-mac-arm64.dmg',
+  windows: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-win-x64.exe',
+  windowsArm64: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-win-arm64.exe',
+  linux: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-linux-arm64.AppImage',
+  deb: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-linux-arm64.deb',
 };
 const releasesUrl = 'https://github.com/timing/eise.app/releases';
 
@@ -89,26 +130,41 @@ useBreadcrumbSchema([
 <style scoped>
 .download-cards {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-	gap: 1.5rem;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 1rem;
 	margin: 2rem 0;
+}
+
+@media (max-width: 600px) {
+	.download-cards {
+		grid-template-columns: 1fr;
+	}
 }
 
 .download-card {
 	background: #f7f7f7;
 	border: 1px solid #e5e5e5;
 	border-radius: 8px;
-	padding: 1.5rem;
+	padding: 1.25rem 1rem;
 	text-align: center;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.6rem;
 }
 
-.download-card h3 {
-	margin: 0.5rem 0 1rem;
+/* Higher specificity so the global .content-card h3 (margin: 40px 0 12px in
+   app.vue) doesn't add a big gap between icon and title. */
+.download-cards .download-card h3 {
+	margin: 0;
+	font-size: 1.25rem;
+	line-height: 1.2;
 }
 
 .platform-icon {
-	font-size: 2.5rem;
+	font-size: 2rem;
 	line-height: 1;
+	margin: 0;
 }
 
 .download-btn {
@@ -121,7 +177,6 @@ useBreadcrumbSchema([
 	font-weight: bold;
 	border-radius: 4px;
 	transition: background 0.2s;
-	margin-bottom: 0.5rem;
 }
 
 .download-btn:hover {
@@ -129,7 +184,7 @@ useBreadcrumbSchema([
 }
 
 .deb-alt {
-	margin: 0.5rem 0 0;
+	margin: 0;
 	font-size: 0.85rem;
 	color: #666;
 }
@@ -141,7 +196,7 @@ useBreadcrumbSchema([
 .platform-note {
 	font-size: 0.8rem;
 	color: #666;
-	margin-top: 0.75rem;
+	margin: 0;
 	line-height: 1.4;
 }
 
@@ -157,6 +212,7 @@ useBreadcrumbSchema([
 	text-align: center;
 	color: #666;
 	font-size: 0.85rem;
+	margin: 1.25rem 0 2rem;
 }
 
 .version-info a {
@@ -175,13 +231,74 @@ useBreadcrumbSchema([
 	margin-top: 0;
 }
 
-.current-option {
-	margin-top: 2rem;
+.comparison {
+	margin: 2rem 0;
 	padding-top: 1.5rem;
 	border-top: 1px solid #e5e5e5;
 }
 
-.current-option h3 {
+.comparison h3 {
 	margin-top: 0;
 }
+
+.compare-table {
+	width: 100%;
+	border-collapse: collapse;
+	margin-top: 1rem;
+	font-size: 0.9rem;
+	background: #fefefe;
+	border: 1px solid #e5e5e5;
+	border-radius: 8px;
+	overflow: hidden;
+}
+
+.compare-table th,
+.compare-table td {
+	padding: 0.7rem 1rem;
+	text-align: left;
+	border-bottom: 1px solid #e5e5e5;
+	vertical-align: top;
+}
+
+.compare-table thead th {
+	background: #f7f7f7;
+	font-weight: bold;
+}
+
+.compare-table tbody th {
+	background: #f7f7f7;
+	font-weight: 500;
+	width: 32%;
+}
+
+.compare-table tr:last-child th,
+.compare-table tr:last-child td {
+	border-bottom: none;
+}
+
+.compare-table td.yes {
+	color: #7ABF6E;
+	font-weight: 500;
+}
+
+.compare-table td.no {
+	color: #666;
+}
+
+.compare-table td.same {
+	color: #666;
+	font-style: italic;
+	text-align: center;
+}
+
+@media (max-width: 600px) {
+	.compare-table {
+		font-size: 0.8rem;
+	}
+	.compare-table th,
+	.compare-table td {
+		padding: 0.5rem 0.6rem;
+	}
+}
+
 </style>

@@ -340,6 +340,19 @@ onMounted(async () => {
 	isMounted.value = true;
 	trackHumanInteraction();
 
+	// Electron: emit launch + first-launch events with platform/arch/version so
+	// we can slice DAU and installs by desktop build. No-op in the browser.
+	if (typeof window !== 'undefined' && window.electronAPI?.getPlatformInfo) {
+		try {
+			const info = await window.electronAPI.getPlatformInfo();
+			track('electron_launch', info);
+			const isFirst = await window.electronAPI.consumeFirstLaunch();
+			if (isFirst) track('electron_first_launch', info);
+		} catch (e) {
+			console.warn('electron launch tracking failed:', e);
+		}
+	}
+
 	const urlParams = new URLSearchParams(window.location.search);
 	if (urlParams.get('lite') === '1' || urlParams.get('lite') === 'true') {
 		forceLiteMode.value = true;
@@ -362,6 +375,12 @@ onMounted(async () => {
 	on('stacked-image-ready', handleStackedImageReady);
 	on('batch-started', handleBatchStarted);
 	on('batch-complete', handleBatchComplete);
+	// Prevent OS from suspending the Electron app while a stack is in progress
+	if (typeof window !== 'undefined' && window.electronAPI?.startPowerSaveBlocker) {
+		on('stacking-started', () => { window.electronAPI.startPowerSaveBlocker(); });
+		on('stacked-image-ready', () => { window.electronAPI.stopPowerSaveBlocker(); });
+		on('upload-error', () => { window.electronAPI.stopPowerSaveBlocker(); });
+	}
 	on('show-color-profile-selector', () => {
 		isSelectingColorProfile.value = true;
 	});
