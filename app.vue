@@ -272,6 +272,22 @@ function emitStackPing() {
 	stackPingCount++;
 }
 
+// Warm the post-processor chunks in the background while the stack runs. The
+// stack takes seconds-to-minutes, so by the time we navigate on success the
+// chunks are already cached against the currently-running bundle's hashes.
+// Without this, a deploy that happens mid-stack invalidates the CDN hashes
+// the running tab is about to request, defineAsyncComponent's import() at
+// pages/post-processor.vue:17-18 gets undefined back, Vue reads `.default`
+// on it, and the user sees "Cannot read properties of undefined (reading
+// 'default')" right after their successful stack. Fire-and-forget: browser
+// caches the module, navigation-time import reuses the cached response.
+// Both components preloaded because batch mode can arrive at the same page.
+function preloadPostProcessor() {
+	if (typeof window === 'undefined') return;
+	import('@/components/PostProcessor.vue').catch(() => {});
+	import('@/components/BatchPostProcessor.vue').catch(() => {});
+}
+
 function startStackPing() {
 	if (stackPingTimer) return;  // Already running.
 	stackStartTs = Date.now();
@@ -357,6 +373,7 @@ onMounted(async () => {
 		// Emit start-loading immediately so VideoFrameProcessor shows loading state
 		eventBusEmit('start-loading', 'Preparing to analyze...');
 		track('stack_start', stackStartProps());
+		preloadPostProcessor();
 		startStackPing();
 	});
 	on('debayer-processing-started', () => {
@@ -366,6 +383,7 @@ onMounted(async () => {
 		lastStackStep = null;
 		eventBusEmit('start-loading', 'Preparing to analyze...');
 		track('stack_start', stackStartProps());
+		preloadPostProcessor();
 		startStackPing();
 	});
 	on('quality-selection-ready', handleQualitySelectionReady);
@@ -759,6 +777,7 @@ function handleProcessingStarted() {
 	stackInFlight = true;
 	lastStackStep = null;
 	track('stack_start', stackStartProps());
+	preloadPostProcessor();
 	startStackPing();
 }
 
