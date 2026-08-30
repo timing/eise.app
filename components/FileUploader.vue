@@ -1379,30 +1379,50 @@ async function processFiles(files, options = {}) {
 						);
 						throw mediabunnyErr;
 					}
-					if (isMobileDevice.value) {
-						// FFmpeg-WASM's ~25 MB bundle + per-frame RAM tends to
-						// tab-crash mobile browsers on anything sizable. Keep
-						// the fallback for small files where it usually works;
-						// hard-fail on larger ones instead of trying and OOM-ing.
-						const MOBILE_FFMPEG_MAX_BYTES = 50 * 1024 * 1024;
-						if (fileToProcess.size > MOBILE_FFMPEG_MAX_BYTES) {
-							addLog(`${failLabel} on mobile: ${mediabunnyErr.message}. Skipping FFmpeg fallback, file is ${(fileToProcess.size / 1024 / 1024).toFixed(1)} MB (> ${MOBILE_FFMPEG_MAX_BYTES / 1024 / 1024} MB), likely to OOM the browser.`);
-							track('stack_reader_fallback', {
-								...getTrackingContext(),
-								from: 'mediabunny',
-								to: 'aborted',
-								fail_stage: failStage,
-								reason,
-								file_size_mb: fileSizeMb,
-								is_mobile: true,
-							});
-							throw mediabunnyErr;
-						}
-						addLog(`${failLabel} on mobile: ${mediabunnyErr.message}. Attempting FFmpeg fallback, this may still OOM on constrained devices.`);
-					} else {
-						addLog(`${failLabel}: ${mediabunnyErr.message}`);
-						addLog('Falling back to FFmpeg (slower, downloads ~25 MB decoder)…');
+					// Mobile: kill the fallback entirely. 14-day analytics: mobile
+					// mediabunny→ffmpeg was 0 finished out of 39 attempts across
+					// every fail_stage. Users just wait 2-3 minutes and give up.
+					// Desktop: fallback only pays off when the decoder was
+					// merely slow, not on analyze/copy/unknown errors (0-25%
+					// success). Everything else: show the actionable card so
+					// users have a real next step instead of a silent ffmpeg
+					// death loop.
+					const DESKTOP_FALLBACK_STAGES = new Set(['decoder']);
+					const shouldFallback = !isMobileDevice.value && DESKTOP_FALLBACK_STAGES.has(failStage);
+					if (!shouldFallback) {
+						const platform = isMobileDevice.value ? 'mobile' : 'desktop';
+						addLog(`${failLabel} on ${platform}: ${mediabunnyErr.message}. Skipping FFmpeg fallback — analytics show it does not recover this failure class.`);
+						track('stack_reader_fallback', {
+							...getTrackingContext(),
+							from: 'mediabunny',
+							to: 'aborted',
+							fail_stage: failStage,
+							reason,
+							file_size_mb: fileSizeMb,
+							is_mobile: isMobileDevice.value,
+						});
+						showActionableError(
+							'The video decoder in this browser could not process this file, and the fallback decoder does not reliably recover from this failure. You have a few options:',
+							[
+								{
+									label: 'Try a shorter clip or lower resolution',
+									description: 'Trim to 30-60 s or downscale to 1080p. Most planetary stacks only need a short window of the sharpest frames.'
+								},
+								{
+									label: 'Convert the video first',
+									description: 'Re-encode to H.264 8-bit 4:2:0 (any tool: HandBrake, ffmpeg CLI, QuickTime export). Browser decoders handle that profile most reliably.'
+								},
+								{
+									label: 'Download the Eise desktop app',
+									description: 'The Mac, Windows and Linux builds ship a full-featured decoder that handles what the browser cannot.',
+									url: '/download/'
+								}
+							]
+						);
+						throw mediabunnyErr;
 					}
+					addLog(`${failLabel}: ${mediabunnyErr.message}`);
+					addLog('Falling back to FFmpeg (slower, downloads ~25 MB decoder)…');
 					track('stack_reader_fallback', {
 						...getTrackingContext(),
 						from: 'mediabunny',
@@ -1414,6 +1434,40 @@ async function processFiles(files, options = {}) {
 					});
 				}
 			} else {
+				// Mediabunny declined the format upfront (canHandle=false).
+				// Desktop: 1/2 finished — small sample but not zero, so let ffmpeg try.
+				// Mobile: mobile total mediabunny→ffmpeg = 0/39, so abort here too.
+				if (isMobileDevice.value) {
+					addLog(`Mediabunny cannot handle this file: ${check.reason}. Skipping FFmpeg on mobile — telemetry shows 0% success rate.`);
+					track('stack_reader_fallback', {
+						...getTrackingContext(),
+						from: 'mediabunny',
+						to: 'aborted',
+						fail_stage: 'unsupported',
+						reason: `unsupported: ${String(check.reason || 'unknown').slice(0, 150)}`,
+						file_size_mb: +(fileToProcess.size / 1024 / 1024).toFixed(1),
+						is_mobile: true,
+					});
+					showActionableError(
+						"This video format isn't supported by your phone's browser video decoder, and the fallback decoder doesn't reliably work on mobile. You have a few options:",
+						[
+							{
+								label: 'Convert the video first',
+								description: 'Re-encode to H.264 8-bit 4:2:0 (HandBrake, ffmpeg CLI, phone video-editor export). Browser decoders handle that profile most reliably.'
+							},
+							{
+								label: 'Open eise.app on a laptop',
+								description: 'Desktop browsers have wider codec support and more memory headroom for tricky videos.'
+							},
+							{
+								label: 'Download the Eise desktop app',
+								description: 'The Mac, Windows and Linux builds ship a full-featured decoder without the mobile constraints.',
+								url: '/download/'
+							}
+						]
+					);
+					return;
+				}
 				addLog(`Mediabunny cannot handle this file: ${check.reason}`);
 				addLog('Falling back to FFmpeg...');
 				track('stack_reader_fallback', {
