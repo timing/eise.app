@@ -357,7 +357,7 @@ const directFileInput = ref(null);
 
 const { track } = useTracking();
 const { openFeedbackAfterDownload } = useFeedback();
-const { inputFilename, getOutputFilename, getStackJobId } = useProcessingState();
+const { inputFilename, getOutputFilename, getStackJobId, getTrackingContext } = useProcessingState();
 const { workerUrl } = useWorkerUrl();
 const { captureProcessedImage, canExport, generateComparisonVideo, getExportStatus } = useComparisonExport();
 
@@ -379,8 +379,8 @@ const publishCanvas = ref(null);
 // Rating popup state. Rate button appears whenever a live stack_job_id exists
 // (i.e. we arrived here via a stacking run, not a direct file load) and the
 // job hasn't been rated yet in this session. Fires as a stack_rating tracking
-// event; stack_job_id rides along via getTrackingContext so analytics joins
-// the rating to the same job as the rest of its stack_* events.
+// event; stack_job_id is spread from getTrackingContext() so analytics can
+// join the rating to the same job as the rest of its stack_* events.
 const showRatingPopup = ref(false);
 const currentRating = ref(0);
 const hoverRating = ref(0);
@@ -399,7 +399,7 @@ function openRatingPopup() {
 	hoverRating.value = 0;
 	ratingComment.value = '';
 	showRatingPopup.value = true;
-	track('rate_open', { source: 'toolbar' });
+	track('rate_open', { ...getTrackingContext(), source: 'toolbar' });
 }
 
 function closeRatingPopup() {
@@ -414,6 +414,7 @@ async function submitRating() {
 		const jobId = getStackJobId();
 		const comment = (ratingComment.value || '').trim().slice(0, 1000);
 		await track('stack_rating', {
+			...getTrackingContext(),
 			rating: currentRating.value,
 			comment: comment || null,
 			has_comment: comment.length > 0,
