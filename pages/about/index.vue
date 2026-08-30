@@ -5,7 +5,7 @@
 			<p class="page-subtitle">Image stacker for planets, Moon &amp; Sun</p>
 			<h3>100% browser-based - no uploads, no installs</h3>
 			<p>Eise.app is the first fully browser-based planetary image stacking tool for astrophotography.
-			Everything runs locally on your machine using WebGPU for fast GPU-accelerated processing, WebAssembly, and Web Workers - your data never leaves your computer.
+			All algorithms run locally on your machine using WebGPU for fast GPU-accelerated processing, WebAssembly, and Web Workers. Your data is not uploaded to any server.
 			</p>
 			<p>
 			The name is an ode to <a href="https://en.wikipedia.org/wiki/Eise_Eisinga" target="_blank">Eise Eisinga</a>, a Frisian amateur astronomer who built a planetarium in his living room.

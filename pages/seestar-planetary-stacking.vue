@@ -1,8 +1,8 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>Stack Seestar Moon and Planet Videos Online</h2>
-			<p class="page-subtitle">Works with MP4, no install</p>
+			<h2>Stack &amp; Improve Seestar Moon and Planet Videos</h2>
+			<p class="page-subtitle">Works with Seestar's MP4 files</p>
 
 			<div class="comparison-images hero-comparison">
 				<figure class="comparison-figure">
@@ -17,37 +17,31 @@
 			</div>
 
 			<p>
-				Eise.app is a free browser-based stacker for Seestar MP4 videos of the Moon and planets. Seestar's built-in Video Stack only runs on RAW AVI, so MP4 clips have no built-in stack path. Eise.app opens the MP4 straight from the browser and runs lucky imaging on it.
-			</p>
-
-			<h3>Why MP4 doesn't work with the built-in stack</h3>
-			<p>
-				Seestar records planetary video in two formats: RAW AVI (uncompressed, ~1.4 GB/min, 10-min max) or MP4 (compressed, share-ready, up to 100 min). The Seestar app is explicit: <em>"Stacking is only available for videos recorded with RAW format enabled."</em> Most people record MP4 for the storage, then find they can't stack it.
+				Eise.app is a free browser-based stacker for Seestar MP4 videos of the Moon and planets. Seestar's built-in Video Stack either exports RAW AVI or MP4. For MP4's, Seestar does not provide (basic) stacking. With Eise.app it's possible to stack all frames in the MP4 video, and have nice sharp results.
 			</p>
 
 			<h3>What Eise.app does</h3>
 			<p>
-				Decodes the MP4 in-browser (FFmpeg via WebAssembly), scores every frame for sharpness, keeps the sharpest 30% by default, and stacks them with alignment-point tracking. Same lucky-imaging approach that AutoStakkert and Registax use, ported to WebGPU. Runs locally, nothing uploads.
+				Eise decodes the MP4 in the browser, ranks every frame for sharpness, keeps the sharpest 30% by default, and stacks them with alignment-point tracking. Same lucky-imaging approach that AutoStakkert and Registax use, ported to WebGPU. Runs locally, nothing uploads. After the stack is done, various sharpening and color tools can be used to improve the image even further.
 			</p>
 
 			<h3>Example: Seestar Moon MP4, four stages</h3>
-			<p>One Seestar S50 Moon clip, MP4, dropped straight in.</p>
 			<div class="image-comparison">
 				<figure>
 					<img src="/seestar-moon-sharpest-frame.webp" alt="Single sharpest frame from a Seestar MP4 lunar video, before stacking" loading="lazy" />
-					<figcaption><strong>1. Sharpest single frame.</strong> Best individual frame in the MP4. Noisy, softened by seeing.</figcaption>
+					<figcaption><strong>1. Sharpest single frame.</strong> Best individual frame in the MP4. Noisy. Seestar logo still in frame.</figcaption>
 				</figure>
 				<figure>
 					<img src="/seestar-moon-stacked-unprocessed.webp" alt="Same Seestar Moon MP4 after Eise.app lucky-imaging stack, no post-processing yet" loading="lazy" />
-					<figcaption><strong>2. Stacked.</strong> Top 30% of frames aligned and combined. Noise drops sharply.</figcaption>
+					<figcaption><strong>2. Stacked.</strong> Top 30% of frames aligned and combined. Less noise.</figcaption>
 				</figure>
 				<figure>
 					<img src="/seestar-moon-stacked-processed.webp" alt="Stacked Seestar Moon image after wavelet sharpening" loading="lazy" />
-					<figcaption><strong>3. Sharpened.</strong> Wavelet sharpening in the built-in post-processor. Craters near the terminator resolve.</figcaption>
+					<figcaption><strong>3. Sharpened &amp; stretched.</strong> Autostretching levels for a brighter moon, together with wavelet sharpening.</figcaption>
 				</figure>
 				<figure>
 					<img src="/seestar-moon-stacked-saturation.webp" alt="Stacked and sharpened Seestar Moon with saturation boosted, revealing mineral moon colours" loading="lazy" />
-					<figcaption><strong>4. Saturation boosted.</strong> The "mineral Moon" hues: blue for titanium-rich basalt, rust for iron oxides.</figcaption>
+					<figcaption><strong>4. Saturation boosted.</strong> Not yet a proper "mineral moon", but getting there.</figcaption>
 				</figure>
 			</div>
 
@@ -150,7 +144,7 @@
 
 <script setup>
 useHead({
-	title: 'Stack Seestar Moon and Planet Videos Online - Works with MP4, No Install | Eise.app',
+	title: 'Improve Seestar Moon and Planet Videos - Works with MP4, No Install | Eise.app',
 	meta: [
 		{ name: 'description', content: 'Free browser-based stacker for Seestar S50 and S30 Pro Moon and planet MP4 videos. The built-in Video Stack only works on RAW AVI; Eise.app handles MP4 natively with lucky imaging.' },
 	],
