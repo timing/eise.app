@@ -1,7 +1,8 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>AutoStakkert! vs Eise.app - Which Planetary Stacker Should You Use?</h2>
+			<h2>AutoStakkert! vs Eise.app</h2>
+			<p class="page-subtitle">Which planetary stacker should you use?</p>
 			<p>
 				AutoStakkert! (by Emil Kraaikamp) has been the industry-standard planetary stacker for over a decade.
 				The current stable release is AutoStakkert!4 4.0.11 (January 2024); 4.0.13 (February 2025) is a newer beta build.

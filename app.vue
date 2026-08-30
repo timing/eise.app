@@ -1017,18 +1017,6 @@ button:hover, a.button:hover, .tabs a:hover {
 .page-layout .content.content-card.content-card-dashboard > :is(h2, h3, h4, p, ul, ol, dl, blockquote) {
 	max-width: none;
 }
-/* Direct-child text blocks stay narrower than the card so line-length is readable
-   (~65-70ch is the sweet spot). Tables, images, and code blocks stay full-width. */
-.page-layout .content.content-card > h2,
-.page-layout .content.content-card > h3,
-.page-layout .content.content-card > h4,
-.page-layout .content.content-card > p,
-.page-layout .content.content-card > ul,
-.page-layout .content.content-card > ol,
-.page-layout .content.content-card > dl,
-.page-layout .content.content-card > blockquote {
-	max-width: 68ch;
-}
 .page-layout .content.content-card h2 {
 	font-size: 30px;
 	color: #1a1a1a;
@@ -1036,6 +1024,13 @@ button:hover, a.button:hover, .tabs a:hover {
 	line-height: 1.2;
 	letter-spacing: -0.01em;
 	font-weight: 700;
+}
+.page-layout .content.content-card > h2 + .page-subtitle {
+	margin: -12px 0 32px;
+	font-size: 18px;
+	line-height: 1.4;
+	color: #555;
+	font-weight: 400;
 }
 .page-layout .content.content-card h3 {
 	font-size: 22px;
@@ -1370,6 +1365,9 @@ canvas {
 	font-size: 12px;
 	color: rgba(198, 255, 253, 0.75);
 	text-align: center;
+}
+.content.content-card .comparison-figure figcaption {
+	color: #555;
 }
 .webgpu-dialog-overlay {
 	position: fixed;

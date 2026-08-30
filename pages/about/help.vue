@@ -1,7 +1,8 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>How to Use Eise.app - Planetary Image Stacking Guide</h2>
+			<h2>How to Use Eise.app</h2>
+			<p class="page-subtitle">Planetary image stacking guide</p>
 			<p>Eise.app processes astrophotography videos of planets, the Moon, and the Sun by analyzing each frame for sharpness, cropping to keep the target centered, aligning frames with local template matching, and combining the sharpest frames into a single detailed result. You choose how many frames to include - a percentage, a quality threshold, or continuous stacking that tries several percentages automatically. This process - lucky imaging - takes a couple of minutes for a typical planetary video and runs entirely in your browser using WebGPU.</p>
 
 			<h3>Getting Started</h3>
@@ -33,6 +34,11 @@
 				<li><strong>Percentage</strong> - Automatically stacks the best N% of frames. Quick and simple.</li>
 				<li><strong>Continuous</strong> - Stacks the same file multiple times using increasing percentages (5%, 10%, 15%, ... up to 90%). This lets you compare results and find the sweet spot between detail and noise without trial and error.</li>
 			</ul>
+
+			<figure class="help-figure">
+				<img src="/eise-continuous-stacking.webp" alt="Eise.app continuous stacking output: the same planetary video stacked at multiple frame percentages, shown together for comparison" loading="lazy" />
+				<figcaption>Continuous stacking: one video, stacked at 5%, 10%, up through 90%. Compare all versions side-by-side and pick the one where detail wins over noise, without re-running the pipeline for each try.</figcaption>
+			</figure>
 
 			<h3>Batch Processing &amp; Timelapse</h3>
 			<p>Batch processing is a separate feature for handling <strong>multiple files</strong>. When you select two or more SER or AVI files, Eise.app asks whether to process them separately (batch) or combine them into one stack. In batch mode, each file is stacked independently with the same settings.</p>
@@ -108,6 +114,7 @@
 					</ol>
 					<p>Once toggled off, any images or MP4 videos saved or processed through the app will no longer include the corner logo or bottom watermark banner.</p>
 					<p><em>Note:</em> for files you have already saved to your photo library with the logo baked in, you will need to crop or edit them manually.</p>
+					<p><em>See also:</em> <NuxtLink to="/seestar-planetary-stacking/">how to stack Seestar Moon and planet MP4 videos in Eise.app</NuxtLink>.</p>
 				</dd>
 
 				<dt>Batch export "Select folder" doesn't work</dt>
@@ -236,6 +243,24 @@ dd {
 	margin: 0.75rem 0;
 	border-radius: 4px;
 	border: 1px solid #e5e5e5;
+}
+.help-figure {
+	margin: 1rem 0 1.5rem;
+}
+.help-figure img {
+	max-width: 100%;
+	max-height: 480px;
+	display: block;
+	border-radius: 6px;
+	border: 1px solid #e5e5e5;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+.help-figure figcaption {
+	font-size: 13px;
+	color: #666;
+	margin-top: 0.6rem;
+	line-height: 1.5;
+	max-width: 60ch;
 }
 .compat-table {
 	width: auto;

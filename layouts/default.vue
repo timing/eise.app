@@ -80,7 +80,8 @@
 							<li><NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert! vs Eise.app</NuxtLink></li>
 							<li><NuxtLink to="/about/registax-vs-eise/">Registax 6 vs Eise.app</NuxtLink></li>
 							<li><NuxtLink to="/about/planetary-system-stacker-vs-eise/">Planetary System Stacker vs Eise.app</NuxtLink></li>
-							<li><NuxtLink to="/planetary-stacking-mac/">On Mac</NuxtLink></li>
+							<li><NuxtLink to="/planetary-stacking-mac/">Stack on Mac</NuxtLink></li>
+							<li><NuxtLink to="/seestar-planetary-stacking/">Stack Seestar videos</NuxtLink></li>
 						</ul>
 					</div>
 					<div class="site-footer-col">

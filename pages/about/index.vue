@@ -1,7 +1,8 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>About Eise.app - Image Stacker for Planets, Moon & Sun</h2>
+			<h2>About Eise.app</h2>
+			<p class="page-subtitle">Image stacker for planets, Moon &amp; Sun</p>
 			<h3>100% browser-based - no uploads, no installs</h3>
 			<p>Eise.app is the first fully browser-based planetary image stacking tool for astrophotography.
 			Everything runs locally on your machine using WebGPU for fast GPU-accelerated processing, WebAssembly, and Web Workers - your data never leaves your computer.

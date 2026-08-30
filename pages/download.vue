@@ -1,7 +1,8 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>Download Eise.app for Mac, Windows and Linux &mdash; Free Planetary Image Stacker</h2>
+			<h2>Download Eise.app for Mac, Windows and Linux</h2>
+			<p class="page-subtitle">Free planetary image stacker</p>
 
 			<p>Native desktop builds of Eise.app for macOS (Apple Silicon), Windows 10+, and Linux. Free planetary image stacker with the same features as the browser version - lucky imaging, alignment-point stacking, wavelet sharpening, RGB alignment - running offline on your own machine.</p>
 

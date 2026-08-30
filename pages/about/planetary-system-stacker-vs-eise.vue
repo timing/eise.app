@@ -1,7 +1,8 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>Planetary System Stacker (PSS) vs Eise.app - Which Should You Use?</h2>
+			<h2>Planetary System Stacker (PSS) vs Eise.app</h2>
+			<p class="page-subtitle">Which should you use?</p>
 			<p>
 				Planetary System Stacker (PSS) by Rolf Hempel is an open-source Python stacker with a well-documented pipeline
 				and a strong technical reputation among astrophotographers who want to see (and understand) the internals.

@@ -1,7 +1,8 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>Registax 6 vs Eise.app - Which Should You Use?</h2>
+			<h2>Registax 6 vs Eise.app</h2>
+			<p class="page-subtitle">Which should you use?</p>
 			<p>
 				Registax 6 (by Cor Berrevoets) was, for over a decade, the go-to tool for wavelet sharpening of planetary images.
 				Most people today still open Registax for its wavelets even after stacking in AutoStakkert!.

@@ -1,7 +1,8 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>Planetary Image Stacking on Mac - Free, Native, No Wine</h2>
+			<h2>Planetary Image Stacking on Mac</h2>
+			<p class="page-subtitle">Free, native, no Wine</p>
 			<p>
 				Eise.app is a free browser-based planetary image stacker that runs natively on macOS - Apple Silicon and Intel - with WebGPU acceleration. No install, no Wine, no Python setup. Handles SER, AVI, and MP4, and includes integrated wavelet sharpening and RGB alignment so you finish in one tool.
 			</p>
