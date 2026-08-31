@@ -347,6 +347,11 @@ import { useProcessingState } from '@/composables/useProcessingState';
 import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useFeedback } from '@/composables/useFeedback';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
+import {
+	detectImageFormat,
+	decodeHeicToBlob,
+	useDirectImageLoad,
+} from '@/composables/useDirectImageLoad';
 
 // Lite mode: deconvolution disabled (too slow on CPU)
 const liteMode = inject('liteMode', ref(false));
@@ -360,6 +365,7 @@ const { openFeedbackAfterDownload } = useFeedback();
 const { inputFilename, getOutputFilename, getStackJobId, getTrackingContext } = useProcessingState();
 const { workerUrl } = useWorkerUrl();
 const { captureProcessedImage, canExport, generateComparisonVideo, getExportStatus } = useComparisonExport();
+const { trackPostOpen, trackPostFailed } = useDirectImageLoad();
 
 // Comparison video export state
 const isExportingVideo = ref(false);
@@ -451,11 +457,49 @@ async function handleDirectFileSelect(event) {
 	const file = event.target.files?.[0];
 	if (!file) return;
 
-	// Set the filename for output naming
-	const { setInputFilename } = useProcessingState();
-	setInputFilename(file.name);
+	// Same detection + telemetry as the homepage direct-load path (see
+	// composables/useDirectImageLoad.js). The post-processor has no ffmpeg
+	// pipeline for exotic formats, so anything not natively browser-decodable
+	// (other than HEIC via createImageBitmap on Safari) gets rejected here
+	// with a pointer to the homepage upload flow.
+	const fmt = detectImageFormat(file);
 
-	// Load the image as a blob and set it as selectedFile
+	if (fmt.isRaw) {
+		trackPostFailed(file, 'raw_unsupported', { failed_in: 'handleDirectFileSelect' });
+		alert(`RAW camera files (${file.name.split('.').pop().toUpperCase()}) aren't supported here. Upload a JPEG/PNG/TIFF from the homepage.`);
+		event.target.value = '';
+		return;
+	}
+
+	const { setInputFilename } = useProcessingState();
+
+	if (fmt.isHeic) {
+		try {
+			const blob = await decodeHeicToBlob(file);
+			setInputFilename(file.name);
+			trackPostOpen(file);
+			selectedFile.value = blob;
+		} catch (err) {
+			trackPostFailed(file, `heic_decode:${err?.message || err}`, { failed_in: 'handleDirectFileSelect' });
+			alert("This browser can't open HEIC/HEIF images. Save as JPEG or PNG first, or open eise.app in Safari.");
+			event.target.value = '';
+		}
+		return;
+	}
+
+	if (!fmt.isTiff && !fmt.isNativeFormat) {
+		// The homepage upload flow (FileUploader.processFiles) can convert
+		// obscure formats via FFmpeg-WASM; the post-processor doesn't load
+		// FFmpeg. Push the user back to the homepage rather than silently
+		// showing a broken image.
+		trackPostFailed(file, 'non_native_format', { failed_in: 'handleDirectFileSelect' });
+		alert(`This format (${fmt.ext}) needs conversion. Upload it from the homepage instead — the conversion runs there.`);
+		event.target.value = '';
+		return;
+	}
+
+	setInputFilename(file.name);
+	trackPostOpen(file);
 	selectedFile.value = file;
 }
 

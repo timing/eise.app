@@ -343,6 +343,12 @@ import { reportError, UserError } from '@/composables/useSentryReporting';
 import { FFmpegUnsupportedError } from '@/plugins/ffmpeg';
 import { useFeedback } from '@/composables/useFeedback';
 import { useTracking } from '@/composables/useTracking';
+import {
+	isRawFile,
+	detectImageFormat,
+	decodeHeicToBlob,
+	useDirectImageLoad,
+} from '@/composables/useDirectImageLoad';
 import { getVariant } from '@/composables/useAbTest';
 import { useLiteMemoryLimits } from '@/composables/useLiteMemoryLimits';
 
@@ -357,6 +363,7 @@ const isMobileClient = ref(false); // Only true after mount to avoid hydration m
 const liteModeClient = ref(false); // Only true after mount to avoid hydration mismatch
 
 const { track } = useTracking();
+const { trackPostOpen, trackPostFailed } = useDirectImageLoad();
 const advancedExpanded = ref(false);
 const showAdvanced = computed(() => advancedExpanded.value);
 function toggleAdvanced() {
@@ -695,6 +702,7 @@ on('stack-failed', (info) => {
 	const component = info?.component;
 	trackStackFailed(reason, component ? { failed_in: component } : null);
 });
+
 
 function onFileChanged(event){
 	clearError(); // Clear previous error state (message + user-fault flag + mismatch set)
@@ -1152,9 +1160,6 @@ function handleBatchClear() {
 }
 
 // Unsupported RAW camera formats
-const RAW_EXTENSIONS = ['.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2', '.raf'];
-const isRawFile = (file) => RAW_EXTENSIONS.some(ext => file.name.toLowerCase().endsWith(ext));
-
 async function processFiles(files, options = {}) {
 	const { skipBatchChoice = false } = options;
 	const { startNewStackJob, setTrackingContext, setStackingMode } = useProcessingState();
@@ -1839,103 +1844,118 @@ async function processFiles(files, options = {}) {
 		await readImageFiles(imageFiles, $ffmpeg, $loadFFmpeg, effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous', effectiveCropMargin.value, effectiveStackPercentage.value, effectiveDrizzleScale.value, effectiveUseGpu.value, surfaceMode.value);
 
 	} else if (imageFiles.length == 1) {
-		// Single image - go directly to post processing
-		if (isRawFile(imageFiles[0])) {
-			eventBusEmit('upload-error', `RAW camera files (${imageFiles[0].name.split('.').pop().toUpperCase()}) are not supported. For planetary imaging, please use SER or AVI format from your capture software.`);
+		// Single image - direct load into post-processor. NOT a stacking attempt:
+		// no stack_start / stack_ping / stack_finished fire. Instead we emit
+		// post_open on successful hand-off and post_failed on conversion errors
+		// so the stack analytics stay clean and load-path bugs stay visible.
+		// Same helpers are used by the "Load another image" flow inside
+		// PostProcessor.vue — see composables/useDirectImageLoad.js.
+		const file = imageFiles[0];
+		const fmt = detectImageFormat(file);
+
+		if (fmt.isRaw) {
+			eventBusEmit('upload-error', `RAW camera files (${file.name.split('.').pop().toUpperCase()}) are not supported. For planetary imaging, please use SER or AVI format from your capture software.`);
 			eventBusEmit('stop-loading');
+			trackPostFailed(file, 'raw_unsupported', { failed_in: 'processFiles' });
 			return;
 		}
 
-		const file = imageFiles[0];
-		const fileName = file.name?.toLowerCase() || '';
-		const isTiff = file.type === 'image/tiff' || fileName.endsWith('.tif') || fileName.endsWith('.tiff');
-		const isHeic = file.type === 'image/heic' || file.type === 'image/heif'
-			|| fileName.endsWith('.heic') || fileName.endsWith('.heif');
-		const isNativeFormat = ['image/png', 'image/jpg', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'].includes(file.type);
-
-		if (isTiff) {
-			addLog('One TIFF image selected, load post processing');
-			emit('postProcessing', file);
-		} else if (isHeic) {
-			// FFmpeg-WASM doesn't include libheif, so routing HEIC through the
-			// ffmpeg conversion below fails with "readFile: path does not exist"
-			// (ffmpeg logs but produces no output). Try browser-native decoding
-			// via createImageBitmap first — Safari (macOS/iOS) supports HEIC
-			// there. Chrome/Firefox/Android reject, and we show a clear error.
-			addLog('HEIC image detected, attempting native browser decode');
-			try {
-				const bitmap = await createImageBitmap(file);
-				const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-				const ctx = canvas.getContext('2d');
-				ctx.drawImage(bitmap, 0, 0);
-				bitmap.close?.();
-				const blob = await canvas.convertToBlob({ type: 'image/png' });
-				emit('postProcessing', blob);
-			} catch (err) {
-				addLog(`HEIC decode failed: ${err?.message || err}`);
-				showActionableError(
-					"This browser can't open HEIC/HEIF images. Save the photo as JPEG or PNG and try again, or open eise.app in Safari on a Mac or iPhone.",
-					[
-						{
-							label: 'Convert the photo first',
-							description: 'Save as JPEG or PNG (most phones have a share option to convert HEIC) and re-upload.'
-						},
-						{
-							label: 'Open in Safari',
-							description: 'Safari on macOS and iOS decodes HEIC natively.'
-						},
-						{
-							label: 'Download the Eise desktop app',
-							description: 'The Mac, Windows and Linux builds ship their own decoder and handle any format.',
-							url: '/download/'
-						}
-					]
-				);
-			}
-		} else if (!isNativeFormat) {
-			addLog('One image selected that is not natively supported by browsers, converting..');
-
-			try {
-				await $loadFFmpeg();
-			} catch (err) {
-				if (err instanceof FFmpegUnsupportedError) {
+		// Wrapping the whole direct-load branch guarantees no throw escapes to
+		// the outer processFiles catch — that catch fires trackStackFailed, which
+		// would produce a phantom stack_failed for what is really a load error.
+		try {
+			if (fmt.isTiff) {
+				addLog('One TIFF image selected, load post processing');
+				trackPostOpen(file);
+				emit('postProcessing', file);
+			} else if (fmt.isHeic) {
+				addLog('HEIC image detected, attempting native browser decode');
+				try {
+					const blob = await decodeHeicToBlob(file);
+					trackPostOpen(file);
+					emit('postProcessing', blob);
+				} catch (err) {
+					addLog(`HEIC decode failed: ${err?.message || err}`);
+					trackPostFailed(file, `heic_decode:${err?.message || err}`, { failed_in: 'processFiles' });
 					showActionableError(
-						"Your browser can't run the image converter needed for this format. It's missing a feature (SharedArrayBuffer) that FFmpeg needs. You have a few options:",
-						ffmpegUnsupportedAlternatives({ context: 'image' })
+						"This browser can't open HEIC/HEIF images. Save the photo as JPEG or PNG and try again, or open eise.app in Safari on a Mac or iPhone.",
+						[
+							{
+								label: 'Convert the photo first',
+								description: 'Save as JPEG or PNG (most phones have a share option to convert HEIC) and re-upload.'
+							},
+							{
+								label: 'Open in Safari',
+								description: 'Safari on macOS and iOS decodes HEIC natively.'
+							},
+							{
+								label: 'Download the Eise desktop app',
+								description: 'The Mac, Windows and Linux builds ship their own decoder and handle any format.',
+								url: '/download/'
+							}
+						]
 					);
-					return;
 				}
-				throw err;
-			}
+			} else if (!fmt.isNativeFormat) {
+				addLog('One image selected that is not natively supported by browsers, converting..');
 
-			let imageData;
-			try {
-				imageData = await fetchFile(file);
-			} catch (fetchErr) {
-				if (fetchErr.name === 'InvalidStateError' || fetchErr.code === 11) {
-					eventBusEmit('upload-error', 'The file could not be read. Please re-select the file and try again.');
-					eventBusEmit('show-error');
-					return;
+				try {
+					await $loadFFmpeg();
+				} catch (err) {
+					if (err instanceof FFmpegUnsupportedError) {
+						trackPostFailed(file, 'ffmpeg_unsupported', { failed_in: 'processFiles' });
+						showActionableError(
+							"Your browser can't run the image converter needed for this format. It's missing a feature (SharedArrayBuffer) that FFmpeg needs. You have a few options:",
+							ffmpegUnsupportedAlternatives({ context: 'image' })
+						);
+						return;
+					}
+					throw err;
 				}
-				throw fetchErr;
+
+				let imageData;
+				try {
+					imageData = await fetchFile(file);
+				} catch (fetchErr) {
+					if (fetchErr.name === 'InvalidStateError' || fetchErr.code === 11) {
+						trackPostFailed(file, `fetch:${fetchErr.name}`, { failed_in: 'processFiles' });
+						eventBusEmit('upload-error', 'The file could not be read. Please re-select the file and try again.');
+						eventBusEmit('show-error');
+						return;
+					}
+					throw fetchErr;
+				}
+				$ffmpeg.FS('writeFile', file.name, imageData);
+
+				await $ffmpeg.run('-i', file.name, file.name + '.png');
+
+				const data = $ffmpeg.FS('readFile', file.name + '.png');
+
+				const blob = new Blob([data.buffer], { type: 'image/png' });
+
+				$ffmpeg.FS('unlink', file.name);
+				$ffmpeg.FS('unlink', file.name + '.png');
+
+				addLog('Load post processing');
+
+				trackPostOpen(file);
+				emit('postProcessing', blob);
+			} else {
+				addLog('One image selected that is supported right away, load post processing');
+				trackPostOpen(file);
+				emit('postProcessing', file);
 			}
-			$ffmpeg.FS('writeFile', file.name, imageData);
-
-			await $ffmpeg.run('-i', file.name, file.name + '.png');
-
-			const data = $ffmpeg.FS('readFile', file.name + '.png');
-
-			const blob = new Blob([data.buffer], { type: 'image/png' });
-
-			$ffmpeg.FS('unlink', file.name);
-			$ffmpeg.FS('unlink', file.name + '.png');
-
-			addLog('Load post processing');
-
-			emit('postProcessing', blob);
-		} else {
-			addLog('One image selected that is supported right away, load post processing');
-			emit('postProcessing', file);
+		} catch (err) {
+			// Any unexpected throw in the direct-load branch — including ffmpeg
+			// readFile failures on formats it can't decode — becomes post_failed.
+			// Without this catch the outer processFiles handler would fire
+			// trackStackFailed for a non-stack, which is what produced the
+			// "reader=null, file_type=null" phantom rows we saw in analytics.
+			const reason = err?.message || String(err);
+			addLog(`Direct-load failed: ${reason}`);
+			trackPostFailed(file, reason, { failed_in: 'processFiles' });
+			eventBusEmit('upload-error', `Couldn't open this image: ${reason}`);
+			eventBusEmit('show-error');
 		}
 	}
 }
