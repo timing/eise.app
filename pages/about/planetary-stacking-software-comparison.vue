@@ -171,6 +171,16 @@
 							<td class="highlight">Yes</td>
 						</tr>
 						<tr>
+							<td class="feature-name">Multi-% stacking</td>
+							<td class="highlight"><a href="#continuous-stacking">Auto 5%–90% sweep</a></td>
+							<td class="highlight">User-defined %</td>
+							<td>No</td>
+							<td>No</td>
+							<td>No</td>
+							<td>No</td>
+							<td>N/A</td>
+						</tr>
+						<tr>
 							<td class="feature-name">Price</td>
 							<td class="highlight">Free</td>
 							<td class="highlight">Free</td>
@@ -192,6 +202,24 @@
 						</tr>
 					</tbody>
 				</table>
+			</div>
+
+			<h3 id="continuous-stacking">Continuous Stacking (or Multi-Percentage) Demo</h3>
+			<p>
+				Continuous stacking (multi-percentage in AutoStakkert!) ranks the frames of a video by sharpness, then automatically produces stacks of the best 5%, 10%, 15%, all the way up to 90%. In the post processor you flip through those stacks with the same sharpening applied to each, so you can pick the sweet spot between sharp detail and low noise instead of guessing a single frame percentage up front. No trial and error, no re-stacking to try another cutoff.
+			</p>
+			<div class="video-embed">
+				<iframe
+					src="https://www.youtube.com/embed/C9_JCFLZ5aE?si=L57uV1XKWi1Khaqs"
+					title="Continuous Stacking demo"
+					loading="lazy"
+					frameborder="0"
+					allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+					referrerpolicy="strict-origin-when-cross-origin"
+					allowfullscreen></iframe>
+				<p class="video-fallback">
+					<a href="https://www.youtube.com/watch?v=C9_JCFLZ5aE" target="_blank" rel="noopener">Watch on YouTube</a>
+				</p>
 			</div>
 
 			<h3>Post-Processing Software Comparison</h3>
@@ -481,8 +509,29 @@ useBreadcrumbSchema([
 	color: #2a7a1a;
 	font-weight: 600;
 }
+.comparison-table td.highlight a {
+	color: inherit;
+	text-decoration: underline;
+}
 .comparison-table tbody tr:hover {
 	background: rgba(0, 0, 0, 0.025);
+}
+.video-embed {
+	max-width: 560px;
+	margin: 1.5rem 0;
+}
+.video-embed iframe {
+	width: 100%;
+	aspect-ratio: 16 / 9;
+	height: auto;
+	display: block;
+	border: 0;
+	border-radius: 6px;
+}
+.video-fallback {
+	margin: 6px 0 0;
+	font-size: 13px;
+	text-align: right;
 }
 h4 {
 	color: #1a1a1a;
