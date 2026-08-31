@@ -3,9 +3,8 @@
 		<div class="content content-card">
 			<h2>About Eise.app</h2>
 			<p class="page-subtitle">Image stacker for planets, Moon &amp; Sun</p>
-			<h3>100% browser-based - no uploads, no installs</h3>
-			<p>Eise.app is the first fully browser-based planetary image stacking tool for astrophotography.
-			All algorithms run locally on your machine using WebGPU for fast GPU-accelerated processing, WebAssembly, and Web Workers. Your data is not uploaded to any server.
+			<p>Eise.app is a (the first!) browser-based planetary image stacking tool for astrophotography, mainly lucky imaging.
+			All algorithms run in your browser, and nothing is uploaded.
 			</p>
 			<p>
 			The name is an ode to <a href="https://en.wikipedia.org/wiki/Eise_Eisinga" target="_blank">Eise Eisinga</a>, a Frisian amateur astronomer who built a planetarium in his living room.
@@ -15,14 +14,13 @@
 			<p>
 				The stacking pipeline includes automatic frame ranking, per-frame cropping and centering, local alignment with de-warping,
 				drizzle upscaling, and quality-weighted frame accumulation. The integrated post-processor offers wavelet sharpening,
-				RGB alignment, and color correction.
-				<NuxtLink to="/about/help/">Learn how Eise.app works</NuxtLink>,
-				<NuxtLink to="/about/architecture/">explore the technical architecture</NuxtLink>, or
+				RGB alignment, and color correction. Together with Continuous Stacking and a built-in post processor it has become more easy to find the best optimal stack percentage.
+				<NuxtLink to="/about/help/">Tips on using Eise.app</NuxtLink>,
 				<NuxtLink to="/about/planetary-stacking-software-comparison/">compare it to other stacking software</NuxtLink>.
 			</p>
-			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image - just open a PNG or TIFF for wavelet sharpening, RGB alignment, and other adjustments without stacking.</p>
+			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image.</p>
 
-			<p>Curious what people are making with it? Browse the <NuxtLink to="/gallery/">community gallery</NuxtLink> of stacks published straight from the app.</p>
+			<p>Curious what people are making with Eise? Browse the <NuxtLink to="/gallery/">community gallery</NuxtLink>. I would love to see yourt stacks, so please show them!</p>
 
 			<section id="testimonials" class="testimonials" aria-label="What users say">
 				<h3>What users say</h3>
@@ -70,8 +68,7 @@
 			</div>
 
 			<h3>Technology</h3>
-			<p>Built with Nuxt/Vue, OpenCV.js (WebAssembly), Web Workers for parallel processing, and FFmpeg.js for video decoding.
-			All processing happens in your browser - works on any OS without installation.</p>
+			<p>Built with Nuxt/Vue, using MediaBunny, ffmpeg.js and webGPU.</p>
 
 			<h3>Browser Requirements</h3>
 			<p>Eise.app uses WebGPU for fast GPU-accelerated processing. See <NuxtLink to="/about/help/">browser requirements</NuxtLink> for minimum versions.</p>
@@ -88,10 +85,10 @@
 			<p>
 				Eise.app works well for quick astrophotography results without installing anything.
 				For a detailed comparison with AutoStakkert!, Planetary System Stacker, Registax, and other tools,
-				see our <NuxtLink to="/about/planetary-stacking-software-comparison/">stacking software comparison</NuxtLink>.
+				see the <NuxtLink to="/about/planetary-stacking-software-comparison/">stacking software comparison</NuxtLink>.
 			</p>
 			<p>
-				Head-to-head with the most-searched competitors:
+				I also made some other comparisons (mainly to boost Eise's SEO position):
 				<NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert! vs Eise.app</NuxtLink>,
 				<NuxtLink to="/about/registax-vs-eise/">Registax 6 vs Eise.app</NuxtLink>,
 				<NuxtLink to="/about/planetary-system-stacker-vs-eise/">PSS vs Eise.app</NuxtLink>.
@@ -100,7 +97,6 @@
 			<h3>Acknowledgments</h3>
 			<p>
 			This project draws inspiration from <a target="_blank" href="https://github.com/Rolf-Hempel/PlanetarySystemStacker">Planetary System Stacker</a> by Rolf Hempel.
-			The alignment point approach, local de-warping, and quality-weighted stacking concepts are based on PSS's implementation.
 			Thank you Rolf for making PSS open source and documenting the algorithms.
 			</p>
 
@@ -109,31 +105,32 @@
 
 				<h4>Show me what you stacked</h4>
 				<p>
-					If you've made something with Eise.app I'd like to see it. With your permission I'll feature good ones on this page.
+					If you've made something with Eise.app I'd like to see it if possible! Here are some suggestions:
 				</p>
 				<ul>
+					<li><NuxtLink to="/gallery/">Upload your stack to the Eise gallery</NuxtLink></li>
 					<li>Post on <a href="https://www.reddit.com/r/astrophotography/" target="_blank" rel="noopener">r/astrophotography</a> and mention Eise.app in the workflow - I keep an eye out.</li>
 					<li>Post to Instagram or X with <strong>#eiseapp</strong>.</li>
-					<li>Open a GitHub Discussion at <a href="https://github.com/timing/eise.app/discussions" target="_blank" rel="noopener">github.com/timing/eise.app/discussions</a>.</li>
-					<li>Or send it via the feedback button. I read every message.</li>
+					<li>Or send it via the feedback button.</li>
 				</ul>
+
+				<h4>Eise's Community gallery</h4>
+				<p>
+					The <NuxtLink to="/gallery/">community gallery</NuxtLink> shows stacks published from the app by other astrophotographers. You can publish yours from the post processor, or upload an Eise stack you've already saved.
+				</p>
+				<div class="community-cta-row">
+					<NuxtLink to="/gallery/" class="cta-secondary">Open the gallery</NuxtLink>
+				</div>
+
+
 
 				<h4>Bugs and feature requests</h4>
 				<p>
-					Hit a bug, want a feature, or something isn't working the way you expected? Please tell me - especially the niche stuff. "Doesn't work with my old QHY camera", "wavelets need one more slider", "add FITS support", "make it run on my Chromebook" - all useful, all read.
-				</p>
+					For any bug or feature request, please tell me - especially the niche stuff! Providing me with your data also helps me a lot.</p>
 				<div class="community-cta-row">
 					<a href="https://github.com/timing/eise.app/issues" target="_blank" rel="noopener" data-no-track @click="onLetMeKnowClick" class="cta-secondary">Send feedback</a>
 					<a href="https://github.com/timing/eise.app/issues/new" target="_blank" rel="noopener" class="cta-secondary">Report on GitHub</a>
 					<a href="https://github.com/timing/eise.app/discussions" target="_blank" rel="noopener" class="cta-secondary">Share on Discussions</a>
-				</div>
-
-				<h4>Community gallery</h4>
-				<p>
-					The <NuxtLink to="/gallery/">community gallery</NuxtLink> shows stacks published from the app by other astrophotographers. You can publish yours in one click straight from the stacking result, or upload an Eise stack you've already saved.
-				</p>
-				<div class="community-cta-row">
-					<NuxtLink to="/gallery/" class="cta-secondary">Open the gallery</NuxtLink>
 				</div>
 
 				<h4>Support the project</h4>

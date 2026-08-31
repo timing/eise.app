@@ -3,15 +3,15 @@
 		<div class="content content-card">
 			<h2>How to Use Eise.app</h2>
 			<p class="page-subtitle">Planetary image stacking guide</p>
-			<p>Eise.app processes astrophotography videos of planets, the Moon, and the Sun by analyzing each frame for sharpness, cropping to keep the target centered, aligning frames with local template matching, and combining the sharpest frames into a single detailed result. You choose how many frames to include - a percentage, a quality threshold, or continuous stacking that tries several percentages automatically. This process - lucky imaging - takes a couple of minutes for a typical planetary video and runs entirely in your browser using WebGPU.</p>
-
-			<h3>Getting Started</h3>
+			
+			<h3>Your first stack</h3>
+			<p>Eise.app is meant to be super easy, and the below steps is what is needed to get your first stack. I am aware that "Capture your video" sounds super easy, but this a step you can make as difficult as you want. I recommend you to find some other resources on that :-).</p>
 			<ol>
-				<li><strong>Capture your video</strong> - Use your telescope and camera to record a video of a planet, the Moon, or Sun. SER format is recommended, but AVI or MP4 also work.</li>
-				<li><strong>Upload to Eise.app</strong> - Drag and drop your file onto the Stack page. Multiple SER files can be combined.</li>
+				<li><strong>Capture your video</strong> - Use your telescope and camera to record a video of a planet, the Moon, or Sun. SER format is recommended, but other video formats also work. If you have a Seestar, dropping the <NuxtLink to="/seestar-planetary-stacking"> Seestar MP4 in Eise</NuxtLink> also works.</li>
+				<li><strong>Drop the file on the Eise.app homepage</strong> - Drag and drop your file onto the Stack page. Multiple SER files can be combined into one stack, or a batch can be created for animations. Click "Stack" to run the pipeline</li>
 				<li><strong>Wait for analysis</strong> - Eise.app analyzes each frame for sharpness and automatically crops and centers your target.</li>
-				<li><strong>Select quality threshold</strong> - Choose a frame selection mode: manually set a threshold, pick a percentage, or use continuous stacking to try multiple percentages automatically.</li>
-				<li><strong>Stack and process</strong> - Click "Stack" and then use the Post Processor to sharpen and enhance your result.</li>
+				<li><strong>Select quality threshold (optional)</strong> - Choose a frame selection mode: manually set a threshold, pick a percentage, or use continuous stacking to try multiple percentages automatically.</li>
+				<li><strong>Post Processing</strong> - After the stacking, the post processor will open. Here you can do wavelet sharpening color correction and more. If you chose "continuous stacking", this is also where you can find all different stacks, with the same post processing applied.</li>
 			</ol>
 
 			<h3>The Stacking Pipeline</h3>
