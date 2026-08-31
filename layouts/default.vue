@@ -121,17 +121,18 @@
 import Logger from '@/components/Logger.vue';
 import { useFeedback } from '@/composables/useFeedback';
 import { getVariant } from '@/composables/useAbTest';
-import { useTracking } from '@/composables/useTracking';
 
 const route = useRoute();
 const menuOpen = ref(false);
 const { openFeedback } = useFeedback();
-const { track } = useTracking();
 
 // Social-proof counter A/B: desktop-only "N Stacks today" badge between logo
 // and nav. Enrollment is gated on desktop so mobile visitors don't get bucketed
-// into a treatment they never see. Count comes from a 5-minute-cached endpoint
-// on gallery-api that reads stack_finished events from the last 24h.
+// into a treatment they never see; the variant lands on the session as soon as
+// the user fires their first tracked event (human_interaction, click_ext, etc.)
+// because activeVariants() reads localStorage on every track call. Count comes
+// from a 5-minute-cached endpoint on gallery-api that reads stack_finished
+// events from the last 24h.
 const stackCounterVariant = ref('A');
 const stackCount24h = ref(null);
 const isDesktop = ref(false);
@@ -153,10 +154,6 @@ onMounted(async () => {
 			if (res && typeof res.count === 'number') stackCount24h.value = res.count;
 		} catch {}
 	}
-	track('social_proof_counter_view', {
-		variant: stackCounterVariant.value,
-		count: stackCount24h.value,
-	});
 });
 
 async function onLetMeKnowClick(event) {

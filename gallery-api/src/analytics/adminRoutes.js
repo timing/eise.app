@@ -459,15 +459,17 @@ export function createAnalyticsAdminRoutes({ db }) {
   const DEFAULT_SUCCESS_EVENT = 'stack_start';
   const EXPERIMENT_CONFIG = {
     // social_proof_counter: variant B shows a "N Stacks today" badge between
-    // the logo and the nav on desktop. Enrollment is gated on desktop in the
-    // layout mount, and each enrolled session fires social_proof_counter_view.
-    // Restricting the pool to sessions that fired that event keeps out any
-    // stale variants_json entries from other experiments.
+    // the logo and the nav on desktop. Enrollment happens client-side inside
+    // the layout mount, gated on `matchMedia('(min-width: 701px)')`, so only
+    // desktop sessions ever get a variant stored in localStorage — and the
+    // variant only lands on the server session after the user fires their
+    // first tracked event (activeVariants() reads localStorage, not getVariant).
+    // No predicate needed: the WHERE variants_json IS NOT NULL filter already
+    // restricts the pool to desktop-enrolled sessions.
     social_proof_counter: {
       successEvent: 'stack_start',
       label: 'Desktop-only "N Stacks today" badge between logo and nav (variant B). ' +
-             'Restricted to sessions that fired social_proof_counter_view (i.e. actually loaded on desktop).',
-      predicate: "SUM(CASE WHEN e.event_name = 'social_proof_counter_view' THEN 1 ELSE 0 END) > 0",
+             'Only desktop sessions enroll; mobile visitors are excluded automatically via the layout mount gate.',
     },
     // video_reader: variant B skips mediabunny for videos. Only sessions that
     // fired a stack_start on a video-format file exercise the differing code
