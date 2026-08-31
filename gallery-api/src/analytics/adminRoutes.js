@@ -458,6 +458,17 @@ export function createAnalyticsAdminRoutes({ db }) {
   // path so unaffected users don't dilute the signal.
   const DEFAULT_SUCCESS_EVENT = 'stack_start';
   const EXPERIMENT_CONFIG = {
+    // social_proof_counter: variant B shows a "N Stacks today" badge between
+    // the logo and the nav on desktop. Enrollment is gated on desktop in the
+    // layout mount, and each enrolled session fires social_proof_counter_view.
+    // Restricting the pool to sessions that fired that event keeps out any
+    // stale variants_json entries from other experiments.
+    social_proof_counter: {
+      successEvent: 'stack_start',
+      label: 'Desktop-only "N Stacks today" badge between logo and nav (variant B). ' +
+             'Restricted to sessions that fired social_proof_counter_view (i.e. actually loaded on desktop).',
+      predicate: "SUM(CASE WHEN e.event_name = 'social_proof_counter_view' THEN 1 ELSE 0 END) > 0",
+    },
     // video_reader: variant B skips mediabunny for videos. Only sessions that
     // fired a stack_start on a video-format file exercise the differing code
     // path. Success = the video stack actually finished.
