@@ -1849,11 +1849,49 @@ async function processFiles(files, options = {}) {
 		const file = imageFiles[0];
 		const fileName = file.name?.toLowerCase() || '';
 		const isTiff = file.type === 'image/tiff' || fileName.endsWith('.tif') || fileName.endsWith('.tiff');
+		const isHeic = file.type === 'image/heic' || file.type === 'image/heif'
+			|| fileName.endsWith('.heic') || fileName.endsWith('.heif');
 		const isNativeFormat = ['image/png', 'image/jpg', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif'].includes(file.type);
 
 		if (isTiff) {
 			addLog('One TIFF image selected, load post processing');
 			emit('postProcessing', file);
+		} else if (isHeic) {
+			// FFmpeg-WASM doesn't include libheif, so routing HEIC through the
+			// ffmpeg conversion below fails with "readFile: path does not exist"
+			// (ffmpeg logs but produces no output). Try browser-native decoding
+			// via createImageBitmap first — Safari (macOS/iOS) supports HEIC
+			// there. Chrome/Firefox/Android reject, and we show a clear error.
+			addLog('HEIC image detected, attempting native browser decode');
+			try {
+				const bitmap = await createImageBitmap(file);
+				const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+				const ctx = canvas.getContext('2d');
+				ctx.drawImage(bitmap, 0, 0);
+				bitmap.close?.();
+				const blob = await canvas.convertToBlob({ type: 'image/png' });
+				emit('postProcessing', blob);
+			} catch (err) {
+				addLog(`HEIC decode failed: ${err?.message || err}`);
+				showActionableError(
+					"This browser can't open HEIC/HEIF images. Save the photo as JPEG or PNG and try again, or open eise.app in Safari on a Mac or iPhone.",
+					[
+						{
+							label: 'Convert the photo first',
+							description: 'Save as JPEG or PNG (most phones have a share option to convert HEIC) and re-upload.'
+						},
+						{
+							label: 'Open in Safari',
+							description: 'Safari on macOS and iOS decodes HEIC natively.'
+						},
+						{
+							label: 'Download the Eise desktop app',
+							description: 'The Mac, Windows and Linux builds ship their own decoder and handle any format.',
+							url: '/download/'
+						}
+					]
+				);
+			}
 		} else if (!isNativeFormat) {
 			addLog('One image selected that is not natively supported by browsers, converting..');
 
