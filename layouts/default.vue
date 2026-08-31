@@ -45,7 +45,7 @@
 
 		<aside v-if="showAffiliate" class="affiliate-banner">
 			<p class="affiliate-disclosure">Advertisement</p>
-			<a href="https://www.zwoastro.com/product/seestar-s50-pro/?ref=eiseapp"
+			<a href="https://www.astroshop.eu/telescopes/zwo-smart-telescope-ap-50-260-seestar-s50-pro/p,93251?affiliate_id=Eiseapp"
 				target="_blank"
 				rel="sponsored noopener nofollow"
 				class="affiliate-link"
