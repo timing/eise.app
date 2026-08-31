@@ -203,6 +203,20 @@ export function createAnalyticsRoutes({ db, env }) {
     return c.json({ ok: true, session_id: sessionId, role });
   });
 
+  app.get('/stats/stacks-24h', async c => {
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    const res = await db.execute({
+      sql: `SELECT COUNT(*) AS n FROM events
+              WHERE site_id = 'eise-prod'
+                AND event_name = 'stack_finished'
+                AND ts >= ?`,
+      args: [since],
+    });
+    const count = Number(res.rows[0]?.n || 0);
+    c.header('Cache-Control', 'public, max-age=300, s-maxage=300');
+    return c.json({ count });
+  });
+
   app.get('/whoami', async c => {
     const cookies = parseCookies(c.req.header('cookie'));
     const sessionId = cookies[SESSION_COOKIE] || null;

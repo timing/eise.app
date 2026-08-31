@@ -79,7 +79,7 @@
 			</p>
 
 			<div v-if="liteModeClient" class="lite-mode-warning">
-				Stacking on mobile devices will likely not work due to memory limitations. For best results, use Eise.app on a laptop or desktop computer.
+				<b>Stacking on mobile:</b> For best results, use Eise.app on a laptop or desktop computer.
 			</div>
 
 			<!-- Batch choice dialog -->

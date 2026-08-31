@@ -1,21 +1,32 @@
 // composables/useTracking.js
 
-import { getVariant } from '@/composables/useAbTest';
-
 let humanInteractionTracked = false;
 
 // Experiments whose variant should be reported with each tracked event.
 // Sent at the top-level `variants` field so the server can attach them to
 // the session once, instead of duplicating on every event's props.
-// video_reader concluded — rolled back to A (mediabunny-first) so we get the
-// fullest pass-2 telemetry coverage during the ongoing 4K stall investigation.
-// Historical variant data stays on old sessions; new sessions carry no variant.
-const ACTIVE_EXPERIMENTS = [];
+// social_proof_counter: desktop-only "N Stacks today" badge between logo and nav.
+const ACTIVE_EXPERIMENTS = ['social_proof_counter'];
+
+// Read a variant from localStorage WITHOUT assigning one. This keeps
+// non-enrolled users (e.g. mobile visitors for the desktop-only counter test)
+// from getting a stray variants_json entry every time they fire an event.
+// The experiment's own useAbTest() call is what actually enrolls a user.
+function readStoredVariant(name) {
+    if (typeof window === 'undefined') return null;
+    try {
+        const v = window.localStorage.getItem(`ab_${name}`);
+        return v === 'A' || v === 'B' ? v : null;
+    } catch {
+        return null;
+    }
+}
 
 function activeVariants() {
     const v = {};
     for (const name of ACTIVE_EXPERIMENTS) {
-        v[name] = getVariant(name);
+        const variant = readStoredVariant(name);
+        if (variant) v[name] = variant;
     }
     return v;
 }

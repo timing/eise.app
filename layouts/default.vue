@@ -2,8 +2,19 @@
 	<div>
 		<div class="top-bar">
 			<header>
-				<h1><a href="/">Eise.app</a>&nbsp;&nbsp;<span class="subtitle">Easy Image Stacker Engine</span></h1>
+				<h1>
+					<a href="/">Eise.app</a>&nbsp;
+					<span class="subtitle">Easy Image Stacker Engine</span>
+					<span
+						v-if="showStackCounter"
+						class="stack-counter nav-desktop-only"
+						:title="`${stackCount24h} stacks finished in the last 24 hours`">
+						<span class="stack-counter-num">&bull; {{ stackCount24h }}</span>
+						<span class="stack-counter-label">{{ stackCount24h === 1 ? 'stack' : 'stacks' }} today</span>
+					</span>
+				</h1>
 			</header>
+			
 			<nav class="tabs">
 				<NuxtLink to="/" :class="{ active: route.path === '/' }">Stack</NuxtLink>
 				<NuxtLink to="/post-processor/" :class="{ active: route.path.startsWith('/post-processor') }">Post Processor</NuxtLink>
@@ -109,10 +120,44 @@
 <script setup>
 import Logger from '@/components/Logger.vue';
 import { useFeedback } from '@/composables/useFeedback';
+import { getVariant } from '@/composables/useAbTest';
+import { useTracking } from '@/composables/useTracking';
 
 const route = useRoute();
 const menuOpen = ref(false);
 const { openFeedback } = useFeedback();
+const { track } = useTracking();
+
+// Social-proof counter A/B: desktop-only "N Stacks today" badge between logo
+// and nav. Enrollment is gated on desktop so mobile visitors don't get bucketed
+// into a treatment they never see. Count comes from a 5-minute-cached endpoint
+// on gallery-api that reads stack_finished events from the last 24h.
+const stackCounterVariant = ref('A');
+const stackCount24h = ref(null);
+const isDesktop = ref(false);
+const showStackCounter = computed(() =>
+	isDesktop.value
+	&& stackCounterVariant.value === 'B'
+	&& typeof stackCount24h.value === 'number'
+	&& stackCount24h.value > 0
+);
+
+onMounted(async () => {
+	if (typeof window === 'undefined') return;
+	isDesktop.value = window.matchMedia('(min-width: 701px)').matches;
+	if (!isDesktop.value) return;
+	stackCounterVariant.value = getVariant('social_proof_counter');
+	if (window.eise && typeof window.eise.stacks24h === 'function') {
+		try {
+			const res = await window.eise.stacks24h();
+			if (res && typeof res.count === 'number') stackCount24h.value = res.count;
+		} catch {}
+	}
+	track('social_proof_counter_view', {
+		variant: stackCounterVariant.value,
+		count: stackCount24h.value,
+	});
+});
 
 async function onLetMeKnowClick(event) {
 	// If Sentry feedback is available, open the modal and cancel navigation.
@@ -180,6 +225,25 @@ watch(() => route.path, () => {
 @media (max-width: 700px) {
 	.nav-desktop-only { display: none !important; }
 	.nav-mobile-only { display: block !important; }
+}
+.stack-counter {
+	padding: 5px 8px 6px 8px;
+	border-radius: 50px;
+	border: 1px solid #8CCF7E;
+	font-size: 12px;
+	margin-left: 6px;
+	line-height: 1;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: normal;
+	user-select: none;
+}
+.stack-counter-num {
+	color: #8CCF7E;
+}
+.stack-counter-label {
+	color: #8CCF7E;
 }
 .hamburger-menu {
 	position: relative;
