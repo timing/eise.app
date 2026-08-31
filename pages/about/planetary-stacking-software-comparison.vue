@@ -356,7 +356,7 @@
 			<h3>Dedicated Tools</h3>
 			<p>Some tools fill a specific niche in the planetary imaging workflow:</p>
 			<ul>
-				<li><strong>WinJUPOS</strong> - The gold standard for planetary derotation. Maps images onto a 3D sphere to compensate for rotation between captures. Also generates ephemeris data and projection maps. Windows only (Wine on Mac/Linux). Free. Being partially replaced by LuckyStackWorker for simpler derotation tasks.</li>
+				<li><strong>WinJUPOS</strong> - for planetary derotation. Maps images onto a 3D sphere to compensate for the rotation of planets. Windows only (Wine on Mac/Linux). Free. Being partially replaced by LuckyStackWorker for simpler derotation tasks.</li>
 				<li><strong>PIPP</strong> - Planetary Imaging PreProcessor. Centers, crops, and reorders frames before stacking. Also converts between video formats. Windows only. Less necessary now that most stackers have built-in cropping and centering.</li>
 				<li><strong>FireCapture</strong> - The leading planetary capture software. Controls your camera, records SER/AVI files, and tracks the planet during capture. Windows, Mac, Linux. This is where the raw data comes from before any stacking happens.</li>
 			</ul>
@@ -373,7 +373,7 @@
 
 			<h4>AutoStakkert! - Best for: Maximum stacking quality, Windows users</h4>
 			<p>
-				AutoStakkert! is the gold standard for planetary stacking on Windows. The current stable release is AS!4 4.0.11 (January 2024); 4.0.13 (February 2025) is a newer beta build, and there have been no releases since.
+				The current stable release is AS!4 4.0.11 (January 2024); 4.0.13 (February 2025) is a newer beta build, and there have been no releases since.
 				It offers the most control over alignment points and supports multiple drizzle scales.
 				SER, AVI, FITS, and image files load natively; MP4, MOV, and HEVC video only work if you separately download FFmpeg and drop <code>ffmpeg.exe</code> into the AutoStakkert! folder.
 				It only handles stacking - you'll need Registax, LuckyStackWorker, or another tool for sharpening.
@@ -384,7 +384,7 @@
 			<h4>Planetary System Stacker (PSS) - Best for: Cross-platform desktop, advanced users</h4>
 			<p>
 				PSS is an open-source Python application that runs on Windows, Mac, and Linux.
-				It includes built-in wavelet sharpening and RGB alignment, making it an all-in-one solution.
+				It includes built-in wavelet sharpening and RGB alignment, making it an all-in-one solution, but quite feature-light in post processing.
 				It's powerful but requires Python installation and dependency management,
 				which can be challenging especially on Apple Silicon Macs.
 				<NuxtLink to="/about/planetary-system-stacker-vs-eise/">See head-to-head: PSS vs Eise.app &rarr;</NuxtLink>
@@ -433,7 +433,7 @@
 				<li><strong>With derotation:</strong> AutoStakkert! &rarr; WinJUPOS or LuckyStackWorker v7</li>
 			</ul>
 
-			<h3>The Eise.app Advantage</h3>
+			<h3>Why Eise.app could be a great fit</h3>
 			<ul>
 				<li><strong>Works everywhere:</strong> Mac, Windows, Linux, even tablets - any device with a modern browser</li>
 				<li><strong>No installation:</strong> Just open the website and start processing</li>
@@ -442,10 +442,6 @@
 				<li><strong>GPU accelerated:</strong> WebGPU provides fast processing on modern browsers</li>
 			</ul>
 
-			<h3>Ready to try Eise.app?</h3>
-			<p>
-				<NuxtLink to="/" class="cta-link">Start stacking now</NuxtLink> - no account or download required.
-			</p>
 		</div>
 	</div>
 </template>
