@@ -363,10 +363,11 @@ export function useFFmpegReader() {
         emit('update-loading', { progress: 0, current: 0, total: pngFilenames.length });
 
         const frameCount = pngFilenames.length;
-        // Sample up to 50 frames for crop detection
-        const sampleInterval = Math.max(1, Math.floor(frameCount / 50));
+        // Target ~10% of frames, min 2, cap 50.
+        const targetSampleCount = Math.max(2, Math.min(50, Math.ceil(frameCount / 10)));
+        const sampleInterval = Math.max(1, Math.floor(frameCount / targetSampleCount));
         const sampleIndices = [];
-        for (let i = 0; i < frameCount; i += sampleInterval) {
+        for (let i = 0; i < frameCount && sampleIndices.length < targetSampleCount; i += sampleInterval) {
             sampleIndices.push(i);
         }
 
@@ -1296,7 +1297,8 @@ export function useFFmpegReader() {
         const MIN_SIZE_FOR_CROP = 300;
         if (width >= MIN_SIZE_FOR_CROP && height >= MIN_SIZE_FOR_CROP) {
             emit('set-caption', 'Detecting planet position...');
-            const SAMPLE_COUNT = Math.min(30, totalFrames);
+            // Target ~10% of frames, min 2, cap 30.
+            const SAMPLE_COUNT = Math.max(2, Math.min(30, Math.ceil(totalFrames / 10)));
             const sampleStep = Math.max(1, Math.floor(totalFrames / SAMPLE_COUNT));
             const detectedCenters = [];
             const detectedSizes = [];

@@ -365,7 +365,12 @@ export function useMediabunnyReader() {
 			// ══════════════════════════════════════════════════════════════
 			emit('set-caption', 'Detecting crop region...');
 
-			const SAMPLE_SIZE = 50;
+			// Scale sample count with the user's frame cap: ~10% of maxFrames, min 2, cap 50.
+			// At maxFrames=7 (mobile) we sample 2 keyframes instead of 50 — the crop-detection
+			// medians work fine on any count ≥ 2, and Pass 1 finishes in a fraction of the time.
+			const SAMPLE_SIZE = maxFrames > 0
+				? Math.max(2, Math.min(50, Math.ceil(maxFrames / 10)))
+				: 50;
 			// rawSamples is hoisted above the outer try for cleanup on error paths
 			let pass1Count = 0;
 

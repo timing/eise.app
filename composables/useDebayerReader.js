@@ -843,7 +843,7 @@ export function useDebayerReader() {
      * @param {number} cropMarginPercent - Margin to add around detected object
      * @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
      */
-    async function detectCropRegion(cropMarginPercent = 10, surfaceMode = false) {
+    async function detectCropRegion(cropMarginPercent = 10, surfaceMode = false, effectiveFrameCount = null) {
         const MIN_SIZE_FOR_CROP = 300;
         if (metadata.width < MIN_SIZE_FOR_CROP || metadata.height < MIN_SIZE_FOR_CROP) {
             addLog(`[DebayerReader] Frame size too small for auto-crop`);
@@ -852,11 +852,13 @@ export function useDebayerReader() {
 
         emit('set-caption', 'Detecting object position...');
 
-        // Sample frames for detection
-        const sampleCount = Math.min(20, metadata.frameCount);
-        const step = Math.max(1, Math.floor(metadata.frameCount / sampleCount));
+        // Target ~10% of the frames we'll actually process (respecting the user's
+        // maxFrames cap), min 2, cap 20.
+        const totalFrames = effectiveFrameCount ?? metadata.frameCount;
+        const sampleCount = Math.max(2, Math.min(20, Math.ceil(totalFrames / 10)));
+        const step = Math.max(1, Math.floor(totalFrames / sampleCount));
         const sampleIndices = [];
-        for (let i = 0; i < metadata.frameCount && sampleIndices.length < sampleCount; i += step) {
+        for (let i = 0; i < totalFrames && sampleIndices.length < sampleCount; i += step) {
             sampleIndices.push(i);
         }
 
@@ -1089,7 +1091,7 @@ export function useDebayerReader() {
         // Detect full crop region
         let cropRegion = null;
         if (metadata.width >= MIN_SIZE_FOR_CROP && metadata.height >= MIN_SIZE_FOR_CROP) {
-            cropRegion = await detectCropRegion(cropMarginPercent, surfaceMode);
+            cropRegion = await detectCropRegion(cropMarginPercent, surfaceMode, frameCount);
         }
         emit('stack-step', 'crop_detected');
 

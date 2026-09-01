@@ -308,10 +308,12 @@ export function useAviReader() {
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: frameCount });
 
-        // Sample every Nth frame for faster detection
-        const sampleInterval = Math.max(1, Math.floor(frameCount / 50)); // ~50 samples max
+        // Target ~10% of frames, min 2, cap 50. Cheap and sufficient for the
+        // median-based crop math.
+        const targetSampleCount = Math.max(2, Math.min(50, Math.ceil(frameCount / 10)));
+        const sampleInterval = Math.max(1, Math.floor(frameCount / targetSampleCount));
         const sampleIndices = [];
-        for (let i = 0; i < frameCount; i += sampleInterval) {
+        for (let i = 0; i < frameCount && sampleIndices.length < targetSampleCount; i += sampleInterval) {
             sampleIndices.push(i);
         }
 
@@ -1132,10 +1134,11 @@ export function useAviReader() {
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: frameIndex.length });
 
-        // Sample every Nth frame
-        const sampleInterval = Math.max(1, Math.floor(frameIndex.length / 50));
+        // Target ~10% of frames, min 2, cap 50.
+        const targetSampleCount = Math.max(2, Math.min(50, Math.ceil(frameIndex.length / 10)));
+        const sampleInterval = Math.max(1, Math.floor(frameIndex.length / targetSampleCount));
         const sampleIndices = [];
-        for (let i = 0; i < frameIndex.length; i += sampleInterval) {
+        for (let i = 0; i < frameIndex.length && sampleIndices.length < targetSampleCount; i += sampleInterval) {
             sampleIndices.push(i);
         }
 

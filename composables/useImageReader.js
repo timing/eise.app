@@ -551,9 +551,11 @@ export function useImageReader() {
 
             // Sample frames for crop detection
             emit('set-caption', 'Detecting planet position...');
-            const sampleInterval = Math.max(1, Math.floor(frameCount / 50));
+            // Target ~10% of images, min 2, cap 50.
+            const targetSampleCount = Math.max(2, Math.min(50, Math.ceil(frameCount / 10)));
+            const sampleInterval = Math.max(1, Math.floor(frameCount / targetSampleCount));
             const sampleIndices = [];
-            for (let i = 0; i < frameCount; i += sampleInterval) {
+            for (let i = 0; i < frameCount && sampleIndices.length < targetSampleCount; i += sampleInterval) {
                 sampleIndices.push(i);
             }
 
