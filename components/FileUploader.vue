@@ -468,7 +468,12 @@ const surfaceMode = computed(() => targetType.value === 'sun-moon');
 
 // Lite mode enforced settings (applies to mobile + no-GPU desktop)
 const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMethod.value === 'normal' ? 1.0 : 1.5));
-const effectiveMaxFrames = computed(() => liteMode.value ? 100 : (enableMaxFrames.value ? selectedMaxFrames.value : -1));
+const effectiveMaxFrames = computed(() => {
+	// Lite mode caps at 100 but respects a lower slider value — the user can
+	// still dial it down for extra headroom on very constrained devices.
+	if (liteMode.value) return Math.min(100, selectedMaxFrames.value || 100);
+	return enableMaxFrames.value ? selectedMaxFrames.value : -1;
+});
 const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPercent.value);
 const effectiveQualityMode = computed(() => {
 	if (liteMode.value) return 'percentage';
@@ -705,8 +710,16 @@ on('stack-failed', (info) => {
 
 
 function onFileChanged(event){
-	clearError(); // Clear previous error state (message + user-fault flag + mismatch set)
+	// Grab the FileList refs synchronously (the event object gets reused).
 	const files = Array.from(event.target.files);
+	// Yield the main thread so iOS can finish dismissing its file picker UI
+	// before Vue's reactivity + re-render kicks in. Without this, the picker
+	// stays visible for the full Vue update tick, feeling like a hang.
+	requestAnimationFrame(() => onFilesSelected(files));
+}
+
+function onFilesSelected(files){
+	clearError(); // Clear previous error state (message + user-fault flag + mismatch set)
 	selectedFiles.value = files;
 	eventBusEmit('stop-loading');
 
