@@ -1,8 +1,8 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>Stack &amp; Improve Seestar Moon and Planet Videos</h2>
-			<p class="page-subtitle">Works with Seestar's MP4 files</p>
+			<h2>How to stack MP4's captured by your Seestar</h2>
+			<p class="page-subtitle"></p>
 
 			<div class="comparison-images hero-comparison">
 				<figure class="comparison-figure">
@@ -17,12 +17,12 @@
 			</div>
 
 			<p>
-				Eise.app is a free browser-based stacker for Seestar MP4 videos of the Moon and planets. Seestar's built-in Video Stack either exports RAW AVI or MP4. For MP4's, Seestar does not provide (basic) stacking. With Eise.app it's possible to stack all frames in the MP4 video, and have nice sharp results.
+				Eise.app is a free browser-based planetary image stacker that also focusses on proper file support. Therefore it also works with MP4 videos you can get from your Seestar. With Eise.app it's possible to stack the sharpest frames in the video, and have nice sharp results.
 			</p>
 
 			<h3>What Eise.app does</h3>
 			<p>
-				Eise decodes the MP4 in the browser, ranks every frame for sharpness, keeps the sharpest 30% by default, and stacks them with alignment-point tracking. Same lucky-imaging approach that AutoStakkert and Registax use, ported to WebGPU. Runs locally, nothing uploads. After the stack is done, various sharpening and color tools can be used to improve the image even further.
+				Eise decodes the MP4 in the browser, ranks every frame for sharpness, keeps the sharpest 30% by default, and stacks them to create one sharper and less noisy image. This is the same lucky-imaging approach that AutoStakkert and Registax use. After the stack is done, various sharpening and color tools can be used to improve the image even further.
 			</p>
 
 			<h3>Example: Seestar Moon MP4, four stages</h3>
@@ -47,62 +47,15 @@
 
 			<h3>Workflow</h3>
 			<ol>
-				<li><strong>Copy the MP4 off your phone.</strong> Seestar app &rarr; My Album &rarr; Solar System Album. AirDrop, Files, iCloud, or USB.</li>
-				<li><strong>Open <NuxtLink to="/">eise.app</NuxtLink></strong> on a laptop or desktop (Safari, Chrome, Firefox, Edge). Mobile works too, but desktop is faster on longer clips.</li>
-				<li><strong>Drop the MP4 in.</strong> Pick <strong>Planet</strong>. Seestar's focal length means the Moon and Sun fit completely in the frame, so Planet mode is the right choice for all Solar System targets, not Surface.</li>
+				<li><strong>Before your capture, disable the Seestar watermark</strong>. 
+					<br/> Inside the Seestar app, go to: Me → Device Management → toggle Image Watermark off. This makes stacking more efficient and yields better results.</li>
+				<li><strong>Start a MP4 capture.</strong> Saturn is almost in opposition!</li>
+				<li><strong>Copy the MP4 off your phone.</strong> Seestar app &rarr; My Album &rarr; Solar System Album. Send your file to your laptop.</li>
+				<li><strong>Open <NuxtLink to="/">eise.app</NuxtLink></strong> on a laptop or desktop (Safari, Chrome, Firefox, Edge). Mobile works a bit, but running Eise on a desktop computer is more stable and faster.</li>
+				<li><strong>Drop the MP4 in Eise.</strong> Make sure the target setting in Eise is set to <strong>Planet</strong>. Seestar's focal length means the Moon and Sun fit completely in the frame, so Planet mode is the right choice for all Solar System targets, not Surface.</li>
 				<li><strong>Wait.</strong> Under a minute for a 2 to 3 minute clip on any recent laptop.</li>
-				<li><strong>Sharpen and export.</strong> Post-processor opens automatically. Export PNG or TIFF.</li>
+				<li><strong>Sharpen and export.</strong> Post-processor opens automatically. Export PNG.</li>
 			</ol>
-
-			<h3>How this compares</h3>
-			<div class="table-wrapper">
-				<table class="comparison-table">
-					<thead>
-						<tr>
-							<th></th>
-							<th>Eise.app</th>
-							<th>Seestar (built-in)</th>
-							<th>AutoStakkert!</th>
-							<th>Registax 6</th>
-							<th>Siril</th>
-						</tr>
-					</thead>
-					<tbody>
-						<tr>
-							<td class="feature-name">Handles MP4</td>
-							<td class="highlight">Yes, native</td>
-							<td>No, RAW AVI only</td>
-							<td>Yes (AS!4)</td>
-							<td>Yes</td>
-							<td>No (convert first)</td>
-						</tr>
-						<tr>
-							<td class="feature-name">Install</td>
-							<td class="highlight">None (browser)</td>
-							<td class="highlight">None (in-app)</td>
-							<td>Windows (Wine on Mac)</td>
-							<td>Windows (Wine on Mac)</td>
-							<td>Mac, Windows, Linux</td>
-						</tr>
-						<tr>
-							<td class="feature-name">Lucky imaging</td>
-							<td class="highlight">Yes</td>
-							<td>Basic frame averaging</td>
-							<td class="highlight">Yes</td>
-							<td>Limited</td>
-							<td>Yes</td>
-						</tr>
-						<tr>
-							<td class="feature-name">Post-processing</td>
-							<td class="highlight">Built in</td>
-							<td>No</td>
-							<td>No (use Registax)</td>
-							<td class="highlight">Yes (wavelets)</td>
-							<td>Partial</td>
-						</tr>
-					</tbody>
-				</table>
-			</div>
 
 			<h3>S50 vs S30 Pro for planets</h3>
 			<p>
@@ -122,14 +75,8 @@
 			<img src="/seestar-logo-disable.jpg" alt="Seestar app screenshot showing the corner logo watermark on a planet capture" class="troubleshooting-image" />
 			<p>Files already saved with the logo baked in need to be cropped manually. See <NuxtLink to="/about/help/">the help page</NuxtLink> for more troubleshooting.</p>
 
-			<h4>Mac and iPad?</h4>
-			<p>Yes. Safari 18+ ships WebGPU. See the <NuxtLink to="/planetary-stacking-mac/">Mac page</NuxtLink> for platform notes. On iPad, drop from the Files app.</p>
-
 			<h4>What about the FITS export?</h4>
-			<p>Seestar's per-exposure FITS is a deep-sky workflow, use Siril for those. Eise.app handles the Moon and planet videos.</p>
-
-			<h3>Try it</h3>
-			<NuxtLink to="/" class="cta-link">Open Eise.app &rarr;</NuxtLink>
+			<p>Seestar's per-exposure FITS  output is for a deep-sky workflow, use Siril for those.</p>
 
 			<h3>See also</h3>
 			<ul>
@@ -146,7 +93,7 @@
 useHead({
 	title: 'Improve Seestar Moon and Planet Videos - Works with MP4, No Install | Eise.app',
 	meta: [
-		{ name: 'description', content: 'Free browser-based stacker for Seestar S50 and S30 Pro Moon and planet MP4 videos. The built-in Video Stack only works on RAW AVI; Eise.app handles MP4 natively with lucky imaging.' },
+		{ name: 'description', content: 'Free browser-based stacker that works with Seestar S50 and S30 Pro Moon and planet MP4 videos. The built-in Video Stack only works on RAW AVI; Eise.app handles MP4 natively with lucky imaging.' },
 	],
 });
 
