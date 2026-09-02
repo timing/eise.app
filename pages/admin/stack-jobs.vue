@@ -3,7 +3,7 @@
 		<div class="controls">
 			<div class="control">
 				<label>Site</label>
-				<select v-model="siteId" @change="fetchJobs">
+				<select v-model="siteId" @change="onSiteChange">
 					<option v-for="s in sites" :key="s.site_id" :value="s.site_id">
 						{{ s.site_id }} ({{ s.events }})
 					</option>
@@ -29,6 +29,15 @@
 					<option value="silent">Silent (no terminal)</option>
 					<option value="continuous">Continuous artifact</option>
 					<option value="pending">Pending / no start</option>
+				</select>
+			</div>
+			<div class="control">
+				<label>OS</label>
+				<select v-model="osFilter" @change="fetchJobs">
+					<option value="">All</option>
+					<option v-for="o in osOptions" :key="o.os" :value="o.os">
+						{{ o.os }} ({{ o.sessions }})
+					</option>
 				</select>
 			</div>
 			<div class="control">
@@ -149,6 +158,7 @@ const { apiBase, authHeader, logout } = inject('adminAuth');
 
 const RANGE_STORAGE_KEY = 'eise-admin-stack-jobs-range';
 const SITE_STORAGE_KEY = 'eise-admin-stack-jobs-site';
+const OS_STORAGE_KEY = 'eise-admin-stack-jobs-os';
 
 const ranges = [
 	{ key: 'today', label: 'Today' },
@@ -163,6 +173,8 @@ const rangeKey = ref('24h');
 const outcome = ref('');
 const includeAdmin = ref(false);
 const includeBots = ref(false);
+const osFilter = ref('');
+const osOptions = ref([]);
 
 const jobs = ref([]);
 const loading = ref(false);
@@ -177,10 +189,15 @@ onMounted(async () => {
 	const storedRange = localStorage.getItem(RANGE_STORAGE_KEY);
 	if (storedRange && ranges.find(r => r.key === storedRange)) rangeKey.value = storedRange;
 	const storedSite = localStorage.getItem(SITE_STORAGE_KEY);
+	const storedOs = localStorage.getItem(OS_STORAGE_KEY);
+	if (storedOs) osFilter.value = storedOs;
 	await fetchSites();
 	if (storedSite && sites.value.find(s => s.site_id === storedSite)) siteId.value = storedSite;
 	if (!siteId.value && sites.value.length) siteId.value = sites.value[0].site_id;
-	if (siteId.value) fetchJobs();
+	if (siteId.value) {
+		await fetchOsOptions();
+		fetchJobs();
+	}
 });
 
 function setRange(key) {
@@ -220,9 +237,23 @@ async function fetchSites() {
 	} catch (e) { error.value = e.message; }
 }
 
+async function fetchOsOptions() {
+	if (!siteId.value) return;
+	try {
+		const body = await apiFetch(`/admin/analytics/os-list?site_id=${encodeURIComponent(siteId.value)}`);
+		osOptions.value = body.items || [];
+	} catch {}
+}
+
+async function onSiteChange() {
+	await fetchOsOptions();
+	fetchJobs();
+}
+
 async function fetchJobs() {
 	if (!siteId.value) return;
 	localStorage.setItem(SITE_STORAGE_KEY, siteId.value);
+	localStorage.setItem(OS_STORAGE_KEY, osFilter.value || '');
 	loading.value = true;
 	error.value = '';
 	try {
@@ -235,6 +266,7 @@ async function fetchJobs() {
 			limit: '200',
 		});
 		if (outcome.value) p.set('outcome', outcome.value);
+		if (osFilter.value) p.set('os', osFilter.value);
 		const body = await apiFetch(`/admin/analytics/stack-jobs?${p.toString()}`);
 		jobs.value = body.items || [];
 	} catch (e) { error.value = e.message; }

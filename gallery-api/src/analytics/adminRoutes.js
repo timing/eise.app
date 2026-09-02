@@ -25,6 +25,25 @@ function includeBots(c) {
   return v === '1' || v === 'true' ? 1 : 0;
 }
 
+// Optional OS filter. Returns a SQL fragment + args suitable for AND-appending
+// to a query on the events table (unqualified `session_id` column) — the empty
+// case returns { sql: '', args: [] } so it disappears when no filter is set.
+// For queries that already join sessions, use `AND s.ua_os = ?` inline instead.
+function osFilter(c) {
+  const raw = c.req.query('os');
+  if (!raw) return { sql: '', args: [] };
+  const os = String(raw).slice(0, 64);
+  return {
+    sql: ' AND session_id IN (SELECT id FROM sessions WHERE ua_os = ?)',
+    args: [os],
+  };
+}
+
+function osValue(c) {
+  const raw = c.req.query('os');
+  return raw ? String(raw).slice(0, 64) : null;
+}
+
 function limitArg(c, fallback = 50) {
   const raw = Number(c.req.query('limit'));
   if (!Number.isFinite(raw) || raw <= 0) return fallback;
@@ -47,12 +66,29 @@ export function createAnalyticsAdminRoutes({ db }) {
     return c.json({ items: res.rows });
   });
 
+  app.get('/os-list', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const res = await db.execute({
+      sql: `
+        SELECT ua_os AS os, COUNT(*) AS sessions
+        FROM sessions
+        WHERE site_id = ? AND ua_os IS NOT NULL AND ua_os != ''
+        GROUP BY ua_os
+        ORDER BY sessions DESC
+      `,
+      args: [site],
+    });
+    return c.json({ items: res.rows });
+  });
+
   app.get('/summary', async c => {
     const site = siteId(c);
     if (!site) return c.json({ error: 'site_id required' }, 400);
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const osF = osFilter(c);
 
     const days = await db.execute({
       sql: `
@@ -65,11 +101,11 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE site_id = ? AND event_name = 'pageview'
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
+          AND (? = 1 OR bot IS NULL)${osF.sql}
         GROUP BY day
         ORDER BY day ASC
       `,
-      args: [site, from, to, inc, incBots],
+      args: [site, from, to, inc, incBots, ...osF.args],
     });
 
     const totals = await db.execute({
@@ -81,9 +117,9 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE site_id = ? AND event_name = 'pageview'
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
+          AND (? = 1 OR bot IS NULL)${osF.sql}
       `,
-      args: [site, from, to, inc, incBots],
+      args: [site, from, to, inc, incBots, ...osF.args],
     });
 
     return c.json({
@@ -101,6 +137,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const osF = osFilter(c);
     const limit = limitArg(c);
 
     const res = await db.execute({
@@ -113,12 +150,12 @@ export function createAnalyticsAdminRoutes({ db }) {
           AND path IS NOT NULL
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
+          AND (? = 1 OR bot IS NULL)${osF.sql}
         GROUP BY path
         ORDER BY pageviews DESC
         LIMIT ?
       `,
-      args: [site, from, to, inc, incBots, limit],
+      args: [site, from, to, inc, incBots, ...osF.args, limit],
     });
     return c.json({ items: res.rows });
   });
@@ -129,6 +166,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const osF = osFilter(c);
     const limit = limitArg(c);
 
     const res = await db.execute({
@@ -142,12 +180,12 @@ export function createAnalyticsAdminRoutes({ db }) {
           AND referrer_host IS NOT NULL AND referrer_host != ''
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
+          AND (? = 1 OR bot IS NULL)${osF.sql}
         GROUP BY referrer_host
         ORDER BY pageviews DESC
         LIMIT ?
       `,
-      args: [site, from, to, inc, incBots, limit],
+      args: [site, from, to, inc, incBots, ...osF.args, limit],
     });
     return c.json({ items: res.rows });
   });
@@ -160,6 +198,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const osF = osFilter(c);
     const limit = limitArg(c);
 
     const res = await db.execute({
@@ -173,12 +212,12 @@ export function createAnalyticsAdminRoutes({ db }) {
           AND referrer_url IS NOT NULL
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
+          AND (? = 1 OR bot IS NULL)${osF.sql}
         GROUP BY referrer_url
         ORDER BY pageviews DESC
         LIMIT ?
       `,
-      args: [site, String(host).slice(0, 253), from, to, inc, incBots, limit],
+      args: [site, String(host).slice(0, 253), from, to, inc, incBots, ...osF.args, limit],
     });
     return c.json({ items: res.rows });
   });
@@ -199,6 +238,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const os = osValue(c);
     const limit = limitArg(c, 100);
 
     const res = await db.execute({
@@ -212,11 +252,12 @@ export function createAnalyticsAdminRoutes({ db }) {
           AND e.ts >= ? AND e.ts < ?
           AND (? = 1 OR COALESCE(e.role, '') != 'admin')
           AND (? = 1 OR e.bot IS NULL)
+          AND (? = '' OR s.ua_os = ?)
         GROUP BY value
         ORDER BY pageviews DESC
         LIMIT ?
       `,
-      args: [site, from, to, inc, incBots, limit],
+      args: [site, from, to, inc, incBots, os || '', os || '', limit],
     });
     return c.json({ dimension: dim, items: res.rows });
   });
@@ -227,11 +268,13 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const osF = osFilter(c);
+    const os = osValue(c);
     const limit = limitArg(c, 50);
 
     const adminFilter = `AND (? = 1 OR COALESCE(role, '') != 'admin')`;
     const botFilter = `AND (? = 1 OR bot IS NULL)`;
-    const baseArgs = [site, from, to, inc, incBots];
+    const baseArgs = [site, from, to, inc, incBots, ...osF.args];
 
     const stmts = [
       // 0 - daily
@@ -239,18 +282,18 @@ export function createAnalyticsAdminRoutes({ db }) {
                 COUNT(DISTINCT session_id) AS sessions,
                 COUNT(DISTINCT visitor_hash) AS daily_uniques,
                 SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) AS admin_pageviews
-              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}
+              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}${osF.sql}
               GROUP BY day ORDER BY day ASC`,
         args: baseArgs },
       // 1 - totals
       { sql: `SELECT COUNT(*) AS pageviews, COUNT(DISTINCT session_id) AS sessions,
                 SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) AS admin_pageviews
-              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}`,
+              FROM events WHERE site_id = ? AND event_name = 'pageview' AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}${osF.sql}`,
         args: baseArgs },
       // 2 - pages
       { sql: `SELECT path, COUNT(*) AS pageviews, COUNT(DISTINCT session_id) AS sessions
               FROM events WHERE site_id = ? AND event_name = 'pageview' AND path IS NOT NULL
-                AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}
+                AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}${osF.sql}
               GROUP BY path ORDER BY pageviews DESC LIMIT ?`,
         args: [...baseArgs, limit] },
       // 3 - referrers
@@ -258,20 +301,25 @@ export function createAnalyticsAdminRoutes({ db }) {
                 COUNT(DISTINCT referrer_url) AS distinct_urls
               FROM events WHERE site_id = ? AND event_name = 'pageview'
                 AND referrer_host IS NOT NULL AND referrer_host != ''
-                AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}
+                AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}${osF.sql}
               GROUP BY referrer_host ORDER BY pageviews DESC LIMIT ?`,
         args: [...baseArgs, limit] },
       // 4 - custom events
       { sql: `SELECT event_name, COUNT(*) AS occurrences, COUNT(DISTINCT session_id) AS sessions
               FROM events WHERE site_id = ? AND event_name != 'pageview'
-                AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}
+                AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}${osF.sql}
               GROUP BY event_name ORDER BY occurrences DESC LIMIT ?`,
         args: [...baseArgs, limit] },
     ];
 
-    // 5..8 - breakdowns
-    for (const dim of ['country', 'device', 'os', 'browser']) {
+    // 5..8 - breakdowns. The OS breakdown deliberately ignores the OS filter
+    // so switching between OS values stays possible; the other three are
+    // filtered so they reflect the currently selected slice.
+    const breakdownDims = ['country', 'device', 'os', 'browser'];
+    const bdBaseArgs = [site, from, to, inc, incBots];
+    for (const dim of breakdownDims) {
       const col = DIMENSIONS[dim];
+      const applyOs = dim !== 'os';
       stmts.push({
         sql: `SELECT COALESCE(${col}, '(unknown)') AS value,
                 COUNT(DISTINCT e.session_id) AS sessions, COUNT(*) AS pageviews
@@ -279,8 +327,11 @@ export function createAnalyticsAdminRoutes({ db }) {
               WHERE e.site_id = ? AND e.event_name = 'pageview' AND e.ts >= ? AND e.ts < ?
                 AND (? = 1 OR COALESCE(e.role, '') != 'admin')
                 AND (? = 1 OR e.bot IS NULL)
+                ${applyOs ? "AND (? = '' OR s.ua_os = ?)" : ''}
               GROUP BY value ORDER BY pageviews DESC LIMIT ?`,
-        args: [...baseArgs, dim === 'country' ? 30 : 10],
+        args: applyOs
+          ? [...bdBaseArgs, os || '', os || '', dim === 'country' ? 30 : 10]
+          : [...bdBaseArgs, dim === 'country' ? 30 : 10],
       });
     }
 
@@ -289,6 +340,7 @@ export function createAnalyticsAdminRoutes({ db }) {
       range: { from, to },
       include_admin: !!inc,
       include_bots: !!incBots,
+      os: os || null,
       days: results[0].rows,
       totals: results[1].rows[0] || { pageviews: 0, sessions: 0, admin_pageviews: 0 },
       pages: results[2].rows,
@@ -309,6 +361,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const osF = osFilter(c);
     const limit = limitArg(c);
 
     const res = await db.execute({
@@ -320,12 +373,12 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE site_id = ? AND event_name != 'pageview'
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
+          AND (? = 1 OR bot IS NULL)${osF.sql}
         GROUP BY event_name
         ORDER BY occurrences DESC
         LIMIT ?
       `,
-      args: [site, from, to, inc, incBots, limit],
+      args: [site, from, to, inc, incBots, ...osF.args, limit],
     });
     return c.json({ items: res.rows });
   });
@@ -336,6 +389,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const osF = osFilter(c);
     const bucket = c.req.query('bucket') === 'hour' ? 'hour' : 'day';
     const eventName = String(c.req.query('event_name') || 'pageview').slice(0, 64);
     const bucketMs = bucket === 'hour' ? 3600000 : 86400000;
@@ -350,11 +404,11 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE site_id = ? AND event_name = ?
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
+          AND (? = 1 OR bot IS NULL)${osF.sql}
         GROUP BY bucket_ts
         ORDER BY bucket_ts ASC
       `,
-      args: [site, eventName, from, to, inc, incBots],
+      args: [site, eventName, from, to, inc, incBots, ...osF.args],
     });
 
     return c.json({
@@ -371,6 +425,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     if (!site) return c.json({ error: 'site_id required' }, 400);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const osF = osFilter(c);
     const windowMs = 5 * 60 * 1000;
     const now = Date.now();
     const from = now - windowMs;
@@ -383,9 +438,9 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE site_id = ? AND event_name = 'pageview'
           AND ts >= ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
+          AND (? = 1 OR bot IS NULL)${osF.sql}
       `,
-      args: [site, from, inc, incBots],
+      args: [site, from, inc, incBots, ...osF.args],
     });
     const row = res.rows[0] || { pageviews: 0, visitors: 0 };
     return c.json({
@@ -404,6 +459,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const osF = osFilter(c);
     const limit = limitArg(c, 100);
 
     const res = await db.execute({
@@ -413,11 +469,11 @@ export function createAnalyticsAdminRoutes({ db }) {
         WHERE site_id = ? AND event_name = ?
           AND ts >= ? AND ts < ?
           AND (? = 1 OR COALESCE(role, '') != 'admin')
-          AND (? = 1 OR bot IS NULL)
+          AND (? = 1 OR bot IS NULL)${osF.sql}
         ORDER BY ts DESC
         LIMIT ?
       `,
-      args: [site, name, from, to, inc, incBots, limit],
+      args: [site, name, from, to, inc, incBots, ...osF.args, limit],
     });
     return c.json({ items: res.rows });
   });
@@ -556,6 +612,7 @@ export function createAnalyticsAdminRoutes({ db }) {
     const { from, to } = parseRange(c);
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
+    const os = osValue(c);
     const limit = limitArg(c, 100);
     const outcome = String(c.req.query('outcome') || '').toLowerCase();
 
@@ -601,10 +658,11 @@ export function createAnalyticsAdminRoutes({ db }) {
                s.ua_device AS device, s.ua_os AS os, s.ua_browser AS browser
         FROM j
         LEFT JOIN sessions s ON s.id = j.session_id
+        WHERE (? = '' OR s.ua_os = ?)
         ORDER BY j.last_ts DESC
         LIMIT ?
       `,
-      args: [site, from, to, inc, incBots, limit],
+      args: [site, from, to, inc, incBots, os || '', os || '', limit],
     });
 
     let items = res.rows.map(r => {

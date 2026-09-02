@@ -28,6 +28,15 @@
 				</div>
 			</div>
 			<div class="control">
+				<label>OS</label>
+				<select v-model="osFilter" @change="fetchAll">
+					<option value="">All</option>
+					<option v-for="o in osOptions" :key="o.os" :value="o.os">
+						{{ o.os }} ({{ o.sessions }})
+					</option>
+				</select>
+			</div>
+			<div class="control">
 				<label>
 					<input type="checkbox" v-model="includeAdmin" @change="fetchAll" />
 					Include admin traffic
@@ -366,6 +375,7 @@ const { apiBase, authHeader, logout } = inject('adminAuth');
 const RANGE_STORAGE_KEY = 'eise-admin-analytics-range';
 const SITE_STORAGE_KEY = 'eise-admin-analytics-site';
 const CHART_STORAGE_KEY = 'eise-admin-analytics-chart';
+const OS_STORAGE_KEY = 'eise-admin-analytics-os';
 
 const ranges = [
 	{ key: 'today', label: 'Today' },
@@ -391,6 +401,8 @@ const siteId = ref('');
 const rangeKey = ref('7d');
 const includeAdmin = ref(false);
 const includeBots = ref(false);
+const osFilter = ref('');
+const osOptions = ref([]);
 
 const summary = ref(null);
 const pages = ref([]);
@@ -484,6 +496,10 @@ onMounted(async () => {
 			if (savedChart.bucket === 'hour' || savedChart.bucket === 'day') chartBucket.value = savedChart.bucket;
 		}
 	} catch {}
+	try {
+		const savedOs = localStorage.getItem(OS_STORAGE_KEY);
+		if (savedOs) osFilter.value = savedOs;
+	} catch {}
 
 	watch([rangeKey, customFrom, customTo], () => {
 		try {
@@ -511,13 +527,22 @@ onMounted(async () => {
 		siteId.value = (savedSite && sites.value.some(s => s.site_id === savedSite))
 			? savedSite
 			: sites.value[0].site_id;
+		await fetchOsOptions();
 		await fetchAll();
 		startLivePolling();
 	}
 
-	watch(siteId, v => {
+	watch(siteId, async v => {
 		try { if (v) localStorage.setItem(SITE_STORAGE_KEY, v); } catch {}
-		if (v) startLivePolling();
+		if (v) {
+			await fetchOsOptions();
+			startLivePolling();
+		}
+	});
+
+	watch(osFilter, v => {
+		try { localStorage.setItem(OS_STORAGE_KEY, v || ''); } catch {}
+		fetchLive();
 	});
 
 	watch([includeAdmin, includeBots], () => fetchLive());
@@ -564,6 +589,7 @@ function commonParams() {
 	params.set('site_id', siteId.value);
 	params.set('include_admin', includeAdmin.value ? '1' : '0');
 	params.set('include_bots', includeBots.value ? '1' : '0');
+	if (osFilter.value) params.set('os', osFilter.value);
 	if (from != null && to != null) {
 		params.set('from', String(from));
 		params.set('to', String(to));
@@ -609,6 +635,7 @@ async function fetchLive() {
 		params.set('site_id', siteId.value);
 		params.set('include_admin', includeAdmin.value ? '1' : '0');
 		params.set('include_bots', includeBots.value ? '1' : '0');
+		if (osFilter.value) params.set('os', osFilter.value);
 		const res = await fetch(`${apiBase}/admin/analytics/live?${params.toString()}`, {
 			headers: { Authorization: authHeader.value },
 			credentials: 'include',
@@ -616,6 +643,22 @@ async function fetchLive() {
 		if (res.status === 401) return logout();
 		if (!res.ok) return;
 		live.value = await res.json();
+	} catch {}
+}
+
+async function fetchOsOptions() {
+	if (!siteId.value) return;
+	try {
+		const params = new URLSearchParams();
+		params.set('site_id', siteId.value);
+		const res = await fetch(`${apiBase}/admin/analytics/os-list?${params.toString()}`, {
+			headers: { Authorization: authHeader.value },
+			credentials: 'include',
+		});
+		if (res.status === 401) return logout();
+		if (!res.ok) return;
+		const body = await res.json();
+		osOptions.value = body.items || [];
 	} catch {}
 }
 
