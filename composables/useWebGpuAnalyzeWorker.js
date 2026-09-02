@@ -5,6 +5,7 @@
 import { useEventBus } from '@/composables/eventBus';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { reportError } from '@/composables/useSentryReporting';
+import { useProcessingState } from '@/composables/useProcessingState';
 
 // Singleton GPU worker - shared across all readers
 let gpuWorker = null;
@@ -19,6 +20,7 @@ const maxBatchCache = new Map();
 export function useWebGpuAnalyzeWorker() {
     const { addLog, emit } = useEventBus();
     const { workerUrl } = useWorkerUrl();
+    const { getLowResCropDetect } = useProcessingState();
 
     // Route worker-side {type: 'log'} messages into the app logger + Sentry.
     // Without this, uncaptured WebGPU validation errors (e.g. buffer > maxBufferSize)
@@ -257,7 +259,10 @@ export function useWebGpuAnalyzeWorker() {
                 height,
                 bayerPattern: -1, // RGBA input, no demosaic
                 threshold: 0.1,
-                requestId
+                requestId,
+                // Only forwarded on analyze-batch (crop detection). detect-crop-analyze
+                // needs full-res sharpness, so we deliberately don't downsample there.
+                lowResCropDetect: getLowResCropDetect()
             });
         });
     }
