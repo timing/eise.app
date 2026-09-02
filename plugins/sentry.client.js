@@ -75,7 +75,7 @@ export default defineNuxtPlugin(async (nuxtApp) => {
     if (typeof document !== 'undefined' && document.body) {
         integrations.push(Sentry.feedbackIntegration({
             colorScheme: 'dark',
-            buttonLabel: 'Feedback',
+            triggerLabel: 'Send feedback',
             submitButtonLabel: 'Send Feedback',
             formTitle: 'Send Feedback',
             messagePlaceholder: 'What went wrong? Or any suggestions?',
