@@ -1890,6 +1890,10 @@ async function applyRotation() {
 		return;
 	}
 
+	// Image can still be loading if the user drags the rotation slider before
+	// loadImage() has produced image16. EISE-Q6: null.clone() on iOS Safari.
+	if (!image16) return;
+
 	// Remove edge mask since coordinates become invalid after rotation
 	edgeMaskEnabled.value = false;
 
