@@ -297,6 +297,26 @@ export function useStacker() {
     }
 
     /**
+     * Cap AP count so the GPU templates buffer stays within the 128 MB
+     * `maxStorageBufferBindingSize` that WebGPU guarantees on every device
+     * (many have more, but we can't assume). templatesBuffer scales as
+     * numAPs × patchSize² × 4 bytes, and getBatchBuffers adds a 1.2× cache
+     * headroom on top. Cap at 90 MB of raw templates → ~108 MB after
+     * headroom, safely under 128 MB. EISE-Q5: 31329 APs at patchSize=30
+     * produced a 129 MB buffer on a Chrome/Linux device at the spec floor.
+     * Subsamples uniformly across the (already quality-filtered) set.
+     */
+    function capAPsToBufferBudget(activeAPs, patchSize) {
+        const MAX_TEMPLATES_BYTES = 90 * 1024 * 1024;
+        const maxAPs = Math.floor(MAX_TEMPLATES_BYTES / (patchSize * patchSize * 4));
+        if (activeAPs.length <= maxAPs) return activeAPs;
+        const stride = activeAPs.length / maxAPs;
+        const capped = new Array(maxAPs);
+        for (let i = 0; i < maxAPs; i++) capped[i] = activeAPs[Math.floor(i * stride)];
+        return capped;
+    }
+
+    /**
      * Filter alignment points by structure (local contrast) and brightness
      * PSS defaults: minStructure=0.02, minBrightness=5
      */
@@ -363,7 +383,7 @@ export function useStacker() {
 
         // Filter APs by quality
         const filteredAPs = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
-        const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
+        const activeAPs = capAPsToBufferBudget(filteredAPs.length > 0 ? filteredAPs : alignmentPoints, patchSize);
 
         return {
             alignmentPoints: activeAPs,
@@ -385,7 +405,7 @@ export function useStacker() {
 
         // Filter APs by quality
         const filteredAPs = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
-        const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
+        const activeAPs = capAPsToBufferBudget(filteredAPs.length > 0 ? filteredAPs : alignmentPoints, patchSize);
 
         return {
             alignmentPoints: activeAPs,
