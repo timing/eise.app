@@ -466,6 +466,14 @@ export function useMediabunnyReader() {
 				await decoder1.flush();
 				decodeAllResolved = true;
 			})();
+			// If the throughput probe (below) rejects first, we bail out
+			// before ever awaiting decodeAll. The finally block then closes
+			// decoder1, which aborts the pending flush() — decodeAll rejects
+			// with AbortError (EISE-Q8) or, on a bad config, OperationError
+			// (EISE-Q7) with no handler attached. Silence the rejection: the
+			// probe error was already reported as EISE-Q3, this is just its
+			// echo.
+			decodeAll.catch(() => {});
 			const progressTicker = setInterval(() => {
 				emit('update-loading', {
 					progress: -1,
@@ -489,12 +497,16 @@ export function useMediabunnyReader() {
 					}
 				}, 100);
 			});
+			let totalDeadlineTimer = null;
 			const totalDeadline = new Promise((_, reject) => {
-				setTimeout(() => reject(Object.assign(
+				totalDeadlineTimer = setTimeout(() => reject(Object.assign(
 					new Error(`Video decoder too slow — only ${rawSamples.length}/${keyPackets.length} keyframes in ${Math.round(TOTAL_BUDGET_MS / 1000)}s. Switching decoders.`),
 					{ isTotalTimeout: true }
 				)), TOTAL_BUDGET_MS);
 			});
+			// Same guard as decodeAll: if probe rejects at 5s, the 10s deadline
+			// still fires and rejects an untracked promise.
+			totalDeadline.catch(() => {});
 			try {
 				await probe;
 				// Funnel checkpoint: throughput probe passed, decoder is producing frames.
@@ -519,6 +531,7 @@ export function useMediabunnyReader() {
 				}
 				throw tagErr(err, 'decoder');
 			} finally {
+				if (totalDeadlineTimer) clearTimeout(totalDeadlineTimer);
 				clearInterval(progressTicker);
 				try { decoder1.close(); } catch (_) { /* already closing / closed */ }
 			}
