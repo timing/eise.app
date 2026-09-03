@@ -7,7 +7,7 @@
 			<div class="comparison-images hero-comparison">
 				<figure class="comparison-figure">
 					<img src="/seestar-moon-stacked-unprocessed.webp" alt="Stacked Seestar Moon MP4 before post-processing" width="998" height="984" />
-					<figcaption>Stacked</figcaption>
+					<figcaption>Stacked, capture by Justin Baker</figcaption>
 				</figure>
 				<span class="arrow">&rarr;</span>
 				<figure class="comparison-figure">
@@ -29,7 +29,7 @@
 			<div class="image-comparison">
 				<figure>
 					<img src="/seestar-moon-sharpest-frame.webp" alt="Single sharpest frame from a Seestar MP4 lunar video, before stacking" loading="lazy" />
-					<figcaption><strong>1. Sharpest single frame.</strong> Best individual frame in the MP4. Noisy. Seestar logo still in frame.</figcaption>
+					<figcaption><strong>1. Sharpest single frame.</strong> Best individual frame in the MP4. Noisy. Seestar logo still in frame. Captured by Justin Baker.</figcaption>
 				</figure>
 				<figure>
 					<img src="/seestar-moon-stacked-unprocessed.webp" alt="Same Seestar Moon MP4 after Eise.app lucky-imaging stack, no post-processing yet" loading="lazy" />
