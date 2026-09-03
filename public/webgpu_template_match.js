@@ -191,14 +191,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // Uses workgroup shared memory for parallel reduction
 // After finding integer peak, applies parabolic fitting to neighboring scores for sub-pixel precision
 //
-// PRECISION NOTE: Frame grayscale data is stored as packed u8 (4 pixels per u32) for memory efficiency.
-// This is sufficient for alignment because:
+// PRECISION NOTE: Both frame and reference-template grayscale data are stored as
+// packed u8 (4 pixels per u32) for memory efficiency. This is sufficient for
+// alignment because:
 // 1. NCC normalizes by mean/variance - relative patterns matter, not absolute precision
 // 2. 256 intensity levels capture planetary features well (good contrast against dark sky)
 // 3. The 20x20 patch size (400 pixels) provides statistical robustness
 // 4. Professional stacking software (AutoStakkert, PIPP, Registax) all use 8-bit for alignment
 // 5. The NCC math still uses f32 internally for accumulation precision
-// Reference templates remain f32 for simplicity since they're small and reused across all frames.
+// 6. Sub-pixel refinement uses parabolic fitting on the NCC scores, not template values,
+//    so 8-bit template storage doesn't reduce shift resolution.
 const batchShaderCode = `
 struct Params {
     templateWidth: u32,
@@ -212,10 +214,10 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> refTemplates: array<f32>;     // Reference templates for all APs (f32 - small, reused)
-@group(0) @binding(2) var<storage, read> frameGraysPacked: array<u32>; // Packed u8 grayscale (4 pixels per u32, 4x memory savings)
-@group(0) @binding(3) var<storage, read> apPositions: array<u32>;      // AP x,y positions (packed)
-@group(0) @binding(4) var<storage, read_write> results: array<f32>;    // Results: numFrames * numAPs * 3 (dx, dy, score)
+@group(0) @binding(1) var<storage, read> refTemplatesPacked: array<u32>; // Packed u8 templates (4 pixels per u32, 4x memory savings vs f32)
+@group(0) @binding(2) var<storage, read> frameGraysPacked: array<u32>;   // Packed u8 grayscale (4 pixels per u32, 4x memory savings)
+@group(0) @binding(3) var<storage, read> apPositions: array<u32>;        // AP x,y positions (packed)
+@group(0) @binding(4) var<storage, read_write> results: array<f32>;      // Results: numFrames * numAPs * 3 (dx, dy, score)
 
 // Shared memory for workgroup reduction (256 threads max)
 var<workgroup> sharedScores: array<f32, 256>;
@@ -233,6 +235,14 @@ fn sampleFrame(frameIdx: u32, x: i32, y: i32) -> f32 {
     let byteOffset = (pixelIdx & 3u) << 3u;   // (pixelIdx % 4) * 8
     let packed = frameGraysPacked[packedIdx];
     return f32((packed >> byteOffset) & 0xFFu);
+}
+
+// Sample a template pixel by absolute pixel index in the packed u8 templates buffer.
+// Each u32 stores 4 template pixels; caller supplies pixelIdx = apStart + y*tw + x.
+fn sampleTemplate(pixelIdx: u32) -> f32 {
+    let packedIdx = pixelIdx >> 2u;
+    let byteOffset = (pixelIdx & 3u) << 3u;
+    return f32((refTemplatesPacked[packedIdx] >> byteOffset) & 0xFFu);
 }
 
 fn computeBatchNCC(frameIdx: u32, apIdx: u32, offsetX: i32, offsetY: i32) -> f32 {
@@ -257,7 +267,7 @@ fn computeBatchNCC(frameIdx: u32, apIdx: u32, offsetX: i32, offsetY: i32) -> f32
 
     for (var y: u32 = 0u; y < th; y++) {
         for (var x: u32 = 0u; x < tw; x++) {
-            templateSum += refTemplates[templateStart + y * tw + x];
+            templateSum += sampleTemplate(templateStart + y * tw + x);
             searchSum += sampleFrame(frameIdx, sx0 + i32(x), sy0 + i32(y));
         }
     }
@@ -271,7 +281,7 @@ fn computeBatchNCC(frameIdx: u32, apIdx: u32, offsetX: i32, offsetY: i32) -> f32
 
     for (var y: u32 = 0u; y < th; y++) {
         for (var x: u32 = 0u; x < tw; x++) {
-            let tVal = refTemplates[templateStart + y * tw + x] - templateMean;
+            let tVal = sampleTemplate(templateStart + y * tw + x) - templateMean;
             templateVar += tVal * tVal;
             let sVal = sampleFrame(frameIdx, sx0 + i32(x), sy0 + i32(y)) - searchMean;
             searchVar += sVal * sVal;
@@ -987,7 +997,7 @@ function getBatchBuffers(numFrames, numAPs, templateSize, frameSize) {
     const packedFrameBytes = Math.ceil(numFrames * frameSize / 4) * 4;
 
     const requiredSizes = {
-        templatesSize: align4(numAPs * templateSize * 4),  // f32 templates (small, reused)
+        templatesSize: align4(numAPs * templateSize),       // packed u8 templates (4x smaller than f32)
         framesSize: align4(packedFrameBytes),               // packed u8 grayscale (4x savings)
         apPosSize: align4(numAPs * 4),
         resultsSize: align4(numFrames * numAPs * 3 * 4)
@@ -1070,8 +1080,13 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
     // Get cached buffers (creates if needed, reuses if large enough)
     const buffers = getBatchBuffers(numFrames, numAPs, templateSize, frameSize);
 
-    // Extract reference templates (once for all frames) - always from original AP positions
-    const refTemplates = new Float32Array(numAPs * templateSize);
+    // Extract reference templates (once for all frames) - always from original AP positions.
+    // Packed u8 layout (4 pixels per u32) matches the framesBuffer format and cuts template
+    // memory 4x — key for large images where numAPs × patchSize² can blow the 128MB
+    // maxStorageBufferBindingSize floor (EISE-Q5: 31329 APs × patchSize=30 was 129 MB as f32).
+    // templateSize (= patchSize²) is always a multiple of 4 for supported patchSize values
+    // (400, 900), so each AP's template starts on a clean u32 boundary.
+    const refTemplatesPacked = new Uint32Array(Math.ceil(numAPs * templateSize / 4));
     const apPositions = new Uint32Array(numAPs);
     const halfPatch = Math.floor(patchSize / 2);
 
@@ -1089,12 +1104,16 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
         // Extract template from ORIGINAL position (not offset)
         const tx0 = ap.x - halfPatch;
         const ty0 = ap.y - halfPatch;
+        const apStart = i * templateSize;
         for (let py = 0; py < patchSize; py++) {
             for (let px = 0; px < patchSize; px++) {
                 const sx = tx0 + px;
                 const sy = ty0 + py;
                 if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
-                    refTemplates[i * templateSize + py * patchSize + px] = refGrayData[sy * width + sx];
+                    const pixelIdx = apStart + py * patchSize + px;
+                    const wordIdx = pixelIdx >> 2;
+                    const byteOffset = (pixelIdx & 3) << 3;
+                    refTemplatesPacked[wordIdx] |= (refGrayData[sy * width + sx] & 0xFF) << byteOffset;
                 }
             }
         }
@@ -1125,7 +1144,7 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
     const searchSize = patchSize + 2 * searchRadius;
     const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, numFrames, width, height]);
     gpuQueue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
-    gpuQueue.writeBuffer(buffers.templatesBuffer, 0, refTemplates);
+    gpuQueue.writeBuffer(buffers.templatesBuffer, 0, refTemplatesPacked);
     gpuQueue.writeBuffer(buffers.framesBuffer, 0, allFrameGraysPacked);
     gpuQueue.writeBuffer(buffers.apPosBuffer, 0, apPositions);
 
