@@ -4,47 +4,39 @@
 			<h2>Planetary System Stacker (PSS) vs Eise.app</h2>
 			<p class="page-subtitle">Which should you use?</p>
 			<p>
-				Planetary System Stacker (PSS) by Rolf Hempel is an open-source Python stacker with a well-documented pipeline
-				and a strong technical reputation among astrophotographers who want to see (and understand) the internals.
-				Eise.app draws direct inspiration from PSS - its alignment-point approach and quality-weighted stacking
-				come from PSS's original design.
-				This page compares the two honestly.
+				Both turn planetary videos into sharper single images. PSS by Rolf Hempel is a Python desktop app with a mature, well-documented codebase.
+				Eise.app runs in the browser, no install. Same core idea, different setup.
 			</p>
 
 			<div class="verdict">
-				<p><strong>Short version:</strong> PSS is the better choice if you like open-source Python software, want to inspect or modify the pipeline, and don't mind installing Python dependencies. Eise.app is the better choice if you're new to planetary imaging, want to skip the install entirely, work on a Mac or mobile device, or benefit from GPU acceleration in a browser.</p>
+				<p><strong>Short version:</strong> PSS if you're comfortable installing Python and want a hackable desktop app. Eise.app if you want to open a URL, drop a file, and be done.</p>
 			</div>
 
-			<h3>Feature-by-Feature Comparison</h3>
+			<h3>Quick comparison</h3>
 			<div class="table-wrapper">
 				<table class="comparison-table">
 					<thead>
 						<tr>
-							<th>Feature</th>
+							<th>&nbsp;</th>
 							<th>Planetary System Stacker</th>
 							<th>Eise.app</th>
 						</tr>
 					</thead>
 					<tbody>
 						<tr>
-							<td class="feature-name">Install required</td>
-							<td>Yes (Python + dependencies)</td>
-							<td class="highlight">No - runs in browser</td>
+							<td class="feature-name">Install</td>
+							<td>Python + dependencies</td>
+							<td class="highlight">None, runs in browser</td>
 						</tr>
 						<tr>
-							<td class="feature-name">Platform</td>
+							<td class="feature-name">Platforms</td>
 							<td>Win, Mac, Linux (via Python)</td>
-							<td class="highlight">Any (browser)</td>
+							<td class="highlight">Anything with a modern browser, mobile included</td>
 						</tr>
 						<tr>
-							<td class="feature-name">Source available</td>
-							<td class="highlight">Yes (open source on GitHub)</td>
-							<td class="highlight">Yes (open source on GitHub)</td>
-						</tr>
-						<tr>
-							<td class="feature-name">Language / stack</td>
-							<td>Python (OpenCV, NumPy, PyQt)</td>
-							<td>JavaScript + WebGPU + WASM</td>
+							<td class="feature-name">Source</td>
+							<td class="highlight">Open source on GitHub</td>
+							<td class="highlight">Open source on GitHub</td>
 						</tr>
 						<tr>
 							<td class="feature-name">Price</td>
@@ -52,39 +44,19 @@
 							<td>Free</td>
 						</tr>
 						<tr>
-							<td class="feature-name">Alignment-point pipeline</td>
-							<td class="highlight">Yes - reference implementation</td>
-							<td>Yes (inspired by PSS)</td>
-						</tr>
-						<tr>
-							<td class="feature-name">Drizzle stacking</td>
-							<td>No</td>
-							<td class="highlight">Yes (1.5x)</td>
-						</tr>
-						<tr>
-							<td class="feature-name">Integrated post-processing</td>
-							<td>Basic (Registax typically used after)</td>
-							<td class="highlight">Yes (wavelets, RGB, color)</td>
-						</tr>
-						<tr>
 							<td class="feature-name">GPU acceleration</td>
-							<td>No (CPU/NumPy)</td>
-							<td class="highlight">WebGPU (when available)</td>
+							<td>No (CPU only)</td>
+							<td class="highlight">Yes (WebGPU when available)</td>
 						</tr>
 						<tr>
-							<td class="feature-name">Extensibility</td>
-							<td class="highlight">High (Python, hackable)</td>
-							<td>Medium (fork the JS)</td>
+							<td class="feature-name">Post-processing</td>
+							<td>Minimal, most users pair it with Registax</td>
+							<td class="highlight">Built in (sharpening, colour, RGB alignment)</td>
 						</tr>
 						<tr>
-							<td class="feature-name">Community docs</td>
-							<td class="highlight">Excellent (Rolf's writeups)</td>
-							<td>Growing</td>
-						</tr>
-						<tr>
-							<td class="feature-name">Beginner-friendly</td>
-							<td>Steeper learning curve (Python setup + PSS UI)</td>
-							<td class="highlight">Yes - guided flow, sensible defaults</td>
+							<td class="feature-name">Learning curve</td>
+							<td>Steeper (Python setup + exposed knobs)</td>
+							<td class="highlight">Guided flow, sensible defaults</td>
 						</tr>
 					</tbody>
 				</table>
@@ -92,39 +64,37 @@
 
 			<h3>When PSS is the better choice</h3>
 			<ul>
-				<li><strong>You're a technical user who wants to read (or modify) the source.</strong> Rolf Hempel documented the pipeline extensively. If you want to understand exactly how alignment points work, PSS is a teaching tool as much as it is a stacker.</li>
-				<li><strong>You're already in the Python data-science stack.</strong> If NumPy and Jupyter are already your daily drivers, adding PSS is trivial.</li>
-				<li><strong>You want to script or batch large runs from a terminal.</strong> Python integrates cleanly with shell scripting; browser tools don't.</li>
-				<li><strong>You want a pure open-source solution with a mature codebase.</strong> PSS has been in development since 2019.</li>
+				<li>You want to read or modify the source.</li>
+				<li>You're already comfortable with Python.</li>
+				<li>You want to script or batch-run from a terminal.</li>
 			</ul>
 
 			<h3>When Eise.app is the better choice</h3>
 			<ul>
-				<li><strong>You're new to planetary imaging.</strong> Eise.app is designed to produce a good result with defaults - quality-weighted stacking, auto crop centering, wavelet sharpening presets. PSS is powerful but exposes more of the pipeline to the user; the Python setup itself is an obstacle for many first-timers.</li>
-				<li><strong>You don't want to install Python and configure a virtual environment.</strong> For many users, "install Python 3.x, install pip packages, resolve OpenCV binaries" is where the friction is. Eise.app skips all of that.</li>
-				<li><strong>You want GPU acceleration.</strong> PSS is CPU-only. Eise.app uses WebGPU for demosaicing, template matching, and stacking when the browser supports it.</li>
-				<li><strong>You want integrated post-processing.</strong> PSS is stacking-focused. Eise.app includes wavelet sharpening, deconvolution, and RGB alignment in the same session.</li>
-				<li><strong>You want to stack on a tablet or phone.</strong> Not PSS's use case; works in Eise.app (with performance caveats).</li>
-				<li><strong>You want to try it before committing.</strong> Open the URL, drop a file. Zero setup.</li>
+				<li>You don't want to install anything.</li>
+				<li>You're on a Mac, phone, or tablet.</li>
+				<li>You want to try it in 30 seconds before committing to any workflow.</li>
 			</ul>
-
-			<h3>Technical Differences</h3>
-			<p>
-				<strong>Shared ancestry.</strong> Eise.app's alignment-point approach, local de-warping, and quality-weighted stacking are directly inspired by PSS. If you've read Rolf's writeups on how PSS works, you'll recognize the same core algorithms in Eise.app - re-implemented in JavaScript and WebGPU.
-			</p>
-			<p>
-				<strong>Runtime.</strong> PSS runs on CPython with NumPy/OpenCV. Eise.app runs in the browser using WebGPU compute shaders for the heavy lifting and WebAssembly (OpenCV.js compiled to WASM) as a CPU fallback.
-			</p>
-			<p>
-				<strong>Extensibility.</strong> PSS's biggest advantage as an open source Python project is that you can modify the pipeline directly. Eise.app is also open source, but modifying JS + WGSL shaders has a steeper on-ramp than editing a Python script.
-			</p>
 
 			<h3>Acknowledgment</h3>
 			<p>
-				Eise.app owes a real intellectual debt to Rolf Hempel and PSS. The alignment-point structure, the quality-weighted stacking approach,
-				and much of the pipeline design were learned from studying PSS's implementation and Rolf's documentation. If you're interested in the algorithms,
-				<a href="https://github.com/Rolf-Hempel/PlanetarySystemStacker" target="_blank" rel="noopener">PSS on GitHub</a> remains the best resource.
+				Eise.app owes real credit to Rolf Hempel and PSS. Studying PSS's implementation and Rolf's documentation shaped much of Eise.app's design.
+				If you want to understand the algorithms,
+				<a href="https://github.com/Rolf-Hempel/PlanetarySystemStacker" target="_blank" rel="noopener">PSS on GitHub</a> is still the best resource.
 			</p>
+			<p>
+				<strong>PSS fork with compatibility fixes.</strong> Upstream PSS (last release 0.8.22) hadn't been updated for newer Python and UI-toolkit versions,
+				which made installing it increasingly awkward. Eise.app's author maintains a fork at
+				<a href="https://github.com/timing/PlanetarySystemStacker" target="_blank" rel="noopener">github.com/timing/PlanetarySystemStacker</a>
+				with the following changes since 0.8.22:
+			</p>
+			<ul>
+				<li>Updated UI toolkit so PSS runs on modern Python (3.9-3.12)</li>
+				<li>Modernized project layout (<code>pyproject.toml</code> instead of <code>setup.py</code>)</li>
+				<li>Accepts <code>.m4v</code> video files for stacking</li>
+				<li><code>--config_file</code> CLI flag for headless and scripted runs</li>
+				<li>Downloadable macOS <code>.app</code> bundle, so you can run PSS on a Mac without installing Python</li>
+			</ul>
 
 			<h3>Try Eise.app</h3>
 			<NuxtLink to="/" class="cta-link">Try Eise.app in your browser &rarr;</NuxtLink>
@@ -143,7 +113,7 @@
 useHead({
 	title: 'Planetary System Stacker vs Eise.app - Compare Planetary Stacking',
 	meta: [
-		{ name: 'description', content: 'PSS is an open-source Python stacker with a documented pipeline. Eise.app applies the same alignment-point approach in the browser with WebGPU. Skip the pip install and compare.' },
+		{ name: 'description', content: 'PSS is a Python desktop stacker. Eise.app runs in the browser, no install. Compare them side by side and pick what fits your workflow.' },
 	],
 });
 
