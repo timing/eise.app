@@ -103,23 +103,6 @@ useHead({
 						offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
 						description: 'Browser-based planetary image stacking tool. Turn videos of planets, the Moon, and the Sun into sharp images using WebGPU-accelerated processing.',
 						publisher: { '@id': 'https://eise.app/#organization' },
-						review: [
-							{
-								'@type': 'Review',
-								author: { '@type': 'Person', name: 'Santhiago', address: { '@type': 'PostalAddress', addressCountry: 'CR' } },
-								reviewBody: 'Very good app — it helped me massively improve my image of the Moon.',
-							},
-							{
-								'@type': 'Review',
-								author: { '@type': 'Person', name: 'Alexis', address: { '@type': 'PostalAddress', addressCountry: 'FR' } },
-								reviewBody: 'Very satisfied with the result.',
-							},
-							{
-								'@type': 'Review',
-								author: { '@type': 'Person', name: 'Astroyouda', address: { '@type': 'PostalAddress', addressCountry: 'ID' } },
-								reviewBody: 'Happy this is easy to use.',
-							},
-						],
 					},
 				],
 			}),
