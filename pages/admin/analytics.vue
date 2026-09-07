@@ -98,6 +98,19 @@
 				</div>
 				<div class="stat-value">{{ totalDailyUniques }}</div>
 			</button>
+			<button type="button" class="stat" :class="{ active: chartMetric === 'returning' }"
+				@click="pickChartMetric('returning')">
+				<div class="stat-label">
+					Returning visitors
+					<span class="info-icon" @click.stop>?<span class="info-tooltip">
+						Distinct sessions with a pageview in the range whose session cookie
+						was first minted more than 8 hours before that pageview. The 8h gap
+						keeps a single late-night visit (23:00 to 03:00) counted as one visit.
+						Cookie-blocking visitors always look new.
+					</span></span>
+				</div>
+				<div class="stat-value">{{ summary.totals.returning || 0 }}</div>
+			</button>
 			<button type="button" class="stat" :class="{ active: chartMetric === 'event:stack_finished' }"
 				@click="pickChartMetric('event:stack_finished')">
 				<div class="stat-label">Stack finished</div>
@@ -128,6 +141,7 @@
 						<option value="pageviews">Pageviews</option>
 						<option value="sessions">Sessions</option>
 						<option value="uniques">Unique visitors</option>
+						<option value="returning">Returning visitors</option>
 						<option value="stack_conversion">Stack conversion rate</option>
 						<optgroup v-if="events.length" label="Events">
 							<option v-for="e in events" :key="e.event_name" :value="'event:' + e.event_name">
@@ -722,6 +736,10 @@ async function fetchChart() {
 			]);
 			chartData.value = starts.items || [];
 			chartData2.value = finishes.items || [];
+		} else if (chartMetric.value === 'returning') {
+			const data = await apiGet('/admin/analytics/timeseries', { bucket: chartBucket.value, metric: 'returning' });
+			chartData.value = data.items || [];
+			chartData2.value = [];
 		} else {
 			const params = { bucket: chartBucket.value };
 			if (chartMetric.value.startsWith('event:')) {
@@ -867,6 +885,11 @@ const chartTotal = computed(() => {
 		if (!starts) return '—';
 		return `${((finishes / starts) * 100).toFixed(1)}%`;
 	}
+	// Returning: use the distinct-session total from the dashboard summary.
+	// Summing per-bucket counts would double-count sessions active in multiple buckets.
+	if (chartMetric.value === 'returning') {
+		return summary.value?.totals?.returning || 0;
+	}
 	return chartValues.value.reduce((s, v) => s + v, 0);
 });
 
@@ -874,6 +897,7 @@ const chartValueUnit = computed(() => {
 	if (chartMetric.value === 'pageviews') return 'pageviews';
 	if (chartMetric.value === 'sessions') return 'sessions';
 	if (chartMetric.value === 'uniques') return chartBucket.value === 'day' ? 'daily uniques' : 'unique visitors';
+	if (chartMetric.value === 'returning') return 'returning visitors';
 	if (chartMetric.value === 'stack_conversion') return '%';
 	if (chartMetric.value.startsWith('event:')) return chartMetric.value.slice(6);
 	return '';

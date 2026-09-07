@@ -2,6 +2,11 @@ import { Hono } from 'hono';
 
 const MAX_LIMIT = 500;
 
+// A pageview counts as "returning" when the session's cookie was first
+// minted more than this many ms before the pageview. 8h is chosen so a
+// single late-night visit (23:00 to 03:00) doesn't split into two.
+const RETURNING_GAP_MS = 8 * 60 * 60 * 1000;
+
 function parseRange(c) {
   const now = Date.now();
   const from = Number(c.req.query('from')) || (now - 30 * 24 * 60 * 60 * 1000);
@@ -310,9 +315,22 @@ export function createAnalyticsAdminRoutes({ db }) {
                 AND ts >= ? AND ts < ? ${adminFilter} ${botFilter}${osF.sql}
               GROUP BY event_name ORDER BY occurrences DESC LIMIT ?`,
         args: [...baseArgs, limit] },
+      // 5 - returning visitors: sessions with a pageview in range whose
+      // cookie was first seen more than 8h before that pageview. The 8h gap
+      // treats a late-night session (23:00 to 03:00) as one visit, not two.
+      // Alias avoids the RETURNING keyword.
+      { sql: `SELECT COUNT(DISTINCT e.session_id) AS returning_count
+              FROM events e JOIN sessions s ON s.id = e.session_id
+              WHERE e.site_id = ? AND e.event_name = 'pageview'
+                AND e.ts >= ? AND e.ts < ?
+                AND s.first_ts < e.ts - ${RETURNING_GAP_MS}
+                AND (? = 1 OR COALESCE(e.role, '') != 'admin')
+                AND (? = 1 OR e.bot IS NULL)
+                AND (? = '' OR s.ua_os = ?)`,
+        args: [site, from, to, inc, incBots, os || '', os || ''] },
     ];
 
-    // 5..8 - breakdowns. The OS breakdown deliberately ignores the OS filter
+    // 6..9 - breakdowns. The OS breakdown deliberately ignores the OS filter
     // so switching between OS values stays possible; the other three are
     // filtered so they reflect the currently selected slice.
     const breakdownDims = ['country', 'device', 'os', 'browser'];
@@ -336,21 +354,23 @@ export function createAnalyticsAdminRoutes({ db }) {
     }
 
     const results = await db.batch(stmts, 'read');
+    const totals = results[1].rows[0] || { pageviews: 0, sessions: 0, admin_pageviews: 0 };
+    totals.returning = Number(results[5].rows[0]?.returning_count) || 0;
     return c.json({
       range: { from, to },
       include_admin: !!inc,
       include_bots: !!incBots,
       os: os || null,
       days: results[0].rows,
-      totals: results[1].rows[0] || { pageviews: 0, sessions: 0, admin_pageviews: 0 },
+      totals,
       pages: results[2].rows,
       referrers: results[3].rows,
       events: results[4].rows,
       breakdowns: {
-        country: results[5].rows,
-        device: results[6].rows,
-        os: results[7].rows,
-        browser: results[8].rows,
+        country: results[6].rows,
+        device: results[7].rows,
+        os: results[8].rows,
+        browser: results[9].rows,
       },
     });
   });
@@ -390,9 +410,39 @@ export function createAnalyticsAdminRoutes({ db }) {
     const inc = includeAdmin(c);
     const incBots = includeBots(c);
     const osF = osFilter(c);
+    const os = osValue(c);
     const bucket = c.req.query('bucket') === 'hour' ? 'hour' : 'day';
+    const metric = String(c.req.query('metric') || '').slice(0, 32);
     const eventName = String(c.req.query('event_name') || 'pageview').slice(0, 64);
     const bucketMs = bucket === 'hour' ? 3600000 : 86400000;
+
+    // Returning visitors: per-bucket distinct sessions whose cookie was
+    // first seen more than 8h before the pageview (see RETURNING_GAP_MS).
+    if (metric === 'returning') {
+      const res = await db.execute({
+        sql: `
+          SELECT (e.ts / ${bucketMs}) * ${bucketMs} AS bucket_ts,
+                 COUNT(DISTINCT e.session_id) AS count
+          FROM events e JOIN sessions s ON s.id = e.session_id
+          WHERE e.site_id = ? AND e.event_name = 'pageview'
+            AND e.ts >= ? AND e.ts < ?
+            AND s.first_ts < e.ts - ${RETURNING_GAP_MS}
+            AND (? = 1 OR COALESCE(e.role, '') != 'admin')
+            AND (? = 1 OR e.bot IS NULL)
+            AND (? = '' OR s.ua_os = ?)
+          GROUP BY bucket_ts
+          ORDER BY bucket_ts ASC
+        `,
+        args: [site, from, to, inc, incBots, os || '', os || ''],
+      });
+      return c.json({
+        bucket,
+        bucket_ms: bucketMs,
+        metric: 'returning',
+        range: { from, to },
+        items: res.rows,
+      });
+    }
 
     const res = await db.execute({
       sql: `
