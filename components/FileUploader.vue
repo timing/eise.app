@@ -358,6 +358,8 @@ const liteMode = inject('liteMode', ref(false));
 
 /// GPU vs CPU: use GPU when available (even in lite mode on mobile)
 const useGPU = inject('useGPU', ref(false));
+const webGPUStatus = inject('webGPUStatus', ref(null));
+const detectedBrowser = inject('detectedBrowser', ref(''));
 const isMobile = inject('isMobile', ref(false));
 const isMobileClient = ref(false); // Only true after mount to avoid hydration mismatch
 const liteModeClient = ref(false); // Only true after mount to avoid hydration mismatch
@@ -1104,6 +1106,81 @@ function ffmpegUnsupportedAlternatives({ context = 'video' } = {}) {
 	];
 }
 
+// Build the "GPU is required and unavailable" error. Branches on WHY the GPU
+// is unavailable so the user gets steps that actually apply:
+//   - user picked CPU manually → plain nudge to flip the visible toggle
+//   - browser has WebGPU but no adapter (Chrome with hw-accel off, blocked
+//     driver, remote desktop) → tell them to enable hardware acceleration
+//   - browser has no WebGPU at all (Safari, Firefox stable) → point at a
+//     browser that does, or the desktop app
+// Deliberately does NOT name the file type — every format Eise handles can be
+// stacked on the GPU; the problem is the GPU, not the file.
+function gpuRequiredError() {
+	// User has a working GPU but toggled CPU in the advanced settings.
+	// The Processing toggle is visible in that case, so just point at it.
+	if (useGPU.value && !effectiveUseGpu.value) {
+		return {
+			message: 'Stacking needs GPU processing. Switch Processing back to GPU in the settings above and try again.',
+		};
+	}
+
+	const status = webGPUStatus.value;
+	const browser = detectedBrowser.value || '';
+	const isEdge = /Edge/i.test(browser);
+	const isChrome = /Chrome/i.test(browser) && !isEdge;
+	const isFirefox = /Firefox/i.test(browser);
+	const isSafari = /Safari/i.test(browser) && !isChrome && !isEdge && !isFirefox;
+	const isChromium = isChrome || isEdge;
+
+	const alternatives = [];
+
+	if (status === 'unsupported') {
+		if (isSafari) {
+			alternatives.push({
+				label: 'Use Chrome, Edge or Firefox',
+				description: 'Safari does not support WebGPU yet. The other major desktop browsers do.'
+			});
+		} else if (isFirefox) {
+			alternatives.push({
+				label: 'Enable WebGPU in Firefox',
+				description: 'Visit about:config, set dom.webgpu.enabled to true, and restart Firefox. Or use Chrome or Edge, which support it out of the box.'
+			});
+		} else {
+			alternatives.push({
+				label: 'Use a browser that supports WebGPU',
+				description: 'Chrome or Edge (version 113 or newer) work best.'
+			});
+		}
+	} else {
+		// no_adapter / error: WebGPU is exposed but the browser could not get a
+		// usable adapter. Overwhelmingly caused by hardware acceleration being
+		// disabled, a driver on Chrome's WebGPU blocklist, or a remote/VM session.
+		if (isChromium) {
+			const settingsUrl = isEdge ? 'edge://settings/system' : 'chrome://settings/system';
+			alternatives.push({
+				label: 'Enable hardware acceleration in your browser',
+				description: `Open ${settingsUrl}, turn on "Use hardware acceleration when available", and restart the browser. Remote desktop sessions and some older GPUs can also block WebGPU.`
+			});
+		} else {
+			alternatives.push({
+				label: 'Enable hardware acceleration in your browser',
+				description: 'Look for a hardware acceleration toggle in your browser\'s system or performance settings, enable it, and restart the browser.'
+			});
+		}
+	}
+
+	alternatives.push({
+		label: 'Download the Eise desktop app',
+		description: 'The Mac, Windows and Linux builds enable GPU out of the box, even when the browser doesn\'t.',
+		url: '/download/'
+	});
+
+	return {
+		message: "Your browser can't access the GPU, which stacking needs.",
+		alternatives
+	};
+}
+
 function setErrorFromException(error, fallbackMessage) {
 	errorMessage.value = error?.message || fallbackMessage;
 	errorIsUserFault.value = error instanceof UserError;
@@ -1215,7 +1292,7 @@ async function processFiles(files, options = {}) {
 	// like SER: stacking each single-frame DNG on its own is never useful).
 	if (dngFiles.length > 0) {
 		if (!effectiveUseGpu.value) {
-			eventBusEmit('upload-error', 'DNG files require GPU processing. Please switch Processing to GPU in settings.');
+			eventBusEmit('upload-error', gpuRequiredError());
 			eventBusEmit('show-error');
 			isProcessing.value = false;
 			return;
@@ -1259,7 +1336,7 @@ async function processFiles(files, options = {}) {
 	// Handle multiple SER files (combined stacking) - when user chose "Combine" option
 	if (serFiles.length > 1) {
 		if (!effectiveUseGpu.value) {
-			eventBusEmit('upload-error', 'SER files require GPU processing. Please switch Processing to GPU in settings, or convert your SER file to MP4/MOV.');
+			eventBusEmit('upload-error', gpuRequiredError());
 			eventBusEmit('show-error');
 			isProcessing.value = false;
 			return;
@@ -1307,7 +1384,7 @@ async function processFiles(files, options = {}) {
 		// Handle SER files with unified debayer reader
 		if (fileToProcess.name.endsWith('.ser')) {
 			if (!effectiveUseGpu.value) {
-				eventBusEmit('upload-error', 'SER files require GPU processing. Please switch Processing to GPU in settings, or convert your SER file to MP4/MOV.');
+				eventBusEmit('upload-error', gpuRequiredError());
 				eventBusEmit('show-error');
 				isProcessing.value = false;
 				return;
@@ -1889,7 +1966,7 @@ async function processFiles(files, options = {}) {
 		}
 
 		if (!effectiveUseGpu.value) {
-			eventBusEmit('upload-error', 'Image sequence stacking requires GPU processing. Please switch Processing to GPU in settings, or convert your images to an MP4/MOV video.');
+			eventBusEmit('upload-error', gpuRequiredError());
 			eventBusEmit('show-error');
 			isProcessing.value = false;
 			return;

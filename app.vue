@@ -84,6 +84,15 @@ const isBatchProcessing = ref(false);
 const showWebGPUChoice = ref(false);
 const webGPUChoiceData = ref(null);
 const webGPUSupported = ref(null);
+// Reason WebGPU isn't usable, so error messages can be specific:
+//   'available'   — adapter obtained
+//   'no_adapter'  — navigator.gpu present but requestAdapter() returned null
+//                   (usually: browser hardware acceleration is off, or the
+//                   GPU/driver is on Chrome's WebGPU blocklist, or remote desktop)
+//   'error'       — requestAdapter() threw
+//   'unsupported' — navigator.gpu missing (Safari, older browsers, Firefox
+//                   without dom.webgpu.enabled)
+const webGPUStatus = ref(null);
 const detectedBrowser = ref('Detecting...');
 const forceLiteMode = ref(false);
 const isMounted = ref(false);
@@ -132,6 +141,7 @@ provide('liteMode', liteMode);
 provide('useGPU', useGPU);
 provide('isMobile', isMobile);
 provide('webGPUSupported', webGPUSupported);
+provide('webGPUStatus', webGPUStatus);
 provide('detectedBrowser', detectedBrowser);
 provide('forceLiteMode', forceLiteMode);
 provide('isMounted', isMounted);
@@ -364,11 +374,14 @@ onMounted(async () => {
 		try {
 			const adapter = await navigator.gpu.requestAdapter();
 			webGPUSupported.value = !!adapter;
+			webGPUStatus.value = adapter ? 'available' : 'no_adapter';
 		} catch (e) {
 			webGPUSupported.value = false;
+			webGPUStatus.value = 'error';
 		}
 	} else {
 		webGPUSupported.value = false;
+		webGPUStatus.value = 'unsupported';
 	}
 
 	on('postProcessing', handlePostProcessing);
