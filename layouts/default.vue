@@ -19,7 +19,8 @@
 				<NuxtLink to="/" :class="{ active: route.path === '/' }">Stack</NuxtLink>
 				<NuxtLink to="/post-processor/" :class="{ active: route.path.startsWith('/post-processor') }">Post Processor</NuxtLink>
 				<NuxtLink to="/gallery/" class="nav-desktop-only" :class="{ active: route.path.startsWith('/gallery') }">Gallery</NuxtLink>
-				<NuxtLink to="/download/" :class="{ active: route.path.startsWith('/download') }">Download</NuxtLink>
+				<NuxtLink to="/download/" class="nav-desktop-only" :class="{ active: route.path.startsWith('/download') }">Download</NuxtLink>
+				<NuxtLink to="https://buymeacoffee.com/timing" target="_blank">Buy me a coffee</NuxtLink>
 				<div class="hamburger-menu" :class="{ open: menuOpen }">
 					<button class="hamburger-toggle" @click="menuOpen = !menuOpen" aria-label="Menu">
 						<span class="hamburger-icon">☰</span>
@@ -27,6 +28,7 @@
 					<div class="menu-backdrop" @click="menuOpen = false"></div>
 					<div class="menu-dropdown">
 						<NuxtLink to="/gallery/" class="nav-mobile-only" @click="menuOpen = false">Gallery</NuxtLink>
+						<NuxtLink to="/download/" class="nav-mobile-only" @click="menuOpen = false">Download</NuxtLink>
 						<div class="menu-divider nav-mobile-only"></div>
 						<NuxtLink to="/about/" @click="menuOpen = false">About Eise.app</NuxtLink>
 						<NuxtLink to="/about/help/" @click="menuOpen = false">Help & How it Works</NuxtLink>
@@ -454,6 +456,12 @@ watch(() => route.path, () => {
 	.menu-dropdown {
 		right: 0;
 		left: auto;
+	}
+	.menu-dropdown a {
+		flex: none;
+		text-align: left;
+		font-size: 14px;
+		padding: 12px 16px;
 	}
 }
 </style>
