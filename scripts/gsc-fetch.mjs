@@ -24,6 +24,13 @@ const SITE_URL = process.env.GSC_SITE_URL || 'sc-domain:eise.app';
 const INITIAL_BACKFILL_DAYS = parseInt(process.env.GSC_BACKFILL_DAYS || '60', 10);
 const SEO_DIR = path.join(repoRoot, 'seo-data');
 
+// URLs to always include in URL Inspection, even if they haven't yet cracked
+// the top-10-by-impressions list. Use for new pages during their ramp period
+// so coverage state shows up in reports before organic impressions accumulate.
+const ALWAYS_INSPECT_URLS = [
+	'https://eise.app/seestar-planetary-stacking/',
+];
+
 const auth = new google.auth.GoogleAuth({
 	keyFile: KEY_PATH,
 	scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
@@ -169,9 +176,10 @@ async function refreshMetaForCurrentMonth(endDate) {
 		const start28 = fmt(addDays(endDate, -27));
 		const topPages = await saQuery(start28, fmt(endDate), ['page'], 100);
 		topPages.sort((a, b) => b.impressions - a.impressions);
+		const topUrls = topPages.slice(0, 10).map((p) => p.keys[0]);
+		const urls = [...new Set([...topUrls, ...ALWAYS_INSPECT_URLS])];
 		const inspections = [];
-		for (const p of topPages.slice(0, 10)) {
-			const url = p.keys[0];
+		for (const url of urls) {
 			try {
 				const res = await searchconsole.urlInspection.index.inspect({
 					requestBody: { siteUrl: SITE_URL, inspectionUrl: url },
