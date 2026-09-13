@@ -2986,7 +2986,7 @@ canvas {
 	color: #9ab0c0;
 }
 .content ul li strong {
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 }
 </style>
 

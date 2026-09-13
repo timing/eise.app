@@ -842,6 +842,20 @@ async function handlePostProcessing(data) {
 </script>
 
 <style>
+html {
+	/* Header palette, hoisted so all components can reference the same tokens.
+	   Body/nav text, testimonials, footer, etc. all pull from --eise-on-dark
+	   (or its rgb-triplet variant for translucent rgba use). */
+	--eise-teal-900: #093442;
+	--eise-teal-800: #0f4356;
+	--eise-teal-600: #2b7a95;
+	--eise-gilt:     #d9a94a;
+	--eise-gilt-lt:  #eec36c;
+	--eise-ink:      #14232a;
+	--eise-on-dark:  #c2d6db;
+	--eise-on-dark-rgb: 194, 214, 219;
+	--eise-muted:    #7e9aa2;
+}
 html,body {
 	padding: 0;
 	margin: 0;
@@ -850,11 +864,12 @@ html,body {
 	-moz-osx-font-smoothing: grayscale;
 	-webkit-font-smoothing: antialiased;
 	-webkit-min-device-pixel-ratio: 1.5;
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 	min-height: 100%;
 }
 html {
 	background: radial-gradient(circle at bottom, #27587c, #0A2940);
+	/*background: radial-gradient(1200px 600px at 78% -10%, rgb(43, 122, 149) 0%, rgba(43, 122, 149, 0) 60%), linear-gradient(rgb(15, 67, 86) 0%, rgb(9, 52, 66) 100%);*/
 }
 .content a:not(.btn-primary):not(.btn-secondary):not(.btn-danger),
 .content a:visited:not(.btn-primary):not(.btn-secondary):not(.btn-danger) {
@@ -866,60 +881,13 @@ body {
 .clearb {
 	clear: both;
 }
-.top-bar {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	flex-wrap: wrap;
-	padding: 0 10px;
+/* Section headings on the dark app chrome go pure white for contrast.
+   Overridden by the ink-on-white rule under .content-card, which uses
+   higher specificity so paper-style pages keep their dark headings. */
+h2 {
+	color: #ffffff;
 }
-header {
-	padding: 0;
-}
-header h1 {
-	margin: 0;
-	font-size: 18px;
-	line-height: 50px;
-	color: white;
-}
-header .subtitle {
-	font-size: 12px;
-	font-weight: normal;
-}
-header a {
-	color: #8CCF7E;
-	text-decoration: none;
-}
-.tabs {
-	border-radius: 5px;
-	margin: 10px 0;
-}
-@media (max-width: 700px) {
-	.top-bar {
-		flex-direction: column;
-		align-items: stretch;
-		padding: 0 20px;
-	}
-	header {
-		text-align: center;
-	}
-	header h1 {
-		line-height: 1.4;
-		padding: 10px 0 5px 0;
-	}
-	.tabs {
-		display: flex;
-		margin: 0;
-	}
-	.tabs a {
-		flex: 1;
-		text-align: center;
-		padding: 8px 5px;
-		font-size: 11px;
-		white-space: nowrap;
-	}
-}
-button, a.button, .tabs a {
+button, a.button {
 	background-color: #fefefe;
 	border: none;
 	color: #333;
@@ -930,18 +898,8 @@ button, a.button, .tabs a {
 	text-decoration: none;
 	font-size: 13px;
 }
-.tabs button, .tabs a, .tabs a.button {
-	border-radius: 0;
-	border-right: 1px solid #ccc;
-	font-weight:bold;
-	display: inline-block;
-}
-button:hover, a.button:hover, .tabs a:hover {
+button:hover, a.button:hover {
 	background-color: #70f1ec;
-}
-.tabs button.active, .tabs a.button.active, .tabs a.active {
-	background-color: #8CCF7E;
-	color: #111;
 }
 .page-layout {
 	display: flex;
@@ -1319,7 +1277,7 @@ canvas {
 	background: rgba(255, 255, 255, 0.04);
 	border-left: 3px solid #8CCF7E;
 	border-radius: 4px;
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 }
 .home-testimonial-quote {
 	margin: 0 0 6px;
@@ -1334,7 +1292,7 @@ canvas {
 	gap: 12px;
 	margin: 0;
 	font-size: 12px;
-	color: rgba(198, 255, 253, 0.65);
+	color: rgba(var(--eise-on-dark-rgb), 0.65);
 	flex-wrap: wrap;
 }
 .home-testimonial-cite a {
@@ -1376,7 +1334,7 @@ canvas {
 }
 .comparison-figure figcaption {
 	font-size: 12px;
-	color: rgba(198, 255, 253, 0.75);
+	color: rgba(var(--eise-on-dark-rgb), 0.75);
 	text-align: center;
 }
 .content.content-card .comparison-figure figcaption {

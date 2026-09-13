@@ -1,35 +1,45 @@
 <template>
 	<div>
-		<div class="top-bar">
-			<header>
-				<h1>
-					<a href="/">Eise.app</a>&nbsp;
-					<span class="subtitle">Easy Image Stacker Engine</span>
-					<span
-						v-if="showStackCounter"
-						class="stack-counter nav-desktop-only"
-						:title="`${stackCount24h} stacks finished in the last 24 hours`">
-						<span class="stack-counter-num">&bull; {{ stackCount24h }}</span>
-						<span class="stack-counter-label">{{ stackCount24h === 1 ? 'stack' : 'stacks' }} today</span>
-					</span>
-				</h1>
-			</header>
-			
-			<nav class="tabs">
-				<NuxtLink to="/" :class="{ active: route.path === '/' }">Stack</NuxtLink>
-				<NuxtLink to="/post-processor/" :class="{ active: route.path.startsWith('/post-processor') }">Post Processor</NuxtLink>
-				<NuxtLink to="/gallery/" class="nav-desktop-only" :class="{ active: route.path.startsWith('/gallery') }">Gallery</NuxtLink>
-				<NuxtLink to="/download/" class="nav-desktop-only" :class="{ active: route.path.startsWith('/download') }">Download</NuxtLink>
-				<NuxtLink to="https://buymeacoffee.com/timing" target="_blank">Buy me a coffee</NuxtLink>
-				<div class="hamburger-menu" :class="{ open: menuOpen }">
-					<button class="hamburger-toggle" @click="menuOpen = !menuOpen" aria-label="Menu">
-						<span class="hamburger-icon">☰</span>
+		<header class="eise-header">
+			<div class="eise-brand">
+				<NuxtLink to="/" class="eise-wordmark">Eise.app</NuxtLink>
+				<span class="eise-tagline">Easy Image Stacker Engine</span>
+				<span
+					v-if="showStackCounter"
+					class="eise-stat"
+					:title="`${stackCount24h} stacks finished in the last 24 hours`">
+					<span class="eise-stat-dot"></span>
+					<span class="eise-stat-text">{{ stackCount24h }} {{ stackCount24h === 1 ? 'stack' : 'stacks' }} today</span>
+				</span>
+			</div>
+
+			<nav class="eise-nav">
+				<NuxtLink to="/" class="eise-tab" data-label="Stack" :class="{ 'is-active': route.path === '/' }">Stack</NuxtLink>
+				<NuxtLink to="/post-processor/" class="eise-tab" data-label="Post Processor" :class="{ 'is-active': route.path.startsWith('/post-processor') }">Post Processor</NuxtLink>
+				<NuxtLink to="/gallery/" class="eise-tab hide-below-460" data-label="Gallery" :class="{ 'is-active': route.path.startsWith('/gallery') }">Gallery</NuxtLink>
+				<NuxtLink to="/download/" class="eise-tab hide-below-560" data-label="Download" :class="{ 'is-active': route.path.startsWith('/download') }">Download</NuxtLink>
+				<a href="https://buymeacoffee.com/timing" target="_blank" rel="noopener" class="eise-cta hide-below-700">Buy me a coffee</a>
+
+				<div ref="hamburgerRef" class="hamburger-menu" :class="{ open: menuOpen }">
+					<button class="eise-menu" @click="menuOpen = !menuOpen" type="button" aria-label="Menu">
+						<svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+							<defs>
+								<clipPath id="jupMenuClip" clipPathUnits="userSpaceOnUse">
+									<circle cx="12" cy="12" r="10"></circle>
+								</clipPath>
+							</defs>
+							<circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="0.9"></circle>
+							<g clip-path="url(#jupMenuClip)">
+								<path d="M0 7.5h24M0 12h24M0 16.5h24" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+								<circle cx="15.5" cy="16.5" r="2.1" fill="#d9a94a"></circle>
+							</g>
+						</svg>
 					</button>
-					<div class="menu-backdrop" @click="menuOpen = false"></div>
 					<div class="menu-dropdown">
-						<NuxtLink to="/gallery/" class="nav-mobile-only" @click="menuOpen = false">Gallery</NuxtLink>
-						<NuxtLink to="/download/" class="nav-mobile-only" @click="menuOpen = false">Download</NuxtLink>
-						<div class="menu-divider nav-mobile-only"></div>
+						<NuxtLink to="/gallery/" class="only-below-460" @click="menuOpen = false">Gallery</NuxtLink>
+						<NuxtLink to="/download/" class="only-below-560" @click="menuOpen = false">Download</NuxtLink>
+						<a href="https://buymeacoffee.com/timing" target="_blank" rel="noopener" class="only-below-700" @click="menuOpen = false">Buy me a coffee</a>
+						<div class="menu-divider only-below-700"></div>
 						<NuxtLink to="/about/" @click="menuOpen = false">About Eise.app</NuxtLink>
 						<NuxtLink to="/about/help/" @click="menuOpen = false">Help & How it Works</NuxtLink>
 						<NuxtLink to="/about/architecture/" @click="menuOpen = false">Technical Architecture</NuxtLink>
@@ -39,7 +49,7 @@
 					</div>
 				</div>
 			</nav>
-		</div>
+		</header>
 
 		<slot />
 
@@ -126,7 +136,22 @@ import { getVariant } from '@/composables/useAbTest';
 
 const route = useRoute();
 const menuOpen = ref(false);
+const hamburgerRef = ref(null);
 const { openFeedback } = useFeedback();
+
+// Close the menu on any click outside the hamburger. A document listener is
+// used instead of a fullscreen backdrop element because the header has
+// `backdrop-filter: blur(...)`, which makes it the containing block for
+// `position: fixed` descendants — a "fullscreen" backdrop nested inside the
+// header would only cover the header's 60px, not the viewport.
+function onDocClickCloseMenu(e) {
+	if (!menuOpen.value) return;
+	if (hamburgerRef.value && !hamburgerRef.value.contains(e.target)) {
+		menuOpen.value = false;
+	}
+}
+onMounted(() => document.addEventListener('click', onDocClickCloseMenu));
+onBeforeUnmount(() => document.removeEventListener('click', onDocClickCloseMenu));
 
 // Social-proof counter A/B: desktop-only "N Stacks today" badge between logo
 // and nav. Enrollment is gated on desktop so mobile visitors don't get bucketed
@@ -220,75 +245,174 @@ watch(() => route.path, () => {
 </script>
 
 <style scoped>
-.nav-mobile-only { display: none !important; }
-@media (max-width: 700px) {
-	.nav-desktop-only { display: none !important; }
-	.nav-mobile-only { display: block !important; }
+.eise-header {
+	position: sticky;
+	top: 0;
+	z-index: 20;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 32px;
+	height: 60px;
+	padding: 0 28px;
+	background: rgba(9, 52, 66, 0.85);
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+	-webkit-font-smoothing: antialiased;
 }
-.stack-counter {
-	padding: 5px 8px 6px 8px;
-	border-radius: 50px;
-	border: 1px solid #8CCF7E;
-	font-size: 12px;
-	margin-left: 6px;
-	line-height: 1;
+
+.eise-brand {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+	min-width: 0;
+}
+
+.eise-wordmark {
+	font-size: 17px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--eise-gilt);
+	text-decoration: none;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.eise-tagline {
+	font-size: 12.5px;
+	letter-spacing: 0.01em;
+	color: var(--eise-muted);
+}
+
+.eise-stat {
+	align-self: center;
 	display: inline-flex;
 	align-items: center;
-	gap: 6px;
-	font-weight: normal;
+	gap: 7px;
+	margin-left: 6px;
+	padding: 3px 10px;
+	border: 1px solid rgba(217, 169, 74, 0.28);
+	border-radius: 999px;
+	background: rgba(217, 169, 74, 0.1);
 	user-select: none;
 }
-.stack-counter-num {
-	color: #8CCF7E;
+
+.eise-stat-dot {
+	flex: 0 0 auto;
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: var(--eise-gilt);
 }
-.stack-counter-label {
-	color: #8CCF7E;
+
+.eise-stat-text {
+	font-size: 11.5px;
+	letter-spacing: 0.02em;
+	color: var(--eise-gilt-lt);
 }
+
+.eise-nav {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.eise-tab {
+	display: inline-flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 7px 14px;
+	/* Transparent border matches the 1px on .eise-cta so all nav items share
+	   the same box height and sit on the same baseline in the flex row. */
+	border: 1px solid transparent;
+	border-radius: 6px;
+	white-space: nowrap;
+	flex-shrink: 0;
+	font-size: 13.5px;
+	color: var(--eise-on-dark);
+	text-decoration: none;
+	transition: background 120ms ease, color 120ms ease;
+}
+/* Ghost copy at the bold weight reserves box width so switching to
+   .is-active (font-weight 600) doesn't reflow the nav. */
+.eise-tab::before {
+	content: attr(data-label);
+	font-weight: 600;
+	height: 0;
+	visibility: hidden;
+	overflow: hidden;
+	user-select: none;
+	pointer-events: none;
+}
+.eise-tab:hover {
+	background: rgba(255, 255, 255, 0.07);
+	color: #ffffff;
+}
+.eise-tab.is-active,
+.eise-tab.is-active:hover {
+	font-weight: 600;
+	color: var(--eise-ink);
+	background: var(--eise-gilt);
+}
+
+.eise-cta {
+	padding: 7px 14px;
+	margin-left: 6px;
+	border: 1px solid rgba(217, 169, 74, 0.55);
+	border-radius: 6px;
+	white-space: nowrap;
+	flex-shrink: 0;
+	font-size: 13.5px;
+	color: var(--eise-gilt-lt);
+	text-decoration: none;
+	background: rgba(217, 169, 74, 0.08);
+	transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.eise-cta:hover {
+	background: var(--eise-gilt);
+	border-color: var(--eise-gilt);
+	color: var(--eise-ink);
+}
+
+.eise-menu {
+	display: grid;
+	place-items: center;
+	width: 32px;
+	height: 32px;
+	margin-left: 8px;
+	padding: 0;
+	background: transparent;
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	border-radius: 6px;
+	color: var(--eise-on-dark);
+	cursor: pointer;
+	transition: background 120ms ease, color 120ms ease;
+}
+.eise-menu:hover {
+	background: rgba(255, 255, 255, 0.07);
+	color: #ffffff;
+}
+.hamburger-menu.open .eise-menu {
+	background: rgba(255, 255, 255, 0.07);
+	color: #ffffff;
+}
+
 .hamburger-menu {
 	position: relative;
-	display: inline-block;
-	vertical-align: top;
-}
-.hamburger-toggle {
-	background-color: #fefefe;
-	border: none;
-	color: #333;
-	padding: 8px 15px 10px 15px;
-	cursor: pointer;
-	transition: background-color 0.3s;
-	font-size: 18px;
-	line-height: 1;
-	vertical-align: top;
-}
-.hamburger-toggle:hover {
-	background-color: #70f1ec;
-}
-.hamburger-menu.open .hamburger-toggle {
-	background-color: #70f1ec;
-}
-.menu-backdrop {
-	position: fixed;
-	top: 0;
-	left: 0;
-	right: 0;
-	bottom: 0;
-	z-index: 99;
-	display: none;
-}
-.hamburger-menu.open .menu-backdrop {
-	display: block;
+	display: inline-flex;
 }
 .menu-dropdown {
 	position: absolute;
-	top: 100%;
+	top: calc(100% + 8px);
 	right: 0;
 	background: #fefefe;
 	border-radius: 6px;
-	box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
 	z-index: 100;
 	min-width: 240px;
 	overflow: hidden;
-	margin-top: 4px;
 	display: none;
 }
 .hamburger-menu.open .menu-dropdown {
@@ -310,6 +434,48 @@ watch(() => route.path, () => {
 	height: 1px;
 	background: #e0e0e0;
 	margin: 4px 0;
+}
+
+/* Menu-only items are hidden by default; each shows in the hamburger only when
+   its corresponding header item has been dropped. */
+.only-below-460,
+.only-below-560,
+.only-below-700 {
+	display: none !important;
+}
+
+/* Drop tagline + counter pill before nav collapses (per design spec). */
+@media (max-width: 900px) {
+	.eise-tagline,
+	.eise-stat {
+		display: none !important;
+	}
+}
+/* Staged collapse: each nav item disappears at the width where it stops fitting
+   on one line and moves into the hamburger menu.
+     ≤ 700px: Buy me a coffee out
+     ≤ 560px: Download out
+     ≤ 460px: Gallery out
+   Below 460 only Stack + Post Processor remain in the header. */
+@media (max-width: 700px) {
+	.hide-below-700 { display: none !important; }
+	.only-below-700 { display: block !important; }
+}
+@media (max-width: 560px) {
+	.hide-below-560 { display: none !important; }
+	.only-below-560 { display: block !important; }
+	.eise-header {
+		gap: 12px;
+		padding: 0 16px;
+	}
+	.eise-tab {
+		padding: 6px 10px;
+		font-size: 13px;
+	}
+}
+@media (max-width: 460px) {
+	.hide-below-460 { display: none !important; }
+	.only-below-460 { display: block !important; }
 }
 .affiliate-banner {
 	max-width: 520px;
@@ -353,10 +519,10 @@ watch(() => route.path, () => {
 	margin: 14px 0 0;
 	font-size: 13px;
 	line-height: 1.5;
-	color: rgba(198, 255, 253, 0.7);
+	color: rgba(var(--eise-on-dark-rgb), 0.7);
 }
 .affiliate-link:hover .affiliate-caption {
-	color: rgba(198, 255, 253, 0.9);
+	color: rgba(var(--eise-on-dark-rgb), 0.9);
 }
 
 .site-footer {
@@ -364,7 +530,7 @@ watch(() => route.path, () => {
 	padding: 32px 20px 24px;
 	background: rgba(0, 0, 0, 0.25);
 	border-top: 1px solid rgba(255, 255, 255, 0.08);
-	color: rgba(198, 255, 253, 0.75);
+	color: rgba(var(--eise-on-dark-rgb), 0.75);
 	font-size: 13px;
 	line-height: 1.6;
 }
@@ -389,7 +555,7 @@ watch(() => route.path, () => {
 	font-weight: 600;
 	text-transform: uppercase;
 	letter-spacing: 0.05em;
-	color: rgba(198, 255, 253, 0.5);
+	color: rgba(var(--eise-on-dark-rgb), 0.5);
 }
 .site-footer-col ul {
 	list-style: none;
@@ -411,10 +577,10 @@ watch(() => route.path, () => {
 	padding-top: 16px;
 	border-top: 1px solid rgba(255, 255, 255, 0.06);
 	font-size: 12px;
-	color: rgba(198, 255, 253, 0.55);
+	color: rgba(var(--eise-on-dark-rgb), 0.55);
 }
 .site-footer-copy a {
-	color: rgba(198, 255, 253, 0.75);
+	color: rgba(var(--eise-on-dark-rgb), 0.75);
 	text-decoration: underline;
 }
 .site-footer-release {
@@ -422,7 +588,7 @@ watch(() => route.path, () => {
 	margin-left: 8px;
 	padding-left: 8px;
 	border-left: 1px solid rgba(255, 255, 255, 0.15);
-	color: rgba(198, 255, 253, 0.45);
+	color: rgba(var(--eise-on-dark-rgb), 0.45);
 }
 @media (max-width: 700px) {
 	.site-footer-release {
@@ -439,29 +605,6 @@ watch(() => route.path, () => {
 	}
 	.site-footer-cols {
 		gap: 20px 24px;
-	}
-}
-@media (max-width: 700px) {
-	.hamburger-menu {
-		flex: 0;
-		display: flex;
-	}
-	.hamburger-toggle {
-		padding: 8px 12px;
-		font-size: 14px;
-		line-height: 1;
-		height: 100%;
-		box-sizing: border-box;
-	}
-	.menu-dropdown {
-		right: 0;
-		left: auto;
-	}
-	.menu-dropdown a {
-		flex: none;
-		text-align: left;
-		font-size: 14px;
-		padding: 12px 16px;
 	}
 }
 </style>

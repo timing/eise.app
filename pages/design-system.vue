@@ -13,11 +13,11 @@
 			<h3>Body Text on Blue Gradient</h3>
 			<p class="ds-note">Main content area text color - used in .content on the radial gradient background</p>
 			<div class="ds-examples text-on-gradient">
-				<p class="body-text-demo">This is the standard body text color (#c6fffd - light cyan) on the blue gradient background. It's used for all main content text in the .content area.</p>
+				<p class="body-text-demo">This is the standard body text color (#c2d6db - soft pale blue) on the blue gradient background. It's used for all main content text in the .content area.</p>
 				<p class="body-text-demo"><strong>Bold text</strong> and <a href="#">links</a> inherit this color.</p>
 			</div>
 			<div class="ds-variants">
-				<strong>Color:</strong> #c6fffd (light cyan)<br>
+				<strong>Color:</strong> #c2d6db (soft pale blue, --eise-on-dark)<br>
 				<strong>Background:</strong> radial-gradient(circle at bottom, #27587c, #0A2940) on html element<br>
 				<strong>Used in:</strong> app.vue html/body styles, .content area
 			</div>
@@ -47,8 +47,8 @@
 				<p class="preview-stats">Sharpness: 0.85 (Tenengrad: 0.72, Laplacian: 0.91) · Circularity: 0.98</p>
 			</div>
 			<div class="ds-variants">
-				<strong>Headings:</strong> #c6fffd (same as body)<br>
-				<strong>Stats:</strong> #c6fffd, font-size: 13px
+				<strong>Headings:</strong> #c2d6db (same as body, --eise-on-dark)<br>
+				<strong>Stats:</strong> #c2d6db, font-size: 13px
 			</div>
 		</div>
 
@@ -500,8 +500,8 @@
 					<span>#70f1ec</span>
 					<small>Cyan (tab hover)</small>
 				</div>
-				<div class="swatch" style="background: #c6fffd">
-					<span>#c6fffd</span>
+				<div class="swatch" style="background: #c2d6db">
+					<span>#c2d6db</span>
 					<small>Light Cyan (body text)</small>
 				</div>
 			</div>
@@ -713,7 +713,7 @@ useHead({
 }
 
 .body-text-demo {
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 	margin: 0 0 10px 0;
 	line-height: 1.5;
 }
@@ -740,13 +740,13 @@ useHead({
 }
 
 .preview-heading {
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 	margin: 0 0 8px 0;
 	font-size: 14px;
 }
 
 .preview-stats {
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 	font-size: 13px;
 	margin: 0;
 }
@@ -991,7 +991,7 @@ useHead({
 .demo-content {
 	flex: 1;
 	background: #27587c;
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 	border-radius: 8px;
 	padding: 15px;
 	text-align: center;

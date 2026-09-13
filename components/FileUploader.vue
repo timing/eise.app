@@ -286,7 +286,7 @@
 	<!-- Welcome content: only show when not processing -->
 	<div class="content" v-if="!isProcessing">
 		<h2>Welcome to Eise.app</h2>
-		<p class="intro">Eise.app is a free browser-based planetary image stacker for astrophotography. Upload a SER, AVI, or MP4 video of Jupiter, Saturn, Mars, the Moon, or the Sun, and it uses lucky imaging - combining the sharpest frames - to produce a detailed final image. Runs entirely in your browser using WebGPU. No install, no upload, no signup.</p>
+		<p class="intro">Eise.app takes your lucky-imaged videos of planets and stacks the sharpest frames to create one sharp image. After stacking the post processor opens and you can sharpen and color correct the image even further. Many video file types are supported, and as long as your video has a planet, the moon or the sun, the stacking will succeed. Runs in your browser, no uploads or signups required.</p>
 
 		<div class="comparison-images">
 			<figure class="comparison-figure">
@@ -304,7 +304,7 @@
 		</p>
 
 		<div class="how-it-works">
-			<p>Under the hood, Eise.app automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. After stacking, the post processor opens for wavelet sharpening, RGB alignment, and color adjustments.</p>
+			<p>Eise.app automatically analyzes, crops, centers, and ranks every frame by sharpness, then aligns and stacks the best ones. After stacking, the post processor opens which allows wavelet sharpening, RGB alignment, and color adjustments.</p>
 			<ul>
 				<li><strong>SER or AVI files</strong> for stacking + post processing. Multiple files open batch mode.</li>
 				<li><strong>Video files</strong> (MP4, MOV, etc.) for stacking + post processing.</li>
@@ -314,7 +314,7 @@
 		</div>
 
 		<h3>More information, bugs and feature requests?</h3>
-		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="https://github.com/timing/eise.app/issues" target="_blank" data-no-track @click="onLetMeKnowClick">Let me know!</a></p>
+		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="https://github.com/timing/eise.app/issues" target="_blank" data-no-track @click="onLetMeKnowClick">Let me know!</a>. If you want to support this project, consider to <NuxtLink to="https://buymeacoffee.com/timing" target="_blank">buy me a coffee</NuxtLink>. <br/><br/>Happy stacking,<br/> Tijmen</p>
 
 		<aside class="home-testimonial">
 			<p class="home-testimonial-quote">"Very good app — it helped me massively improve my image of the Moon."</p>
@@ -2415,12 +2415,12 @@ async function processFiles(files, options = {}) {
 }
 .intro {
 	font-size: 1.1em;
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 	margin-bottom: 5px;
 }
 .sample-credit {
 	font-size: 12px;
-	color: rgba(198, 255, 253, 0.75);
+	color: rgba(var(--eise-on-dark-rgb), 0.75);
 	margin: -15px 0 20px;
 }
 .sample-credit a {
@@ -2436,7 +2436,7 @@ async function processFiles(files, options = {}) {
 	font-weight: 500;
 }
 .how-it-works summary:hover {
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 }
 .how-it-works ul {
 	margin: 10px 0;

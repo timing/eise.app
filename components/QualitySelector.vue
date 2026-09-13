@@ -200,10 +200,11 @@ function drawGraph() {
 		ctx.stroke();
 	}
 
-	// Draw preview position indicator (cyan, when not playing)
+	// Draw preview position indicator (--eise-on-dark, when not playing).
+	// Canvas 2D can't read CSS vars, so this hex must match html's --eise-on-dark.
 	if (!isPlaying.value) {
 		const previewX = padding.left + ((previewFrameIndex.value + 0.5) / sortedFrames.value.length) * graphWidth;
-		ctx.strokeStyle = '#c6fffd';
+		ctx.strokeStyle = '#c2d6db';
 		ctx.lineWidth = 2;
 		ctx.beginPath();
 		ctx.moveTo(previewX, padding.top);
@@ -490,7 +491,7 @@ function proceedWithStacking() {
 	align-items: center;
 	gap: 10px;
 	flex-wrap: wrap;
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 }
 
 .sharpness-badge {
@@ -529,14 +530,14 @@ function proceedWithStacking() {
 
 .frame-position {
 	font-size: 13px;
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 	min-width: 70px;
 }
 
 .no-preview {
 	padding: 40px;
 	text-align: center;
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 }
 
 .action-buttons {

@@ -451,7 +451,7 @@ async function processImageFrames(files) {
 	}
 	.preview-frame h4 {
 		margin: 0 0 10px 0;
-		color: #c6fffd;
+		color: var(--eise-on-dark);
 	}
 	.preview-frame canvas {
 		border: 1px solid #ccc;
@@ -461,7 +461,7 @@ async function processImageFrames(files) {
 	.sharpness-label, .frame-stats {
 		margin: 8px 0 0 0;
 		font-size: 13px;
-		color: #c6fffd;
+		color: var(--eise-on-dark);
 	}
 	.error-message {
 		background-color: #ffcccc;

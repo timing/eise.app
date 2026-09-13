@@ -209,14 +209,14 @@ function abort() {
 }
 
 .label {
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 	opacity: 0.8;
 }
 
 .value {
 	font-family: monospace;
 	font-weight: bold;
-	color: #c6fffd;
+	color: var(--eise-on-dark);
 }
 
 .no-results {
