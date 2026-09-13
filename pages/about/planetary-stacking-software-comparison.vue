@@ -1,30 +1,21 @@
 <template>
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
-			<h2>Planetary Stacking Software Comparison 2026</h2>
+			<h1>Planetary Stacking Software Comparison</h1>
 			<p>
-				Choosing the right stacking software for planetary astrophotography can be confusing.
-				This guide compares the most popular options for both stacking and post-processing.
+				Here I compare Eise.app with other stacking software, like Autostakkert!, Planetary System Stacker, and Registrax. I also created some specific pages, that go more in-depth:
 			</p>
+			<ul>
+				<li><NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert! vs Eise.app</NuxtLink></li>
+				<li><NuxtLink to="/about/registax-vs-eise/">Registax 6 vs Eise.app</NuxtLink></li>
+				<li><NuxtLink to="/about/planetary-system-stacker-vs-eise/">PSS vs Eise.app</NuxtLink></li>
+			</ul>
 			<p class="vs-quicklinks">
-				<strong>Head-to-head:</strong>&nbsp;<NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert! vs Eise.app</NuxtLink>
-				· <NuxtLink to="/about/registax-vs-eise/">Registax 6 vs Eise.app</NuxtLink>
-				· <NuxtLink to="/about/planetary-system-stacker-vs-eise/">PSS vs Eise.app</NuxtLink>
-			</p>
-			<p class="vs-quicklinks">
-				<strong>Platform guides:</strong>&nbsp;<NuxtLink to="/planetary-stacking-mac/">Planetary stacking on Mac</NuxtLink>
+				<strong>Platform guide:</strong>&nbsp;<NuxtLink to="/planetary-stacking-mac/">Planetary stacking on Mac</NuxtLink>
 			</p>
 
-			<h3>What is Planetary Stacking Software?</h3>
-			<p>
-				Planetary stacking software combines hundreds or thousands of video frames to create a single sharp image.
-				This technique, called <em>lucky imaging</em>, overcomes atmospheric turbulence by selecting the best moments
-				when the air happens to be steady. The result: detailed images of Jupiter's cloud bands, Saturn's rings,
-				lunar craters, or sunspots.
-			</p>
-
-			<h3>Stacking Software Comparison</h3>
-			<p>These tools handle the core pipeline: reading video files, ranking frames by sharpness, aligning them, and combining them into a single image.</p>
+			<h2>Stacking Software Comparison</h2>
+			<p>This table compares software that runs the whole pipeline: reading video files, ranking frames by sharpness, aligning them, and combining them into a single image.</p>
 			<div class="table-wrapper">
 				<table class="comparison-table">
 					<thead>
@@ -356,14 +347,13 @@
 			<h3>Dedicated Tools</h3>
 			<p>Some tools fill a specific niche in the planetary imaging workflow:</p>
 			<ul>
-				<li><strong>WinJUPOS</strong> - for planetary derotation. Maps images onto a 3D sphere to compensate for the rotation of planets. Windows only (Wine on Mac/Linux). Free. Being partially replaced by LuckyStackWorker for simpler derotation tasks.</li>
+				<li><strong>WinJUPOS</strong> - for planetary derotation. Maps images onto a 3D sphere to compensate for the rotation of planets. Windows only (Wine on Mac/Linux) and free. Being partially replaced by LuckyStackWorker for simpler derotation tasks.</li>
 				<li><strong>PIPP</strong> - Planetary Imaging PreProcessor. Centers, crops, and reorders frames before stacking. Also converts between video formats. Windows only. Less necessary now that most stackers have built-in cropping and centering.</li>
-				<li><strong>FireCapture</strong> - The leading planetary capture software. Controls your camera, records SER/AVI files, and tracks the planet during capture. Windows, Mac, Linux. This is where the raw data comes from before any stacking happens.</li>
 			</ul>
 
 			<h3>When to Use Each Tool</h3>
 
-			<h4>Eise.app - Best for: Quick results, Mac/Linux users, beginners</h4>
+			<h4>Eise.app - Best for: Quick results, file support, Mac/Linux users, beginners</h4>
 			<p>
 				Eise.app is the only planetary stacking tool that runs entirely in your browser.
 				No installation, no dependencies, works on any operating system.
@@ -373,24 +363,23 @@
 
 			<h4>AutoStakkert! - Best for: Maximum stacking quality, Windows users</h4>
 			<p>
-				The current stable release is AS!4 4.0.11 (January 2024); 4.0.13 (February 2025) is a newer beta build, and there have been no releases since.
-				It offers the most control over alignment points and supports multiple drizzle scales.
-				SER, AVI, FITS, and image files load natively; MP4, MOV, and HEVC video only work if you separately download FFmpeg and drop <code>ffmpeg.exe</code> into the AutoStakkert! folder.
-				It only handles stacking - you'll need Registax, LuckyStackWorker, or another tool for sharpening.
+				The current stable release is AS!4 4.0.11 (January 2024); 4.0.13 (February 2025) is a newer beta build.
+				Has amazing alignment points support and multiple drizzle scales.
+				Loads SER, AVI, FITS, and image files natively. MP4, MOV, and HEVC video only work if you separately download FFmpeg and drop <code>ffmpeg.exe</code> into the AutoStakkert! folder.
+				It only handles stacking, you'll need Registax, LuckyStackWorker, or another tool for sharpening. Or Eise of course!
 				Windows-only (Emil has stated there are no plans for native Mac or Linux builds).
-				<NuxtLink to="/about/autostakkert-vs-eise/">See head-to-head: AutoStakkert! vs Eise.app &rarr;</NuxtLink>
+				<NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert! vs Eise.app &rarr;</NuxtLink>
 			</p>
 
-			<h4>Planetary System Stacker (PSS) - Best for: Cross-platform desktop, advanced users</h4>
+			<h4>Planetary System Stacker (PSS) - Best for Cross-platform desktop, advanced users</h4>
 			<p>
 				PSS is an open-source Python application that runs on Windows, Mac, and Linux.
-				It includes built-in wavelet sharpening and RGB alignment, making it an all-in-one solution, but quite feature-light in post processing.
-				It's powerful but requires Python installation and dependency management,
-				which can be challenging especially on Apple Silicon Macs.
-				<NuxtLink to="/about/planetary-system-stacker-vs-eise/">See head-to-head: PSS vs Eise.app &rarr;</NuxtLink>
+				It includes built-in wavelet sharpening and RGB alignment, but that's it.
+				<NuxtLink to="/about/planetary-system-stacker-vs-eise/">PSS vs Eise.app &rarr;</NuxtLink>
+				<NuxtLink to="https://github.com/timing/PlanetarySystemStacker">For Mac, use this PSS fork.</NuxtLink>
 			</p>
 
-			<h4>Planet Stacker X - Best for: Native macOS experience</h4>
+			<h4>Planet Stacker X - Best for Native macOS experience</h4>
 			<p>
 				Planet Stacker X is a free, native macOS application available on the App Store.
 				It offers GPU-accelerated processing on Apple Silicon, wavelet sharpening (Gaussian and Starlet),
@@ -398,7 +387,7 @@
 				Not available in the EU App Store due to regulations.
 			</p>
 
-			<h4>LuckyStackWorker - Best for: Post-processing + derotation</h4>
+			<h4>LuckyStackWorker - Best for Post-processing + derotation</h4>
 			<p>
 				LuckyStackWorker (LSW) is a cross-platform post-processing tool that automates wavelet sharpening
 				and deconvolution with object recognition. Since v7 (January 2026), it includes built-in derotation,
@@ -406,16 +395,16 @@
 				Works on already-stacked images (TIFF, PNG, FITS), not raw video files.
 			</p>
 
-			<h4>Registax 6 - Best for: Wavelet sharpening (Windows)</h4>
+			<h4>Registax 6 - Best for Wavelet sharpening (Windows)</h4>
 			<p>
 				Registax pioneered wavelet sharpening for planetary images and is still widely used for post-processing.
 				Its 6-layer wavelet interface remains the most well-known in the hobby.
-				However, its stacking capabilities are outdated compared to AutoStakkert! or PSS.
+				However, its stacking capabilities are outdated compared to AutoStakkert! or PSS and Eise.
 				Last updated in 2011 but still functional. Windows-only.
-				<NuxtLink to="/about/registax-vs-eise/">See head-to-head: Registax 6 vs Eise.app &rarr;</NuxtLink>
+				<NuxtLink to="/about/registax-vs-eise/">Registax 6 vs Eise.app &rarr;</NuxtLink>
 			</p>
 
-			<h4>AstroSurface - Best for: All-in-one on Windows</h4>
+			<h4>AstroSurface - All-in-one on Windows</h4>
 			<p>
 				AstroSurface aims to replace the PIPP + AutoStakkert + Registax pipeline with a single application.
 				It handles pre-processing, stacking, and wavelet sharpening with Richardson-Lucy deconvolution.
