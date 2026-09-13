@@ -57,7 +57,7 @@
 		<template v-if="!isProcessing && !isBatchMode">
 			<h3>Select file(s) for stacking and/or post processing</h3>
 			<div class="file-input-wrapper" :class="{ 'has-files': selectedFiles.length > 0 }">
-				<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser" multiple @change="onFileChanged" title="" />
+				<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser,.dng" multiple @change="onFileChanged" title="" />
 				<label for="file-upload" class="file-label">
 					<template v-if="selectedFiles.length > 0">
 						{{ selectedFilesDescription }}
@@ -67,7 +67,7 @@
 							<span class="drop-icon">📂</span>
 							<span class="drop-text">Drag files here</span>
 							<span class="drop-button">Choose files</span>
-							<span class="drop-formats">SER, AVI, MP4, PNG, TIFF, JPEG</span>
+							<span class="drop-formats">SER, AVI, MP4, DNG, PNG, TIFF, JPEG</span>
 							<span class="drop-privacy">Nothing is uploaded.</span>
 						</span>
 					</template>
@@ -613,7 +613,9 @@ const selectedFilesDescription = computed(() => {
 const startButtonText = computed(() => {
 	if (selectedFiles.value.length === 1) {
 		const file = selectedFiles.value[0];
-		if (file.type.startsWith('image/')) {
+		// DNGs go through the stacker (single-frame debayer + crop), not the post-processor.
+		const isDng = file.name.toLowerCase().endsWith('.dng');
+		if (file.type.startsWith('image/') && !isDng) {
 			return 'Post process';
 		}
 	}
@@ -723,9 +725,12 @@ function onFilesSelected(files){
 	selectedFiles.value = files;
 	eventBusEmit('stop-loading');
 
-	// Categorize files
+	// Categorize files. DNGs are extension-detected because browsers report
+	// inconsistent MIME types for them (image/x-adobe-dng, image/tiff, or empty),
+	// and they route to the Bayer debayer pipeline rather than the RGBA image reader.
+	const dngFiles = files.filter(f => f.name.toLowerCase().endsWith('.dng'));
 	const videoFiles = files.filter(f => f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.ser') || f.name.toLowerCase().endsWith('.avi'));
-	const imageFiles = files.filter(f => f.type.startsWith('image/'));
+	const imageFiles = files.filter(f => f.type.startsWith('image/') && !f.name.toLowerCase().endsWith('.dng'));
 	const serFiles = files.filter(f => f.name.toLowerCase().endsWith('.ser'));
 	const aviFiles = files.filter(f => f.name.toLowerCase().endsWith('.avi'));
 	const batchableFiles = [...serFiles, ...aviFiles];
@@ -746,6 +751,12 @@ function onFilesSelected(files){
 
 	if (videoFiles.length >= 1 && imageFiles.length > 0) {
 		alert('Please select either video files or image files, not both.');
+		clearSelection();
+		return;
+	}
+
+	if (dngFiles.length > 0 && (videoFiles.length > 0 || imageFiles.length > 0)) {
+		alert('Please select either DNG files or other file types, not both.');
 		clearSelection();
 		return;
 	}
@@ -1179,13 +1190,15 @@ async function processFiles(files, options = {}) {
 
 	setStackingMode(qualityMode.value === 'continuous' ? 'continuous' : 'single');
 
+	const dngFiles = files.filter(file => file.name.toLowerCase().endsWith('.dng'));
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser') || file.name.endsWith('.avi'));
-	const imageFiles = files.filter(file => file.type.startsWith('image/'));
+	// Exclude DNGs from the RGBA image reader; they take the Bayer debayer path below.
+	const imageFiles = files.filter(file => file.type.startsWith('image/') && !file.name.toLowerCase().endsWith('.dng'));
 
 	// Set the input filename AND mint a fresh stack_job_id — this is the entry
 	// point for a genuine new stack attempt (each retry = new job). Post-
 	// processor Prev/Next navigation only calls setInputFilename (no new id).
-	const primaryFile = videoFiles[0] || imageFiles[0];
+	const primaryFile = videoFiles[0] || dngFiles[0] || imageFiles[0];
 	if (primaryFile) {
 		startNewStackJob(primaryFile.name);
 		// Pin the log-shipping cursor to THIS moment so the first stack_ping
@@ -1195,6 +1208,38 @@ async function processFiles(files, options = {}) {
 		// mark the filename as already-shipped.
 		markLogStart();
 		addLog(`File: ${primaryFile.name}`);
+	}
+
+	// DNG (raw Bayer) files — route to the debayer pipeline. One DNG per file,
+	// so multi-file selection always means combined stacking (no batch dialog
+	// like SER: stacking each single-frame DNG on its own is never useful).
+	if (dngFiles.length > 0) {
+		if (!effectiveUseGpu.value) {
+			eventBusEmit('upload-error', 'DNG files require GPU processing. Please switch Processing to GPU in settings.');
+			eventBusEmit('show-error');
+			isProcessing.value = false;
+			return;
+		}
+		setTrackingContext({ file_type: 'dng', reader: 'debayer', gpu_enabled: effectiveUseGpu.value });
+		addLog(`Processing ${dngFiles.length} DNG file${dngFiles.length > 1 ? 's' : ''}`);
+
+		const { useDngParser, useMultiDngParser } = await import('@/composables/useDngParser');
+		const { useDebayerReader } = await import('@/composables/useDebayerReader');
+
+		const parser = dngFiles.length > 1 ? useMultiDngParser() : useDngParser();
+		await parser.init(dngFiles.length > 1 ? dngFiles : dngFiles[0]);
+
+		const reader = useDebayerReader();
+		await reader.init(dngFiles[0], parser);
+		await reader.processFile({
+			maxFrames: effectiveMaxFrames.value,
+			manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
+			cropMarginPercent: effectiveCropMargin.value,
+			stackPercentage: effectiveStackPercentage.value,
+			drizzleScale: effectiveDrizzleScale.value,
+			surfaceMode: surfaceMode.value,
+		});
+		return;
 	}
 
 	// Multiple SER/AVI files - offer batch mode choice (unless already chosen)
