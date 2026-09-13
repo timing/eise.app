@@ -2,19 +2,20 @@
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
 			<h2>About Eise.app</h2>
-			<p class="page-subtitle">Image stacker for planets, Moon &amp; Sun</p>
-			<p>Eise.app is a (the first!) browser-based planetary image stacking tool for astrophotography, mainly lucky imaging.
+			<p class="page-subtitle">Image stacker for planets, the Moon &amp; the Sun</p>
+			<p>Eise.app is a (the first!) browser-based planetary image stacking tool for astrophotography, using lucky imaging.
 			All algorithms run in your browser, and nothing is uploaded.
 			</p>
 			<p>
-			The name is an ode to <a href="https://en.wikipedia.org/wiki/Eise_Eisinga" target="_blank">Eise Eisinga</a>, a Frisian amateur astronomer who built a planetarium in his living room.
+			The name is an ode to <a href="https://en.wikipedia.org/wiki/Eise_Eisinga" target="_blank">Eise Eisinga</a>, a Frisian (NL) amateur astronomer who built a planetarium in his living room.
 			The project started from frustrations getting existing software running on ARM-based Macs - AutoStakkert4! didn't work in Wine, PSS had dependency issues, Lynkeos crashed continuously.
 			</p>
 
 			<p>
 				The stacking pipeline includes automatic frame ranking, per-frame cropping and centering, local alignment with de-warping,
-				drizzle upscaling, and quality-weighted frame accumulation. The integrated post-processor offers wavelet sharpening,
-				RGB alignment, and color correction. Together with Continuous Stacking and a built-in post processor it has become more easy to find the best optimal stack percentage.
+				drizzle upscaling, and quality-weighted frame accumulation.
+
+				Another cool feature is Continuous Stacking and with the a built-in post processor it has become more easy to find the best optimal stack percentage.
 				<NuxtLink to="/about/help/">Tips on using Eise.app</NuxtLink>,
 				<NuxtLink to="/about/planetary-stacking-software-comparison/">compare it to other stacking software</NuxtLink>.
 			</p>
@@ -102,31 +103,28 @@
 
 			<section id="community" class="community-section">
 				<h3>Community & feedback</h3>
-
-				<h4>Show me what you stacked</h4>
+	
+				<h4>Eise's gallery, show me and the world what you stacked</h4>
 				<p>
-					If you've made something with Eise.app I'd like to see it if possible! Here are some suggestions:
-				</p>
-				<ul>
-					<li><NuxtLink to="/gallery/">Upload your stack to the Eise gallery</NuxtLink></li>
-					<li>Post on <a href="https://www.reddit.com/r/astrophotography/" target="_blank" rel="noopener">r/astrophotography</a> and mention Eise.app in the workflow - I keep an eye out.</li>
-					<li>Post to Instagram or X with <strong>#eiseapp</strong>.</li>
-					<li>Or send it via the feedback button.</li>
-				</ul>
+					Eise has a <NuxtLink to="/gallery/">gallery with stacks from other astrophotographers</NuxtLink>. 
+					You can publish your stacks from the post processor after stacking and post processing, 
+					or you can upload an Eise stack you've already saved on the gallery page itself.</p>
 
-				<h4>Eise's Community gallery</h4>
-				<p>
-					The <NuxtLink to="/gallery/">community gallery</NuxtLink> shows stacks published from the app by other astrophotographers. You can publish yours from the post processor, or upload an Eise stack you've already saved.
-				</p>
 				<div class="community-cta-row">
 					<NuxtLink to="/gallery/" class="cta-secondary">Open the gallery</NuxtLink>
 				</div>
 
+				<h4>Sharing outside Eise.app</h4>
+				<p>If you're happy with your stack, you can also tell the world! For example:</p>
+				<ul>
+					<li>Post on <a href="https://www.reddit.com/r/astrophotography/" target="_blank" rel="noopener">r/astrophotography</a> and mention Eise.app :-)</li>
+					<li>Post to Instagram or X with <strong>#eiseapp</strong>.</li>
+				</ul>
 
 
 				<h4>Bugs and feature requests</h4>
 				<p>
-					For any bug or feature request, please tell me - especially the niche stuff! Providing me with your data also helps me a lot.</p>
+					For any bug or feature request, let me know! It could be I need your data, but we'll figure that out.</p>
 				<div class="community-cta-row">
 					<a href="https://github.com/timing/eise.app/issues" target="_blank" rel="noopener" data-no-track @click="onLetMeKnowClick" class="cta-secondary">Send feedback</a>
 					<a href="https://github.com/timing/eise.app/issues/new" target="_blank" rel="noopener" class="cta-secondary">Report on GitHub</a>
@@ -135,7 +133,7 @@
 
 				<h4>Support the project</h4>
 				<p>
-					Eise.app is free and I build it in my spare time. If it saved you an evening of wrestling with Wine or a legacy install, you can buy me a coffee to keep the project going.
+					Eise.app is free, open source, and I build it in my spare time. If you like Eise, then feel free to buy me a coffee!
 				</p>
 				<div class="community-cta-row">
 					<a href="https://buymeacoffee.com/timing" target="_blank" rel="noopener" class="bmc-btn">
@@ -212,7 +210,7 @@ function prevScreenshot() {
 useHead({
 	title: 'About Eise.app - Browser-Based Planetary Image Stacking',
 	meta: [
-		{ name: 'description', content: 'Eise.app is the first fully browser-based planetary image stacking tool for astrophotography. Process planets, Moon, and Sun images without installation - works on Mac, Windows, and Linux.' },
+		{ name: 'description', content: 'Eise.app is the first fully browser-based planetary image stacking tool for astrophotography. Process planets, the Moon, and Sun images without installation - works on Mac, Windows, and Linux.' },
 		{ name: 'keywords', content: 'planetary image stacking, astrophotography software, browser-based stacking, lucky imaging, planetary photography' },
 	],
 });
