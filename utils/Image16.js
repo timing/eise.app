@@ -224,6 +224,68 @@ export class Image16 {
 	}
 
 	/**
+	 * Resize by area-weighted averaging (box filter). Downsizing only — the
+	 * intended use is restoring apparent sharpness on oversampled captures by
+	 * consolidating signal into fewer pixels. Returns a clone when scale is 1.
+	 * @param {number} scale - Fraction in (0, 1], e.g. 0.8 for 80%
+	 * @returns {Image16}
+	 */
+	resize(scale) {
+		if (!(scale > 0) || scale > 1) {
+			throw new Error(`Image16.resize scale must be in (0, 1], got ${scale}`);
+		}
+		if (scale === 1) return this.clone();
+
+		const { width: srcW, height: srcH, data: src } = this;
+		const dstW = Math.max(1, Math.round(srcW * scale));
+		const dstH = Math.max(1, Math.round(srcH * scale));
+		if (dstW === srcW && dstH === srcH) return this.clone();
+
+		const dst = new Float32Array(dstW * dstH * 4);
+		const scaleX = srcW / dstW;
+		const scaleY = srcH / dstH;
+
+		for (let dy = 0; dy < dstH; dy++) {
+			const y0 = dy * scaleY;
+			const y1 = (dy + 1) * scaleY;
+			const yStart = Math.floor(y0);
+			const yEnd = Math.min(srcH, Math.ceil(y1));
+
+			for (let dx = 0; dx < dstW; dx++) {
+				const x0 = dx * scaleX;
+				const x1 = (dx + 1) * scaleX;
+				const xStart = Math.floor(x0);
+				const xEnd = Math.min(srcW, Math.ceil(x1));
+
+				let r = 0, g = 0, b = 0, a = 0, wSum = 0;
+				for (let sy = yStart; sy < yEnd; sy++) {
+					const wy = Math.min(sy + 1, y1) - Math.max(sy, y0);
+					const rowBase = sy * srcW;
+					for (let sx = xStart; sx < xEnd; sx++) {
+						const wx = Math.min(sx + 1, x1) - Math.max(sx, x0);
+						const w = wx * wy;
+						const idx = (rowBase + sx) * 4;
+						r += src[idx] * w;
+						g += src[idx + 1] * w;
+						b += src[idx + 2] * w;
+						a += src[idx + 3] * w;
+						wSum += w;
+					}
+				}
+
+				const inv = 1 / wSum;
+				const dIdx = (dy * dstW + dx) * 4;
+				dst[dIdx] = r * inv;
+				dst[dIdx + 1] = g * inv;
+				dst[dIdx + 2] = b * inv;
+				dst[dIdx + 3] = a * inv;
+			}
+		}
+
+		return new Image16(dstW, dstH, dst);
+	}
+
+	/**
 	 * Rotate on the GPU with bicubic (Keys) interpolation. Falls back to the
 	 * CPU bilinear rotate() when WebGPU is unavailable. Preferred over rotate()
 	 * for user-facing rotation: bilinear produces moiré on near-Nyquist detail.

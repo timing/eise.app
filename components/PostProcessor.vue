@@ -245,15 +245,40 @@
 				<input type="text" v-model="exportFilename" @keydown.enter="downloadCanvasAsPNG" />
 			</div>
 
+			<div class="export-resize">
+				<label>Output size:</label>
+				<input type="number" min="10" max="100" step="5" v-model.number="exportResizePercent" />
+				<span class="resize-unit">%</span>
+				<span v-if="exportResizeSuggestion" class="resize-suggestion">
+					For optimal sharpness (limb ~{{ exportResizeSuggestion.edgeWidth.toFixed(1) }} px):
+					<button type="button" class="resize-target-link" :class="{ active: exportResizePercent === exportResizeSuggestion.suggestions.aggressive }" @click="exportResizePercent = exportResizeSuggestion.suggestions.aggressive">{{ exportResizeSuggestion.suggestions.aggressive }}% aggressive</button>
+					<span class="target-sep">·</span>
+					<button type="button" class="resize-target-link" :class="{ active: exportResizePercent === exportResizeSuggestion.suggestions.balanced }" @click="exportResizePercent = exportResizeSuggestion.suggestions.balanced">{{ exportResizeSuggestion.suggestions.balanced }}% balanced</button>
+					<span class="target-sep">·</span>
+					<button type="button" class="resize-target-link" :class="{ active: exportResizePercent === exportResizeSuggestion.suggestions.conservative }" @click="exportResizePercent = exportResizeSuggestion.suggestions.conservative">{{ exportResizeSuggestion.suggestions.conservative }}% conservative</button>
+				</span>
+			</div>
+			<div v-if="showResizePreview" class="resize-preview">
+				<div class="preview-cell">
+					<div class="preview-label">100%</div>
+					<canvas ref="previewOriginalCanvas" @mousedown="onPreviewMouseDown('left', $event)"></canvas>
+				</div>
+				<div class="preview-cell">
+					<div class="preview-label">{{ exportResizePercent }}%</div>
+					<canvas ref="previewResizedCanvas" @mousedown="onPreviewMouseDown('right', $event)"></canvas>
+				</div>
+			</div>
+			<p v-if="showResizePreview" class="preview-hint">Drag either preview to pan.</p>
+
 			<div class="export-buttons">
 				<button class="export-option" @click="downloadCanvasAsPNG">
-					⬇ Processed PNG (8-bit)
+					⬇ PNG 8-bit
 				</button>
 				<button v-if="sharpenedImage16" class="export-option" @click="download16BitProcessedPNG">
-					⬇ Processed PNG (16-bit)
+					⬇ PNG 16-bit
 				</button>
 				<button class="export-option" @click="downloadUnprocessedPNG">
-					⬇ Unprocessed PNG (16-bit)
+					⬇ PNG 16-bit (unprocessed)
 				</button>
 				<button v-if="props.croppedSerData" class="export-option secondary" @click="downloadCroppedSer">
 					⬇ Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})
@@ -337,6 +362,7 @@ import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import { deconvolveWebGL, deconvolveWebGL16, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
 import { Image16 } from '@/utils/Image16.js'
+import { estimateOversampling } from '@/utils/estimateOversampling.js'
 import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2, blurWithWebGL2 } from '@/utils/webgl2Processor.js'
 import { download16BitPNG, decodePNG } from '@/utils/png16Encoder.js'
 import { decodeTIFF } from '@/utils/tiffDecoder.js'
@@ -374,6 +400,13 @@ const exportProgress = ref('');
 // Export popup state
 const showExportPopup = ref(false);
 const exportFilename = ref('');
+const exportResizePercent = ref(100);
+const exportResizeSuggestion = ref(null); // { suggestedPercent, edgeWidth, sampleCount, strongestEdge }
+const previewOriginalCanvas = ref(null);
+const previewResizedCanvas = ref(null);
+const previewCenter = ref({ x: 0, y: 0 }); // in original image coordinates
+let previewDragState = null;
+const showResizePreview = computed(() => showExportPopup.value && !!image16);
 const showKebabMenu = ref(false);
 const showHelpPopup = ref(false);
 
@@ -536,7 +569,114 @@ function openExportPopup() {
 	exportFilename.value = inputFilename.value || 'eise_app';
 	didExport.value = false;
 	showExportPopup.value = true;
+	computeResizeSuggestion();
+	nextTick(() => renderResizePreview());
 }
+
+function computeResizeSuggestion() {
+	const source = sharpenedImage16 || image16;
+	if (!source) {
+		exportResizeSuggestion.value = null;
+		exportResizePercent.value = 100;
+		previewCenter.value = { x: 0, y: 0 };
+		return;
+	}
+	exportResizePercent.value = 100;
+	try {
+		const s = estimateOversampling(source.data, source.width, source.height);
+		exportResizeSuggestion.value = s.edgeWidth !== null ? s : null;
+		previewCenter.value = s.strongestEdge || { x: Math.floor(source.width / 2), y: Math.floor(source.height / 2) };
+	} catch (e) {
+		console.warn('Resize suggestion failed:', e);
+		exportResizeSuggestion.value = null;
+		previewCenter.value = { x: Math.floor(source.width / 2), y: Math.floor(source.height / 2) };
+	}
+}
+
+function clampExportPercent() {
+	let p = exportResizePercent.value;
+	if (!Number.isFinite(p)) p = 100;
+	return Math.max(10, Math.min(100, Math.round(p)));
+}
+
+function renderResizePreview() {
+	if (!canvas || !canvas.value) return;
+	const left = previewOriginalCanvas.value;
+	const right = previewResizedCanvas.value;
+	if (!left || !right) return;
+
+	const displayCanvas = canvas.value;
+	const srcW = displayCanvas.width;
+	const srcH = displayCanvas.height;
+
+	// Both previews show the SAME real-world region so the sharpness
+	// comparison is apples-to-apples; the resized side is physically smaller
+	// because it uses fewer pixels to represent that region.
+	const maxPreviewCss = 180;
+	const regionW = Math.min(maxPreviewCss, srcW);
+	const regionH = Math.min(maxPreviewCss, srcH);
+
+	const cxWant = Math.round(previewCenter.value.x - regionW / 2);
+	const cyWant = Math.round(previewCenter.value.y - regionH / 2);
+	const cx = Math.max(0, Math.min(srcW - regionW, cxWant));
+	const cy = Math.max(0, Math.min(srcH - regionH, cyWant));
+
+	left.width = regionW;
+	left.height = regionH;
+	const lctx = left.getContext('2d');
+	lctx.imageSmoothingEnabled = false;
+	lctx.drawImage(displayCanvas, cx, cy, regionW, regionH, 0, 0, regionW, regionH);
+
+	const percent = clampExportPercent();
+	const scale = percent / 100;
+
+	const rW = Math.max(1, Math.round(regionW * scale));
+	const rH = Math.max(1, Math.round(regionH * scale));
+	right.width = rW;
+	right.height = rH;
+	const rctx = right.getContext('2d');
+	rctx.imageSmoothingEnabled = true;
+	rctx.imageSmoothingQuality = 'high';
+	rctx.drawImage(displayCanvas, cx, cy, regionW, regionH, 0, 0, rW, rH);
+}
+
+function onPreviewMouseDown(source, e) {
+	if (!canvas || !canvas.value) return;
+	const scale = source === 'right' ? clampExportPercent() / 100 : 1;
+	previewDragState = {
+		startClientX: e.clientX,
+		startClientY: e.clientY,
+		startCenterX: previewCenter.value.x,
+		startCenterY: previewCenter.value.y,
+		scale
+	};
+	document.addEventListener('mousemove', onPreviewMouseMove);
+	document.addEventListener('mouseup', onPreviewMouseUp);
+	e.preventDefault();
+}
+
+function onPreviewMouseMove(e) {
+	if (!previewDragState) return;
+	const dxCss = e.clientX - previewDragState.startClientX;
+	const dyCss = e.clientY - previewDragState.startClientY;
+	const dxOrig = dxCss / previewDragState.scale;
+	const dyOrig = dyCss / previewDragState.scale;
+	previewCenter.value = {
+		x: previewDragState.startCenterX - dxOrig,
+		y: previewDragState.startCenterY - dyOrig
+	};
+	renderResizePreview();
+}
+
+function onPreviewMouseUp() {
+	previewDragState = null;
+	document.removeEventListener('mousemove', onPreviewMouseMove);
+	document.removeEventListener('mouseup', onPreviewMouseUp);
+}
+
+watch(exportResizePercent, () => {
+	if (showExportPopup.value) nextTick(renderResizePreview);
+});
 
 function openPublishModal(source) {
 	publishCanvas.value = canvas?.value || null;
@@ -563,10 +703,26 @@ const handleCanvasReady = (canvasRef) => {
 };
 
 const downloadCanvasAsPNG = () => {
-	if (!canvas) return;
+	if (!canvas || !canvas.value) return;
 
-	track('export', { type: 'processed', format: 'png', bit_depth: 8 });
-	const dataURL = canvas.value.toDataURL('image/png');
+	const percent = clampExportPercent();
+	let sourceCanvas = canvas.value;
+	if (percent < 100) {
+		const scale = percent / 100;
+		const w = Math.max(1, Math.round(sourceCanvas.width * scale));
+		const h = Math.max(1, Math.round(sourceCanvas.height * scale));
+		const tmp = document.createElement('canvas');
+		tmp.width = w;
+		tmp.height = h;
+		const ctx = tmp.getContext('2d');
+		ctx.imageSmoothingEnabled = true;
+		ctx.imageSmoothingQuality = 'high';
+		ctx.drawImage(sourceCanvas, 0, 0, w, h);
+		sourceCanvas = tmp;
+	}
+
+	track('export', { type: 'processed', format: 'png', bit_depth: 8, resize_percent: percent });
+	const dataURL = sourceCanvas.toDataURL('image/png');
 	const link = document.createElement('a');
 	const filename = exportFilename.value || inputFilename.value || 'eise_app';
 	link.download = `${filename}_processed.png`;
@@ -581,13 +737,16 @@ const downloadCanvasAsPNG = () => {
 const downloadUnprocessedPNG = async () => {
 	if (!image16) return;
 
-	track('export', { type: 'unprocessed', format: 'png', bit_depth: 16 });
+	const percent = clampExportPercent();
+	const source = percent < 100 ? image16.resize(percent / 100) : image16;
+
+	track('export', { type: 'unprocessed', format: 'png', bit_depth: 16, resize_percent: percent });
 	try {
 		const filename = exportFilename.value || inputFilename.value || 'eise_app';
 		await download16BitPNG(
-			image16.data,
-			image16.width,
-			image16.height,
+			source.data,
+			source.width,
+			source.height,
 			`${filename}_unprocessed.png`
 		);
 		didExport.value = true;
@@ -660,13 +819,16 @@ const downloadCroppedSer = () => {
 const download16BitProcessedPNG = async () => {
 	if (!sharpenedImage16) return;
 
-	track('export', { type: 'processed', format: 'png', bit_depth: 16 });
+	const percent = clampExportPercent();
+	const source = percent < 100 ? sharpenedImage16.resize(percent / 100) : sharpenedImage16;
+
+	track('export', { type: 'processed', format: 'png', bit_depth: 16, resize_percent: percent });
 	try {
 		const filename = exportFilename.value || inputFilename.value || 'eise_app';
 		await download16BitPNG(
-			sharpenedImage16.data,
-			sharpenedImage16.width,
-			sharpenedImage16.height,
+			source.data,
+			source.width,
+			source.height,
 			`${filename}_processed_16bit.png`
 		);
 		didExport.value = true;
@@ -2718,7 +2880,7 @@ canvas {
 	color: #333;
 	border-radius: 10px;
 	padding: 25px 30px;
-	max-width: 400px;
+	max-width: 600px;
 	width: 90%;
 	max-height: 100%;
 	overflow-y: auto;
@@ -2751,19 +2913,116 @@ canvas {
 	outline: none;
 	border-color: #8CCF7E;
 }
-.export-buttons {
+.export-resize {
+	margin-bottom: 10px;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 4px 8px;
+}
+.export-resize label {
+	font-weight: bold;
+	font-size: 13px;
+}
+.export-resize input {
+	width: 64px;
+	padding: 6px 8px;
+	border: 1px solid #ccc;
+	border-radius: 5px;
+	font-size: 14px;
+	box-sizing: border-box;
+}
+.export-resize input:focus {
+	outline: none;
+	border-color: #8CCF7E;
+}
+.export-resize .resize-unit {
+	font-size: 14px;
+	color: #333;
+}
+.export-resize .resize-suggestion {
+	flex: 1 1 100%;
+	font-size: 12px;
+	color: #666;
+	line-height: 1.4;
+}
+.export-resize .resize-target-link {
+	background: none;
+	border: none;
+	padding: 0 2px;
+	color: #4a7cbf;
+	cursor: pointer;
+	font: inherit;
+	text-decoration: underline;
+}
+.export-resize .resize-target-link.active {
+	color: #2a5a99;
+	font-weight: bold;
+	text-decoration: none;
+	cursor: default;
+}
+.export-resize .target-sep {
+	color: #aaa;
+	padding: 0 2px;
+}
+.resize-preview {
+	display: flex;
+	gap: 10px;
+	justify-content: center;
+	margin: 0 0 16px 0;
+	padding: 8px;
+	background: #f5f5f5;
+	border-radius: 6px;
+}
+.resize-preview .preview-cell {
 	display: flex;
 	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	flex: 1 1 0;
+	min-width: 0;
+}
+.resize-preview .preview-label {
+	font-size: 11px;
+	color: #666;
+	font-weight: bold;
+}
+.resize-preview canvas {
+	image-rendering: pixelated;
+	image-rendering: -moz-crisp-edges;
+	max-width: 100%;
+	height: auto;
+	background: #000;
+	border: 1px solid #ddd;
+	display: block;
+	cursor: grab;
+	user-select: none;
+	-webkit-user-select: none;
+}
+.resize-preview canvas:active {
+	cursor: grabbing;
+}
+.preview-hint {
+	text-align: center;
+	font-size: 11px;
+	color: #888;
+	margin: -8px 0 12px 0;
+}
+.export-buttons {
+	display: flex;
+	flex-direction: row;
+	flex-wrap: wrap;
 	gap: 8px;
 	margin-bottom: 20px;
 }
 .export-option {
-	padding: 12px 16px;
+	flex: 1 1 140px;
+	padding: 12px 14px;
 	border: none;
 	border-radius: 5px;
 	cursor: pointer;
-	font-size: 14px;
-	text-align: left;
+	font-size: 13px;
+	text-align: center;
 	transition: background-color 0.2s;
 	background-color: #8CCF7E;
 	color: #111;
