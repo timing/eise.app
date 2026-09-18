@@ -53,9 +53,11 @@ function clientIp(c) {
   return null;
 }
 
-export function createApp(env) {
+// `deps.db` lets tests inject a client (the web libsql client used in
+// production cannot open local file: URLs). Production callers pass env only.
+export function createApp(env, deps = {}) {
   const app = new Hono();
-  const db = createDb(env);
+  const db = deps.db || createDb(env);
   const storage = createStorage(env);
   const maxImageBytes = Number(env.MAX_IMAGE_BYTES || 20 * 1024 * 1024);
   const maxThumbBytes = 500 * 1024;
@@ -134,11 +136,30 @@ export function createApp(env) {
     return c.json({ id, status: 'pending' }, 201);
   });
 
+  // Homepage card. Returns the admin-picked stack, falling back to the newest
+  // approved one so the card is never empty before anything is featured.
+  app.get('/featured', async c => {
+    const cols = `id, name, title, description, astrobin_url, image_path, thumb_path, created_at, approved_at, captured_at, featured_at`;
+    let res = await db.execute({
+      sql: `SELECT ${cols} FROM submissions
+            WHERE status = 'approved' AND featured_at IS NOT NULL
+            ORDER BY featured_at DESC LIMIT 1`,
+    });
+    if (!res.rows[0]) {
+      res = await db.execute({
+        sql: `SELECT ${cols} FROM submissions WHERE status = 'approved'
+              ORDER BY approved_at DESC LIMIT 1`,
+      });
+    }
+    const row = res.rows[0];
+    return c.json({ item: row ? publicRow(row, storage) : null });
+  });
+
   app.get('/submissions', async c => {
     const limit = Math.min(Number(c.req.query('limit') || 60), 200);
     const offset = Math.max(Number(c.req.query('offset') || 0), 0);
     const res = await db.execute({
-      sql: `SELECT id, name, title, description, astrobin_url, image_path, thumb_path, created_at, approved_at, captured_at
+      sql: `SELECT id, name, title, description, astrobin_url, image_path, thumb_path, created_at, approved_at, captured_at, featured_at
             FROM submissions WHERE status = 'approved'
             ORDER BY approved_at DESC LIMIT ? OFFSET ?`,
       args: [limit, offset],
@@ -183,6 +204,25 @@ export function createApp(env) {
     return c.json({ ok: true });
   });
 
+  // Exactly one featured stack at a time: picking a new one clears the rest.
+  admin.post('/submissions/:id/feature', async c => {
+    const id = c.req.param('id');
+    const row = await db.execute({ sql: `SELECT status FROM submissions WHERE id = ?`, args: [id] });
+    if (!row.rows[0]) return c.json({ error: 'not found' }, 404);
+    if (row.rows[0].status !== 'approved') {
+      return c.json({ error: 'only approved submissions can be featured' }, 400);
+    }
+    await db.execute({ sql: `UPDATE submissions SET featured_at = NULL WHERE featured_at IS NOT NULL` });
+    await db.execute({ sql: `UPDATE submissions SET featured_at = ? WHERE id = ?`, args: [Date.now(), id] });
+    return c.json({ ok: true });
+  });
+
+  admin.post('/submissions/:id/unfeature', async c => {
+    const id = c.req.param('id');
+    await db.execute({ sql: `UPDATE submissions SET featured_at = NULL WHERE id = ?`, args: [id] });
+    return c.json({ ok: true });
+  });
+
   admin.delete('/submissions/:id', async c => {
     const id = c.req.param('id');
     const row = await db.execute({ sql: `SELECT image_path, thumb_path FROM submissions WHERE id = ?`, args: [id] });
@@ -218,9 +258,10 @@ function publicRow(row, storage) {
     image_url: storage.publicUrlFor(row.image_path),
     thumb_url: storage.publicUrlFor(row.thumb_path),
     approved_at: row.approved_at,
+    featured: !!row.featured_at,
   };
 }
 
 function adminRow(row, storage) {
-  return { ...publicRow(row, storage), status: row.status, created_at: row.created_at };
+  return { ...publicRow(row, storage), status: row.status, created_at: row.created_at, featured_at: row.featured_at };
 }

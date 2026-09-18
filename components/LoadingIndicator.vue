@@ -5,10 +5,16 @@
 			<div class="error-subtitle">Check the logs below for details</div>
 		</div>
 		<div v-else class="loading-content">
-			<div class="caption" v-if="caption">{{ caption }}</div>
-			<div class="frame-counter" v-if="totalFrames > 0">{{ currentFrame }} / {{ totalFrames }}</div>
-			<div class="frame-counter frame-counter-dots" v-else aria-hidden="true">
-				<span>.</span><span>.</span><span>.</span>
+			<div class="caption" v-if="caption">
+				<span class="caption-dot" aria-hidden="true"></span>
+				<span>{{ caption }}</span>
+			</div>
+			<div class="loading-readout">
+				<span class="frame-counter" v-if="totalFrames > 0">{{ currentFrame }} / {{ totalFrames }}</span>
+				<span class="frame-counter frame-counter-dots" v-else aria-hidden="true">
+					<span>.</span><span>.</span><span>.</span>
+				</span>
+				<span class="loading-percent">{{ isIndeterminate ? 'estimating…' : progress + '%' }}</span>
 			</div>
 			<div class="loading-indicator">
 				<div v-if="isIndeterminate" class="indeterminate"></div>
@@ -86,22 +92,48 @@ onUnmounted(() => {
 
 <style>
 .loading-wrapper {
-	margin-bottom: 15px;
-	padding: 10px 0;
+	margin-bottom: 4px;
 }
+/* Title line: pulsing gilt dot + what is running right now. */
 .caption {
-	text-align: center;
-	font-size: 16px;
-	font-weight: bold;
-	color: #333;
-	margin-bottom: 5px;
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	margin-bottom: 18px;
+	font-size: 15px;
+	font-weight: 600;
+	color: #ffffff;
+}
+.caption-dot {
+	flex: 0 0 auto;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--eise-gilt);
+	animation: caption-pulse 1.4s ease-in-out infinite;
+}
+@keyframes caption-pulse {
+	0%, 100% { opacity: 0.35; }
+	50% { opacity: 1; }
+}
+.loading-readout {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 9px;
 }
 .frame-counter {
-	text-align: center;
-	font-size: 24px;
-	font-weight: bold;
-	color: #4A90E2;
-	margin-bottom: 10px;
+	font-family: var(--eise-mono);
+	font-size: 22px;
+	font-weight: 500;
+	letter-spacing: -0.01em;
+	color: var(--eise-gilt-lt);
+}
+.loading-percent {
+	font-family: var(--eise-mono);
+	font-size: 12px;
+	color: #8fa9b1;
 }
 .frame-counter-dots {
 	letter-spacing: 6px;
@@ -118,17 +150,18 @@ onUnmounted(() => {
 	30% { opacity: 1; }
 }
 .loading-indicator {
-	height: 8px;
-	background-color: #e0e0e0;
-	border-radius: 4px;
+	position: relative;
+	height: 6px;
+	background-color: rgba(255, 255, 255, 0.09);
+	border-radius: 3px;
 	overflow: hidden;
 }
 .determinate {
 	height: 100%;
-	background-color: #8CCF7E;
 	width: 0%;
-	transition: width 0.3s ease;
-	border-radius: 4px;
+	background: linear-gradient(90deg, #d9a94a, #eec36c);
+	border-radius: 3px;
+	transition: width 0.24s ease;
 }
 .indeterminate {
 	height: 100%;
@@ -137,33 +170,30 @@ onUnmounted(() => {
 .indeterminate::before {
 	content: '';
 	position: absolute;
-	height: 100%;
-	width: 50%;
-	background-color: #8CCF7E;
-	border-radius: 4px;
-	animation: moveIndeterminate 2s infinite linear;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 30%;
+	border-radius: 3px;
+	background: linear-gradient(90deg, rgba(217, 169, 74, 0), #d9a94a, rgba(217, 169, 74, 0));
+	animation: moveIndeterminate 1.5s ease-in-out infinite;
 }
 @keyframes moveIndeterminate {
-	0% {
-		left: -50%;
-	}
-	100% {
-		left: 100%;
-	}
+	0% { transform: translateX(-100%); }
+	100% { transform: translateX(320%); }
 }
 .error-state {
-	text-align: center;
-	padding: 20px 10px;
+	padding: 4px 0 8px;
 }
 .error-title {
-	font-size: 18px;
-	font-weight: bold;
-	color: #e74c3c;
-	margin-bottom: 8px;
+	font-size: 15px;
+	font-weight: 600;
+	color: #e58a8a;
+	margin-bottom: 6px;
 }
 .error-subtitle {
-	font-size: 14px;
-	color: #666;
+	font-size: 12.5px;
+	color: var(--eise-muted-2);
 }
 </style>
 

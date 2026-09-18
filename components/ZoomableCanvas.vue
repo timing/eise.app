@@ -223,30 +223,34 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 	display: flex;
 	justify-content: space-between;
 	align-items: center;
-	color: white;
-	padding: 8px 0;
+	gap: 16px;
+	flex-wrap: wrap;
+	color: var(--eise-on-dark);
+	padding: 0 0 14px;
 }
 .zoom-indicator {
 	font-size: 13px;
+	color: var(--eise-muted-2);
 	display: inline-flex;
 	align-items: center;
-	gap: 4px;
+	gap: 6px;
 }
 .zoom-input {
-	width: 50px;
-	background: transparent;
-	border: 1px solid #666;
-	border-radius: 3px;
-	color: white;
-	font-size: 13px;
-	padding: 2px 4px;
+	width: 52px;
+	background: rgba(0, 0, 0, 0.2);
+	border: 1px solid var(--eise-panel-border);
+	border-radius: 5px;
+	color: var(--eise-bright);
+	font-family: var(--eise-mono);
+	font-size: 12.5px;
+	padding: 4px 7px;
 	text-align: right;
 	box-sizing: border-box;
-	height: 24px;
+	height: 26px;
 }
 .zoom-input:focus {
 	outline: none;
-	border-color: #888;
+	border-color: var(--eise-gilt);
 }
 .kebab-menu {
 	position: relative;
@@ -254,18 +258,18 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 }
 .kebab-btn {
 	background: transparent;
-	border: 1px solid #666;
-	color: #aaa;
+	border: 1px solid var(--eise-panel-border);
+	color: var(--eise-on-dark);
 	font-size: 10px;
-	padding: 4px 6px;
+	padding: 4px 7px;
 	cursor: pointer;
-	border-radius: 3px;
+	border-radius: 5px;
 	box-sizing: border-box;
-	height: 24px;
+	height: 26px;
 }
 .kebab-btn:hover {
+	background: rgba(255, 255, 255, 0.07);
 	color: #fff;
-	border-color: #888;
 }
 .kebab-backdrop {
 	position: fixed;
@@ -304,7 +308,10 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 .zoomable-canvas-wrapper {
 	height: calc(100vh - 240px);
 	position: relative;
-	border: 1px solid white;
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 12px;
+	background: rgba(0, 0, 0, 0.24);
+	overflow: hidden;
 }
 .zoomable-canvas-container {
 	overflow: hidden;

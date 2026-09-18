@@ -1,59 +1,86 @@
 <template>
-<div class="page-layout">
-	<div class="card">
-		<h3>Select Quality Threshold</h3>
-		<p>Drag the slider to choose how many frames to include in the stack.</p>
-		<p>Frames are sorted from sharpest (left) to blurriest (right).</p>
+	<div class="page-layout pp-layout">
+		<div class="panel">
+			<div class="panel-section">
+				<h3 class="panel-label">Quality threshold</h3>
+				<p class="panel-sub">Frames are sorted sharpest to blurriest. Choose how many of the best ones go into the stack.</p>
 
-		<div class="threshold-controls">
-			<label>
-				<strong>Include top:</strong>
-				<input type="range" min="1" :max="totalFrames" v-model.number="selectedCount" @input="updateThreshold" :key="'slider-' + totalFrames" />
-				<span class="threshold-value">{{ selectedCount }} / {{ totalFrames }} frames ({{ percentageText }})</span>
-			</label>
-		</div>
+				<div class="threshold-readout">
+					<span class="threshold-count">{{ selectedCount }}</span>
+					<span class="threshold-total">/ {{ totalFrames }} frames</span>
+					<span class="threshold-pct">{{ percentageText }}</span>
+				</div>
 
-		<div class="graph-container">
-			<canvas ref="graphCanvas" @click="onGraphClick" @mousemove="onGraphHover"></canvas>
-			<div class="graph-labels">
-				<span>Best</span>
-				<span>Worst</span>
+				<div class="threshold-controls">
+					<label class="visually-hidden" for="threshold-range">Frames to include</label>
+					<input id="threshold-range" type="range" min="1" :max="totalFrames" v-model.number="selectedCount" @input="updateThreshold" :key="'slider-' + totalFrames" />
+				</div>
+				<div class="graph-labels">
+					<span>SHARPEST</span>
+					<span>BLURRIEST</span>
+				</div>
+
+				<div class="graph-container">
+					<canvas ref="graphCanvas" @click="onGraphClick" @mousemove="onGraphHover"></canvas>
+				</div>
+				<div class="graph-scores">
+					<span>sharpness {{ bestScoreText }}</span>
+					<span>cut at {{ cutScoreText }}</span>
+				</div>
+			</div>
+
+			<div class="panel-section panel-section-flush stack-actions">
+				<button class="stack-btn" @click="proceedWithStacking">Stack {{ selectedCount }} frames</button>
+				<button class="cancel-btn" @click="cancelSelection">Cancel</button>
 			</div>
 		</div>
 
-		<div class="action-buttons">
-			<button class="btn-primary" @click="proceedWithStacking">Stack {{ selectedCount }} frames</button>
+		<div class="content">
+			<div class="preview-section" v-if="previewFrame">
+				<div class="preview-head">
+					<div class="preview-title">
+						<span class="preview-eyebrow">{{ isPlaying ? 'Playing' : 'Preview' }}</span>
+						<span class="preview-frame-no">Frame #{{ previewFrameIndex + 1 }}</span>
+					</div>
+					<span class="verdict" :class="{ included: previewFrameIndex < selectedCount }">
+						{{ previewFrameIndex < selectedCount ? 'Included in stack' : 'Excluded — below threshold' }}
+					</span>
+				</div>
+
+				<div class="preview-stage">
+					<canvas ref="previewCanvas" class="preview-canvas"></canvas>
+				</div>
+
+				<div class="frame-slider">
+					<button class="play-button" @click="togglePlayback" :aria-label="isPlaying ? 'Pause' : 'Play frames'">
+						<svg v-if="isPlaying" width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4.5" width="4" height="15" rx="1" /><rect x="14" y="4.5" width="4" height="15" rx="1" /></svg>
+						<svg v-else width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.2 19 12 8 18.8z" /></svg>
+					</button>
+					<input type="range" min="0" :max="totalFrames - 1" v-model.number="previewFrameIndex" @input="onFrameSliderChange" />
+					<span class="frame-position">{{ previewFrameIndex + 1 }} / {{ totalFrames }}</span>
+				</div>
+
+				<div class="frame-stats-grid">
+					<div class="stat">
+						<div class="stat-label">Sharpness</div>
+						<div class="stat-value">{{ previewFrame.sharpness?.toFixed(2) || '?' }}</div>
+						<div class="stat-sub">Tenengrad {{ previewFrame.tenengrad?.toFixed(2) || '?' }} · Laplacian {{ previewFrame.laplacian?.toFixed(2) || '?' }}</div>
+					</div>
+					<div class="stat">
+						<div class="stat-label">Circularity</div>
+						<div class="stat-value">{{ previewFrame.circularity?.toFixed(2) || '?' }}</div>
+					</div>
+					<div class="stat">
+						<div class="stat-label">Rank</div>
+						<div class="stat-value">{{ previewFrameIndex + 1 }} of {{ totalFrames }}</div>
+					</div>
+				</div>
+			</div>
+			<div v-else class="no-preview">
+				<p>Use the slider or press Play to preview frames</p>
+			</div>
 		</div>
 	</div>
-
-	<div class="content">
-		<div class="preview-section" v-if="previewFrame">
-			<h4>
-				<span v-if="isPlaying">Playing: </span>
-				<span v-else>Preview: </span>
-				Frame #{{ previewFrameIndex + 1 }}
-				<span class="sharpness-badge" :class="{ included: previewFrameIndex < selectedCount }">
-					Sharpness: {{ previewFrame.sharpness?.toFixed(2) || '?' }} (Tenengrad: {{ previewFrame.tenengrad?.toFixed(2) || '?' }}, Laplacian: {{ previewFrame.laplacian?.toFixed(2) || '?' }}) · Circularity: {{ previewFrame.circularity?.toFixed(2) || '?' }}
-					<span v-if="previewFrameIndex < selectedCount">(included)</span>
-					<span v-else>(excluded)</span>
-				</span>
-			</h4>
-			<canvas ref="previewCanvas" class="preview-canvas"></canvas>
-			<div class="frame-slider">
-				<input type="range" min="0" :max="totalFrames - 1" v-model.number="previewFrameIndex" @input="onFrameSliderChange" />
-				<span class="frame-position">{{ previewFrameIndex + 1 }} / {{ totalFrames }}</span>
-			</div>
-			<div class="playback-controls">
-				<button class="play-button" @click="togglePlayback">
-					{{ isPlaying ? '⏸ Pause' : '▶ Play' }}
-				</button>
-			</div>
-		</div>
-		<div v-else class="no-preview">
-			<p>Use the slider or press Play to preview frames</p>
-		</div>
-	</div>
-</div>
 </template>
 
 <script setup>
@@ -92,6 +119,10 @@ const percentageText = computed(() => {
 	if (totalFrames.value === 0) return '0%';
 	return Math.round((selectedCount.value / totalFrames.value) * 100) + '%';
 });
+
+// Sharpness at the top of the sorted list and at the cut, shown under the graph.
+const bestScoreText = computed(() => sortedFrames.value[0]?.sharpness?.toFixed(1) ?? '-');
+const cutScoreText = computed(() => sortedFrames.value[selectedCount.value - 1]?.sharpness?.toFixed(1) ?? '-');
 
 onMounted(() => {
 	if (props.frames && props.frames.length > 0) {
@@ -136,16 +167,15 @@ function drawGraph() {
 
 	// Set canvas size
 	const width = canvas.parentElement.clientWidth || 400;
-	const height = 150;
+	const height = 128;
 	canvas.width = width * dpr;
 	canvas.height = height * dpr;
 	canvas.style.width = width + 'px';
 	canvas.style.height = height + 'px';
 	ctx.scale(dpr, dpr);
 
-	// Clear
-	ctx.fillStyle = '#f5f5f5';
-	ctx.fillRect(0, 0, width, height);
+	// Clear. The container paints the dark plot background, so stay transparent.
+	ctx.clearRect(0, 0, width, height);
 
 	// Find min/max sharpness for scaling
 	const sharpnessValues = sortedFrames.value.map(f => f.sharpness);
@@ -153,7 +183,7 @@ function drawGraph() {
 	const minSharpness = Math.min(...sharpnessValues);
 	const range = maxSharpness - minSharpness || 1;
 
-	const padding = { left: 10, right: 10, top: 10, bottom: 25 };
+	const padding = { left: 0, right: 0, top: 8, bottom: 0 };
 	const graphWidth = width - padding.left - padding.right;
 	const graphHeight = height - padding.top - padding.bottom;
 
@@ -170,9 +200,9 @@ function drawGraph() {
 
 		// Color based on whether included in selection
 		if (i < selectedCount.value) {
-			ctx.fillStyle = '#8CCF7E'; // Green for included
+			ctx.fillStyle = 'rgba(217, 169, 74, 0.55)'; // Gilt for included
 		} else {
-			ctx.fillStyle = '#ccc'; // Gray for excluded
+			ctx.fillStyle = 'rgba(255, 255, 255, 0.09)'; // Faint for excluded
 		}
 
 		ctx.fillRect(x, y, Math.max(barWidth - 0.5, 1), barHeight);
@@ -180,9 +210,9 @@ function drawGraph() {
 
 	// Draw threshold line (orange dashed)
 	const thresholdX = padding.left + (selectedCount.value / sortedFrames.value.length) * graphWidth;
-	ctx.strokeStyle = '#ff5722';
-	ctx.lineWidth = 2;
-	ctx.setLineDash([5, 3]);
+	ctx.strokeStyle = '#eec36c';
+	ctx.lineWidth = 1.5;
+	ctx.setLineDash([]);
 	ctx.beginPath();
 	ctx.moveTo(thresholdX, padding.top);
 	ctx.lineTo(thresholdX, height - padding.bottom);
@@ -192,8 +222,8 @@ function drawGraph() {
 	// Draw play position indicator (yellow/gold, only when playing)
 	if (isPlaying.value) {
 		const playX = padding.left + ((playIndex.value + 0.5) / sortedFrames.value.length) * graphWidth;
-		ctx.strokeStyle = '#FFC107';
-		ctx.lineWidth = 3;
+		ctx.strokeStyle = '#ffffff';
+		ctx.lineWidth = 2;
 		ctx.beginPath();
 		ctx.moveTo(playX, padding.top);
 		ctx.lineTo(playX, height - padding.bottom);
@@ -204,8 +234,8 @@ function drawGraph() {
 	// Canvas 2D can't read CSS vars, so this hex must match html's --eise-on-dark.
 	if (!isPlaying.value) {
 		const previewX = padding.left + ((previewFrameIndex.value + 0.5) / sortedFrames.value.length) * graphWidth;
-		ctx.strokeStyle = '#c2d6db';
-		ctx.lineWidth = 2;
+		ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+		ctx.lineWidth = 1.5;
 		ctx.beginPath();
 		ctx.moveTo(previewX, padding.top);
 		ctx.lineTo(previewX, height - padding.bottom);
@@ -396,6 +426,13 @@ function stopPlayback() {
 	drawGraph();
 }
 
+// Abandon the run and go back to the home state. A reload is what the other
+// start-over paths do: it also frees the analysed frames and workers.
+function cancelSelection() {
+	stopPlayback();
+	window.location.href = '/';
+}
+
 function proceedWithStacking() {
 	// Stop playback before stacking
 	stopPlayback();
@@ -412,137 +449,262 @@ function proceedWithStacking() {
 </script>
 
 <style scoped>
-.threshold-controls {
-	margin: 15px 0;
+.threshold-readout {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	margin-bottom: 4px;
 }
-
+.threshold-count {
+	font-family: var(--eise-mono);
+	font-size: 26px;
+	font-weight: 500;
+	letter-spacing: -0.02em;
+	color: var(--eise-gilt-lt);
+}
+.threshold-total,
+.threshold-pct {
+	font-family: var(--eise-mono);
+	font-size: 13px;
+	color: #8fa9b1;
+}
+.threshold-pct {
+	margin-left: auto;
+}
 .threshold-controls input[type="range"] {
-	width: 200px;
-	margin: 0 10px;
-}
-
-.threshold-value {
-	font-weight: bold;
-	color: #8CCF7E;
-}
-
-.graph-container {
-	margin: 20px 0;
-	background: #f5f5f5;
-	border-radius: 5px;
-	padding: 10px;
-}
-
-.graph-container canvas {
 	width: 100%;
-	cursor: crosshair;
-	border-radius: 3px;
+	margin: 6px 0 4px;
 }
-
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+	border: 0;
+}
 .graph-labels {
 	display: flex;
 	justify-content: space-between;
-	font-size: 11px;
-	color: #666;
-	margin-top: 5px;
+	font-family: var(--eise-mono);
+	font-size: 10.5px;
+	letter-spacing: 0.05em;
+	color: var(--eise-label);
 }
-
-.playback-controls {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	gap: 15px;
-	margin-top: 20px;
-}
-
-.play-button {
-	background-color: #27587c;
-	color: white;
-	padding: 8px 16px;
-	border: none;
-	border-radius: 5px;
-	cursor: pointer;
-	font-size: 14px;
-}
-
-.play-button:hover {
-	background-color: #1D4A66;
-}
-
-.play-status {
-	color: #666;
-	font-size: 13px;
-}
-
-.content {
-	max-width: none;
-	padding: 20px;
-}
-
-.preview-section {
-	padding: 20px 0;
+.graph-container {
+	position: relative;
+	height: 128px;
+	margin-top: 16px;
+	border-radius: 8px;
+	background: rgba(0, 0, 0, 0.22);
+	border: 1px solid rgba(255, 255, 255, 0.09);
 	overflow: hidden;
 }
-
-.preview-section h4 {
-	margin: 0 0 15px 0;
+.graph-container canvas {
+	display: block;
+	width: 100%;
+	cursor: crosshair;
+}
+.graph-scores {
+	display: flex;
+	justify-content: space-between;
+	margin-top: 7px;
+	font-family: var(--eise-mono);
+	font-size: 10.5px;
+	color: var(--eise-label);
+}
+/* Own class, not .action-buttons: that global rule is a flex row. */
+.stack-actions {
+	padding-top: 0;
+	padding-bottom: 22px;
+}
+.stack-btn {
+	width: 100%;
+	padding: 11px 16px;
+	border: none;
+	border-radius: 7px;
+	background: var(--eise-gilt);
+	color: var(--eise-panel);
+	font: inherit;
 	font-size: 14px;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background 120ms ease;
+}
+.stack-btn:hover {
+	background: #f3d290;
+	color: var(--eise-panel);
+}
+.cancel-btn {
+	width: 100%;
+	margin-top: 10px;
+	padding: 10px 16px;
+	border-radius: 7px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	color: #f0d6d6;
+	font: inherit;
+	font-size: 13.5px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+.cancel-btn:hover {
+	background: rgba(196, 92, 84, 0.22);
+	border-color: rgba(226, 120, 110, 0.6);
+	color: #ffdcd6;
+}
+
+/* Preview column */
+.content {
+	max-width: 900px;
+	padding: 0;
+}
+.preview-head {
 	display: flex;
 	align-items: center;
-	gap: 10px;
+	justify-content: space-between;
+	gap: 16px;
 	flex-wrap: wrap;
-	color: var(--eise-on-dark);
+	margin-bottom: 12px;
 }
-
-.sharpness-badge {
-	font-size: 12px;
-	padding: 3px 8px;
-	background: #eee;
-	border-radius: 4px;
-	color: #666;
+.preview-title {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
 }
-
-.sharpness-badge.included {
-	background: #e8f5e9;
-	color: #2e7d32;
+.preview-eyebrow {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--eise-label);
 }
-
+.preview-frame-no {
+	font-family: var(--eise-mono);
+	font-size: 13px;
+	color: var(--eise-bright);
+}
+/* Verdict pill: whether this frame makes the cut. */
+.verdict {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	padding: 4px 11px;
+	border-radius: 999px;
+	font-size: 12.5px;
+	font-weight: 500;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	color: #8fa9b1;
+}
+.verdict.included {
+	background: rgba(122, 178, 142, 0.14);
+	border-color: rgba(122, 178, 142, 0.42);
+	color: #a8dcb9;
+}
+/* Holds the design's 4:3 box, so the column keeps its shape while a frame is
+   still decoding instead of collapsing to a black strip. */
+.preview-stage {
+	display: grid;
+	place-items: center;
+	width: 100%;
+	aspect-ratio: 4 / 3;
+	max-height: 68vh;
+	background: #000000;
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	border-radius: 10px;
+	overflow: hidden;
+	box-shadow: 0 12px 44px rgba(0, 0, 0, 0.45);
+}
 .preview-canvas {
 	display: block;
-	margin: 0 auto;
-	border: 1px solid #ddd;
-	border-radius: 5px;
 	max-width: 100%;
+	max-height: 100%;
 }
-
 .frame-slider {
 	display: flex;
 	align-items: center;
-	justify-content: center;
-	gap: 10px;
-	margin-top: 15px;
+	gap: 14px;
+	margin-top: 14px;
 }
-
 .frame-slider input[type="range"] {
-	width: 300px;
-	max-width: 80%;
+	flex: 1;
+	min-width: 0;
+	height: 4px;
+	accent-color: var(--eise-gilt);
 }
-
+.play-button {
+	flex: 0 0 auto;
+	width: 38px;
+	height: 38px;
+	display: grid;
+	place-items: center;
+	padding: 0;
+	border-radius: 50%;
+	background: rgba(255, 255, 255, 0.07);
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	color: var(--eise-gilt-lt);
+	cursor: pointer;
+}
+.play-button:hover {
+	background: rgba(217, 169, 74, 0.18);
+	border-color: rgba(217, 169, 74, 0.5);
+	color: var(--eise-gilt-lt);
+}
 .frame-position {
-	font-size: 13px;
-	color: var(--eise-on-dark);
-	min-width: 70px;
+	flex: 0 0 auto;
+	font-family: var(--eise-mono);
+	font-size: 12.5px;
+	color: #8fa9b1;
 }
-
+.frame-stats-grid {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 1px 20px;
+	margin-top: 22px;
+	border-top: 1px solid var(--eise-panel-line);
+}
+.stat {
+	padding: 13px 0;
+	border-bottom: 1px solid var(--eise-panel-line);
+	min-width: 0;
+}
+.stat-label {
+	margin-bottom: 4px;
+	font-size: 11px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--eise-label);
+}
+.stat-value {
+	font-family: var(--eise-mono);
+	font-size: 15px;
+	color: var(--eise-bright);
+}
+.stat-sub {
+	margin-top: 4px;
+	font-family: var(--eise-mono);
+	font-size: 10.5px;
+	color: var(--eise-muted);
+}
 .no-preview {
-	padding: 40px;
-	text-align: center;
-	color: var(--eise-on-dark);
+	display: grid;
+	place-items: center;
+	width: 100%;
+	aspect-ratio: 4 / 3;
+	border: 1px dashed rgba(255, 255, 255, 0.18);
+	border-radius: 10px;
+	background: rgba(0, 0, 0, 0.16);
+	color: #6b8792;
+	font-size: 13px;
 }
-
-.action-buttons {
-	margin-top: 20px;
-	text-align: center;
+@media (max-width: 560px) {
+	.frame-stats-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
 }
-
 </style>

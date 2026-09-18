@@ -1,8 +1,25 @@
 <template>
-	<div>
+	<div class="app-shell">
+		<!-- Decorative orrery rings from the design. Behind everything, ignores
+		     pointer events, clipped by .app-shell so it cannot cause h-scroll. -->
+		<svg class="orbit-decor" viewBox="0 0 900 900" aria-hidden="true" focusable="false">
+			<g fill="none" stroke="#d9a94a" stroke-opacity="0.34">
+				<circle cx="450" cy="450" r="418" stroke-width="1.2" />
+				<circle cx="450" cy="450" r="404" stroke-width="7" stroke-opacity="0.1" stroke-dasharray="3 9" />
+				<circle cx="450" cy="450" r="330" stroke-width="1.2" />
+				<circle cx="450" cy="450" r="318" stroke-width="6" stroke-opacity="0.1" stroke-dasharray="3 9" />
+				<circle cx="450" cy="450" r="242" stroke-width="1.2" />
+				<circle cx="450" cy="450" r="166" stroke-width="1.2" />
+				<circle cx="450" cy="450" r="96" stroke-width="1.2" />
+				<g stroke-opacity="0.13" stroke-width="1">
+					<path d="M450 32v836M32 450h836M154 154l592 592M746 154L154 746" />
+				</g>
+			</g>
+		</svg>
+
 		<header class="eise-header">
 			<div class="eise-brand">
-				<NuxtLink to="/" class="eise-wordmark">Eise.app</NuxtLink>
+				<NuxtLink to="/" class="eise-wordmark" @click="onWordmarkClick">Eise.app</NuxtLink>
 				<span class="eise-tagline">Easy Image Stacker Engine</span>
 				<span
 					v-if="showStackCounter"
@@ -51,7 +68,9 @@
 			</nav>
 		</header>
 
-		<slot />
+		<div class="app-content">
+			<slot />
+		</div>
 
 		<div class="clearb"></div>
 
@@ -117,11 +136,13 @@
 						</ul>
 					</div>
 				</div>
-				<p class="site-footer-copy">
-					Eise.app - Free browser-based planetary image stacker.
-					Named after <a href="https://en.wikipedia.org/wiki/Eise_Eisinga" target="_blank" rel="noopener">Eise Eisinga</a>.
+				<div class="site-footer-bottom">
+					<p class="site-footer-copy">
+						Eise.app - Free browser-based planetary image stacker.
+						Named after <a href="https://en.wikipedia.org/wiki/Eise_Eisinga" target="_blank" rel="noopener">Eise Eisinga</a>.
+					</p>
 					<span v-if="buildDate" class="site-footer-release">Latest release: {{ buildDate }}</span>
-				</p>
+				</div>
 			</div>
 		</footer>
 
@@ -135,6 +156,23 @@ import { useFeedback } from '@/composables/useFeedback';
 import { getVariant } from '@/composables/useAbTest';
 
 const route = useRoute();
+
+// The wordmark is a plain link to /, but on the stack page itself that is a
+// no-op - so mid-run (analyzing, picking a threshold, stacking) it would look
+// dead. Reload instead, which is how "Start over" gets back to a clean home
+// state elsewhere in the app.
+const isProcessing = inject('isProcessing', null);
+const isSelectingQuality = inject('isSelectingQuality', null);
+const isSelectingColorProfile = inject('isSelectingColorProfile', null);
+const isShowingContinuousResults = inject('isShowingContinuousResults', null);
+function onWordmarkClick(event) {
+	const busy = [isProcessing, isSelectingQuality, isSelectingColorProfile, isShowingContinuousResults]
+		.some((flag) => flag && flag.value);
+	if (route.path === '/' && busy) {
+		event.preventDefault();
+		window.location.reload();
+	}
+}
 const menuOpen = ref(false);
 const hamburgerRef = ref(null);
 const { openFeedback } = useFeedback();
@@ -245,6 +283,31 @@ watch(() => route.path, () => {
 </script>
 
 <style scoped>
+.app-shell {
+	position: relative;
+	overflow-x: clip;
+}
+/* Sits behind the page; the header (z-index 20) and content stay above it. */
+.orbit-decor {
+	position: absolute;
+	top: -260px;
+	right: -300px;
+	width: 900px;
+	height: 900px;
+	z-index: 0;
+	opacity: 0.42;
+	pointer-events: none;
+}
+.app-content {
+	position: relative;
+	z-index: 1;
+}
+@media (max-width: 700px) {
+	.orbit-decor {
+		top: -320px;
+		right: -420px;
+	}
+}
 .eise-header {
 	position: sticky;
 	top: 0;
@@ -527,9 +590,9 @@ watch(() => route.path, () => {
 
 .site-footer {
 	margin-top: 40px;
-	padding: 32px 20px 24px;
-	background: rgba(0, 0, 0, 0.25);
-	border-top: 1px solid rgba(255, 255, 255, 0.08);
+	padding: 44px 28px 28px;
+	background: rgba(4, 28, 36, 0.5);
+	border-top: 1px solid rgba(255, 255, 255, 0.09);
 	color: rgba(var(--eise-on-dark-rgb), 0.75);
 	font-size: 13px;
 	line-height: 1.6;
@@ -540,22 +603,22 @@ watch(() => route.path, () => {
 	margin-bottom: 60px;
 }
 .site-footer-inner {
-	max-width: 1100px;
+	max-width: 1560px;
 	margin: 0 auto;
 }
 .site-footer-cols {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-	gap: 24px 32px;
-	margin-bottom: 24px;
+	gap: 36px 40px;
 }
 .site-footer-col h4 {
-	margin: 0 0 10px;
-	font-size: 12px;
-	font-weight: 600;
+	margin: 0 0 11px;
+	font-family: var(--eise-mono);
+	font-size: 10.5px;
+	font-weight: 500;
 	text-transform: uppercase;
-	letter-spacing: 0.05em;
-	color: rgba(var(--eise-on-dark-rgb), 0.5);
+	letter-spacing: 0.12em;
+	color: var(--eise-gilt);
 }
 .site-footer-col ul {
 	list-style: none;
@@ -563,45 +626,54 @@ watch(() => route.path, () => {
 	margin: 0;
 }
 .site-footer-col li {
-	margin: 4px 0;
+	margin: 0 0 11px;
 }
 .site-footer-col a {
-	color: #8CCF7E;
+	font-size: 14px;
+	color: var(--eise-on-dark);
 	text-decoration: none;
+	border: none;
 }
 .site-footer-col a:hover {
-	text-decoration: underline;
+	color: #ffffff;
+	text-decoration: none;
+}
+/* Colophon row: credit left, release stamp right. */
+.site-footer-bottom {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 20px;
+	flex-wrap: wrap;
+	margin-top: 40px;
+	padding-top: 20px;
+	border-top: 1px solid rgba(255, 255, 255, 0.09);
 }
 .site-footer-copy {
 	margin: 0;
-	padding-top: 16px;
-	border-top: 1px solid rgba(255, 255, 255, 0.06);
-	font-size: 12px;
-	color: rgba(var(--eise-on-dark-rgb), 0.55);
+	font-size: 13px;
+	line-height: 1.6;
+	color: #8aa3ab;
 }
 .site-footer-copy a {
-	color: rgba(var(--eise-on-dark-rgb), 0.75);
-	text-decoration: underline;
+	color: #8aa3ab;
+	text-decoration: none;
+	border-bottom: 1px solid rgba(217, 169, 74, 0.45);
+}
+.site-footer-copy a:hover {
+	color: var(--eise-gilt-lt);
+	border-bottom-color: var(--eise-gilt-lt);
 }
 .site-footer-release {
-	display: inline-block;
-	margin-left: 8px;
-	padding-left: 8px;
-	border-left: 1px solid rgba(255, 255, 255, 0.15);
-	color: rgba(var(--eise-on-dark-rgb), 0.45);
+	font-family: var(--eise-mono);
+	font-size: 12px;
+	letter-spacing: 0.02em;
+	color: var(--eise-muted);
 }
-@media (max-width: 700px) {
-	.site-footer-release {
-		display: block;
-		margin-left: 0;
-		padding-left: 0;
-		border-left: 0;
-		margin-top: 4px;
-	}
-}
+
 @media (max-width: 700px) {
 	.site-footer {
-		padding: 24px 16px 20px;
+		padding: 32px 16px 20px;
 	}
 	.site-footer-cols {
 		gap: 20px 24px;

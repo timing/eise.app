@@ -855,6 +855,16 @@ html {
 	--eise-on-dark:  #c2d6db;
 	--eise-on-dark-rgb: 194, 214, 219;
 	--eise-muted:    #7e9aa2;
+	/* Panel surface (stack page + post processor settings column). */
+	--eise-panel:        #11323f;
+	--eise-panel-border: rgba(255, 255, 255, 0.14);
+	--eise-panel-line:   rgba(255, 255, 255, 0.08);
+	--eise-label:        #68808f;
+	--eise-muted-2:      #97b1b8;
+	--eise-body:         #bdd2d8;
+	--eise-bright:       #eef5f7;
+	--eise-link:         #8fcfe0;
+	--eise-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 html,body {
 	padding: 0;
@@ -868,8 +878,12 @@ html,body {
 	min-height: 100%;
 }
 html {
-	background: radial-gradient(circle at bottom, #27587c, #0A2940);
-	/*background: radial-gradient(1200px 600px at 78% -10%, rgb(43, 122, 149) 0%, rgba(43, 122, 149, 0) 60%), linear-gradient(rgb(15, 67, 86) 0%, rgb(9, 52, 66) 100%);*/
+	/* Page ground, straight from the design: a teal top-right glow over a
+	   vertical teal ramp. Values are the --eise-teal-* tokens above. */
+	background-color: var(--eise-teal-900);
+	background-image:
+		radial-gradient(1200px 600px at 78% -10%, var(--eise-teal-600) 0%, rgba(43, 122, 149, 0) 60%),
+		linear-gradient(180deg, var(--eise-teal-800) 0%, var(--eise-teal-900) 100%);
 }
 .content a:not(.btn-primary):not(.btn-secondary):not(.btn-danger),
 .content a:visited:not(.btn-primary):not(.btn-secondary):not(.btn-danger) {
@@ -939,6 +953,67 @@ button:hover, a.button:hover {
 	.page-layout .content {
 		width: auto;
 		min-width: 0;
+	}
+}
+/* Two-column app layout: sticky settings panel + work area. Used by the stack
+   page (.stack-layout) and the post processor (.pp-layout); they differ only
+   in how wide the panel column is allowed to get. */
+.page-layout.stack-layout,
+.page-layout.pp-layout {
+	display: grid;
+	grid-template-columns: minmax(340px, 400px) minmax(0, 1fr);
+	align-items: start;
+	gap: 40px;
+	width: 100%;
+	max-width: 1560px;
+	margin: 0 auto;
+	padding: 32px 28px 96px;
+	box-sizing: border-box;
+}
+.page-layout.pp-layout {
+	grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+}
+/* Inline in the page, not sticky: the panel sits at the top of its column,
+   expands to its full height, and scrolls away with the rest of the page. */
+.stack-layout > .panel,
+.pp-layout > .panel {
+	align-self: start;
+}
+.stack-layout > .content,
+.pp-layout > .content {
+	width: auto;
+	min-width: 0;
+	padding: 0;
+}
+.stack-layout > .content {
+	max-width: 780px;
+}
+/* 1120 is the design's "md" breakpoint (where the header starts dropping
+   items); the panel narrows there and only stacks once two columns stop
+   working at all, at 760. */
+@media (max-width: 1120px) {
+	.page-layout.stack-layout,
+	.page-layout.pp-layout {
+		grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+		gap: 28px;
+		padding: 28px 20px 80px;
+	}
+}
+@media (max-width: 760px) {
+	.page-layout.stack-layout,
+	.page-layout.pp-layout {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 28px;
+		padding: 20px 16px 64px;
+	}
+	.stack-layout > .panel,
+	.pp-layout > .panel {
+		position: static;
+		/* Stacked above the content: keep the panel a panel, not a banner. */
+		width: 100%;
+		max-width: 420px;
+		max-height: none;
+		overflow-y: visible;
 	}
 }
 .content {
@@ -1101,6 +1176,303 @@ canvas {
 	background: #eee;
 	color: #999;
 }
+
+/* ============================================================
+   Panel: the dark settings surface used by the stack page and
+   the post processor (replaces the white `.card` on those two).
+   Every control inside a .panel picks up the dark treatment
+   automatically, so components only need structural classes.
+   ============================================================ */
+.panel {
+	background: var(--eise-panel);
+	color: var(--eise-body);
+	border: 1px solid var(--eise-panel-border);
+	border-radius: 12px;
+	box-shadow: 0 8px 28px rgba(3, 11, 20, 0.32);
+	box-sizing: border-box;
+}
+.panel-section {
+	padding: 20px 22px;
+}
+/* Hairline BETWEEN sections only. Deliberately not `:first-child` + border-top:
+   a non-section sibling (the absolutely positioned processing spinner) would
+   then push the first section out of :first-child mid-render, popping a border
+   in and shifting the whole panel by a pixel. */
+.panel-section + .panel-section {
+	border-top: 1px solid var(--eise-panel-line);
+}
+/* Content that continues the section above it (e.g. expanded Advanced). */
+.panel-section.panel-section-flush,
+.panel-section + .panel-section.panel-section-flush {
+	border-top: none;
+	padding-top: 4px;
+}
+/* Section caption. Also used on h3/h4 so the heading outline survives. */
+.panel-label {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	margin: 0 0 12px;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--eise-label);
+}
+.panel-title {
+	margin: 0 0 3px;
+	font-size: 14px;
+	font-weight: 600;
+	letter-spacing: -0.005em;
+	color: var(--eise-bright);
+}
+.panel-sub {
+	margin: 0 0 16px;
+	font-size: 12.5px;
+	line-height: 1.5;
+	color: var(--eise-muted-2);
+}
+.panel-note {
+	font-size: 12.5px;
+	line-height: 1.5;
+	color: var(--eise-muted-2);
+}
+.panel-mono {
+	font-family: var(--eise-mono);
+	font-size: 10.5px;
+	letter-spacing: 0.05em;
+	color: var(--eise-muted-2);
+}
+
+/* Option rows: radio/checkbox choices rendered as selectable tiles. */
+.opt-group {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.opt-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 9px 11px;
+	border-radius: 7px;
+	border: 1px solid rgba(255, 255, 255, 0.09);
+	background: rgba(255, 255, 255, 0.04);
+	color: var(--eise-body);
+	font-size: 13.5px;
+	line-height: 1.35;
+	cursor: pointer;
+	transition: background 110ms ease, border-color 110ms ease;
+}
+.opt-row:hover {
+	background: rgba(255, 255, 255, 0.07);
+}
+.opt-row:has(input:checked) {
+	border-color: rgba(217, 169, 74, 0.45);
+	background: rgba(217, 169, 74, 0.14);
+	color: #f4fafb;
+}
+/* Pill badge for "new", "beta" markers inside option rows. */
+.opt-badge {
+	display: inline-block;
+	margin-left: 8px;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.08);
+	border: 1px solid var(--eise-panel-border);
+	font-family: var(--eise-mono);
+	font-size: 10px;
+	font-weight: normal;
+	letter-spacing: 0.04em;
+	color: #9ab3ba;
+	vertical-align: middle;
+}
+.opt-badge.gilt {
+	background: rgba(217, 169, 74, 0.14);
+	border-color: rgba(217, 169, 74, 0.3);
+	color: var(--eise-gilt-lt);
+}
+
+/* Form controls inside a panel. */
+.panel input[type="radio"] {
+	appearance: none;
+	-webkit-appearance: none;
+	flex: 0 0 auto;
+	width: 13px;
+	height: 13px;
+	margin: 0;
+	box-sizing: border-box;
+	border: 1.5px solid rgba(255, 255, 255, 0.3);
+	border-radius: 50%;
+	background: transparent;
+	cursor: pointer;
+}
+.panel input[type="radio"]:checked {
+	border: 4px solid var(--eise-gilt);
+	background: var(--eise-panel);
+}
+.panel input[type="checkbox"] {
+	flex: 0 0 auto;
+	width: 15px;
+	height: 15px;
+	margin: 0;
+	accent-color: var(--eise-gilt);
+	cursor: pointer;
+}
+.panel input[type="range"] {
+	width: 100%;
+	height: 4px;
+	accent-color: var(--eise-gilt);
+	cursor: pointer;
+}
+.panel input[type="number"],
+.panel input[type="text"],
+.panel .number-input {
+	width: 66px;
+	padding: 4px 7px;
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid var(--eise-panel-border);
+	border-radius: 5px;
+	color: var(--eise-bright);
+	font-family: var(--eise-mono);
+	font-size: 12px;
+	text-align: right;
+}
+.panel input[type="number"]:disabled,
+.panel .number-input:disabled {
+	background: rgba(255, 255, 255, 0.02);
+	color: var(--eise-label);
+}
+.panel label {
+	cursor: pointer;
+}
+/* Checkbox/label line that is not a full option tile. */
+.panel-check {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font-size: 13.5px;
+	color: var(--eise-body);
+	cursor: pointer;
+}
+/* label | control | value readout */
+.slider-row {
+	display: grid;
+	grid-template-columns: 74px 1fr 42px;
+	align-items: center;
+	gap: 10px 12px;
+}
+.slider-row > label,
+.slider-row > .slider-label {
+	font-size: 13px;
+	color: var(--eise-body);
+}
+.panel-value {
+	font-family: var(--eise-mono);
+	font-size: 12px;
+	color: var(--eise-bright);
+	text-align: right;
+}
+
+/* Neutral button on the dark panel. */
+.panel-btn {
+	padding: 9px 12px;
+	border-radius: 7px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid var(--eise-panel-border);
+	color: #dfeaed;
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+	transition: background 120ms ease;
+}
+.panel-btn:hover {
+	background: rgba(255, 255, 255, 0.11);
+	color: #ffffff;
+}
+.panel-btn.gilt {
+	background: var(--eise-gilt);
+	border-color: transparent;
+	color: var(--eise-ink);
+	font-weight: 600;
+}
+.panel-btn.gilt:hover {
+	background: #f3d290;
+	color: var(--eise-ink);
+}
+
+/* Segmented control (sharpening method picker). */
+.seg-group {
+	display: flex;
+	gap: 4px;
+	padding: 3px;
+	border-radius: 8px;
+	background: rgba(0, 0, 0, 0.2);
+	border: 1px solid rgba(255, 255, 255, 0.09);
+}
+.seg-btn {
+	flex: 1 1 auto;
+	padding: 7px 10px;
+	border: none;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--eise-body);
+	font: inherit;
+	font-size: 13px;
+	cursor: pointer;
+}
+.seg-btn:hover {
+	background: rgba(255, 255, 255, 0.07);
+	color: #ffffff;
+}
+.seg-btn.active,
+.seg-btn.active:hover {
+	background: var(--eise-gilt);
+	color: var(--eise-ink);
+	font-weight: 600;
+}
+
+/* Dashed file drop target. */
+.drop-zone {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	text-align: center;
+	padding: 28px 18px;
+	border-radius: 8px;
+	border: 1px dashed rgba(255, 255, 255, 0.22);
+	background: rgba(0, 0, 0, 0.16);
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+.drop-zone:hover,
+.drop-zone.is-hover {
+	border-color: var(--eise-gilt);
+	background: rgba(217, 169, 74, 0.1);
+}
+
+/* Inline help text revealed by the ⓘ icons. */
+.panel .info-icon {
+	color: var(--eise-label);
+}
+.panel .info-icon:hover {
+	color: var(--eise-on-dark);
+}
+.panel .info-text {
+	margin-top: 10px;
+	padding: 10px 12px;
+	border-radius: 6px;
+	background: rgba(0, 0, 0, 0.2);
+	border: 1px solid var(--eise-panel-line);
+	font-size: 12.5px;
+	line-height: 1.55;
+	color: var(--eise-muted-2);
+}
+.panel .info-text strong {
+	color: var(--eise-body);
+}
+
 /* Primary action button (green) */
 .btn-primary {
 	display: inline-block;

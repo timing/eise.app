@@ -1,30 +1,34 @@
 <template>
-	<div class="page-layout">
-		<div class="card">
-			<h3>Select Color Profile</h3>
-			<p>Your SER file contains raw Bayer data that needs to be converted to color.</p>
-			<p>Click on the thumbnail that shows the <strong>correct colors</strong> for your subject.</p>
-			<p>The auto-detected profile is highlighted with a blue border, but this may not always be correct.</p>
+	<div class="page-layout pp-layout">
+		<div class="panel">
+			<div class="panel-section">
+				<h3 class="panel-title">Select color profile</h3>
+				<p class="panel-sub">Your SER file contains raw Bayer data that needs to be converted to color.</p>
+				<p class="panel-note">Click the thumbnail that shows the <strong>correct colors</strong> for your subject. The auto-detected pattern is marked <span class="opt-badge gilt">auto</span>.</p>
+			</div>
 		</div>
 		<div class="content">
-			<h2>Select Bayer Pattern</h2>
+			<h2 class="section-eyebrow">Select Bayer pattern</h2>
 			<div v-if="!thumbnailsReady" class="loading-thumbnails">
-				<p>Rendering previews...</p>
+				<p>Rendering previews…</p>
 			</div>
 			<div class="thumbnails" :class="{ hidden: !thumbnailsReady }">
-				<div
+				<button
 					v-for="profile in profiles"
 					:key="profile.id"
+					type="button"
 					class="thumbnail-wrapper"
 					:class="{ autodetected: autoDetectedProfile === profile.id }"
 					@click="confirmProfile(profile.id)"
 				>
-					<canvas :ref="el => canvasRefs[profile.id] = el" class="thumbnail-canvas"></canvas>
-					<div class="profile-label">
+					<span class="thumbnail-frame">
+						<canvas :ref="el => canvasRefs[profile.id] = el" class="thumbnail-canvas"></canvas>
+					</span>
+					<span class="profile-label">
 						{{ profile.label }}
-						<span v-if="autoDetectedProfile === profile.id" class="auto-badge">auto</span>
-					</div>
-				</div>
+						<span v-if="autoDetectedProfile === profile.id" class="opt-badge gilt">auto</span>
+					</span>
+				</button>
 			</div>
 		</div>
 	</div>
@@ -308,63 +312,86 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.section-eyebrow {
+	margin: 0 0 16px;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--eise-label);
+}
 .thumbnails {
-	display: flex;
-	gap: 15px;
-	flex-wrap: wrap;
-	margin-top: 20px;
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+	gap: 16px;
+	max-width: 900px;
 }
-
-.thumbnail-wrapper {
-	cursor: pointer;
-	border: 3px solid #ddd;
-	border-radius: 8px;
-	padding: 8px;
-	transition: all 0.2s ease;
-	background: #f9f9f9;
-}
-
-.thumbnail-wrapper:hover {
-	border-color: #8CCF7E;
-	transform: scale(1.02);
-	background: #e8f5e9;
-}
-
-.thumbnail-wrapper.autodetected {
-	border-color: #27587c;
-	border-style: dashed;
-}
-
-.thumbnail-canvas {
-	display: block;
-	border-radius: 4px;
-}
-
-.profile-label {
-	text-align: center;
-	margin-top: 8px;
-	font-weight: bold;
-	font-size: 14px;
-	color: #333;
-}
-
-.auto-badge {
-	background: #27587c;
-	color: white;
-	font-size: 10px;
-	padding: 2px 6px;
-	border-radius: 10px;
-	margin-left: 5px;
-	font-weight: normal;
-}
-
 .thumbnails.hidden {
 	display: none;
 }
-
+/* Each pattern is a picker tile: framed preview + name. */
+.thumbnail-wrapper {
+	display: flex;
+	flex-direction: column;
+	gap: 11px;
+	padding: 10px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 10px;
+	cursor: pointer;
+	transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+.thumbnail-wrapper:hover {
+	background: rgba(255, 255, 255, 0.07);
+	border-color: rgba(217, 169, 74, 0.55);
+	transform: translateY(-2px);
+}
+.thumbnail-wrapper:focus-visible {
+	outline: 2px solid var(--eise-gilt);
+	outline-offset: 2px;
+}
+/* The auto-detected guess, gilt like every other "current choice" in the app. */
+.thumbnail-wrapper.autodetected {
+	border-color: rgba(217, 169, 74, 0.45);
+	background: rgba(217, 169, 74, 0.1);
+}
+.thumbnail-frame {
+	display: grid;
+	place-items: center;
+	width: 100%;
+	aspect-ratio: 1 / 1;
+	background: #030d13;
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 8px;
+	overflow: hidden;
+}
+.thumbnail-canvas {
+	display: block;
+	max-width: 100%;
+	max-height: 100%;
+}
+.profile-label {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	font-size: 13.5px;
+	font-weight: 500;
+	color: var(--eise-bright);
+}
 .loading-thumbnails {
-	text-align: center;
-	padding: 40px;
-	color: #666;
+	display: grid;
+	place-items: center;
+	width: 100%;
+	max-width: 900px;
+	min-height: 220px;
+	border: 1px dashed rgba(255, 255, 255, 0.18);
+	border-radius: 10px;
+	background: rgba(0, 0, 0, 0.16);
+	color: #6b8792;
+	font-size: 13px;
+}
+.loading-thumbnails p {
+	margin: 0;
 }
 </style>

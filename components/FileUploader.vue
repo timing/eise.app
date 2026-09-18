@@ -1,11 +1,11 @@
 <template>
-<div class="page-layout">
-	<div class="card">
+<div class="page-layout stack-layout">
+	<div class="panel">
 		<!-- LoadingIndicator always mounted so it can receive events -->
 		<LoadingIndicator />
 
 		<!-- Status indicators (mobile only) -->
-		<div v-if="isMobileClient" class="status-indicators">
+		<div v-if="isMobileClient" class="status-indicators panel-section">
 			<span class="status-item" :class="{ active: useGPU }">
 				<span class="status-check">{{ useGPU ? '✓' : '✗' }}</span> GPU
 			</span>
@@ -15,13 +15,13 @@
 		</div>
 
 		<!-- Cancel button during processing -->
-		<div v-if="isProcessing" class="action-buttons processing-actions">
+		<div v-if="isProcessing" class="action-buttons processing-actions panel-section">
 			<button class="btn-danger" @click="cancelProcessing">Cancel</button>
 			<p class="processing-hint">Stacking can take a while, but the results are hopefully worth the wait!</p>
 		</div>
 
 		<!-- Error message - always visible when set, regardless of processing state -->
-		<div v-if="errorMessage" class="error-message">
+		<div v-if="errorMessage" class="error-message panel-inset">
 			<p>{{ errorMessage }}</p>
 			<ul v-if="errorAlternatives.length" class="error-alternatives">
 				<li v-for="(alt, i) in errorAlternatives" :key="i">
@@ -37,7 +37,7 @@
 		</div>
 
 		<!-- Cancelled message -->
-		<div v-if="showCancelledMessage" class="cancelled-message">
+		<div v-if="showCancelledMessage" class="cancelled-message panel-inset">
 			<p>Processing cancelled.</p>
 			<p class="feedback-prompt">
 				Was something not working? <a href="https://github.com/timing/eise.app/issues" @click="openCancelFeedback">Let me know</a> so I can improve things.
@@ -55,125 +55,130 @@
 
 		<!-- Initial state: file selection and settings (hidden during processing) -->
 		<template v-if="!isProcessing && !isBatchMode">
-			<h3>Select file(s) for stacking and/or post processing</h3>
-			<div class="file-input-wrapper" :class="{ 'has-files': selectedFiles.length > 0 }">
-				<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser,.dng" multiple @change="onFileChanged" title="" />
-				<label for="file-upload" class="file-label">
-					<template v-if="selectedFiles.length > 0">
-						{{ selectedFilesDescription }}
-					</template>
-					<template v-else>
-						<span class="drop-zone-content">
-							<span class="drop-icon">📂</span>
-							<span class="drop-text">Drag files here</span>
-							<span class="drop-button">Choose files</span>
-							<span class="drop-formats">SER, AVI, MP4, DNG, PNG, TIFF, JPEG</span>
+			<div class="panel-section">
+				<h3 class="panel-title">Select files</h3>
+				<p class="panel-sub">For stacking and post processing.</p>
+				<div class="file-input-wrapper" :class="{ 'has-files': selectedFiles.length > 0 }">
+					<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser,.dng" multiple @change="onFileChanged" title="" />
+					<label for="file-upload" class="file-label drop-zone">
+						<template v-if="selectedFiles.length > 0">
+							{{ selectedFilesDescription }}
+						</template>
+						<template v-else>
+							<svg class="drop-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" />
+								<path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+							</svg>
+							<span class="drop-text">Drop files here</span>
+							<span class="drop-sub">or <span class="drop-browse">browse</span> your computer</span>
+							<span class="drop-formats">SER · AVI · MP4 · DNG · PNG · TIFF</span>
 							<span class="drop-privacy">Nothing is uploaded.</span>
-						</span>
-					</template>
-				</label>
-			</div>
-
-			<p v-if="selectedFiles.length === 0" class="try-sample-line">
-				No footage of your own? <a href="#" @click.prevent="loadSample" :aria-busy="loadingSample" class="try-sample-link">{{ loadingSample ? 'Loading sample…' : 'Try a sample Jupiter clip →' }}</a>
-			</p>
-
-			<div v-if="liteModeClient" class="lite-mode-warning">
-				<b>Stacking on mobile:</b> For best results, use Eise.app on a laptop or desktop computer.
-			</div>
-
-			<!-- Batch choice dialog -->
-			<div v-if="showBatchChoice" class="batch-choice-dialog">
-				<h4>{{ pendingBatchFiles.length }} files selected</h4>
-				<p>How would you like to process them?</p>
-				<div v-if="qualityMode === 'continuous'" class="lite-mode-warning">Continuous stacking is not available in batch mode. Batch files will be stacked using the percentage method instead.</div>
-				<div class="batch-choice-buttons">
-					<button class="btn-primary" @click="processBatchMode">
-						Stack separately (batch)
-						<small>Each file becomes its own stack</small>
-					</button>
-					<button class="btn-secondary" @click="processCombinedMode">
-						Combine into one
-						<small>All frames merged together</small>
-					</button>
+						</template>
+					</label>
 				</div>
-				<button class="btn-text" @click="cancelBatchChoice">Cancel</button>
-			</div>
 
-			<div v-if="selectedFiles.length > 0 && !showBatchChoice && !isBatchMode" class="selected-files">
-				<div v-if="selectedFiles.length > 1" class="selected-file-list">
-					<div
-						v-for="(file, index) in selectedFiles"
-						:key="`${file.name}-${index}`"
-						class="selected-file-item"
-						:class="{ 'is-mismatched': mismatchedFileNames.has(file.name) }"
-					>
-						<span class="file-name" :title="file.name">{{ file.name }}</span>
-						<span class="file-size">{{ formatFileSize(file.size) }}</span>
-						<button
-							class="remove-btn"
-							@click="removeSelectedFile(index)"
-							:title="`Remove ${file.name}`"
-						>&times;</button>
+				<p v-if="selectedFiles.length === 0" class="try-sample-line">
+					<span>No footage of your own?</span>
+					<a href="#" @click.prevent="loadSample" :aria-busy="loadingSample" class="try-sample-link">{{ loadingSample ? 'Loading sample…' : 'Try a sample Jupiter clip →' }}</a>
+				</p>
+
+				<div v-if="liteModeClient" class="lite-mode-warning">
+					<b>Stacking on mobile:</b> For best results, use Eise.app on a laptop or desktop computer.
+				</div>
+
+				<!-- Batch choice dialog -->
+				<div v-if="showBatchChoice" class="batch-choice-dialog">
+					<h4>{{ pendingBatchFiles.length }} files selected</h4>
+					<p>How would you like to process them?</p>
+					<div v-if="qualityMode === 'continuous'" class="lite-mode-warning">Continuous stacking is not available in batch mode. Batch files will be stacked using the percentage method instead.</div>
+					<div class="batch-choice-buttons">
+						<button class="btn-primary" @click="processBatchMode">
+							Stack separately (batch)
+							<small>Each file becomes its own stack</small>
+						</button>
+						<button class="btn-secondary" @click="processCombinedMode">
+							Combine into one
+							<small>All frames merged together</small>
+						</button>
+					</div>
+					<button class="btn-text" @click="cancelBatchChoice">Cancel</button>
+				</div>
+
+				<div v-if="selectedFiles.length > 0 && !showBatchChoice && !isBatchMode" class="selected-files">
+					<div v-if="selectedFiles.length > 1" class="selected-file-list">
+						<div
+							v-for="(file, index) in selectedFiles"
+							:key="`${file.name}-${index}`"
+							class="selected-file-item"
+							:class="{ 'is-mismatched': mismatchedFileNames.has(file.name) }"
+						>
+							<span class="file-name" :title="file.name">{{ file.name }}</span>
+							<span class="file-size">{{ formatFileSize(file.size) }}</span>
+							<button
+								class="remove-btn"
+								@click="removeSelectedFile(index)"
+								:title="`Remove ${file.name}`"
+							>&times;</button>
+						</div>
+					</div>
+
+					<div v-if="showMemoryOptimization" class="memory-optimization-box">
+						<p class="optimization-hint">
+							Memory optimization options:
+						</p>
+						<label class="checkbox-option">
+							<input type="checkbox" v-model="enablePreCrop" />
+							Pre-crop video
+							<span v-if="preCropAutoEnabled" class="auto-badge">auto</span>
+						</label>
+						<label class="checkbox-option">
+							<input type="checkbox" v-model="enableMaxFrames" />
+							Limit to
+							<input type="number" v-model.number="selectedMaxFrames" min="100" max="5000" step="100" class="number-input" :disabled="!enableMaxFrames" />
+							frames
+						</label>
+					</div>
+
+					<div class="action-buttons">
+						<button class="btn-primary" @click="startProcessing">{{ startButtonText }}</button>
+						<button class="btn-secondary" @click="clearSelection">Clear</button>
 					</div>
 				</div>
-
-				<div v-if="showMemoryOptimization" class="memory-optimization-box">
-					<p class="optimization-hint">
-						Memory optimization options:
-					</p>
-					<label class="checkbox-option">
-						<input type="checkbox" v-model="enablePreCrop" />
-						Pre-crop video
-						<span v-if="preCropAutoEnabled" class="auto-badge">auto</span>
-					</label>
-					<label class="checkbox-option">
-						<input type="checkbox" v-model="enableMaxFrames" />
-						Limit to
-						<input type="number" v-model.number="selectedMaxFrames" min="100" max="5000" step="100" class="number-input" :disabled="!enableMaxFrames" />
-						frames
-					</label>
-				</div>
-
-				<div class="action-buttons">
-					<button class="btn-primary" @click="startProcessing">{{ startButtonText }}</button>
-					<button class="btn-secondary" @click="clearSelection">Clear</button>
-				</div>
 			</div>
 
-			<div class="separator"></div>
-
-			<h4>Target <span class="info-icon" @click="showTargetInfo = !showTargetInfo">ⓘ</span></h4>
-			<div class="radio-group">
-				<label class="radio-option">
-					<input type="radio" v-model="targetType" value="planet" />
-					Planet (or Moon fully in frame)
-				</label>
-				<label class="radio-option">
-					<input type="radio" v-model="targetType" value="sun-moon" />
-					Surface: Closeup of Sun or Moon
-				</label>
+			<div class="panel-section">
+				<h4 class="panel-label">Target <span class="info-icon" @click="showTargetInfo = !showTargetInfo">ⓘ</span></h4>
+				<div class="opt-group">
+					<label class="opt-row">
+						<input type="radio" v-model="targetType" value="planet" />
+						<span>Planet (or Moon fully in frame)</span>
+					</label>
+					<label class="opt-row">
+						<input type="radio" v-model="targetType" value="sun-moon" />
+						<span>Surface: Closeup of Sun or Moon</span>
+					</label>
+				</div>
+				<p v-if="showTargetInfo" class="info-text"><strong>Planet:</strong> For full-disk planets or Moon. Rejects frames where the object touches the edge.<br><strong>Surface:</strong> For Moon/Sun closeups. Disables edge detection and uses drift tracking for larger frame-to-frame motion.</p>
 			</div>
-			<p v-if="showTargetInfo" class="info-text"><strong>Planet:</strong> For full-disk planets or Moon. Rejects frames where the object touches the edge.<br><strong>Surface:</strong> For Moon/Sun closeups. Disables edge detection and uses drift tracking for larger frame-to-frame motion.</p>
 
 			<!-- Frame selection hidden in lite mode (defaults to 30%) -->
-			<template v-if="!liteModeClient">
-				<div class="separator"></div>
-
-				<h4>Frame selection <span class="info-icon" @click="showFrameSelectionInfo = !showFrameSelectionInfo">ⓘ</span></h4>
-				<div class="radio-group">
-					<label class="radio-option">
+			<div v-if="!liteModeClient" class="panel-section">
+				<h4 class="panel-label">Frame selection <span class="info-icon" @click="showFrameSelectionInfo = !showFrameSelectionInfo">ⓘ</span></h4>
+				<div class="opt-group">
+					<label class="opt-row">
 						<input type="radio" v-model="qualityMode" value="manual" />
-						Manually pick best frames threshold
+						<span>Manually pick best frames threshold</span>
 					</label>
-					<label class="radio-option">
+					<label class="opt-row">
 						<input type="radio" v-model="qualityMode" value="percentage" />
-						Stack best
-						<input type="number" v-model.number="stackPercentage" min="1" max="100" class="number-input" :disabled="qualityMode !== 'percentage'" />%
+						<span class="opt-inline">Stack best
+							<input type="number" v-model.number="stackPercentage" min="1" max="100" class="number-input" :disabled="qualityMode !== 'percentage'" />
+							<span class="opt-unit">%</span>
+						</span>
 					</label>
-					<label class="radio-option">
+					<label class="opt-row">
 						<input type="radio" v-model="qualityMode" value="continuous" />
-						Continuous stacking (5% to 90%) <b>new</b>
+						<span>Continuous stacking (5% to 90%) <span class="opt-badge gilt">new</span></span>
 					</label>
 				</div>
 				<p v-if="showFrameSelectionInfo" class="info-text">
@@ -181,120 +186,121 @@
 					<strong>Percentage:</strong> Automatically selects the sharpest frames. Recommended if you run into memory issues.<br>
 					<strong>Continuous:</strong> Stacks the same file multiple times, each time using more frames (5%, 10%, 15%, ... up to 90%). Helps you find the sweet spot between detail and noise without trial and error. Not the same as batch processing, which processes multiple files.
 				</p>
-			</template>
+			</div>
 
 			<!-- Advanced toggle -->
-			<div v-if="!liteModeClient" class="advanced-toggle-wrapper">
-				<button type="button" class="advanced-toggle" @click="toggleAdvanced">
-					{{ advancedExpanded ? '− Hide advanced settings' : '+ Advanced settings' }}
+			<div v-if="!liteModeClient" class="advanced-bar">
+				<button type="button" class="advanced-toggle" @click="toggleAdvanced" :aria-expanded="advancedExpanded ? 'true' : 'false'">
+					<span class="panel-label">Advanced</span>
+					<span class="advanced-chevron" :class="{ open: advancedExpanded }">
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+					</span>
 				</button>
 			</div>
 
 			<!-- Advanced options hidden in lite mode -->
 			<template v-if="!liteModeClient && showAdvanced">
-				<div class="separator"></div>
+				<div class="panel-section panel-section-flush">
+					<h4 class="panel-label">Stacking mode <span class="info-icon" @click="showStackingModeInfo = !showStackingModeInfo">ⓘ</span></h4>
+					<div class="opt-group">
+						<label class="opt-row">
+							<input type="radio" v-model="drizzleMethod" value="normal" />
+							<span>Normal (1x)</span>
+						</label>
+						<label class="opt-row">
+							<input type="radio" v-model="drizzleMethod" value="bicubic" />
+							<span>1.5x Bicubic drizzle</span>
+						</label>
+						<label class="opt-row">
+							<input type="radio" v-model="drizzleMethod" value="drizzle" />
+							<span>1.5x Pixfrac drizzle <span class="opt-badge">beta</span></span>
+						</label>
+					</div>
 
-				<h4>Stacking mode <span class="info-icon" @click="showStackingModeInfo = !showStackingModeInfo">ⓘ</span></h4>
-				<div class="radio-group">
-					<label class="radio-option">
-						<input type="radio" v-model="drizzleMethod" value="normal" />
-						Normal (1x)
-					</label>
-					<label class="radio-option">
-						<input type="radio" v-model="drizzleMethod" value="bicubic" />
-						1.5x Bicubic drizzle
-					</label>
-					<label class="radio-option">
-						<input type="radio" v-model="drizzleMethod" value="drizzle" />
-						1.5x Pixfrac drizzle <b>beta</b>
-					</label>
+					<div class="field-grid">
+						<label v-if="drizzleMethod === 'drizzle'" class="field-label" for="pixfrac-input">Pixfrac</label>
+						<input v-if="drizzleMethod === 'drizzle'" id="pixfrac-input" type="number" min="0.3" max="0.95" step="0.05" v-model.number="pixfrac" class="number-input" />
+						<label class="field-label" for="ap-size-input">AP size</label>
+						<input id="ap-size-input" type="number" min="10" max="64" step="2" v-model.number="apPatchSize" class="number-input" />
+						<label class="field-label" for="ap-quality-input">AP quality threshold</label>
+						<input id="ap-quality-input" type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="number-input" />
+					</div>
+					<p v-if="showStackingModeInfo" class="info-text"><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Bicubic drizzle:</strong> 1.5x upscale using bicubic interpolation. Good general-purpose drizzle.<br><strong>Pixfrac drizzle:</strong> True Fruchter &amp; Hook drizzle with area-overlap accumulation. Each input pixel is shrunk by pixfrac before mapping to the output grid. Smaller pixfrac (0.5-0.7) recovers more sub-pixel detail but needs more frames for coverage.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 30 is a safe middle ground.</p>
 				</div>
-				<label v-if="drizzleMethod === 'drizzle'" class="checkbox-option">
-					Pixfrac:
-					<input type="number" min="0.3" max="0.95" step="0.05" v-model.number="pixfrac" class="number-input" />
-				</label>
 
-				<label class="checkbox-option">
-					AP size:
-					<input type="number" min="10" max="64" step="2" v-model.number="apPatchSize" class="number-input" />
-				</label>
-
-				<label class="checkbox-option">
-					AP quality threshold:
-					<input type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="number-input" />
-				</label>
-
-								<p v-if="showStackingModeInfo" class="info-text"><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Bicubic drizzle:</strong> 1.5x upscale using bicubic interpolation. Good general-purpose drizzle.<br><strong>Pixfrac drizzle:</strong> True Fruchter &amp; Hook drizzle with area-overlap accumulation. Each input pixel is shrunk by pixfrac before mapping to the output grid. Smaller pixfrac (0.5-0.7) recovers more sub-pixel detail but needs more frames for coverage.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 30 is a safe middle ground.</p>
-
-				<template v-if="targetType !== 'sun-moon'">
-					<div class="separator"></div>
-
-					<h4>Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
-					<input type="range" min="5" max="200" step="5" v-model="cropMarginPercent" />
-					{{ cropMarginPercent }}%
+				<div v-if="targetType !== 'sun-moon'" class="panel-section">
+					<h4 class="panel-label">Crop margin <span class="info-icon" @click="showCropMarginInfo = !showCropMarginInfo">ⓘ</span></h4>
+					<div class="slider-row">
+						<span class="slider-label">Margin</span>
+						<input type="range" min="5" max="200" step="5" v-model="cropMarginPercent" />
+						<span class="panel-value">{{ cropMarginPercent }}%</span>
+					</div>
 					<p v-if="showCropMarginInfo" class="info-text">Extra space around detected object. Increase for Saturn's rings, decrease for tighter crops.</p>
-				</template>
-
-				</template>
+				</div>
+			</template>
 
 			<!-- Max frames - always visible (important for lite mode) -->
-			<template v-if="!showMemoryOptimization && (showAdvanced || liteModeClient)">
-				<div class="separator"></div>
-				<h4>Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
-				<label>
+			<div v-if="!showMemoryOptimization && (showAdvanced || liteModeClient)" class="panel-section">
+				<h4 class="panel-label">Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
+				<label class="panel-check">
 					<input type="checkbox" v-model="enableMaxFrames" />
 					Limit frames
 				</label>
-				<input type="range" min="2" :max="liteModeClient ? 100 : 5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
-				{{ enableMaxFrames ? selectedMaxFrames : '∞' }}
+				<div class="slider-row">
+					<span class="slider-label">Frames</span>
+					<input type="range" min="2" :max="liteModeClient ? 100 : 5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
+					<span class="panel-value">{{ enableMaxFrames ? selectedMaxFrames : '∞' }}</span>
+				</div>
 				<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
-			</template>
+			</div>
 
 			<!-- Processing backend toggle - only meaningful when GPU is actually available -->
 			<template v-if="useGPU && showAdvanced">
-				<div class="separator"></div>
-				<h4>Processing <span class="info-icon" @click="showProcessingBackendInfo = !showProcessingBackendInfo">ⓘ</span></h4>
-				<div class="radio-group">
-					<label class="radio-option">
-						<input type="radio" v-model="processingBackend" value="gpu" />
-						GPU (fast)
-					</label>
-					<label class="radio-option">
-						<input type="radio" v-model="processingBackend" value="cpu" />
-						CPU (slow)
-					</label>
+				<div class="panel-section">
+					<h4 class="panel-label">Processing <span class="info-icon" @click="showProcessingBackendInfo = !showProcessingBackendInfo">ⓘ</span></h4>
+					<div class="opt-group">
+						<label class="opt-row">
+							<input type="radio" v-model="processingBackend" value="gpu" />
+							<span>GPU (fast)</span>
+						</label>
+						<label class="opt-row">
+							<input type="radio" v-model="processingBackend" value="cpu" />
+							<span>CPU (slow)</span>
+						</label>
+					</div>
+					<p v-if="showProcessingBackendInfo" class="info-text">
+						GPU is much faster and is the default. Only pick CPU if the GPU path produces bad results or crashes on your file. CPU processing can take many minutes even for short clips.
+					</p>
 				</div>
-				<p v-if="showProcessingBackendInfo" class="info-text">
-					GPU is much faster and is the default. Only pick CPU if the GPU path produces bad results or crashes on your file. CPU processing can take many minutes even for short clips.
-				</p>
-			</template>
 
-			<template v-if="useGPU && showAdvanced">
-				<div class="separator"></div>
-				<h4>Crop detection precision <span class="info-icon" @click="showLowResCropDetectInfo = !showLowResCropDetectInfo">ⓘ</span></h4>
-				<label class="checkbox-option">
-					<input type="checkbox" v-model="lowResCropDetectValue" />
-					Low-res crop detection (halves memory needed)
-				</label>
-				<p v-if="showLowResCropDetectInfo" class="info-text">
-					Runs the initial "where's the object" detection at half resolution. The final stack still uses your full-resolution frames — only the detection step is coarser. Turn this on if you see "GPU buffer would exceed device limit" errors on large photos; turn it off if you want the initial detection at full precision. Default is on for mobile devices where per-buffer memory limits are tight.
-				</p>
+				<div class="panel-section">
+					<h4 class="panel-label">Crop detection precision <span class="info-icon" @click="showLowResCropDetectInfo = !showLowResCropDetectInfo">ⓘ</span></h4>
+					<label class="panel-check">
+						<input type="checkbox" v-model="lowResCropDetectValue" />
+						Low-res crop detection (halves memory needed)
+					</label>
+					<p v-if="showLowResCropDetectInfo" class="info-text">
+						Runs the initial "where's the object" detection at half resolution. The final stack still uses your full-resolution frames — only the detection step is coarser. Turn this on if you see "GPU buffer would exceed device limit" errors on large photos; turn it off if you want the initial detection at full precision. Default is on for mobile devices where per-buffer memory limits are tight.
+					</p>
+				</div>
 			</template>
 		</template>
 	</div>
 
 	<!-- Welcome content: only show when not processing -->
-	<div class="content" v-if="!isProcessing">
-		<h2>Welcome to Eise.app</h2>
-		<p class="intro">Eise.app takes your lucky-imaged videos of planets and stacks the sharpest frames to create one sharp image. After stacking the post processor opens and you can sharpen and color correct the image even further. Many video file types are supported, and as long as your video has a planet, the moon or the sun, the stacking will succeed. Runs in your browser, no uploads or signups required.</p>
+	<div class="content home-intro" v-if="!isProcessing">
+		<h1 class="home-title">Welcome to Eise.app</h1>
+		<p class="intro">Eise.app is a free browser-based planetary image stacker for astrophotography. Pick a SER, AVI, or MP4 video of Jupiter, Saturn, Mars, the Moon, or the Sun, and it uses lucky imaging, combining the sharpest frames, to produce a detailed final image. Runs entirely in your browser using WebGPU. No install, no upload, no signup.</p>
 
 		<div class="comparison-images">
 			<figure class="comparison-figure">
 				<img src="/jupiter-singleframe.png" alt="Single frame from video" width="150" height="150" />
 				<figcaption>Single frame</figcaption>
 			</figure>
-			<span class="arrow">&rarr;</span>
-			<figure class="comparison-figure">
+			<span class="arrow" aria-hidden="true">
+				<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13m0 0-5-5m5 5-5 5" /></svg>
+			</span>
+			<figure class="comparison-figure is-result">
 				<img src="/jupiter-stacked.png" alt="Stacked and sharpened result" width="150" height="150" />
 				<figcaption>Stacked + Sharpened</figcaption>
 			</figure>
@@ -303,17 +309,39 @@
 			The example above was shot with a <a href="https://www.astroshop.eu/telescopes/ts-optics-telescope-n-150-750-photon-ota/p,64564?affiliate_id=Eiseapp" target="_blank" rel="noopener sponsored">TS Optics Photon 150/750 Newtonian</a>.
 		</p>
 
-		<div class="how-it-works">
-			<p>Eise.app automatically analyzes, crops, centers, and ranks every frame by sharpness, then aligns and stacks the best ones. After stacking, the post processor opens which allows wavelet sharpening, RGB alignment, and color adjustments.</p>
-			<ul>
-				<li><strong>SER or AVI files</strong> for stacking + post processing. Multiple files open batch mode.</li>
-				<li><strong>Video files</strong> (MP4, MOV, etc.) for stacking + post processing.</li>
-				<li><strong>Image files</strong> (TIFF, PNG, JPG) for stacking, or a single image to go straight to the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</li>
-			</ul>
-			<p><strong>Tip:</strong> For Moon or Sun surface closeups, select "Surface" mode to handle larger frame-to-frame drift.</p>
-		</div>
+		<p class="how-it-works-intro">Under the hood, Eise.app automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. After stacking, the post processor opens for wavelet sharpening, RGB alignment, and color adjustments.</p>
 
-		<h3>More information, bugs and feature requests?</h3>
+		<dl class="spec-rows">
+			<div class="spec-row">
+				<dt>SER or AVI files</dt>
+				<dd>for stacking + post processing. Multiple files open batch mode.</dd>
+			</div>
+			<div class="spec-row">
+				<dt>Video files</dt>
+				<dd>(MP4, MOV, etc.) for stacking + post processing.</dd>
+			</div>
+			<div class="spec-row">
+				<dt>Image files</dt>
+				<dd>(TIFF, PNG, JPG) for stacking, or a single image to go straight to the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</dd>
+			</div>
+		</dl>
+
+		<!-- Featured community stack. Falls back to hidden when the gallery API is unreachable. -->
+		<NuxtLink v-if="featuredStack" to="/gallery/" class="gallery-pick">
+			<span class="gallery-pick-thumb">
+				<img :src="featuredStack.thumb_url" :alt="featuredStack.title || featuredStack.name" loading="lazy" width="128" height="128" />
+			</span>
+			<span class="gallery-pick-body">
+				<span class="gallery-pick-eyebrow">From the gallery</span>
+				<span class="gallery-pick-title">{{ featuredStack.title || 'Untitled' }}</span>
+				<span class="gallery-pick-by">by {{ featuredStack.name }}</span>
+				<span class="gallery-pick-cta">See all community stacks
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13m0 0-5-5m5 5-5 5" /></svg>
+				</span>
+			</span>
+		</NuxtLink>
+
+		<h2 class="home-h2">More information, bugs and feature requests?</h2>
 		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="https://github.com/timing/eise.app/issues" target="_blank" data-no-track @click="onLetMeKnowClick">Let me know!</a>. If you want to support this project, consider to <NuxtLink to="https://buymeacoffee.com/timing" target="_blank">buy me a coffee</NuxtLink>. <br/><br/>Happy stacking,<br/> Tijmen</p>
 
 		<aside class="home-testimonial">
@@ -580,7 +608,23 @@ onMounted(async () => {
 	if (!hadLowResSetting && isMobile.value) {
 		setLowResCropDetect(true);
 	}
+
+	loadFeaturedStack();
 });
+
+// Featured community stack shown next to the welcome copy. The admin picks it
+// in the gallery admin; the API falls back to the newest approved stack when
+// nothing is featured. Best-effort: the block stays hidden when the gallery
+// API is unreachable or has nothing to show.
+const featuredStack = ref(null);
+async function loadFeaturedStack() {
+	try {
+		const res = await fetch('https://gallery.eise.app/featured');
+		if (!res.ok) return;
+		const body = await res.json();
+		featuredStack.value = body?.item || null;
+	} catch {}
+}
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
@@ -2482,5 +2526,447 @@ async function processFiles(files, options = {}) {
 	background: transparent;
 	color: #0d3d6e;
 	border-bottom-color: #0d3d6e;
+}
+
+/* ============================================================
+   Stack page: settings panel + welcome column.
+   Everything below is scoped to .stack-layout / .panel so the
+   light-theme rules above keep working where they are still used.
+   ============================================================ */
+
+/* --- Drop zone --------------------------------------------- */
+.panel .file-input-wrapper {
+	margin-bottom: 0;
+}
+.panel .file-label {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 0;
+	padding: 28px 18px;
+	border: 1px dashed rgba(255, 255, 255, 0.22);
+	border-radius: 8px;
+	background: rgba(0, 0, 0, 0.16);
+	color: var(--eise-bright);
+	text-align: center;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+.panel .file-input-wrapper:hover .file-label,
+.panel .file-label:hover {
+	border-color: var(--eise-gilt);
+	background: rgba(217, 169, 74, 0.1);
+}
+/* With files chosen the zone collapses to a single filename line. */
+.panel .file-input-wrapper.has-files .file-label {
+	padding: 14px 16px;
+	font-size: 13px;
+	border-style: solid;
+	border-color: var(--eise-panel-border);
+}
+.panel .drop-icon {
+	color: #8fa9b0;
+	margin-bottom: 10px;
+}
+.panel .drop-text {
+	font-size: 13.5px;
+	font-weight: 500;
+	color: var(--eise-bright);
+}
+.panel .drop-sub {
+	margin-top: 3px;
+	font-size: 12.5px;
+	color: var(--eise-muted-2);
+}
+.panel .drop-browse {
+	color: var(--eise-gilt-lt);
+	font-weight: 500;
+}
+.panel .drop-formats {
+	margin-top: 12px;
+	font-family: var(--eise-mono);
+	font-size: 10.5px;
+	letter-spacing: 0.05em;
+	color: var(--eise-muted-2);
+}
+.panel .drop-privacy {
+	margin-top: 6px;
+	font-size: 11px;
+	color: var(--eise-label);
+}
+
+/* --- Sample clip line -------------------------------------- */
+.panel .try-sample-line {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin: 16px 0 0;
+	font-size: 12.5px;
+	color: var(--eise-muted-2);
+	text-align: left;
+}
+.panel .try-sample-link {
+	color: var(--eise-link) !important;
+	font-weight: 500;
+	white-space: nowrap;
+	border-bottom: 1px solid rgba(143, 207, 224, 0.4);
+}
+.panel .try-sample-link:hover {
+	color: #b7e4f2;
+	text-decoration: none;
+	border-bottom-color: rgba(183, 228, 242, 0.6);
+}
+
+/* --- Option rows: inline controls --------------------------- */
+.opt-inline {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+}
+.opt-inline .number-input {
+	width: 52px;
+}
+.opt-unit {
+	color: var(--eise-muted-2);
+}
+
+/* --- label/input pairs (AP size, pixfrac, …) ---------------- */
+.field-grid {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	align-items: center;
+	gap: 10px 12px;
+	margin-top: 16px;
+	padding-top: 14px;
+	border-top: 1px solid var(--eise-panel-line);
+}
+.field-label {
+	font-size: 13px;
+	color: var(--eise-body);
+}
+.panel .panel-check + .slider-row {
+	margin-top: 14px;
+}
+
+/* --- Advanced disclosure bar -------------------------------- */
+.advanced-bar {
+	border-top: 1px solid var(--eise-panel-line);
+}
+.panel .advanced-toggle {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	width: 100%;
+	padding: 15px 22px;
+	background: transparent;
+	border: none;
+	border-radius: 0;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+.panel .advanced-toggle:hover {
+	background: rgba(255, 255, 255, 0.03);
+}
+.panel .advanced-toggle .panel-label {
+	margin: 0;
+}
+.advanced-chevron {
+	display: grid;
+	place-items: center;
+	color: var(--eise-muted-2);
+	transition: transform 140ms ease;
+}
+.advanced-chevron.open {
+	transform: rotate(180deg);
+}
+
+/* --- Selected files / batch boxes on the dark panel --------- */
+.panel .selected-files {
+	margin-top: 16px;
+	padding: 12px;
+	background: rgba(0, 0, 0, 0.18);
+	border: 1px solid var(--eise-panel-line);
+	border-radius: 8px;
+}
+.panel .selected-file-item {
+	background: rgba(255, 255, 255, 0.04);
+	border-color: rgba(255, 255, 255, 0.1);
+	color: var(--eise-body);
+}
+.panel .selected-file-item.is-mismatched {
+	background: rgba(217, 83, 79, 0.14);
+	border-color: rgba(217, 83, 79, 0.5);
+}
+.panel .selected-file-item .file-size {
+	font-family: var(--eise-mono);
+	color: var(--eise-label);
+}
+.panel .selected-file-item .remove-btn {
+	background: rgba(255, 255, 255, 0.08);
+	color: var(--eise-body);
+}
+.panel .selected-file-item .remove-btn:hover {
+	background: #D9534F;
+	color: #fff;
+}
+.panel .memory-optimization-box {
+	background: rgba(217, 169, 74, 0.08);
+	border-color: rgba(217, 169, 74, 0.25);
+}
+.panel .optimization-hint {
+	color: var(--eise-gilt-lt);
+}
+.panel .memory-optimization-box .checkbox-option {
+	color: var(--eise-body);
+	font-size: 13px;
+}
+.panel .lite-mode-warning {
+	margin-top: 14px;
+	margin-bottom: 0;
+	background: rgba(217, 169, 74, 0.08);
+	border-color: rgba(217, 169, 74, 0.25);
+	color: var(--eise-body);
+}
+.panel .batch-choice-dialog {
+	margin: 16px 0 0;
+	background: rgba(0, 0, 0, 0.18);
+	border-color: var(--eise-panel-line);
+	color: var(--eise-body);
+}
+.panel .batch-choice-dialog h4 {
+	color: var(--eise-bright);
+}
+.panel .batch-choice-dialog p {
+	color: var(--eise-muted-2);
+}
+.panel .btn-text {
+	color: var(--eise-muted-2);
+}
+.panel .btn-text:hover {
+	background: transparent;
+	color: var(--eise-bright);
+}
+/* Panel actions follow the design's gilt primary. */
+.panel .btn-primary {
+	background-color: var(--eise-gilt);
+	color: var(--eise-ink);
+}
+.panel .btn-primary:hover {
+	background-color: #f3d290;
+	color: var(--eise-ink);
+}
+.panel .btn-secondary {
+	background-color: rgba(255, 255, 255, 0.08);
+	border: 1px solid var(--eise-panel-border);
+	color: var(--eise-body);
+}
+.panel .btn-secondary:hover {
+	background-color: rgba(255, 255, 255, 0.14);
+	color: #fff;
+}
+.panel .status-indicators .status-item {
+	color: var(--eise-label);
+}
+.panel .status-indicators .status-item.active {
+	color: var(--eise-body);
+}
+.panel .status-indicators .status-item.active .status-check {
+	color: var(--eise-gilt);
+}
+.panel-inset {
+	margin: 16px 22px;
+}
+.panel .processing-hint {
+	color: var(--eise-muted-2);
+}
+
+/* --- Welcome column ----------------------------------------- */
+.home-intro {
+	padding-top: 6px;
+}
+.home-title {
+	margin: 0 0 14px;
+	font-size: 30px;
+	line-height: 1.2;
+	font-weight: 600;
+	letter-spacing: -0.02em;
+	color: #ffffff;
+}
+.home-intro .intro {
+	margin: 0 0 30px;
+	font-size: 15.5px;
+	line-height: 1.65;
+	color: #b7ccd2;
+	text-wrap: pretty;
+}
+.home-intro .comparison-images {
+	gap: 18px;
+	margin: 0 0 18px;
+	max-width: 560px;
+}
+.home-intro .comparison-images .arrow {
+	display: grid;
+	place-items: center;
+	margin-bottom: 22px;
+	color: var(--eise-muted);
+	font-size: inherit;
+}
+.home-intro .comparison-figure figcaption {
+	font-family: var(--eise-mono);
+	font-size: 10.5px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--eise-muted);
+}
+.home-intro .comparison-figure.is-result figcaption {
+	color: var(--eise-gilt);
+}
+.home-intro .sample-credit {
+	margin: 0 0 30px;
+}
+.how-it-works-intro {
+	margin: 0 0 26px;
+	font-size: 15px;
+	line-height: 1.65;
+	color: #b7ccd2;
+	text-wrap: pretty;
+}
+.spec-rows {
+	margin: 0 0 34px;
+	border-top: 1px solid var(--eise-panel-line);
+}
+.spec-row {
+	display: grid;
+	grid-template-columns: 150px 1fr;
+	gap: 20px;
+	padding: 13px 0;
+	border-bottom: 1px solid var(--eise-panel-line);
+}
+.spec-row dt {
+	font-size: 13.5px;
+	font-weight: 600;
+	color: #f1f7f8;
+}
+.spec-row dd {
+	margin: 0;
+	font-size: 14px;
+	line-height: 1.55;
+	color: #b7ccd2;
+}
+@media (max-width: 560px) {
+	.spec-row {
+		grid-template-columns: 1fr;
+		gap: 4px;
+	}
+}
+
+/* Featured community stack */
+.gallery-pick {
+	display: grid;
+	grid-template-columns: 128px 1fr;
+	gap: 18px;
+	align-items: center;
+	margin-bottom: 34px;
+	padding: 14px;
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.11);
+	color: inherit;
+	text-decoration: none;
+	transition: background 140ms ease, border-color 140ms ease;
+}
+.gallery-pick:hover {
+	background: rgba(255, 255, 255, 0.07);
+	border-color: rgba(217, 169, 74, 0.4);
+}
+.gallery-pick-thumb {
+	position: relative;
+	width: 128px;
+	height: 128px;
+	border-radius: 8px;
+	overflow: hidden;
+	background: #030d13;
+}
+.gallery-pick-thumb img {
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	display: block;
+}
+.gallery-pick-body {
+	min-width: 0;
+}
+.gallery-pick-eyebrow {
+	display: block;
+	margin-bottom: 7px;
+	font-family: var(--eise-mono);
+	font-size: 10.5px;
+	font-weight: 500;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--eise-gilt);
+}
+.gallery-pick-title {
+	display: block;
+	font-size: 16px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: #ffffff;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.gallery-pick-by {
+	display: block;
+	margin-top: 2px;
+	font-size: 13px;
+	color: #8aa3ab;
+}
+.gallery-pick-cta {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 12px;
+	font-size: 13.5px;
+	font-weight: 500;
+	color: var(--eise-gilt-lt);
+}
+@media (max-width: 520px) {
+	.gallery-pick {
+		grid-template-columns: 1fr;
+	}
+	.gallery-pick-thumb {
+		width: 100%;
+		height: auto;
+		aspect-ratio: 1;
+	}
+}
+.home-h2 {
+	margin: 0 0 12px;
+	font-size: 18px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: #ffffff;
+}
+.home-intro .home-testimonial {
+	margin: 0;
+	padding: 18px 22px;
+	border-left: none;
+	border: 1px solid var(--eise-panel-line);
+	border-radius: 8px;
+	background: rgba(255, 255, 255, 0.035);
+}
+.home-intro .home-testimonial-quote {
+	margin: 0 0 10px;
+	font-size: 15px;
+	line-height: 1.6;
+	font-style: normal;
+	color: #e3eef1;
 }
 </style>

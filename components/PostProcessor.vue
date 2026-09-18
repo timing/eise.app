@@ -8,23 +8,41 @@
 	style="display: none;"
 />
 
-<div class="page-layout" :class="{ 'page-layout-wide': imageLoaded }">
-	<div class="card" :class="{ 'controls-disabled': !imageLoaded }">
+<div class="page-layout pp-layout">
+	<div class="panel" :class="{ 'controls-disabled': !imageLoaded }">
 		<!-- Controls always visible, but disabled when no image -->
 		<div class="controls">
 			<div class="processing-indicator" v-if="isProcessing">
 				<div class="spinner"></div>
 			</div>
 
-			<!-- Pipeline order: RGB Alignment → Color Balance → Auto Stretch → Sharpening → Color Adjustments → Crop → Rotation -->
+			<!-- Processing pipeline order (independent of the order the controls are
+			     shown in): RGB Alignment → Color Balance → Auto Stretch → Sharpening →
+			     Color Adjustments → Crop → Rotation -->
 
-			<div class="color-alignment">
-				<h4>RGB Alignment <a href="#" class="manual-link" @click.prevent="showManualRgbControls = !showManualRgbControls">{{ showManualRgbControls ? 'hide manual' : 'manual' }}</a></h4>
-				<label class="checkbox-label">
-					<input type="checkbox" v-model="rgbAlignmentIsAuto" @change="onAutoAlignCheckboxChange" :disabled="isAutoAligning" />
-					{{ isAutoAligning ? 'Detecting...' : 'Auto' }}
-				</label>
-
+			<div class="panel-section color-balance-section">
+				<h4 class="panel-label">Color Balance</h4>
+				<div class="check-stack">
+					<!-- Link is a sibling of the label, never a child: clicking it must
+					     toggle the manual controls without flipping the checkbox. -->
+					<div class="rgb-align-row">
+						<label class="panel-check">
+							<input type="checkbox" v-model="rgbAlignmentIsAuto" @change="onAutoAlignCheckboxChange" :disabled="isAutoAligning" />
+							{{ isAutoAligning ? 'Detecting...' : 'Auto RGB Alignment' }}
+						</label>
+						<a href="#" class="manual-link" @click.prevent="showManualRgbControls = !showManualRgbControls">{{ showManualRgbControls ? 'hide manual' : 'manual' }}</a>
+					</div>
+					<label class="panel-check">
+						<input type="checkbox" v-model="autoColorBalance" @change="applyProcessing" />
+						Auto colors (gray world)
+					</label>
+					<label class="panel-check">
+						<input type="checkbox" v-model="autoStretch" @change="applyProcessing" />
+						Auto levels (stretch)
+						<input type="number" min="0" max="100" step="5" v-model.number="autoStretchAmount" @input="applyProcessing" class="number-input stretch-input" :disabled="!autoStretch" />
+						<span class="opt-unit">%</span>
+					</label>
+				</div>
 				<div v-if="showManualRgbControls" class="manual-rgb-controls">
 					<h5 style="color:blue;">Blue</h5>
 					<button @click="processChromaticAberration('blue', 'y', -0.5)">↑ {{ fixedAberration.blue?.y < 0 ? Math.abs(fixedAberration.blue.y) : '' }}</button>
@@ -40,133 +58,107 @@
 				</div>
 			</div>
 
-			<div class="color-balance-section">
-				<h4>Color Balance</h4>
-				<label class="checkbox-label">
-					<input type="checkbox" v-model="autoColorBalance" @change="applyProcessing" />
-					Auto colors (gray world)
-				</label>
-				<label class="checkbox-label">
-					<input type="checkbox" v-model="autoStretch" @change="applyProcessing" />
-					Auto levels (stretch)
-					<input type="number" min="0" max="100" step="5" v-model.number="autoStretchAmount" @input="applyProcessing" class="number-input" :disabled="!autoStretch" />
-					%
-				</label>
-			</div>
-
-			<fieldset class="sharpening-frame">
-				<legend>Sharpening <span class="info-icon" @click="showSharpeningInfo = !showSharpeningInfo">ⓘ</span></legend>
-				<div v-if="showSharpeningInfo" class="info-text">
+			<div class="panel-section sharpening-frame">
+				<h4 class="panel-label">Sharpening <span class="info-icon" @click="showSharpeningInfo = !showSharpeningInfo">ⓘ</span></h4>
+				<div v-if="showSharpeningInfo" class="info-text sharpening-info">
 					Luminance-only sharpening reduces color noise but may slightly desaturate the image. Increase saturation/vibrance to compensate.
 				</div>
-				<div class="sharpening-tabs">
-					<button :class="{ active: sharpeningMethod === 'wavelets' }" @click="setSharpeningMethod('wavelets')">Wavelets</button>
-					<button :class="{ active: sharpeningMethod === 'usm' }" @click="setSharpeningMethod('usm')">Unsharp Mask</button>
-					<button :class="{ active: sharpeningMethod === 'none' }" @click="setSharpeningMethod('none')" title="None">⊘</button>
+				<div class="seg-group sharpening-tabs">
+					<button class="seg-btn" :class="{ active: sharpeningMethod === 'wavelets' }" @click="setSharpeningMethod('wavelets')">Wavelets</button>
+					<button class="seg-btn" :class="{ active: sharpeningMethod === 'usm' }" @click="setSharpeningMethod('usm')">Unsharp Mask</button>
+					<button class="seg-btn seg-icon" :class="{ active: sharpeningMethod === 'none' }" @click="setSharpeningMethod('none')" title="No sharpening" aria-label="No sharpening">
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8.5" /><path d="M6 18 18 6" stroke-linecap="round" /></svg>
+					</button>
 				</div>
 
-				<label v-if="sharpeningMethod === 'wavelets' || sharpeningMethod === 'usm'" class="checkbox-label luminance-only-option">
+				<label v-if="sharpeningMethod === 'wavelets' || sharpeningMethod === 'usm'" class="panel-check luminance-only-option">
 					<input type="checkbox" v-model="sharpenLuminanceOnly" @change="applyProcessing" />
-					Luminance only (reduces color noise)
+					<span>Luminance only <span class="check-hint">(reduces color noise)</span></span>
 				</label>
 
-				<div class="sharpening-content" v-if="sharpeningMethod === 'usm'">
-					<div>
-						<label>Radius:</label>
-						<input type="range" min="0.5" max="10" step="0.1" v-model="usmRadius" @input="applyProcessing"/>
-						<span>{{ usmRadius }}</span>
-					</div>
-					<div>
-						<label>Amount:</label>
-						<input type="range" min="0" max="20" step="0.1" v-model="usmAmount" @input="applyProcessing"/>
-						<span>{{ usmAmount }}</span>
-					</div>
-					<div>
-						<label>Threshold:</label>
-						<input type="range" min="0" max="50" step="1" v-model="usmThreshold" @input="applyProcessing"/>
-						<span>{{ usmThreshold }}</span>
-					</div>
+				<div class="slider-row sharpening-content" v-if="sharpeningMethod === 'usm'">
+					<label for="usm-radius">Radius</label>
+					<input id="usm-radius" type="range" min="0.5" max="10" step="0.1" v-model="usmRadius" @input="applyProcessing"/>
+					<span class="panel-value">{{ usmRadius }}</span>
+					<label for="usm-amount">Amount</label>
+					<input id="usm-amount" type="range" min="0" max="20" step="0.1" v-model="usmAmount" @input="applyProcessing"/>
+					<span class="panel-value">{{ usmAmount }}</span>
+					<label for="usm-threshold">Threshold</label>
+					<input id="usm-threshold" type="range" min="0" max="50" step="1" v-model="usmThreshold" @input="applyProcessing"/>
+					<span class="panel-value">{{ usmThreshold }}</span>
 				</div>
 
-				<div class="sharpening-content" v-if="sharpeningMethod === 'wavelets'">
-					<div>
-						<label>Radius:</label>
-						<input type="range" min="0" max="5" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
-						<span>{{ waveletsRadius }}</span>
-					</div>
-					<div>
-						<label>Amount:</label>
-						<input type="range" min="0" max="50" step="0.1" v-model="waveletsAmount" @input="applyProcessing"/>
-						<span>{{ waveletsAmount }}</span>
-					</div>
-					<div>
-						<label>Denoise:</label>
-						<input type="range" min="0" max="50" step="1" v-model="postNoiseReduction" @input="applyProcessing"/>
-						<span>{{ postNoiseReduction > 0 ? postNoiseReduction : 'Off' }}</span>
-					</div>
+				<div class="slider-row sharpening-content" v-if="sharpeningMethod === 'wavelets'">
+					<label for="wav-radius">Radius</label>
+					<input id="wav-radius" type="range" min="0" max="5" step="0.1" v-model="waveletsRadius" @input="applyProcessing"/>
+					<span class="panel-value">{{ waveletsRadius }}</span>
+					<label for="wav-amount">Amount</label>
+					<input id="wav-amount" type="range" min="0" max="50" step="0.1" v-model="waveletsAmount" @input="applyProcessing"/>
+					<span class="panel-value">{{ waveletsAmount }}</span>
+					<label for="wav-denoise">Denoise</label>
+					<input id="wav-denoise" type="range" min="0" max="50" step="1" v-model="postNoiseReduction" @input="applyProcessing"/>
+					<span class="panel-value">{{ postNoiseReduction > 0 ? postNoiseReduction : 'Off' }}</span>
 				</div>
-
-			</fieldset>
-
-			<h4>Color Adjustments</h4>
-			<div>
-				<label>Gain:</label>
-				<input type="range" min="0.5" max="3" step="0.01" v-model="gain" @input="applyProcessing"/>
-				<span>{{ gain }}</span>
-			</div>
-			<div>
-				<label>Gamma:</label>
-				<input type="range" min="0.3" max="3" step="0.01" v-model="gamma" @input="applyProcessing"/>
-				<span>{{ gamma }}</span>
-			</div>
-			<div>
-				<label>Contrast:</label>
-				<input type="range" min="0.5" max="2" step="0.01" v-model="contrast" @input="applyProcessing"/>
-				<span>{{ contrast }}</span>
-			</div>
-			<div>
-				<label>Vibrance:</label>
-				<input type="range" min="-1" max="2" step="0.01" v-model="vibrance" @input="applyProcessing"/>
-				<span>{{ vibrance }}</span>
-			</div>
-			<div>
-				<label>Saturation:</label>
-				<input type="range" min="0" max="2" step="0.01" v-model="saturation" @input="applyProcessing"/>
-				<span>{{ saturation }}</span>
-			</div>
-			<div>
-				<label>Saturation repeats:</label>
-				<input type="number" min="1" max="10" v-model.number="saturationRepeats" @input="applyProcessing" class="number-input"/>
 			</div>
 
-			<h4>Crop</h4>
-			<div class="crop-controls">
-				<button v-if="!cropMode" @click="startCropMode">Select crop area</button>
-				<button v-if="!cropMode && canUndoCrop" class="undo-crop" @click="undoCrop">Undo crop</button>
-				<template v-if="cropMode">
-					<span class="crop-hint">Click and drag on the image to select area</span>
-					<button class="btn-primary" @click="applyCrop" :disabled="!cropSelection">Apply crop</button>
-					<button class="cancel-crop" @click="cancelCrop">Cancel</button>
-				</template>
+			<div class="panel-section">
+				<h4 class="panel-label">Color Adjustments</h4>
+				<div class="slider-row">
+					<label for="pp-gain">Gain</label>
+					<input id="pp-gain" type="range" min="0.5" max="3" step="0.01" v-model="gain" @input="applyProcessing"/>
+					<span class="panel-value">{{ gain }}</span>
+					<label for="pp-gamma">Gamma</label>
+					<input id="pp-gamma" type="range" min="0.3" max="3" step="0.01" v-model="gamma" @input="applyProcessing"/>
+					<span class="panel-value">{{ gamma }}</span>
+					<label for="pp-contrast">Contrast</label>
+					<input id="pp-contrast" type="range" min="0.5" max="2" step="0.01" v-model="contrast" @input="applyProcessing"/>
+					<span class="panel-value">{{ contrast }}</span>
+					<label for="pp-vibrance">Vibrance</label>
+					<input id="pp-vibrance" type="range" min="-1" max="2" step="0.01" v-model="vibrance" @input="applyProcessing"/>
+					<span class="panel-value">{{ vibrance }}</span>
+					<label for="pp-saturation">Saturation</label>
+					<input id="pp-saturation" type="range" min="0" max="2" step="0.01" v-model="saturation" @input="applyProcessing"/>
+					<span class="panel-value">{{ saturation }}</span>
+				</div>
+				<div class="field-row">
+					<label for="pp-sat-repeats">Saturation repeats</label>
+					<input id="pp-sat-repeats" type="number" min="1" max="10" v-model.number="saturationRepeats" @input="applyProcessing" class="number-input"/>
+				</div>
 			</div>
 
-			<h4>Rotation</h4>
-			<div>
-				<input type="range" min="-180" max="180" step="0.1" v-model.number="rotation" @input="previewRotation" @change="applyRotation" />
-				<span>{{ rotation }}°</span>
-				<button v-if="rotation !== 0 || hasAppliedRotation" class="reset-rotation" @click="resetRotation">Reset</button>
+			<!-- Crop + edge mask share one row to save vertical space (per design).
+			     Either group spans the full width while its editing mode is active,
+			     so the hint text and Apply/Cancel are not squeezed into a half. -->
+			<div class="panel-section tool-duo">
+				<div class="crop-controls" :class="{ 'is-active': cropMode }">
+					<button v-if="!cropMode" class="panel-btn" @click="startCropMode">Select crop area</button>
+					<button v-if="!cropMode && canUndoCrop" class="panel-btn undo-crop" @click="undoCrop">Undo crop</button>
+					<template v-if="cropMode">
+						<span class="crop-hint">Click and drag on the image to select area</span>
+						<button class="btn-primary" @click="applyCrop" :disabled="!cropSelection">Apply crop</button>
+						<button class="panel-btn cancel-crop" @click="cancelCrop">Cancel</button>
+					</template>
+				</div>
+				<div class="edge-mask-controls" :class="{ 'is-active': edgeMaskMode }">
+					<button v-if="!edgeMaskMode && !edgeMaskEnabled" class="panel-btn" @click="startEdgeMaskMode">Add edge mask</button>
+					<button v-if="!edgeMaskMode && edgeMaskEnabled" class="panel-btn" @click="startEdgeMaskMode">Edit edge mask</button>
+					<button v-if="!edgeMaskMode && edgeMaskEnabled" class="panel-btn remove-mask" @click="removeEdgeMask">Remove</button>
+					<template v-if="edgeMaskMode">
+						<span class="edge-mask-hint">Drag circle to move, drag edge to resize</span>
+						<button class="btn-primary" @click="applyEdgeMask">Apply</button>
+						<button class="panel-btn cancel-mask" @click="cancelEdgeMask">Cancel</button>
+					</template>
+				</div>
 			</div>
 
-			<h4>Edge Mask</h4>
-			<div class="edge-mask-controls">
-				<button v-if="!edgeMaskMode && !edgeMaskEnabled" @click="startEdgeMaskMode">Add edge mask</button>
-				<button v-if="!edgeMaskMode && edgeMaskEnabled" @click="startEdgeMaskMode">Edit edge mask</button>
-				<button v-if="!edgeMaskMode && edgeMaskEnabled" class="remove-mask" @click="removeEdgeMask">Remove</button>
-				<template v-if="edgeMaskMode">
-					<span class="edge-mask-hint">Drag circle to move, drag edge to resize</span>
-					<button class="btn-primary" @click="applyEdgeMask">Apply</button>
-					<button class="cancel-mask" @click="cancelEdgeMask">Cancel</button>
-				</template>
+			<div class="panel-section">
+				<h4 class="panel-label">Rotation</h4>
+				<div class="slider-row">
+					<label for="pp-rotation">Angle</label>
+					<input id="pp-rotation" type="range" min="-180" max="180" step="0.1" v-model.number="rotation" @input="previewRotation" @change="applyRotation" />
+					<span class="panel-value">{{ rotation }}°</span>
+				</div>
+				<button v-if="rotation !== 0 || hasAppliedRotation" class="panel-btn reset-rotation" @click="resetRotation">Reset</button>
 			</div>
 
 		</div>
@@ -174,27 +166,33 @@
 	<div class="content">
 		<!-- Intro with file select when no image loaded -->
 		<div v-if="!imageLoaded" class="intro-content">
-			<div class="file-input-wrapper">
+			<div class="file-input-wrapper pp-picker">
 				<input
 					type="file"
 					accept="image/*"
 					id="post-processor-file-input"
 					@change="handleDirectFileSelect"
 				/>
-				<label for="post-processor-file-input" class="file-label btn-primary">
-					Select image to process...
+				<label for="post-processor-file-input" class="file-label pp-picker-label">
+					<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#d9a94a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" /><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" /></svg>
+					Select image to process
 				</label>
-				<p class="supported-formats">PNG, TIFF, JPEG</p>
+				<p class="supported-formats">PNG · TIFF · JPEG</p>
 			</div>
 
-			<h2>Post processor</h2>
-			<h3>Sharpen your planetary images</h3>
-			<p>The post-processor helps you bring out detail in your astrophotography. Works great on stacked planetary images, but you can also load any image directly. All processing runs locally in your browser.</p>
+			<div class="pp-intro-copy">
+				<h1>Post processor</h1>
+				<p class="pp-lede">The post-processor helps you bring out detail in your astrophotography. When a stack is finished this post processor will open the resulting image, but you can also load a previous stacked image here directly. All processing runs locally in your browser.</p>
 
-			<h4>Features</h4>
-			<p v-for="feature in features" :key="feature.title"><strong>{{ feature.title }}</strong><br/>{{ feature.desc }}</p>
+				<div class="pp-features-label">Features</div>
+				<dl class="spec-rows pp-features">
+					<div v-for="feature in features" :key="feature.title" class="spec-row">
+						<dt>{{ feature.title }}</dt>
+						<dd>{{ feature.desc }}</dd>
+					</div>
+				</dl>
+			</div>
 		</div>
-		<!-- Canvas when image loaded -->
 		<template v-else>
 			<ZoomableCanvas ref="zoomableCanvasRef" id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode || edgeMaskMode" :previewRotation="previewRotationAngle">
 				<template #overlay>
@@ -2569,21 +2567,74 @@ canvas {
 
 /* Intro content styling */
 .intro-content {
-	max-width: 600px;
+	max-width: 720px;
 }
-.intro-content .file-input-wrapper {
-	margin-bottom: 30px;
+.pp-picker {
+	position: relative;
+	margin-bottom: 0;
 }
-.intro-content .file-label {
-	display: inline-block;
-	padding: 12px 24px;
+.pp-picker-label {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	width: 100%;
+	max-width: 460px;
+	padding: 26px 24px;
+	border-radius: 10px;
+	border: 1px dashed rgba(255, 255, 255, 0.24);
+	background: rgba(0, 0, 0, 0.16);
+	color: var(--eise-bright);
 	font-size: 16px;
+	font-weight: 600;
+	text-align: center;
 	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+/* The transparent file input sits on top of the label, so the hover has to
+   hang off the wrapper - a bare .pp-picker-label:hover never fires, and the
+   light-theme .file-input-wrapper:hover rule would win instead. */
+.pp-picker:hover .pp-picker-label,
+.pp-picker-label:hover {
+	border-color: var(--eise-gilt);
+	background: rgba(217, 169, 74, 0.1);
 }
 .intro-content .supported-formats {
-	margin-top: 8px;
-	color: #888;
-	font-size: 13px;
+	margin: 10px 0 0;
+	font-family: var(--eise-mono);
+	font-size: 10.5px;
+	letter-spacing: 0.06em;
+	color: var(--eise-muted);
+}
+.pp-intro-copy {
+	margin-top: 40px;
+}
+.pp-intro-copy h1 {
+	margin: 0 0 10px;
+	font-size: 30px;
+	line-height: 1.2;
+	font-weight: 600;
+	letter-spacing: -0.02em;
+	color: #ffffff;
+}
+.pp-lede {
+	margin: 0 0 34px;
+	font-size: 15.5px;
+	line-height: 1.65;
+	color: #b7ccd2;
+	text-wrap: pretty;
+}
+.pp-features-label {
+	margin-bottom: 4px;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--eise-gilt);
+}
+.pp-features :deep(.spec-row) {
+	grid-template-columns: 190px 1fr;
+	padding: 14px 0;
 }
 
 /* Toolbar actions wrapper */
@@ -2593,8 +2644,34 @@ canvas {
 	gap: 8px;
 }
 .toolbar-actions > button {
-	font-size: 14px;
+	font-size: 13.5px;
 	line-height: 1;
+}
+/* Secondary toolbar actions (Rate, Publish) sit on the dark work area. */
+.toolbar-actions .btn-rate,
+.toolbar-actions .btn-publish {
+	padding: 8px 15px;
+	border-radius: 7px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.16);
+	color: var(--eise-bright);
+	font-weight: 500;
+}
+.toolbar-actions .btn-rate:hover,
+.toolbar-actions .btn-publish:hover {
+	background: rgba(255, 255, 255, 0.11);
+	color: #ffffff;
+}
+/* Export is the primary action. */
+.toolbar-actions > .btn-primary:not(.btn-rate):not(.btn-publish) {
+	padding: 8px 15px;
+	border-radius: 7px;
+	background: var(--eise-gilt);
+	color: var(--eise-ink);
+	font-weight: 600;
+}
+.toolbar-actions > .btn-primary:not(.btn-rate):not(.btn-publish):hover {
+	background: #f3d290;
 }
 
 /* Kebab menu */
@@ -2603,18 +2680,22 @@ canvas {
 	display: inline-block;
 }
 .kebab-btn {
-	background: #fefefe;
-	border: none;
-	color: #333;
-	font-size: 14px;
-	padding: 8px 12px;
+	width: 34px;
+	height: 34px;
+	display: grid;
+	place-items: center;
+	background: transparent;
+	border: 1px solid var(--eise-panel-border);
+	color: var(--eise-on-dark);
+	font-size: 15px;
+	padding: 0;
 	cursor: pointer;
-	border-radius: 5px;
-	font-weight: bold;
+	border-radius: 7px;
 	line-height: 1;
 }
 .kebab-btn:hover {
-	background: #f0f0f0;
+	background: rgba(255, 255, 255, 0.07);
+	color: #ffffff;
 }
 .kebab-backdrop {
 	position: fixed;
@@ -2652,172 +2733,166 @@ canvas {
 	background: #f0f0f0;
 }
 
-.color-alignment h4 {
+/* RGB alignment: checkbox left, manual toggle right, on one line. */
+.rgb-align-row {
 	display: flex;
 	align-items: center;
-	gap: 10px;
+	justify-content: space-between;
+	gap: 12px;
 }
-.color-alignment h5 {
+.manual-rgb-controls h5 {
 	margin: 8px 0 4px 0;
+	font-size: 11px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
 }
-.color-alignment button {
+.manual-rgb-controls button {
 	margin-right: 2px;
 	min-width: 50px;
 	padding: 4px 8px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid var(--eise-panel-border);
+	border-radius: 5px;
+	color: var(--eise-body);
+	font-family: var(--eise-mono);
+	font-size: 12px;
+}
+.manual-rgb-controls button:hover {
+	background: rgba(255, 255, 255, 0.12);
+	color: #fff;
 }
 .manual-link {
-	margin-left: 10px;
-	font-size: 12px;
+	margin-left: auto;
+	font-size: 12.5px;
 	font-weight: normal;
-	color: #7ab;
+	text-transform: none;
+	letter-spacing: 0;
+	color: var(--eise-link);
+	border-bottom: 1px solid rgba(143, 207, 224, 0.35);
 }
 .manual-link:hover {
-	color: #9cd;
+	color: #b7e4f2;
+	border-bottom-color: rgba(183, 228, 242, 0.6);
 }
 .manual-rgb-controls {
-	margin-top: 8px;
-	padding: 8px;
-	background: rgba(255,255,255,0.05);
-	border-radius: 4px;
+	margin-top: 10px;
+	padding: 10px;
+	background: rgba(0, 0, 0, 0.2);
+	border: 1px solid var(--eise-panel-line);
+	border-radius: 6px;
 }
-.color-balance-section {
-	margin: 15px 0;
+.check-stack {
+	display: flex;
+	flex-direction: column;
+	gap: 11px;
 }
-.color-balance-section h4 {
-	margin-bottom: 8px;
+.stretch-input {
+	width: 54px;
+	margin-left: auto;
+}
+.check-hint {
+	color: var(--eise-muted);
+}
+.field-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 14px;
+	font-size: 13px;
+	color: var(--eise-body);
+}
+.field-row .number-input {
+	width: 54px;
 }
 .checkbox-label {
 	display: flex;
 	align-items: center;
 	gap: 8px;
 	cursor: pointer;
-	font-size: 14px;
+	font-size: 13.5px;
+	color: var(--eise-body);
 }
 .checkbox-label input[type="checkbox"] {
-	width: 16px;
-	height: 16px;
+	width: 15px;
+	height: 15px;
 	cursor: pointer;
 }
 .luminance-only-option {
-	margin: 2px 0 6px 0;
-	font-size: 11px;
-	color: #888;
+	margin: 14px 0 0;
+	font-size: 12.5px;
 }
 .info-icon {
 	cursor: pointer;
-	color: #666;
-	font-size: 0.85em;
+	color: var(--eise-label);
+	font-size: 1.1em;
 	user-select: none;
 }
 .info-icon:hover {
-	color: #333;
+	color: var(--eise-on-dark);
 }
 .info-text {
-	font-size: 0.85em;
-	color: #555;
-	margin-bottom: 8px;
-	padding: 6px 8px;
-	background: #f5f5f5;
-	border-radius: 4px;
+	margin-bottom: 12px;
+	padding: 10px 12px;
+	border-radius: 6px;
+	background: rgba(0, 0, 0, 0.2);
+	border: 1px solid var(--eise-panel-line);
+	font-size: 12.5px;
+	line-height: 1.55;
+	color: var(--eise-muted-2);
 }
-.crop-controls {
-	display: flex;
+/* Crop | edge mask, side by side; a group in editing mode takes the full row. */
+.tool-duo {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
 	gap: 10px;
-	align-items: center;
-	flex-wrap: wrap;
+	align-items: start;
 }
-.crop-controls button {
-	padding: 8px 16px;
-	border: none;
-	border-radius: 4px;
-	cursor: pointer;
-	background-color: #e8e8e8;
-	color: #555;
-}
-.crop-controls .cancel-crop {
-	background-color: #888;
-	color: white;
-}
-.crop-controls .undo-crop {
-	background-color: #ff9800;
-	color: white;
-}
-.crop-hint {
-	font-size: 12px;
-	color: #666;
-}
-
-/* Edge mask controls */
+.crop-controls,
 .edge-mask-controls {
 	display: flex;
 	gap: 10px;
 	align-items: center;
 	flex-wrap: wrap;
 }
-.edge-mask-controls button {
-	padding: 8px 16px;
-	border: none;
-	border-radius: 4px;
-	cursor: pointer;
-	background-color: #e8e8e8;
-	color: #555;
+.tool-duo .crop-controls.is-active,
+.tool-duo .edge-mask-controls.is-active {
+	grid-column: 1 / -1;
 }
-.edge-mask-controls .cancel-mask {
-	background-color: #888;
-	color: white;
+.tool-duo .panel-btn {
+	flex: 1 1 auto;
+	text-align: center;
+}
+/* Buttons here carry .panel-btn; these only add the state colours. */
+.crop-controls .undo-crop {
+	border-color: rgba(255, 152, 0, 0.45);
+	color: #f3b14d;
 }
 .edge-mask-controls .remove-mask {
-	background-color: #ff6b6b;
-	color: white;
+	border-color: rgba(217, 83, 79, 0.45);
+	color: #e58a8a;
 }
+.crop-hint,
 .edge-mask-hint {
 	font-size: 12px;
-	color: #666;
+	color: var(--eise-muted-2);
 }
 
-.sharpening-frame {
-	border: none;
-	padding: 0;
-	margin: 0;
-}
-.sharpening-frame legend {
-	font-weight: bold;
-	padding: 0;
-	margin-bottom: 8px;
-}
+/* Sharpening: segmented picker + sliders (.seg-group carries the looks). */
 .sharpening-tabs {
-	display: inline-flex;
-	margin-bottom: 10px;
+	margin-bottom: 0;
 }
-.sharpening-tabs button {
-	padding: 6px 12px;
-	border: 1px solid #ccc;
-	border-radius: 0;
-	margin-left: -1px;
-	background-color: #e8e8e8;
-	color: #555;
-	cursor: pointer;
-	font-size: 12px;
-	white-space: nowrap;
-	transition: background-color 0.2s;
+.seg-icon {
+	flex: 0 0 auto;
+	width: 34px;
+	display: grid;
+	place-items: center;
 }
-.sharpening-tabs button:first-child {
-	margin-left: 0;
-	border-radius: 4px 0 0 4px;
-}
-.sharpening-tabs button:last-child {
-	border-radius: 0 4px 4px 0;
-	padding: 6px 8px;
-}
-.sharpening-tabs button:hover {
-	background-color: #d0d0d0;
-}
-.sharpening-tabs button.active {
-	background-color: #8CCF7E;
-	color: #111;
+.sharpening-info {
+	margin-bottom: 12px;
 }
 .sharpening-content {
-	padding-top: 5px;
+	margin-top: 16px;
 }
 .processing-indicator {
 	position: absolute;
@@ -2849,9 +2924,12 @@ canvas {
 	font-size: 13px;
 	z-index: 10;
 }
+/* Sits under the slider, right-aligned with the value column instead of
+   hanging off the label. */
 .reset-rotation {
-	margin-left: 10px;
-	padding: 4px 8px;
+	display: block;
+	margin: 12px 0 0 auto;
+	padding: 5px 12px;
 	font-size: 12px;
 }
 .export-hint {

@@ -1,8 +1,10 @@
 <template>
-	<div class="page-layout page-layout-wide">
-		<div class="content content-card">
-			<h2>Eise Gallery</h2>
-			<p>Stacks published by the community, made with Eise.app. Want yours here? <NuxtLink to="/">Stack an image</NuxtLink> and hit Publish, or <button type="button" class="link-btn" @click="triggerUpload">upload an Eise stack</button> you've already saved.</p>
+	<div class="page-layout gallery-page">
+		<div class="gallery-content">
+			<div class="gallery-head">
+				<h1>Eise Gallery</h1>
+				<p class="gallery-lede">Stacks published by the community, made with Eise.app. Want yours here? <NuxtLink to="/">Stack an image</NuxtLink> and hit Publish, or <button type="button" class="link-btn" @click="triggerUpload">upload an Eise stack</button> you've already saved.</p>
+			</div>
 
 			<input ref="uploadInput" type="file" accept="image/png,image/jpeg,image/webp" hidden @change="handleFileSelect" />
 
@@ -16,11 +18,13 @@
 
 			<div v-else class="gallery-grid">
 				<button v-for="item in items" :key="item.id" class="gallery-card" @click="selected = item" :title="cardTitle(item)">
-					<img :src="item.thumb_url" :alt="item.title || item.name" loading="lazy" />
-					<div class="gallery-card-name">
-						<span v-if="item.title" class="card-title">{{ item.title }}</span>
-						<span class="card-by">by {{ item.name }}</span>
-					</div>
+					<span class="gallery-card-frame">
+						<img :src="item.thumb_url" :alt="item.title || item.name" loading="lazy" />
+					</span>
+					<span class="gallery-card-caption">
+						<span class="card-title">{{ item.title || 'Untitled' }}</span>
+						<span class="card-by">{{ item.name }}</span>
+					</span>
 				</button>
 			</div>
 
@@ -156,89 +160,170 @@ useHead({
 </script>
 
 <style scoped>
+.gallery-page {
+	max-width: 1400px;
+	margin: 0 auto;
+	padding: 48px 28px 96px;
+	box-sizing: border-box;
+}
+/* Deliberately not `.content`: that global class forces `color: inherit` on
+   links, which would kill the lede link colour below. */
+.gallery-content {
+	flex: 1;
+	width: 100%;
+	min-width: 0;
+	line-height: 1.65;
+}
+.gallery-head {
+	padding-bottom: 22px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+.gallery-head h1 {
+	margin: 0 0 10px;
+	font-size: 32px;
+	line-height: 1.15;
+	font-weight: 600;
+	letter-spacing: -0.025em;
+	color: #ffffff;
+}
+.gallery-lede {
+	margin: 0;
+	max-width: 62ch;
+	font-size: 15px;
+	line-height: 1.65;
+	color: #b7ccd2;
+	text-wrap: pretty;
+}
+.gallery-lede :deep(a),
+.link-btn {
+	color: #8fcfe0;
+	text-decoration: none;
+	border-bottom: 1px solid rgba(143, 207, 224, 0.35);
+}
+.gallery-lede :deep(a:hover),
+.link-btn:hover {
+	background: none;
+	color: #b7e4f2;
+	border-bottom-color: rgba(183, 228, 242, 0.6);
+}
 .link-btn {
 	background: none;
 	border: none;
+	border-bottom: 1px solid rgba(143, 207, 224, 0.35);
+	border-radius: 0;
 	padding: 0;
-	color: #8CCF7E;
 	cursor: pointer;
 	font: inherit;
-	text-decoration: underline;
 }
-.link-btn:hover { color: #a8dc9c; }
 .gallery-msg {
 	text-align: center;
 	padding: 3rem 1rem;
-	color: #666;
+	color: var(--eise-muted);
 }
 .gallery-msg.error {
-	color: #a33;
+	color: #e58a8a;
 }
+/* Design uses minmax(280px); we go one step denser so every viewport fits one
+   extra column (5 at the 1400px cap, 4 around 1000px, 3 around 800px). */
 .gallery-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-	gap: 1rem;
-	margin-top: 1.5rem;
+	grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+	gap: 22px;
+	margin-top: 32px;
+}
+@media (max-width: 600px) {
+	.gallery-page { padding: 28px 16px 64px; }
+	.gallery-grid {
+		grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+		gap: 14px;
+	}
 }
 .gallery-card {
-	background: #111;
-	border: 1px solid #333;
-	border-radius: 6px;
+	background: none;
+	border: none;
+	border-radius: 0;
 	padding: 0;
+	margin: 0;
 	cursor: pointer;
-	overflow: hidden;
 	display: flex;
 	flex-direction: column;
-	transition: transform 0.15s, border-color 0.15s;
+	gap: 11px;
+	min-width: 0;
+	text-align: left;
+	transition: transform 0.15s;
 }
 .gallery-card:hover {
+	background: none;
 	transform: translateY(-2px);
-	border-color: #8CCF7E;
+}
+.gallery-card-frame {
+	position: relative;
+	width: 100%;
+	aspect-ratio: 1 / 1;
+	border-radius: 10px;
+	overflow: hidden;
+	background: #030d13;
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	display: block;
+	transition: border-color 0.15s;
+}
+.gallery-card:hover .gallery-card-frame {
+	border-color: rgba(217, 169, 74, 0.55);
 }
 .gallery-card img {
 	width: 100%;
-	aspect-ratio: 1;
+	height: 100%;
 	object-fit: contain;
-	background: #000;
 	display: block;
 }
-.gallery-card-name {
-	padding: 0.5rem 0.6rem;
-	font-size: 0.85rem;
-	color: #eee;
-	text-align: left;
-	background: #1a1a1a;
+.gallery-card-caption {
 	display: flex;
-	flex-direction: column;
-	gap: 2px;
+	flex-wrap: wrap;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 2px 12px;
 	min-width: 0;
 }
 .card-title {
-	font-weight: bold;
+	flex: 0 1 auto;
+	min-width: 0;
+	font-size: 14px;
+	font-weight: 500;
+	color: #f1f7f8;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
+/* Never shrinks, so a long author name wraps to its own line (pushed right by
+   margin-left: auto) instead of being ellipsised down to a single letter. */
 .card-by {
-	color: #999;
-	font-size: 0.78rem;
+	flex: 0 0 auto;
+	max-width: 100%;
+	margin-left: auto;
+	font-size: 12.5px;
+	color: var(--eise-muted);
+	text-align: right;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
 .gallery-cta {
-	margin-top: 3rem;
-	padding: 2rem 1rem;
+	margin-top: 64px;
+	padding: 32px 1rem 0;
 	text-align: center;
-	border-top: 1px solid #333;
+	border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 .gallery-cta h3 {
 	margin: 0 0 0.5rem 0;
-	color: #eee;
+	font-size: 19px;
+	font-weight: 600;
+	letter-spacing: -0.015em;
+	color: #ffffff;
 }
 .gallery-cta p {
 	margin: 0 0 1.25rem 0;
-	color: #aaa;
+	font-size: 15px;
+	color: #b7ccd2;
 }
 .gallery-cta-actions {
 	display: flex;

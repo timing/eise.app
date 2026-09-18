@@ -21,6 +21,11 @@ const MIGRATIONS = [
   `ALTER TABLE submissions ADD COLUMN title TEXT`,
   `ALTER TABLE submissions ADD COLUMN ip TEXT`,
   `CREATE INDEX IF NOT EXISTS idx_submissions_ip_created ON submissions(ip, created_at)`,
+  // When the admin picked this stack for the homepage. NULL = not featured.
+  // A timestamp rather than a boolean so the newest pick wins if more than one
+  // ever ends up set.
+  `ALTER TABLE submissions ADD COLUMN featured_at INTEGER`,
+  `CREATE INDEX IF NOT EXISTS idx_submissions_featured ON submissions(featured_at DESC)`,
 ];
 
 export function createDb(env) {

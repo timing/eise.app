@@ -40,9 +40,12 @@
 					</td>
 					<td class="col-status">
 						<span :class="'badge badge-' + item.status">{{ item.status }}</span>
+						<span v-if="item.featured" class="badge badge-featured" title="Shown on the homepage">★ Featured</span>
 					</td>
 					<td class="col-actions">
 						<button v-if="item.status !== 'approved'" class="action approve" @click="act(item.id, 'approve')">Approve</button>
+						<button v-if="item.status === 'approved' && !item.featured" class="action feature" @click="act(item.id, 'feature')">Feature on homepage</button>
+						<button v-if="item.featured" class="action unfeature" @click="act(item.id, 'unfeature')">Unfeature</button>
 						<button v-if="item.status !== 'rejected'" class="action reject" @click="act(item.id, 'reject')">Reject</button>
 						<button class="action danger" @click="del(item.id)">Delete</button>
 					</td>
@@ -156,6 +159,7 @@ function formatDate(ts) {
 .badge-pending  { background: #fff4d6; color: #7a5a00; }
 .badge-approved { background: #d6f0d6; color: #2a5a2a; }
 .badge-rejected { background: #f0d6d6; color: #7a2a2a; }
+.badge-featured { background: #f6e3b8; color: #6b4b06; margin-top: 4px; }
 .action {
 	display: block; width: 100%; margin-bottom: 4px;
 	padding: 6px 10px; border: none; border-radius: 4px;
@@ -165,6 +169,10 @@ function formatDate(ts) {
 .action.approve:hover { background: #7ABF6E; }
 .action.reject { background: #e8e8e8; color: #333; }
 .action.reject:hover { background: #d8d8d8; }
+.action.feature { background: #f6e3b8; color: #6b4b06; }
+.action.feature:hover { background: #eed79e; }
+.action.unfeature { background: #e8e8e8; color: #333; }
+.action.unfeature:hover { background: #d8d8d8; }
 .action.danger { background: #f0d6d6; color: #7a2a2a; }
 .action.danger:hover { background: #e0b6b6; }
 </style>

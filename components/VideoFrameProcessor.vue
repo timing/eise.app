@@ -1,18 +1,29 @@
 <template>
-	<div class="page-layout">
-		<div class="card">
-			<LoadingIndicator />
+	<div class="page-layout pp-layout">
+		<div class="panel">
+			<div class="panel-section">
+				<LoadingIndicator />
 
-			<div v-if="!showCancelledMessage && !uploadError" class="action-buttons processing-actions">
-				<button class="btn-danger" @click="cancelProcessing">Cancel</button>
+				<!-- Where we are in the run (display only, see stageSteps). -->
+				<ol class="stage-steps">
+					<li v-for="step in stageSteps" :key="step.label" class="stage-step" :class="step.state">
+						<span class="step-dot" aria-hidden="true"></span>
+						<span class="step-name">{{ step.label }}</span>
+						<span class="step-meta">{{ step.meta }}</span>
+					</li>
+				</ol>
+			</div>
+
+			<div v-if="!showCancelledMessage && !uploadError" class="panel-section panel-section-flush processing-actions">
+				<button class="cancel-btn" @click="cancelProcessing">Cancel</button>
 				<p class="processing-hint">Stacking can take a while, but the results are hopefully worth the wait!</p>
 			</div>
 
-			<div v-if="skippedFrames > 0" class="skipped-info">
+			<div v-if="skippedFrames > 0" class="skipped-info panel-inset">
 				<p>{{ skippedFrames }} frames skipped (couldn't crop)</p>
 			</div>
 
-			<div v-if="uploadError" class="error-message">
+			<div v-if="uploadError" class="error-message panel-inset">
 				<p>Error: {{ uploadError }}</p>
 				<p class="feedback-prompt">
 					Something went wrong? <a href="https://github.com/timing/eise.app/issues" @click="openErrorFeedback">Let me know what happened</a> so I can fix it.
@@ -20,7 +31,7 @@
 			</div>
 
 			<!-- Cancelled message -->
-			<div v-if="showCancelledMessage" class="cancelled-message">
+			<div v-if="showCancelledMessage" class="cancelled-message panel-inset">
 				<p>Processing cancelled.</p>
 				<p class="feedback-prompt">
 					Was something not working? <a href="https://github.com/timing/eise.app/issues" @click="openCancelFeedback">Let me know</a> so I can improve things.
@@ -32,7 +43,7 @@
 		<div class="content" v-if="processingStage === 'analyzing' || processingStage === 'stacking'">
 			<div class="preview-frames-row">
 				<div v-if="processingStage === 'analyzing' && bestFrame" class="preview-frame" :class="{ 'dual-preview': bestFrame?.grayBlob }">
-					<h4>Sharpest Frame{{ bestFrame?.grayBlob ? ' (Analysis vs Color)' : '' }}</h4>
+					<h4 class="preview-label">Sharpest frame{{ bestFrame?.grayBlob ? ' (analysis vs color)' : '' }}</h4>
 					<div class="dual-canvas-row">
 						<div v-if="bestFrame?.grayBlob" class="canvas-wrapper">
 							<span class="canvas-label">Grayscale (used for analysis)</span>
@@ -47,22 +58,28 @@
 				</div>
 
 				<div v-if="processingStage === 'analyzing' && refCandidate" class="preview-frame">
-					<h4>Reference Candidate</h4>
+					<h4 class="preview-label">Reference candidate</h4>
 					<canvas ref="refCandidateCanvas"></canvas>
 					<p class="frame-stats">Sharpness: {{ refCandidate.sharpness?.toFixed(2) }} (Tenengrad: {{ refCandidate.tenengrad?.toFixed(2) }}, Laplacian: {{ refCandidate.laplacian?.toFixed(2) }}) · Circularity: {{ refCandidate.circularity?.toFixed(2) || '?' }}</p>
 				</div>
 			</div>
 
 			<div v-if="processingStage === 'stacking' && referenceFrame" class="preview-frame">
-				<h4>Reference Frame for Alignment</h4>
+				<h4 class="preview-label">Reference frame for alignment</h4>
 				<canvas ref="referenceFrameCanvas"></canvas>
+			</div>
+
+			<!-- Nothing to show yet: hold the space so the column does not pop. -->
+			<div v-if="processingStage === 'analyzing' && !bestFrame && !refCandidate" class="preview-placeholder">
+				<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#4d6874" stroke-width="1.4" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M3.6 9.5h16.8M3.6 14.5h16.8" /></svg>
+				<span>Reference frame appears once analysis completes</span>
 			</div>
 		</div>
 	</div>
 </template>
 
 <script setup>
-import { onMounted, ref, watch, defineProps, onBeforeUpdate, nextTick } from 'vue';
+import { onMounted, ref, computed, watch, defineProps, onBeforeUpdate, nextTick } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
@@ -106,6 +123,28 @@ const props = defineProps({
 const bestFramesCount = ref(0);
 const allFramesCount = ref(0);
 const processingStage = ref('importing'); // Will be 'importing' initially, then 'analyzing', then 'stacking'
+
+// Run progress shown in the panel. Display only - it never drives processing.
+//
+// processingStage alone is not enough to label the phase: the readers only flip
+// it to 'analyzing' on the first `best-frame-updated`, which lands well after
+// analysis actually starts (and not at all for short clips), so the panel would
+// still claim "Importing" while the caption already reads "Analyzing frames".
+// The readers do announce the switch through the caption, so that is used as a
+// second signal. Worst case a caption is renamed and a step lights up late -
+// the caption itself always shows the true current step.
+const ANALYSIS_CAPTION = /analy/i;
+const sawAnalysisCaption = ref(false);
+const STAGE_LABELS = ['Importing frames', 'Analyzing frames', 'Aligning and stacking'];
+const displayStage = computed(() => {
+	if (processingStage.value === 'stacking') return 2;
+	if (processingStage.value === 'analyzing' || sawAnalysisCaption.value) return 1;
+	return 0;
+});
+const stageSteps = computed(() => STAGE_LABELS.map((label, i) => {
+	const state = displayStage.value > i ? 'done' : displayStage.value === i ? 'active' : 'pending';
+	return { label, state, meta: state === 'done' ? 'done' : state === 'active' ? 'in progress' : 'queued' };
+}));
 const uploadError = ref(null); // New ref for upload errors
 const showCancelledMessage = ref(false);
 
@@ -226,6 +265,10 @@ onMounted(async () => {
 			referenceFrame.value = null;
 			refCandidate.value = null;
 		}
+	});
+
+	on('set-caption', (text) => {
+		if (ANALYSIS_CAPTION.test(text || '')) sawAnalysisCaption.value = true;
 	});
 
 	on('best-frame-updated', (frame) => {
@@ -439,29 +482,122 @@ async function processImageFrames(files) {
 </script>
 
 <style scoped>
+	/* Run steps under the progress bar. */
+	.stage-steps {
+		list-style: none;
+		margin: 20px 0 0;
+		padding: 0;
+		border-top: 1px solid var(--eise-panel-line);
+	}
+	.stage-step {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 11px 0;
+		border-bottom: 1px solid var(--eise-panel-line);
+		font-size: 13.5px;
+		color: #5d7580;
+	}
+	.stage-step.active {
+		color: #ffffff;
+		font-weight: 500;
+	}
+	.stage-step.done {
+		color: #8fa9b1;
+	}
+	.step-dot {
+		flex: 0 0 auto;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		box-sizing: border-box;
+		border: 1px solid rgba(255, 255, 255, 0.22);
+	}
+	.stage-step.active .step-dot {
+		background: var(--eise-gilt);
+		border: none;
+	}
+	.stage-step.done .step-dot {
+		background: #5f9e7a;
+		border: none;
+	}
+	.step-name {
+		flex: 1;
+	}
+	.step-meta {
+		font-family: var(--eise-mono);
+		font-size: 11.5px;
+		color: #5d7580;
+	}
+	.stage-step.active .step-meta,
+	.stage-step.done .step-meta {
+		color: #8fa9b1;
+	}
+	/* Cancel is deliberately quiet: destructive, but not the thing to reach for. */
+	.cancel-btn {
+		width: 100%;
+		padding: 10px 16px;
+		border-radius: 7px;
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.18);
+		color: #f0d6d6;
+		font: inherit;
+		font-size: 13.5px;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 120ms ease, border-color 120ms ease;
+	}
+	.cancel-btn:hover {
+		background: rgba(196, 92, 84, 0.22);
+		border-color: rgba(226, 120, 110, 0.6);
+		color: #ffdcd6;
+	}
 	.preview-frames-row {
 		display: flex;
-		gap: 20px;
-		justify-content: center;
+		gap: 24px;
+		justify-content: flex-start;
 		flex-wrap: wrap;
 	}
 	.preview-frame {
-		text-align: center;
-		margin-bottom: 20px;
+		margin-bottom: 24px;
+		min-width: 0;
 	}
-	.preview-frame h4 {
-		margin: 0 0 10px 0;
-		color: var(--eise-on-dark);
+	.preview-label {
+		margin: 0 0 12px 0;
+		font-size: 11px;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--eise-label);
 	}
 	.preview-frame canvas {
-		border: 1px solid #ccc;
-		border-radius: 5px;
 		max-width: 100%;
+		background: #000000;
+		border: 1px solid rgba(255, 255, 255, 0.12);
+		border-radius: 10px;
+		box-shadow: 0 12px 44px rgba(0, 0, 0, 0.45);
+	}
+	.preview-placeholder {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 10px;
+		width: 100%;
+		max-width: 900px;
+		aspect-ratio: 4 / 3;
+		border: 1px dashed rgba(255, 255, 255, 0.18);
+		border-radius: 10px;
+		background: rgba(0, 0, 0, 0.16);
+		font-size: 13px;
+		color: #6b8792;
 	}
 	.sharpness-label, .frame-stats {
-		margin: 8px 0 0 0;
-		font-size: 13px;
-		color: var(--eise-on-dark);
+		margin: 10px 0 0 0;
+		font-family: var(--eise-mono);
+		font-size: 11.5px;
+		line-height: 1.5;
+		color: var(--eise-muted);
 	}
 	.error-message {
 		background-color: #ffcccc;
@@ -521,21 +657,21 @@ async function processImageFrames(files) {
 	.skipped-info p {
 		margin: 0;
 	}
-	.action-buttons {
-		display: flex;
-		gap: 10px;
-		margin-top: 10px;
-	}
 	.processing-actions {
-		flex-direction: column;
-		align-items: center;
-		margin-top: 20px;
+		padding-top: 0;
+		padding-bottom: 22px;
 	}
 	.processing-hint {
-		font-size: 12px;
-		color: #888;
-		margin: 8px 0 0 0;
-		text-align: center;
+		margin: 12px 0 0 0;
+		font-size: 12.5px;
+		line-height: 1.55;
+		color: #8fa9b1;
+		text-wrap: pretty;
+	}
+	.skipped-info {
+		background: rgba(217, 169, 74, 0.08);
+		border: 1px solid rgba(217, 169, 74, 0.25);
+		color: var(--eise-body);
 	}
 	/* Side-by-side grayscale/color preview */
 	.dual-preview {
