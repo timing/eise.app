@@ -11,6 +11,11 @@ async function hashFile(filePath) {
 
 const IGNORE = new Set(['.DS_Store', 'Thumbs.db']);
 
+// Cloudflare Pages consumes these at deploy time and never serves them (they 404
+// on eise.app). Listing them in the manifest makes the Electron updater try to
+// download them, fail the hash check and abort every update. Keep them out.
+const CF_ONLY = new Set(['_headers', '_redirects', '_routes.json']);
+
 async function walk(dir) {
   const entries = await readdir(dir, { withFileTypes: true });
   const files = [];
@@ -31,6 +36,7 @@ const files = {};
 
 for (const filePath of allFiles) {
   const rel = posix.join(...relative(outputDir, filePath).split(/[\\/]/));
+  if (CF_ONLY.has(rel)) continue;
   files[rel] = await hashFile(filePath);
 }
 

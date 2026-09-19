@@ -106,14 +106,18 @@ async function downloadFile(relativePath, expectedHash) {
     const timeout = setTimeout(() => controller.abort(), 60_000);
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.error(`Download failed for ${relativePath}: HTTP ${res.status}`);
+      return null;
+    }
     const buffer = Buffer.from(await res.arrayBuffer());
     if (sha256(buffer) !== expectedHash) {
       console.error(`Hash mismatch for ${relativePath}`);
       return null;
     }
     return buffer;
-  } catch {
+  } catch (err) {
+    console.error(`Download error for ${relativePath}: ${err.message}`);
     return null;
   }
 }
@@ -206,8 +210,9 @@ async function checkAndDownload(win, appFilesDir) {
   const results = await pooled(tasks, MAX_CONCURRENT_DOWNLOADS);
 
   // If any download failed, abort
-  if (results.some(r => r === false)) {
-    console.error('Some downloads failed, aborting update');
+  const failed = results.filter(r => r === false).length;
+  if (failed > 0) {
+    console.error(`${failed}/${changedFiles.length} downloads failed, aborting update`);
     try { await fsp.rm(staging, { recursive: true, force: true }); } catch {}
     return;
   }
