@@ -19,7 +19,7 @@
 			<div v-else class="gallery-grid">
 				<button v-for="item in items" :key="item.id" class="gallery-card" @click="selected = item" :title="cardTitle(item)">
 					<span class="gallery-card-frame">
-						<img :src="item.thumb_url" :alt="item.title || item.name" loading="lazy" />
+						<img :src="item.thumb_url" :alt="cardAlt(item)" loading="lazy" decoding="async" />
 					</span>
 					<span class="gallery-card-caption">
 						<span class="card-title">{{ item.title || 'Untitled' }}</span>
@@ -47,7 +47,7 @@
 
 		<div v-if="selected" class="lightbox" @click.self="selected = null">
 			<div class="lightbox-panel">
-				<img :src="selected.image_url" :alt="selected.name" />
+				<img :src="selected.image_url" :alt="cardAlt(selected)" />
 				<div class="lightbox-meta">
 					<h3>
 						<span v-if="selected.title" class="lightbox-title">{{ selected.title }}</span>
@@ -73,8 +73,22 @@ import { ref, onMounted } from 'vue';
 import PublishModal from '@/components/PublishModal.vue';
 
 const API_BASE = 'https://gallery.eise.app';
-const items = ref([]);
-const loading = ref(true);
+
+// Fetched during `nuxt generate` so the static HTML ships real cards (titles,
+// names, thumbnails) instead of a "Loading…" placeholder. Crawlers that do not
+// execute JS still see the gallery. Wrapped in try/catch: a gallery-api hiccup
+// must never fail the whole site build, it just falls back to the client fetch.
+const { data: prerendered } = await useAsyncData('gallery-submissions', async () => {
+	try {
+		const body = await $fetch(`${API_BASE}/submissions`);
+		return body?.items || [];
+	} catch {
+		return [];
+	}
+});
+
+const items = ref(prerendered.value || []);
+const loading = ref(items.value.length === 0);
 const error = ref('');
 const selected = ref(null);
 
@@ -123,19 +137,43 @@ function closeUploadModal() {
 }
 
 function onPublished() {
+	// Full replace rather than mergePreservingOrder: the user just published, so
+	// surfacing their stack at the top is worth the reflow.
 	fetch(`${API_BASE}/submissions`).then(r => r.ok && r.json()).then(body => {
 		if (body?.items) items.value = body.items;
 	}).catch(() => {});
 }
 
+// Merge fresh data into the prerendered snapshot without moving cards that are
+// already on screen: keep the snapshot's order for items that still exist, and
+// append anything published since the last deploy at the end. The API is
+// newest-first, so splicing new items in at the top instead slides all 24
+// painted cards one grid slot and measures ~0.45 CLS. The ordering corrects
+// itself on the next deploy, and crawlers always get the correctly ordered
+// prerendered HTML, so this only affects an already-open tab.
+function mergePreservingOrder(current, fresh) {
+	const byId = new Map(fresh.map(item => [item.id, item]));
+	const kept = [];
+	for (const item of current) {
+		const updated = byId.get(item.id);
+		if (!updated) continue; // withdrawn since the snapshot was built
+		kept.push(updated);
+		byId.delete(item.id);
+	}
+	return [...kept, ...byId.values()];
+}
+
+// The prerendered list is a snapshot from the last deploy, so refresh it to
+// pick up submissions published since then. Only surface an error if we have
+// nothing to show, otherwise the snapshot stays on screen.
 onMounted(async () => {
 	try {
 		const res = await fetch(`${API_BASE}/submissions`);
 		if (!res.ok) throw new Error(`Failed to load gallery (${res.status})`);
 		const body = await res.json();
-		items.value = body.items || [];
+		items.value = mergePreservingOrder(items.value, body.items || []);
 	} catch (e) {
-		error.value = e.message;
+		if (items.value.length === 0) error.value = e.message;
 	} finally {
 		loading.value = false;
 	}
@@ -151,10 +189,37 @@ function cardTitle(item) {
 	return item.title ? `${item.title} by ${item.name}` : `by ${item.name}`;
 }
 
+function cardAlt(item) {
+	return `${item.title || 'Planetary stack'} by ${item.name}, stacked with Eise.app`;
+}
+
+// Built from the prerendered snapshot (not the reactive `items`) so the JSON-LD
+// is baked into the static HTML and does not churn after the client refresh.
+const galleryLd = {
+	'@context': 'https://schema.org',
+	'@type': 'ImageGallery',
+	name: 'Eise Gallery',
+	url: 'https://eise.app/gallery/',
+	description: 'Community-published planetary stacks made with Eise.app.',
+	associatedMedia: (prerendered.value || []).map(item => ({
+		'@type': 'ImageObject',
+		name: item.title || `Planetary stack by ${item.name}`,
+		...(item.description ? { description: item.description } : {}),
+		contentUrl: item.image_url,
+		thumbnailUrl: item.thumb_url,
+		creditText: item.name,
+		creator: { '@type': 'Person', name: item.name },
+		...(item.captured_at ? { dateCreated: item.captured_at } : {}),
+	})),
+};
+
 useHead({
 	title: 'Gallery — Eise.app',
 	meta: [
-		{ name: 'description', content: 'Community-published planetary stacks made with Eise.app.' },
+		{ name: 'description', content: 'Community-published planetary stacks of Jupiter, Saturn, Mars and the Moon, made in the browser with Eise.app.' },
+	],
+	script: [
+		{ type: 'application/ld+json', innerHTML: JSON.stringify(galleryLd) },
 	],
 });
 </script>
