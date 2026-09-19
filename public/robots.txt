@@ -1,2 +1,9 @@
 User-agent: *
 Allow: /
+
+# Internal pages. These also send `noindex` in their meta, which is what
+# actually keeps them out of the index; this block just saves crawl budget.
+Disallow: /admin/
+Disallow: /design-system/
+
+Sitemap: https://eise.app/sitemap.xml
