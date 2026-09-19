@@ -483,6 +483,7 @@ const {
 	setPixfrac: setSharedPixfrac,
 	getTrackingContext,
 	getStackJobProps,
+	setSelectedFileContext,
 	lowResCropDetect: lowResCropDetectValue,
 	setLowResCropDetect,
 	alwaysShowColorPicker: alwaysShowColorPickerValue,
@@ -789,6 +790,9 @@ function onFileChanged(event){
 function onFilesSelected(files){
 	clearError(); // Clear previous error state (message + user-fault flag + mismatch set)
 	selectedFiles.value = files;
+	// Record what was picked before any validation runs, so a rejection below
+	// (or anywhere downstream, pre-stack_start) can report ext/size/count.
+	setSelectedFileContext(files);
 	eventBusEmit('stop-loading');
 
 	// Categorize files. DNGs are extension-detected because browsers report
@@ -803,13 +807,19 @@ function onFilesSelected(files){
 	const nonSerVideos = videoFiles.filter(f => !f.name.toLowerCase().endsWith('.ser') && !f.name.toLowerCase().endsWith('.avi'));
 
 	// Validate file combinations upfront
+	// These two use alert() + clearSelection() rather than the upload-error bus,
+	// so they need their own emit to reach the file_rejected hook in app.vue.
+	// `file-rejected` is analytics-only and paints no banner — emitting
+	// upload-error here would stack a red banner on top of the alert.
 	if (batchableFiles.length > 0 && nonSerVideos.length > 0) {
+		eventBusEmit('file-rejected', { source: 'bad_combination', message: 'SER/AVI mixed with other video files' });
 		alert('Please select either SER/AVI files or other video files, not both.');
 		clearSelection();
 		return;
 	}
 
 	if (nonSerVideos.length > 1) {
+		eventBusEmit('file-rejected', { source: 'bad_combination', message: 'Multiple non-SER/AVI video files selected' });
 		alert('Please select only one video file (multiple SER/AVI files are supported for batch processing).');
 		clearSelection();
 		return;

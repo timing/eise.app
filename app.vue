@@ -30,6 +30,7 @@ const {
 	getTrackingContext,
 	getStackJobProps,
 	getInputFilename,
+	getSelectedFileContext,
 	markStackStart,
 	markStackStep,
 	markStackStop,
@@ -346,6 +347,42 @@ function trackWatchdogFailure(kind, message) {
 	});
 }
 
+// Coarse buckets for file_rejected. The raw message is kept too, but messages
+// are long, interpolated with filenames/dimensions, and get reworded — grouping
+// the analytics on a stable category is what makes the report readable.
+// Order matters: first match wins, so put the specific patterns first.
+const REJECT_CATEGORIES = [
+	[/mixed with|Multiple non-SER/i, 'bad_combination'],
+	[/not supported|unsupported|already demosaiced|use SER or AVI/i, 'unsupported_format'],
+	[/too large|exceeds|downscale below|ran out of memory|allocation failed/i, 'too_large'],
+	[/GPU is required|requires GPU|WebGPU|switch Processing to GPU/i, 'gpu_required'],
+	[/corrupt|could not be read|failed to parse|no video frames|may be corrupted/i, 'unreadable'],
+	[/couldn't open this image|failed to load any images|failed to load/i, 'decode_failed'],
+];
+
+let lastRejectKey = '';
+// Pre-start rejection. Deliberately NOT a stack_* event: there is no job, so it
+// must not join to stack_job_id or it would pollute the stack funnel. Deduped
+// on category+ext because several sites emit twice for one user action.
+function trackFileRejected(source, message) {
+	const msg = String(message || '').slice(0, 200);
+	const category = (REJECT_CATEGORIES.find(([re]) => re.test(msg)) || [null, 'other'])[1];
+	const fileCtx = getSelectedFileContext() || {};
+	// Signature includes the selection itself, so re-picking a different file
+	// and hitting the same category still reports (only true double-emits for
+	// one user action are suppressed).
+	const key = `${category}|${fileCtx.file_ext || '?'}|${fileCtx.file_count || 0}|${fileCtx.file_mb || 0}`;
+	if (key === lastRejectKey) return;
+	lastRejectKey = key;
+	track('file_rejected', {
+		...fileCtx,
+		category,
+		source,
+		reason: msg,
+		gpu_enabled: getTrackingContext()?.gpu_enabled ?? null,
+	});
+}
+
 onMounted(async () => {
 	isMounted.value = true;
 	trackHumanInteraction();
@@ -462,10 +499,21 @@ onMounted(async () => {
 	// the failure, we don't. Route them through the enriched stack_failed path.
 	// Payload may be a plain string OR `{ message, alternatives }` (actionable
 	// card variant) — unwrap so analytics doesn't log `[object Object]`.
+	// When no stack is in flight the same emit means we turned the user away
+	// BEFORE they ever got a job: unsupported format, bad file combination,
+	// header parse failure, GPU required. Those used to return early here and
+	// vanish, which is why the interacted -> stack_start funnel has a blind
+	// 50%. Fire file_rejected instead so the pre-start drop-off is diagnosable.
 	on('upload-error', (payload) => {
-		if (!stackInFlight) return;
 		const message = typeof payload === 'string' ? payload : (payload?.message || 'unknown');
+		if (!stackInFlight) { trackFileRejected('upload_error', message); return; }
 		trackWatchdogFailure('upload_error', message);
+	});
+
+	// Analytics-only channel for reject paths that never touch upload-error
+	// (alert() + clearSelection sites). Paints no UI.
+	on('file-rejected', (payload) => {
+		trackFileRejected(payload?.source || 'unknown', payload?.message || 'unknown');
 	});
 
 	// Watchdog: catch unhandled rejections/errors during processing so the

@@ -21,13 +21,6 @@
 			<div class="eise-brand">
 				<NuxtLink to="/" class="eise-wordmark" @click="onWordmarkClick">Eise.app</NuxtLink>
 				<span class="eise-tagline">Easy Image Stacker Engine</span>
-				<span
-					v-if="showStackCounter"
-					class="eise-stat"
-					:title="`${stackCount24h} stacks finished in the last 24 hours`">
-					<span class="eise-stat-dot"></span>
-					<span class="eise-stat-text">{{ stackCount24h }} {{ stackCount24h === 1 ? 'stack' : 'stacks' }} today</span>
-				</span>
 			</div>
 
 			<nav class="eise-nav">
@@ -153,7 +146,6 @@
 <script setup>
 import Logger from '@/components/Logger.vue';
 import { useFeedback } from '@/composables/useFeedback';
-import { getVariant } from '@/composables/useAbTest';
 
 const route = useRoute();
 
@@ -191,35 +183,11 @@ function onDocClickCloseMenu(e) {
 onMounted(() => document.addEventListener('click', onDocClickCloseMenu));
 onBeforeUnmount(() => document.removeEventListener('click', onDocClickCloseMenu));
 
-// Social-proof counter A/B: desktop-only "N Stacks today" badge between logo
-// and nav. Enrollment is gated on desktop so mobile visitors don't get bucketed
-// into a treatment they never see; the variant lands on the session as soon as
-// the user fires their first tracked event (human_interaction, click_ext, etc.)
-// because activeVariants() reads localStorage on every track call. Count comes
-// from a 5-minute-cached endpoint on gallery-api that reads stack_finished
-// events from the last 24h.
-const stackCounterVariant = ref('A');
-const stackCount24h = ref(null);
-const isDesktop = ref(false);
-const showStackCounter = computed(() =>
-	isDesktop.value
-	&& stackCounterVariant.value === 'B'
-	&& typeof stackCount24h.value === 'number'
-	&& stackCount24h.value > 0
-);
-
-onMounted(async () => {
-	if (typeof window === 'undefined') return;
-	isDesktop.value = window.matchMedia('(min-width: 701px)').matches;
-	if (!isDesktop.value) return;
-	stackCounterVariant.value = getVariant('social_proof_counter');
-	if (window.eise && typeof window.eise.stacks24h === 'function') {
-		try {
-			const res = await window.eise.stacks24h();
-			if (res && typeof res.count === 'number') stackCount24h.value = res.count;
-		} catch {}
-	}
-});
+// social_proof_counter A/B (desktop-only "N stacks today" badge) ran
+// 2026-08-31 → 2026-09-19 and lost: -9.4% own-footage stack_start on desktop
+// (p=0.22, 95% CI -23%…+6%), negative in every week of the run. Rolled back to
+// variant A. The EXPERIMENT_CONFIG entries in gallery-api stay so historical
+// sessions still report. See .claude/skills/ab-test/SKILL.md.
 
 async function onLetMeKnowClick(event) {
 	// If Sentry feedback is available, open the modal and cancel navigation.
@@ -346,33 +314,6 @@ watch(() => route.path, () => {
 	font-size: 12.5px;
 	letter-spacing: 0.01em;
 	color: var(--eise-muted);
-}
-
-.eise-stat {
-	align-self: center;
-	display: inline-flex;
-	align-items: center;
-	gap: 7px;
-	margin-left: 6px;
-	padding: 3px 10px;
-	border: 1px solid rgba(217, 169, 74, 0.28);
-	border-radius: 999px;
-	background: rgba(217, 169, 74, 0.1);
-	user-select: none;
-}
-
-.eise-stat-dot {
-	flex: 0 0 auto;
-	width: 5px;
-	height: 5px;
-	border-radius: 50%;
-	background: var(--eise-gilt);
-}
-
-.eise-stat-text {
-	font-size: 11.5px;
-	letter-spacing: 0.02em;
-	color: var(--eise-gilt-lt);
 }
 
 .eise-nav {
@@ -507,10 +448,9 @@ watch(() => route.path, () => {
 	display: none !important;
 }
 
-/* Drop tagline + counter pill before nav collapses (per design spec). */
+/* Drop the tagline before nav collapses (per design spec). */
 @media (max-width: 900px) {
-	.eise-tagline,
-	.eise-stat {
+	.eise-tagline {
 		display: none !important;
 	}
 }

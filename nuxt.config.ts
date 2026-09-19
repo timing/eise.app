@@ -7,14 +7,12 @@ import { sentryVitePlugin } from '@sentry/vite-plugin';
 const isProduction = process.env.CF_PAGES_BRANCH === 'main';
 const robotsContent = isProduction ? 'index, follow' : 'noindex, nofollow';
 
-// Electron builds set EISE_BUILD_TARGET=electron so analytics land in a separate
-// Simple Analytics hostname bucket instead of polluting web stats.
+// Electron builds set EISE_BUILD_TARGET=electron so desktop analytics land in a
+// separate site bucket instead of polluting web stats. Note that the desktop
+// auto-updater swaps in the web-flavored bundle, so beacon.js also re-checks for
+// Electron at runtime and overrides the site id there.
 const isElectronBuild = process.env.EISE_BUILD_TARGET === 'electron';
-const analyticsHostname = isElectronBuild
-	? 'electron.eise.app'
-	: (isProduction ? 'eise.app' : 'localhost.eise.app');
 
-// Custom analytics beacon (parallel-run with Simple Analytics for validation).
 const beaconSite = isElectronBuild
 	? 'eise-electron'
 	: (isProduction ? 'eise-prod' : 'eise-dev');
@@ -59,13 +57,6 @@ export default defineNuxtConfig({
 			],
 			script: [
 				{
-					src: 'https://api.eise.app/latest.js',
-					async: true,
-					defer: true,
-					crossorigin: 'anonymous',
-					'data-hostname': analyticsHostname,
-				},
-				{
 					// Query-string bust so a new deploy = new URL. Cloudflare and
 					// browsers both key by query string, so returning visitors don't
 					// stay on the stale copy for max-age (currently 5min per
@@ -77,9 +68,6 @@ export default defineNuxtConfig({
 					'data-site': beaconSite,
 				}
 			],
-			noscript: [
-				{ children: '<img src="https://api.eise.app/noscript.gif" alt="" referrerpolicy="no-referrer-when-downgrade" />' }
-			]
 		}
 	},
 	router: {

@@ -36,6 +36,10 @@ const trackingContext = ref({
     gpu_enabled: null    // true/false
 });
 
+// Set at file-selection time (before any stack job exists) so pre-start
+// rejections can report what was rejected. Survives until the next selection.
+const selectedFileContext = ref(null);
+
 const stackingMode = ref('single'); // 'single' or 'continuous'
 // When true, crop-detection analyze runs at half resolution (fixed 2× box-
 // filter downscale). Trade-off: ~1 source-pixel error in the initial centroid,
@@ -171,6 +175,26 @@ export function useProcessingState() {
         return batchStartIndex.value;
     }
 
+    // What the user picked, captured at selection time so a rejection that
+    // happens BEFORE stack_start still knows what was rejected. Without this
+    // the file_rejected event would only carry a message string, which tells
+    // us nothing about which formats/sizes we're turning away.
+    function setSelectedFileContext(files) {
+        const list = Array.from(files || []);
+        if (!list.length) { selectedFileContext.value = null; return; }
+        const exts = [...new Set(list.map(f => (f.name.split('.').pop() || '').toLowerCase()).filter(Boolean))];
+        selectedFileContext.value = {
+            file_count: list.length,
+            file_ext: exts.length === 1 ? exts[0] : exts.slice(0, 3).join('+'),
+            file_mime: list[0].type || null,
+            file_mb: Math.round(list.reduce((a, f) => a + (f.size || 0), 0) / (1024 * 1024)),
+        };
+    }
+
+    function getSelectedFileContext() {
+        return selectedFileContext.value;
+    }
+
     function setTrackingContext({ file_type, reader, gpu_enabled }) {
         // initial_reader is sticky per job: whoever calls setTrackingContext first
         // owns it, and later fallback calls (mediabunny -> ffmpeg) only rewrite
@@ -252,6 +276,8 @@ export function useProcessingState() {
         batchStartIndex,
         setBatchStartIndex,
         getBatchStartIndex,
+        setSelectedFileContext,
+        getSelectedFileContext,
         setTrackingContext,
         getTrackingContext,
         getStackJobProps,

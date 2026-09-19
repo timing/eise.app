@@ -98,11 +98,6 @@
       .then(function (r) { return r.ok ? r.json() : { role: null }; })
       .catch(function () { return { role: null }; });
   };
-  window.eise.stacks24h = function () {
-    return fetch(endpoint + '/stats/stacks-24h')
-      .then(function (r) { return r.ok ? r.json() : { count: null }; })
-      .catch(function () { return { count: null }; });
-  };
 
   pageview();
 
