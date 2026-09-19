@@ -26,6 +26,7 @@ import { reportError } from '@/composables/useSentryReporting';
 // Import parser helpers for Bayer pattern conversion
 import { getGpuBayerPattern as serGetGpuBayerPattern, isRgbColor, SER_COLOR_BGR } from '@/composables/useSerParser';
 import { opencvToGpuPattern } from '@/composables/useAviParser';
+import { useProcessingState } from '@/composables/useProcessingState';
 
 /**
  * Map OpenCV Bayer pattern names to GPU shader pattern indices
@@ -183,6 +184,18 @@ export function useDebayerReader() {
     let cancelled = false;
     let isRgbPassthrough = false;  // true for SER colorID 100 (RGB) or 101 (BGR)
     let isBgr = false;             // true for SER colorID 101 (BGR) - swap R/B channels
+
+    // SER colorIDs 8-11 name the Bayer pattern outright (RGGB/GRBG/GBRG/BGGR),
+    // and other parsers fill metadata.bayerPattern when the container declares
+    // one. Anything else reaching this path - MONO-tagged raw that is really
+    // Bayer, unknown colorID - is a guess, and that is when the picker earns
+    // its place.
+    const SER_EXPLICIT_BAYER_IDS = [8, 9, 10, 11];
+    function hasDeclaredBayerPattern() {
+        if (SER_EXPLICIT_BAYER_IDS.includes(metadata?.colorID)) return true;
+        const declared = metadata?.bayerPattern?.opencv;
+        return !!declared && declared !== 'MONO';
+    }
 
     // Cancel processing and terminate workers
     function cancelProcessing() {
@@ -1019,10 +1032,23 @@ export function useDebayerReader() {
 
         const MIN_SIZE_FOR_CROP = 300;
 
+        // Does the user get asked about the Bayer pattern at all? The picker is
+        // for files that do not say what they are; when the file declares its
+        // pattern we trust it and go straight to stacking, unless the user
+        // opted into always picking. Decided up front so the preview frame and
+        // its crop detection - work that exists only to feed the picker - can
+        // be skipped too.
+        const { getAlwaysShowColorPicker } = useProcessingState();
+        const needsColorPicker = !forceBayerPattern
+            && (getAlwaysShowColorPicker() || !hasDeclaredBayerPattern());
+
         if (isRgbPassthrough) {
             // RGB/BGR SER: skip the color profile selector entirely —
             // frames are already decoded RGB, no Bayer pattern needed.
             addLog(`[DebayerReader] RGB SER: skipping color profile selector`);
+            emit('debayer-processing-started');
+        } else if (!needsColorPicker && !forceBayerPattern) {
+            addLog(`[DebayerReader] Bayer pattern declared by the file: ${bayerChoice} (colorID: ${metadata.colorID}) — skipping color profile selector`);
             emit('debayer-processing-started');
         } else {
             // Read first frame for preview (used by the Bayer color profile selector)

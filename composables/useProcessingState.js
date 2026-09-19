@@ -45,6 +45,11 @@ const stackingMode = ref('single'); // 'single' or 'continuous'
 // failures on 4000×3000+ smartphone photos. Default is initialized in
 // FileUploader based on isMobileDevice: on by default on mobile, off on desktop.
 const lowResCropDetect = ref(false);
+// Advanced opt-in: show the Bayer colour profile picker on every raw file,
+// even when the file already names its pattern. Off by default so SER files
+// that declare their colorID go straight to stacking; the picker still appears
+// on its own when the pattern is not declared (see useDebayerReader).
+const alwaysShowColorPicker = ref(false);
 const continuousStackingResults = ref([]); // Stores [pct, blob, sharpness] for comparison
 const batchStartIndex = ref(0); // Initial index for BatchPostProcessor
 
@@ -132,6 +137,14 @@ export function useProcessingState() {
 
     function getStackingMode() {
         return stackingMode.value;
+    }
+
+    function setAlwaysShowColorPicker(value) {
+        alwaysShowColorPicker.value = !!value;
+    }
+
+    function getAlwaysShowColorPicker() {
+        return alwaysShowColorPicker.value;
     }
 
     function setLowResCropDetect(value) {
@@ -230,6 +243,9 @@ export function useProcessingState() {
         lowResCropDetect,
         setLowResCropDetect,
         getLowResCropDetect,
+        alwaysShowColorPicker,
+        setAlwaysShowColorPicker,
+        getAlwaysShowColorPicker,
         continuousStackingResults,
         setContinuousResults,
         getContinuousResults,

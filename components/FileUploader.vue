@@ -284,6 +284,17 @@
 					</p>
 				</div>
 			</template>
+
+			<div v-if="!liteModeClient && showAdvanced" class="panel-section">
+				<h4 class="panel-label">Color profile <span class="info-icon" @click="showColorPickerInfo = !showColorPickerInfo">ⓘ</span></h4>
+				<label class="panel-check">
+					<input type="checkbox" v-model="alwaysShowColorPickerValue" />
+					Always show color profile picker
+				</label>
+				<p v-if="showColorPickerInfo" class="info-text">
+					Raw files (SER, DNG, raw AVI) need debayering to become color. When the file states its Bayer pattern, Eise uses it and goes straight to stacking. When it doesn't, you get the picker anyway so you can choose the one with the right colors. Turn this on to always pick by hand, for example when a file declares the wrong pattern.
+				</p>
+			</div>
 		</template>
 	</div>
 
@@ -460,6 +471,7 @@ const showStackingModeInfo = ref(false);
 const showContinuousInfo = ref(false);
 const showProcessingBackendInfo = ref(false);
 const showLowResCropDetectInfo = ref(false);
+const showColorPickerInfo = ref(false);
 
 // Pull the shared processing state early: the watch() below references
 // lowResCropDetectValue and hits a TDZ error if the destructure lives after.
@@ -473,6 +485,8 @@ const {
 	getStackJobProps,
 	lowResCropDetect: lowResCropDetectValue,
 	setLowResCropDetect,
+	alwaysShowColorPicker: alwaysShowColorPickerValue,
+	setAlwaysShowColorPicker,
 } = useProcessingState();
 
 // User-selectable backend. Only takes effect when GPU is otherwise available;
@@ -539,6 +553,9 @@ function loadSettings() {
 			if (settings.processingBackend === 'gpu' || settings.processingBackend === 'cpu') {
 				processingBackend.value = settings.processingBackend;
 			}
+			if (typeof settings.alwaysShowColorPicker === 'boolean') {
+				setAlwaysShowColorPicker(settings.alwaysShowColorPicker);
+			}
 			if (typeof settings.lowResCropDetect === 'boolean') {
 				setLowResCropDetect(settings.lowResCropDetect);
 			}
@@ -564,7 +581,8 @@ function saveSettings() {
 			pixfrac: pixfrac.value,
 			drizzleMethod: drizzleMethod.value,
 			processingBackend: processingBackend.value,
-			lowResCropDetect: lowResCropDetectValue.value
+			lowResCropDetect: lowResCropDetectValue.value,
+			alwaysShowColorPicker: alwaysShowColorPickerValue.value
 		};
 		localStorage.setItem('eise-settings', JSON.stringify(settings));
 	} catch (e) {
@@ -573,7 +591,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, pixfrac, processingBackend, lowResCropDetectValue], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, pixfrac, processingBackend, lowResCropDetectValue, alwaysShowColorPickerValue], saveSettings);
 
 onMounted(async () => {
 	// Read the raw persisted setting BEFORE loadSettings runs, so we can tell
