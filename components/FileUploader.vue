@@ -340,7 +340,7 @@
 		<!-- Featured community stack. Falls back to hidden when the gallery API is unreachable. -->
 		<NuxtLink v-if="featuredStack" to="/gallery/" class="gallery-pick">
 			<span class="gallery-pick-thumb">
-				<img :src="featuredStack.thumb_url" :alt="featuredStack.title || featuredStack.name" loading="lazy" width="128" height="128" />
+				<img :src="featuredStack.thumb_url" :alt="`${featuredStack.title || 'Planetary stack'} by ${featuredStack.name}, stacked with Eise.app`" loading="lazy" decoding="async" width="128" height="128" />
 			</span>
 			<span class="gallery-pick-body">
 				<span class="gallery-pick-eyebrow">From the gallery</span>
@@ -626,23 +626,25 @@ onMounted(async () => {
 	if (!hadLowResSetting && isMobile.value) {
 		setLowResCropDetect(true);
 	}
-
-	loadFeaturedStack();
 });
 
 // Featured community stack shown next to the welcome copy. The admin picks it
 // in the gallery admin; the API falls back to the newest approved stack when
 // nothing is featured. Best-effort: the block stays hidden when the gallery
 // API is unreachable or has nothing to show.
-const featuredStack = ref(null);
-async function loadFeaturedStack() {
+//
+// Fetched during `nuxt generate` rather than on mount, so the card ships in the
+// static HTML. That makes it crawlable and, because the block is `v-if`, also
+// removes the layout shift it used to cause by popping in after hydration.
+// The try/catch keeps a gallery-api hiccup from failing the site build.
+const { data: featuredStack } = await useAsyncData('featured-stack', async () => {
 	try {
-		const res = await fetch('https://gallery.eise.app/featured');
-		if (!res.ok) return;
-		const body = await res.json();
-		featuredStack.value = body?.item || null;
-	} catch {}
-}
+		const body = await $fetch('https://gallery.eise.app/featured');
+		return body?.item || null;
+	} catch {
+		return null;
+	}
+});
 
 const selectedFiles = ref([]);
 const isProcessing = ref(false);
