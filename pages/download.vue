@@ -37,8 +37,8 @@
 						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="3.1" /><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1" stroke-linecap="round" /></svg>
 						<h3>Linux</h3>
 					</div>
-					<a :href="DOWNLOAD_URLS.linux" download class="download-btn" @click="track('download', { os: 'linux' })">Download .AppImage</a>
-					<p class="platform-desc">Or grab the <a :href="DOWNLOAD_URLS.deb" download @click="track('download', { os: 'linux' })">.deb package</a> for Debian / Ubuntu.</p>
+					<a :href="DOWNLOAD_URLS.linux" download class="download-btn" @click="track('download', { os: 'linux', arch: 'x64' })">Download .AppImage</a>
+					<p class="platform-desc">x64. Or grab the <a :href="DOWNLOAD_URLS.deb" download @click="track('download', { os: 'linux', arch: 'x64' })">.deb package</a> for Debian / Ubuntu. On ARM64, take the <a :href="DOWNLOAD_URLS.linuxArm64" download @click="track('download', { os: 'linux', arch: 'arm64' })">.AppImage</a> or <a :href="DOWNLOAD_URLS.debArm64" download @click="track('download', { os: 'linux', arch: 'arm64' })">.deb</a>.</p>
 					<div class="platform-note">
 						<p>Make AppImage executable:</p>
 						<code>chmod +x Eise*.AppImage</code>
@@ -118,13 +118,23 @@
 import { useTracking } from '~/composables/useTracking';
 import MailingListForm from '@/components/MailingListForm.vue';
 const { track } = useTracking();
-const RELEASE_VERSION = '2026.08.30';
+const RELEASE_VERSION = '2026.09.19';
+// Pinned to the release tag rather than /releases/latest/download/: the filenames
+// carry the version anyway, so "latest" bought nothing and broke every link during
+// the window between publishing a release and deploying this page.
+// electron-builder drops the leading zeros when it names artifacts, so the file
+// version and the display version differ.
+const RELEASE_TAG = `v${RELEASE_VERSION}`;
+const FILE_VERSION = '2026.9.19';
+const RELEASE_BASE = `https://github.com/timing/eise.app/releases/download/${RELEASE_TAG}`;
 const DOWNLOAD_URLS = {
-  mac: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-mac-arm64.dmg',
-  windows: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-win-x64.exe',
-  windowsArm64: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-win-arm64.exe',
-  linux: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-linux-arm64.AppImage',
-  deb: 'https://github.com/timing/eise.app/releases/latest/download/Eise-2026.8.30-linux-arm64.deb',
+  mac: `${RELEASE_BASE}/Eise-${FILE_VERSION}-mac-arm64.dmg`,
+  windows: `${RELEASE_BASE}/Eise-${FILE_VERSION}-win-x64.exe`,
+  windowsArm64: `${RELEASE_BASE}/Eise-${FILE_VERSION}-win-arm64.exe`,
+  linux: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-x86_64.AppImage`,
+  linuxArm64: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-arm64.AppImage`,
+  deb: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-amd64.deb`,
+  debArm64: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-arm64.deb`,
 };
 const releasesUrl = 'https://github.com/timing/eise.app/releases';
 

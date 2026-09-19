@@ -16,7 +16,9 @@ npm run build        # Production build
 npm run generate     # Generate static files (for Cloudflare deployment)
 ```
 
-**IMPORTANT: Do NOT run `npm run build` to verify changes.** The dev server (`npm run dev`) is always running in another terminal and will show compilation errors immediately via hot-reload. Running build is slow and unnecessary.
+**IMPORTANT: Do NOT run `npm run build` or `npm run generate` to verify changes.** The dev server (`npm run dev`) is always running in another terminal and will show compilation errors immediately via hot-reload. Running build is slow and unnecessary.
+
+It is also actively destructive: `build`/`generate` share `.nuxt` with the dev server and overwrite `.nuxt/dist/server/server.mjs` with a production stub. The dev server then 500s on every request with `Package import specifier "#internal/nitro" is not defined`. That error means a production build clobbered the dev build, NOT that your source is broken. Recovery: stop the dev server, `rm -rf .nuxt`, `npm run dev`. The same happens after a real deploy build, so expect it then too.
 
 ## Architecture
 
@@ -117,7 +119,9 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 - `apPatchSize` - Alignment point patch size in pixels (default 20)
 - `inputFilename` - Current input filename for output naming
 
-UI settings in FileUploader.vue sync to this shared state via watchers, and useStacker.js reads from it via getter functions (`getMinApQuality()`, `getApPatchSize()`).
+- `apSpacingScale` - Alignment-point grid spacing multiplier (default 1 = full density). AP count falls with the SQUARE of this, so it is the dominant lever on NCC dispatch cost. Driven by the "Alignment detail" slider; `LITE_AP_SPACING_FLOOR` in FileUploader.vue can floor it for lite mode (currently 1, i.e. no automatic reduction).
+
+UI settings in FileUploader.vue sync to this shared state via watchers, and useStacker.js reads from it via getter functions (`getMinApQuality()`, `getApPatchSize()`, `getApSpacingScale()`).
 
 **SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`. **When adding new JS files to `public/`**, you MUST add them to `config/cloudflare_headers.txt` with COEP headers, otherwise they will be blocked by Cross-Origin-Embedder-Policy on production.
 

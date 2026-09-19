@@ -35,9 +35,17 @@ win:
 linux:
   category: Graphics
   maintainer: eise@eise.app
+  # Without an explicit arch list electron-builder only builds the host arch,
+  # which on an Apple Silicon machine means arm64-only Linux downloads.
   target:
-    - AppImage
-    - deb
+    - target: AppImage
+      arch:
+        - x64
+        - arm64
+    - target: deb
+      arch:
+        - x64
+        - arm64
 
 nsis:
   oneClick: true
