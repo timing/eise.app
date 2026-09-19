@@ -1,8 +1,37 @@
-const { app, BrowserWindow, session, shell, ipcMain, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, Menu, session, shell, ipcMain, powerSaveBlocker } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { registerScheme, registerHandler } = require('./protocol');
 const { applyPendingUpdate, startUpdateChecker } = require('./updater');
+
+// The packaged package.json still carries the Nuxt scaffold name, which Electron
+// would otherwise use for the macOS app menu ("About nuxt-app", "Quit nuxt-app").
+const APP_NAME = 'Eise';
+const LEGACY_APP_NAME = 'nuxt-app';
+app.setName(APP_NAME);
+useExistingProfileIfPresent();
+
+/**
+ * Electron derives the userData directory name from the app name, so renaming the
+ * app would point existing installs at an empty directory and strand the profile
+ * they already have under the old name: the downloaded app-files, a staged update,
+ * localStorage and the first-launch marker. Keep using that directory when it is
+ * already there rather than moving anything — nothing on disk changes either way.
+ * Fresh installs get a directory named after the app. An explicit --user-data-dir
+ * always wins and short-circuits this entirely, so a test build can be launched
+ * against a throwaway profile without reading the real one.
+ */
+function useExistingProfileIfPresent() {
+  if (process.argv.some(arg => arg.startsWith('--user-data-dir'))) return;
+  try {
+    const existing = path.join(app.getPath('appData'), LEGACY_APP_NAME);
+    const hasProfile = fs.existsSync(path.join(existing, 'app-files')) ||
+      fs.existsSync(path.join(existing, 'first-launch.json'));
+    if (hasProfile) app.setPath('userData', existing);
+  } catch (err) {
+    console.error('Could not resolve the existing profile, using the default:', err.message);
+  }
+}
 
 // Enable WebGPU
 app.commandLine.appendSwitch('enable-unsafe-webgpu');
@@ -87,16 +116,83 @@ function readAppVersion() {
   }
 }
 
+/**
+ * Manifest of the web bundle currently being served. The shell self-updates from
+ * https://eise.app, so this moves independently of the installer version and is
+ * the only thing that says which UI you are actually looking at.
+ */
+function readContentManifest(appFilesDir) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(appFilesDir, 'version.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// "2026-09-19T18:57:43.687Z" -> "2026-09-19 18:57 UTC"
+function formatManifestDate(iso) {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(iso || '');
+  return m ? `${m[1]} ${m[2]} UTC` : (iso || 'unknown');
+}
+
+function describeWebRelease(appFilesDir) {
+  const manifest = readContentManifest(appFilesDir);
+  if (!manifest) return 'bundled with installer';
+  const commit = manifest.commit ? ` (${manifest.commit})` : '';
+  return `${formatManifestDate(manifest.version)}${commit}`;
+}
+
+/**
+ * About panel showing both versions: the installer this machine downloaded, and
+ * the web release the auto-updater has since swapped in.
+ */
+function configureAboutPanel(appFilesDir) {
+  const appVersion = readAppVersion();
+  const webRelease = describeWebRelease(appFilesDir);
+
+  app.setAboutPanelOptions({
+    applicationName: APP_NAME,
+    // Windows and Linux render only applicationName/applicationVersion/copyright,
+    // so both versions have to fit on this single line there.
+    applicationVersion: `${appVersion} · web release ${webRelease}`,
+    version: webRelease, // macOS shows this in parentheses after the version
+    credits: `Installed build ${appVersion}\nWeb release ${webRelease}\nhttps://eise.app`,
+    copyright: 'Copyright (c) 2026 eise.app'
+  });
+}
+
+/**
+ * macOS builds a correct default menu once app.setName() has run. Windows and
+ * Linux have no About entry in the default menu at all, so give them one.
+ */
+function buildMenu() {
+  if (process.platform === 'darwin') return;
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { role: 'fileMenu' },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+    { role: 'help', submenu: [{ label: `About ${APP_NAME}`, role: 'about' }] }
+  ]));
+}
+
 // IPC handlers
 ipcMain.handle('get-app-version', () => readAppVersion());
 
-ipcMain.handle('get-platform-info', () => ({
-  platform: process.platform,
-  arch: process.arch,
-  app_version: readAppVersion(),
-  electron_version: process.versions.electron,
-  chrome_version: process.versions.chrome,
-}));
+ipcMain.handle('get-platform-info', () => {
+  const manifest = readContentManifest(getAppFilesDir());
+  return {
+    platform: process.platform,
+    arch: process.arch,
+    app_version: readAppVersion(),
+    // app_version is frozen at whatever installer was downloaded; these two track
+    // the web bundle the shell actually runs after a self-update.
+    content_version: manifest?.version || null,
+    content_commit: manifest?.commit || null,
+    electron_version: process.versions.electron,
+    chrome_version: process.versions.chrome,
+  };
+});
 
 // Returns true the very first time it's called for this install, false forever
 // after. State is persisted to a small JSON file in userData so it survives app
@@ -135,6 +231,10 @@ app.whenReady().then(() => {
 
   const appFilesDir = getAppFilesDir();
   console.log('Serving app from:', appFilesDir);
+
+  // Read after applyPendingUpdate() so both reflect what is actually running.
+  configureAboutPanel(appFilesDir);
+  buildMenu();
 
   const win = createWindow(appFilesDir);
 

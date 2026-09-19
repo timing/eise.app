@@ -40,11 +40,16 @@ for (const filePath of allFiles) {
   files[rel] = await hashFile(filePath);
 }
 
+// Cloudflare Pages exposes the deployed commit; the desktop About panel shows it
+// next to the release date so a running install can be tied back to a build.
+const commit = (process.env.CF_PAGES_COMMIT_SHA || process.env.GITHUB_SHA || '').slice(0, 7) || null;
+
 const manifest = {
   version: new Date().toISOString(),
+  commit,
   files
 };
 
 const outPath = join(outputDir, 'version.json');
 await writeFile(outPath, JSON.stringify(manifest, null, 2));
-console.log(`version.json written with ${Object.keys(files).length} files`);
+console.log(`version.json written with ${Object.keys(files).length} files (commit ${commit || 'unknown'})`);
