@@ -737,6 +737,27 @@ async function safeStackMapAsync(buffer, mode) {
     }
 }
 
+// --- NCC dispatch telemetry -------------------------------------------------
+// The stacking phase used to be a blackout: sessions that died here reported
+// `last_step: stack_ap_grid_built` and nothing else, so we could not tell a GPU
+// watchdog kill from an allocation failure, nor whether the adaptive loop had
+// already collapsed to its floor of 1 frame per dispatch. These three reports
+// answer that. They run inside the stacking worker, so they postMessage out and
+// useStacker relays them onto the stack-step bus.
+//
+// Volume is bounded: `start` and `done` fire once per NCC call, `slow` fires at
+// most once per call (guarded by nccSlowReported).
+// The WorkerGlobalScope check matters: on a main thread `self.postMessage` is
+// window.postMessage, which has a different signature and would fire a message
+// event at the page. Only post when we are genuinely inside a worker.
+function reportNcc(kind, props) {
+    try {
+        if (typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope) {
+            self.postMessage({ type: 'ncc-telemetry', kind, props });
+        }
+    } catch {}
+}
+
 // Cached buffers
 let cachedStackBuffers = null;
 let cachedStackConfig = null;
@@ -2382,6 +2403,26 @@ async function matchTemplatesFromGpuBuffer(grayGpuBuffer, refGrayData, width, he
     const src = stackingDeviceCostMs != null ? 'learned' : 'default';
     console.log(`[stacking] NCC: ${batchSize} frames, ${framesPerDispatch} frames/dispatch (${src}), cap ${workgroupCap}, target ${TARGET_MS}ms, ${numAPs} APs, radius ${searchRadius}`);
 
+    // Fires BEFORE the first dispatch, so it survives a GPU watchdog kill that
+    // takes the rest of the run with it. projected_frame_ms is the key number:
+    // if it exceeds MAX_MS the loop is already at its floor of 1 frame and has
+    // no lever left, which is exactly the case AP-slicing would address.
+    reportNcc('start', {
+        ncc_path: 'gpu_buffer',
+        num_aps: numAPs,
+        search_radius: searchRadius,
+        patch_size: patchSize,
+        batch_size: batchSize,
+        frames_per_dispatch: framesPerDispatch,
+        workgroup_cap: workgroupCap,
+        cost_src: src,
+        learned_cost: stackingDeviceCostMs,
+        projected_frame_ms: stackingDeviceCostMs != null ? Math.round(workPerFrame * stackingDeviceCostMs) : null,
+    });
+    let nccSlowReported = false;
+    let nccMaxElapsed = 0;
+    let nccDispatches = 0;
+
     let frameStart = 0;
     while (frameStart < batchSize) {
         const sub = Math.min(framesPerDispatch, batchSize - frameStart);
@@ -2405,6 +2446,25 @@ async function matchTemplatesFromGpuBuffer(grayGpuBuffer, refGrayData, width, he
             stackingDeviceCostMs = stackingDeviceCostMs == null ? sample : stackingDeviceCostMs * (1 - alpha) + sample * alpha;
         }
 
+        nccDispatches++;
+        if (elapsed > nccMaxElapsed) nccMaxElapsed = elapsed;
+        // at_floor is the datapoint the AP-slicing decision rests on: a dispatch
+        // that overran the budget while ALREADY down to a single frame means
+        // frame-count batching has nothing left to give.
+        if (elapsed > MAX_MS && !nccSlowReported) {
+            nccSlowReported = true;
+            reportNcc('slow', {
+                ncc_path: 'gpu_buffer',
+                elapsed_ms: Math.round(elapsed),
+                frames_in_dispatch: sub,
+                frames_per_dispatch: framesPerDispatch,
+                at_floor: framesPerDispatch <= 1,
+                num_aps: numAPs,
+                search_radius: searchRadius,
+                dispatch_index: nccDispatches,
+            });
+        }
+
         frameStart += sub;
         if (frameStart < batchSize) {
             if (elapsed > MAX_MS && framesPerDispatch > 1) {
@@ -2419,6 +2479,14 @@ async function matchTemplatesFromGpuBuffer(grayGpuBuffer, refGrayData, width, he
             }
         }
     }
+
+    reportNcc('done', {
+        ncc_path: 'gpu_buffer',
+        dispatches: nccDispatches,
+        max_elapsed_ms: Math.round(nccMaxElapsed),
+        final_frames_per_dispatch: framesPerDispatch,
+        hit_slow: nccSlowReported,
+    });
 
     // Copy all results out in one shot (small buffer, ~9 KB for 500 APs)
     const copyEncoder = stackDevice.createCommandEncoder();
@@ -2644,6 +2712,25 @@ async function matchTemplatesFullyGpu(grayGpuBuffer, refGrayData, width, height,
     const src = stackingDeviceCostMs != null ? 'learned' : 'default';
     console.log(`[stacking] NCC(fullyGpu): ${batchSize} frames, ${framesPerDispatch} frames/dispatch (${src}), cap ${workgroupCap}, target ${TARGET_MS}ms, ${numAPs} APs, radius ${searchRadius}`);
 
+    // Same reasoning as the gpu_buffer path above. ncc_path distinguishes them:
+    // both are live and we do not yet know which one the failing Android
+    // sessions actually run.
+    reportNcc('start', {
+        ncc_path: 'fully_gpu',
+        num_aps: numAPs,
+        search_radius: searchRadius,
+        patch_size: patchSize,
+        batch_size: batchSize,
+        frames_per_dispatch: framesPerDispatch,
+        workgroup_cap: workgroupCap,
+        cost_src: src,
+        learned_cost: stackingDeviceCostMs,
+        projected_frame_ms: stackingDeviceCostMs != null ? Math.round(workPerFrame * stackingDeviceCostMs) : null,
+    });
+    let nccSlowReported = false;
+    let nccMaxElapsed = 0;
+    let nccDispatches = 0;
+
     let frameStart = 0;
     while (frameStart < batchSize) {
         const sub = Math.min(framesPerDispatch, batchSize - frameStart);
@@ -2667,6 +2754,22 @@ async function matchTemplatesFullyGpu(grayGpuBuffer, refGrayData, width, height,
             stackingDeviceCostMs = stackingDeviceCostMs == null ? sample : stackingDeviceCostMs * (1 - alpha) + sample * alpha;
         }
 
+        nccDispatches++;
+        if (elapsed > nccMaxElapsed) nccMaxElapsed = elapsed;
+        if (elapsed > MAX_MS && !nccSlowReported) {
+            nccSlowReported = true;
+            reportNcc('slow', {
+                ncc_path: 'fully_gpu',
+                elapsed_ms: Math.round(elapsed),
+                frames_in_dispatch: sub,
+                frames_per_dispatch: framesPerDispatch,
+                at_floor: framesPerDispatch <= 1,
+                num_aps: numAPs,
+                search_radius: searchRadius,
+                dispatch_index: nccDispatches,
+            });
+        }
+
         frameStart += sub;
         if (frameStart < batchSize) {
             if (elapsed > MAX_MS && framesPerDispatch > 1) {
@@ -2681,6 +2784,14 @@ async function matchTemplatesFullyGpu(grayGpuBuffer, refGrayData, width, height,
             }
         }
     }
+
+    reportNcc('done', {
+        ncc_path: 'fully_gpu',
+        dispatches: nccDispatches,
+        max_elapsed_ms: Math.round(nccMaxElapsed),
+        final_frames_per_dispatch: framesPerDispatch,
+        hit_slow: nccSlowReported,
+    });
 
     // Cleanup temp buffers (keep shiftsGpuBuffer and apPositionsBuffer!)
     paramsBuffer.destroy();

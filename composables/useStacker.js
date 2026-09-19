@@ -16,7 +16,7 @@ export function useStacker() {
     const { addLog, emit, on } = useEventBus();
     const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
-    const { getMinApQuality, getApPatchSize, getPixfrac } = useProcessingState();
+    const { getMinApQuality, getApPatchSize, getPixfrac, getApSpacingScale } = useProcessingState();
 
     // Track active workers for cancellation
     let cancelled = false;
@@ -278,6 +278,15 @@ export function useStacker() {
             spacing = Math.floor(patchSize / 2); // 10px = 50% overlap
         }
 
+        // User/lite-mode density dial. Widening the spacing drops the AP count
+        // quadratically, which is the dominant term in NCC dispatch cost
+        // (frames × APs × searchArea × patchArea). Default scale is 1, so the
+        // grid is unchanged unless something deliberately dials it back.
+        const spacingScale = getApSpacingScale();
+        if (spacingScale > 1) {
+            spacing = Math.max(4, Math.round(spacing * spacingScale));
+        }
+
         const alignmentPoints = [];
         const marginX = Math.floor((width % spacing) / 2) + patchSize / 2;
         const marginY = Math.floor((height % spacing) / 2) + patchSize / 2;
@@ -485,6 +494,15 @@ export function useStacker() {
                     gpuStackWorker.postMessage({ type: 'init' });
                 })
             ]);
+            // NCC dispatch telemetry relay. addEventListener (not onmessage) on
+            // purpose: the await-per-step helpers below reassign worker.onmessage
+            // constantly, and a telemetry message landing mid-step would other-
+            // wise hit whichever handler happened to be installed and get read as
+            // an unexpected reply. A separate listener sidesteps that entirely.
+            gpuStackWorker.addEventListener('message', (e) => {
+                if (e.data?.type !== 'ncc-telemetry') return;
+                emit('stack-step', `stack_ncc_${e.data.kind}`, e.data.props);
+            });
             addLog('GPU workers initialized');
 
             // Helper to load a batch of frames (SER from file, images from memory)

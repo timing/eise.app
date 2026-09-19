@@ -25,6 +25,13 @@ const inputFilenameWithExt = ref('');
 const stackJobId = ref('');
 const minApQuality = ref(0.3);
 const apPatchSize = ref(20);
+// Multiplier on the alignment-point grid spacing. 1 = current density.
+// Higher = sparser grid = fewer APs. AP count falls with the SQUARE of this,
+// so 2 is roughly a quarter of the alignment points. Same kind of quality-for-
+// headroom dial as maxFrames, but aimed at GPU cost rather than memory.
+// Driven by the Alignment detail slider in FileUploader; lite mode can floor it
+// (see LITE_AP_SPACING_FLOOR there, currently 1 = no automatic reduction).
+const apSpacingScale = ref(1);
 const pixfrac = ref(1.0);
 
 // Tracking context for analytics
@@ -125,6 +132,17 @@ export function useProcessingState() {
 
     function getApPatchSize() {
         return apPatchSize.value;
+    }
+
+    function setApSpacingScale(value) {
+        const n = Number(value);
+        // Clamp: below 1 would densify past the tuned default (untested, and the
+        // GPU cost is quadratic), above 3 leaves too few APs to de-warp with.
+        apSpacingScale.value = Number.isFinite(n) ? Math.min(3, Math.max(1, n)) : 1;
+    }
+
+    function getApSpacingScale() {
+        return apSpacingScale.value;
     }
 
     function setPixfrac(value) {
@@ -258,6 +276,9 @@ export function useProcessingState() {
         apPatchSize,
         setApPatchSize,
         getApPatchSize,
+        apSpacingScale,
+        setApSpacingScale,
+        getApSpacingScale,
         pixfrac,
         setPixfrac,
         getPixfrac,

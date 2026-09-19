@@ -459,13 +459,16 @@ onMounted(async () => {
 	on('cropped-ser-ready', (data) => {
 		croppedSerData.value = data;
 	});
-	on('stack-step', (step) => {
+	on('stack-step', (step, props) => {
 		// Mid-pipeline funnel checkpoint. Carries reader/gpu/job_id so we can
 		// see how far each attempt gets before dropping to cancel/fail.
+		// Optional second arg carries step-specific detail (the NCC dispatch
+		// steps use it to ship AP count, search radius and dispatch timings).
+		// Tracking context goes last so a step can never shadow reader/job id.
 		lastStackStep = step;
 		lastStackStepTs = Date.now();
 		markStackStep(step);  // Mirror to shared trace so other components' terminals see it.
-		track('stack_step', { step, ...getTrackingContext() });
+		track('stack_step', { step, ...(props || {}), ...getTrackingContext() });
 	});
 	on('stack-failed', (data) => {
 		// In batch mode, batch processing handles individual failures

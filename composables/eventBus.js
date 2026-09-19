@@ -133,8 +133,11 @@ export const useEventBus = () => {
 		caption.value = newCaption;
 	};
 
-	// General purpose methods for handling various events
-	const emit = (event, payload) => {
+	// General purpose methods for handling various events.
+	// Extra args after `payload` are forwarded to listeners untouched, so an
+	// event can carry detail without every existing single-payload listener
+	// having to change (stack-step uses this to ship per-step props).
+	const emit = (event, payload, ...rest) => {
 		if (event === 'set-caption') {
 			setCaption(payload);
 		}
@@ -144,7 +147,7 @@ export const useEventBus = () => {
 			console.log(`Debug: ${debugFrames.length} frames available. Use window.debugListFrames() / window.debugSaveFrame(index) | Skipped: window.debugSkippedFrames() / window.debugSaveSkippedFrame(index)`);
 		}
 		if (eventCallbacks[event]) {
-			eventCallbacks[event].forEach(cb => cb(payload));
+			eventCallbacks[event].forEach(cb => cb(payload, ...rest));
 		}
 	};
 

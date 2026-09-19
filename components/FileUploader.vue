@@ -254,6 +254,19 @@
 				<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
 			</div>
 
+			<!-- Alignment detail - same class of dial as Max frames (trades stack
+			     quality for headroom), so it follows the same visibility rule. -->
+			<div v-if="!showMemoryOptimization && (showAdvanced || liteModeClient)" class="panel-section">
+				<h4 class="panel-label">Alignment detail <span class="info-icon" @click="showApDensityInfo = !showApDensityInfo">ⓘ</span></h4>
+				<div class="slider-row">
+					<span class="slider-label">Detail</span>
+					<input type="range" min="1" max="3" step="0.25" v-model.number="apSpacingScale" />
+					<span class="panel-value">{{ apDensityLabel }}</span>
+				</div>
+				<p v-if="liteModeClient && apSpacingScale < LITE_AP_SPACING_FLOOR" class="info-text">Lite mode uses at least {{ apDensityLabel }} detail to keep the GPU within budget.</p>
+				<p v-if="showApDensityInfo" class="info-text">Controls how densely alignment points are placed. Fewer points means less local distortion correction (a slightly softer stack) but a much lighter GPU load, since cost falls with the square of the spacing. Lower this if stacking crashes or stalls on this device.</p>
+			</div>
+
 			<!-- Processing backend toggle - only meaningful when GPU is actually available -->
 			<template v-if="useGPU && showAdvanced">
 				<div class="panel-section">
@@ -480,6 +493,7 @@ const showColorPickerInfo = ref(false);
 const {
 	setMinApQuality: setSharedMinApQuality,
 	setApPatchSize: setSharedApPatchSize,
+	setApSpacingScale: setSharedApSpacingScale,
 	setPixfrac: setSharedPixfrac,
 	getTrackingContext,
 	getStackJobProps,
@@ -504,6 +518,11 @@ const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // kept for backward compat with saved settings migration
 const minApQuality = ref(0.3); // Alignment point quality threshold (NCC score)
 const apPatchSize = ref(30); // Alignment point patch size in pixels
+// Alignment-point grid spacing multiplier. 1 = full density (current default).
+// AP count scales with 1/scale², so this is the same kind of quality-for-
+// headroom trade as maxFrames, aimed at the GPU rather than at memory.
+const apSpacingScale = ref(1);
+const showApDensityInfo = ref(false);
 const drizzleMethod = ref('normal'); // 'normal', 'bicubic', or 'drizzle'
 const pixfrac = ref(0.7); // Drizzle drop shrink factor (Fruchter & Hook)
 
@@ -520,6 +539,28 @@ const effectiveMaxFrames = computed(() => {
 	return enableMaxFrames.value ? selectedMaxFrames.value : -1;
 });
 const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPercent.value);
+// Lite-mode floor, deliberately parked at 1 (no auto-reduction) until the NCC
+// telemetry has had a week to describe the CURRENT regime. liteMode is on for
+// every mobile visitor, so raising this floor changes the default for all of
+// them at once and there is no mobile control group left to measure against —
+// the watchdog kills we are trying to diagnose would likely vanish and we would
+// never learn whether the diagnosis was right. Once stack_ncc_slow.at_floor has
+// answered that, set LITE_AP_SPACING_FLOOR to 2 (about a quarter of the
+// alignment points) and this becomes the deliberate fix. The slider below is
+// already live either way, so users hitting crashes have a manual escape hatch.
+const LITE_AP_SPACING_FLOOR = 1;
+const effectiveApSpacingScale = computed(() =>
+	liteMode.value
+		? Math.max(LITE_AP_SPACING_FLOOR, apSpacingScale.value || 1)
+		: (apSpacingScale.value || 1)
+);
+const apDensityLabel = computed(() => {
+	const s = effectiveApSpacingScale.value;
+	if (s <= 1) return 'Full';
+	if (s < 1.75) return 'High';
+	if (s < 2.5) return 'Reduced';
+	return 'Minimal';
+});
 const effectiveQualityMode = computed(() => {
 	if (liteMode.value) return 'percentage';
 	return qualityMode.value;
@@ -549,6 +590,7 @@ function loadSettings() {
 			if (settings.targetType) targetType.value = settings.targetType;
 			if (settings.minApQuality !== undefined) minApQuality.value = settings.minApQuality;
 			if (settings.apPatchSize !== undefined) apPatchSize.value = settings.apPatchSize;
+			if (settings.apSpacingScale !== undefined) apSpacingScale.value = settings.apSpacingScale;
 			if (settings.pixfrac !== undefined) pixfrac.value = settings.pixfrac;
 			if (settings.drizzleMethod) drizzleMethod.value = settings.drizzleMethod;
 			if (settings.processingBackend === 'gpu' || settings.processingBackend === 'cpu') {
@@ -579,6 +621,7 @@ function saveSettings() {
 			targetType: targetType.value,
 			minApQuality: minApQuality.value,
 			apPatchSize: apPatchSize.value,
+			apSpacingScale: apSpacingScale.value,
 			pixfrac: pixfrac.value,
 			drizzleMethod: drizzleMethod.value,
 			processingBackend: processingBackend.value,
@@ -592,7 +635,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, pixfrac, processingBackend, lowResCropDetectValue, alwaysShowColorPickerValue], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, apSpacingScale, pixfrac, processingBackend, lowResCropDetectValue, alwaysShowColorPickerValue], saveSettings);
 
 onMounted(async () => {
 	// Read the raw persisted setting BEFORE loadSettings runs, so we can tell
@@ -731,6 +774,9 @@ const { getLogTail, markLogStart } = useStackLogTelemetry();
 // Sync stacking settings to shared state for stacker to use
 watch(minApQuality, (val) => setSharedMinApQuality(val), { immediate: true });
 watch(apPatchSize, (val) => setSharedApPatchSize(val), { immediate: true });
+// Sync the EFFECTIVE value, so lite mode's floor reaches useStacker without the
+// slider position lying about what will actually run.
+watch(effectiveApSpacingScale, (val) => setSharedApSpacingScale(val), { immediate: true });
 // Effective pixfrac: bicubic method uses 1.0, drizzle method uses user value
 const effectivePixfrac = computed(() => drizzleMethod.value === 'drizzle' ? pixfrac.value : 1.0);
 // Migrate old drizzleMode setting to new drizzleMethod
