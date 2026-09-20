@@ -58,7 +58,7 @@
 						<tr>
 							<td class="feature-name">Input formats (native)</td>
 							<td>SER, AVI, FITS, image files</td>
-							<td class="highlight">SER, AVI, MP4, MOV, WebM, image sequences</td>
+							<td class="highlight">SER, AVI, MP4, MOV, WebM, image sequences, camera RAW</td>
 						</tr>
 						<tr>
 							<td class="feature-name">MP4 / MOV / HEVC</td>

@@ -3,7 +3,7 @@
 <input
 	type="file"
 	ref="directFileInput"
-	accept="image/*"
+	accept="image/*,.dng,.cr2,.cr3,.nef,.arw,.orf,.rw2,.raf,.pef,.srw,.nrw,.sr2,.srf,.mrw,.rwl,.3fr,.iiq,.x3f"
 	@change="handleDirectFileSelect"
 	style="display: none;"
 />
@@ -169,7 +169,7 @@
 			<div class="file-input-wrapper pp-picker">
 				<input
 					type="file"
-					accept="image/*"
+					accept="image/*,.dng,.cr2,.cr3,.nef,.arw,.orf,.rw2,.raf,.pef,.srw,.nrw,.sr2,.srf,.mrw,.rwl,.3fr,.iiq,.x3f"
 					id="post-processor-file-input"
 					@change="handleDirectFileSelect"
 				/>
@@ -491,18 +491,29 @@ async function handleDirectFileSelect(event) {
 	// Same detection + telemetry as the homepage direct-load path (see
 	// composables/useDirectImageLoad.js). The post-processor has no ffmpeg
 	// pipeline for exotic formats, so anything not natively browser-decodable
-	// (other than HEIC via createImageBitmap on Safari) gets rejected here
-	// with a pointer to the homepage upload flow.
+	// (other than HEIC via createImageBitmap, and RAW via LibRaw below) gets
+	// rejected here with a pointer to the homepage upload flow.
 	const fmt = detectImageFormat(file);
 
+	const { setInputFilename } = useProcessingState();
+
+	// Camera RAW: LibRaw demosaics it (its own worker, ~2MB wasm loaded on
+	// demand) and we load the result like any other image. 8-bit, because this
+	// is a viewing/sharpening entry point rather than a stack.
 	if (fmt.isRaw) {
-		trackPostFailed(file, 'raw_unsupported', { failed_in: 'handleDirectFileSelect' });
-		alert(`RAW camera files (${file.name.split('.').pop().toUpperCase()}) aren't supported here. Upload a JPEG/PNG/TIFF from the homepage.`);
-		event.target.value = '';
+		try {
+			const { decodeRawToPngBlob } = await import('@/composables/useLibRawRgb');
+			const blob = await decodeRawToPngBlob(file);
+			setInputFilename(file.name);
+			trackPostOpen(file);
+			selectedFile.value = blob;
+		} catch (err) {
+			trackPostFailed(file, `raw_decode:${err?.message || err}`, { failed_in: 'handleDirectFileSelect' });
+			alert(`This RAW file couldn't be decoded (${err?.message || err}).`);
+			event.target.value = '';
+		}
 		return;
 	}
-
-	const { setInputFilename } = useProcessingState();
 
 	if (fmt.isHeic) {
 		try {

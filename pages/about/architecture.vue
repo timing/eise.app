@@ -8,7 +8,7 @@
 			<pre class="diagram">
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            FILE INPUT                                    │
-│         SER  /  AVI (raw Bayer)  /  AVI (MJPEG)  /  Video  /  Images    │
+│    SER / AVI / Video / RAW photos (CR2, NEF, ARW, RAF, DNG) / Images    │
 └───────────────────────────────────┬─────────────────────────────────────┘
                                     │
                                     ▼
@@ -100,6 +100,16 @@
 					<td>PNG, JPG, TIFF</td>
 					<td>useImageReader</td>
 					<td>Image sequences</td>
+				</tr>
+				<tr>
+					<td>Camera RAW (CR2, CR3, NEF, ARW, ORF, RW2, DNG)</td>
+					<td>useLibRawParser → useDebayerReader</td>
+					<td>LibRaw (WASM) reads the undebayered sensor mosaic; demosaic runs on the GPU like SER, so the full sensor bit depth is kept</td>
+				</tr>
+				<tr>
+					<td>Camera RAW without a Bayer grid (Fuji X-Trans RAF, linear DNG, Foveon)</td>
+					<td>useLibRawRgb → useImageReader</td>
+					<td>No 2x2 mosaic to read, so LibRaw demosaics these itself and they join the image pipeline</td>
 				</tr>
 			</table>
 

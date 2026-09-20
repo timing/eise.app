@@ -72,3 +72,9 @@ Cache-Control: no-cache, must-revalidate
 /gpu/helpers.js
 Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate
+
+# libraw-wasm ships its decoder as a module worker plus a sibling .wasm. Vite
+# emits both under /_nuxt/ with hashed names, so the rule has to be a wildcard:
+# without COEP the browser refuses to start the worker on a require-corp page.
+/_nuxt/*
+Cross-Origin-Embedder-Policy: require-corp

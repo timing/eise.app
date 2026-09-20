@@ -260,7 +260,7 @@
 					<input type="file" id="demo-file" style="display:none" />
 					<label for="demo-file" class="file-label">Choose files...</label>
 				</div>
-				<p class="supported-formats">SER, AVI, MP4, PNG, TIFF, JPEG</p>
+				<p class="supported-formats">SER, AVI, MP4, RAW, PNG, TIFF, JPEG</p>
 			</div>
 			<div class="ds-variants">
 				<strong>Classes:</strong> .file-input-wrapper, .file-label, .supported-formats<br>

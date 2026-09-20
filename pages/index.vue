@@ -73,7 +73,7 @@ const videoProcessorRef = ref(null);
 useHead({
 	title: 'Planetary Image Stacking in Your Browser - Free, No Install | Eise.app',
 	meta: [
-		{ name: 'description', content: 'Free online planetary image stacker. Upload SER, AVI, or MP4 videos of planets, Moon, or Sun and get sharp stacked images. Runs entirely in your browser - no upload, no install, no signup.' },
+		{ name: 'description', content: 'Free online planetary image stacker for SER, AVI, MP4 and camera RAW. Stack planets, Moon and Sun in your browser - no upload, no install, no signup.' },
 	],
 	script: [
 		{

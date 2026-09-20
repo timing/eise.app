@@ -103,7 +103,12 @@ export default defineNuxtConfig({
 	},
 	vite: {
 		optimizeDeps: {
-			include: ['@ffmpeg/ffmpeg']
+			include: ['@ffmpeg/ffmpeg'],
+			// libraw-wasm spawns its worker with `new Worker(new URL('./worker.js',
+			// import.meta.url))`. Pre-bundling rewrites import.meta.url to the deps
+			// chunk, so the worker (and the libraw.wasm it fetches next to itself)
+			// would 404. Excluding it keeps the package as real ESM off node_modules.
+			exclude: ['libraw-wasm']
 		},
 		server: {
 			headers: {

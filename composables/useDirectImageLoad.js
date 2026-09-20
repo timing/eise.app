@@ -8,7 +8,14 @@
 
 import { useTracking } from './useTracking';
 
-export const RAW_EXTENSIONS = ['.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2', '.raf'];
+// Camera RAW, all decoded by LibRaw (composables/useLibRawParser.js). Kept to
+// formats LibRaw handles and cameras people actually shoot; an extension that
+// slips through but cannot be decoded fails with a clear message rather than
+// silently doing the wrong thing.
+export const RAW_EXTENSIONS = [
+    '.dng', '.cr2', '.cr3', '.nef', '.arw', '.orf', '.rw2', '.raf',
+    '.pef', '.srw', '.nrw', '.sr2', '.srf', '.mrw', '.rwl', '.3fr', '.iiq', '.x3f',
+];
 
 export function isRawFile(file) {
     const name = file?.name?.toLowerCase() || '';

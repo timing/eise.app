@@ -28,7 +28,8 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 │
 ├── Format Parsers (header parsing only):
 │   ├── useSerParser.js      - SER header parsing, frame reading
-│   └── useAviParser.js      - AVI/RIFF parsing, frame index
+│   ├── useAviParser.js      - AVI/RIFF parsing, frame index
+│   └── useLibRawParser.js   - Camera RAW (CR2/CR3/NEF/ARW/ORF/RW2/RAF/DNG) via LibRaw-WASM
 │
 ├── Frame Readers (processing pipelines):
 │   ├── useDebayerReader.js  - Raw Bayer (SER, raw AVI) → GPU demosaic → analyze → stack
@@ -80,6 +81,10 @@ Browser (Nuxt.js + Vue.js) - All processing is client-side
 
 **File Processing Paths**:
 - **Raw Bayer (SER, raw AVI)**: `useSerParser`/`useAviParser` → `useDebayerReader` → GPU demosaic + analyze
+- **Camera RAW (CR2, CR3, NEF, ARW, ORF, RW2, RAF, DNG, ...)**: `useLibRawParser` → `useDebayerReader` → GPU demosaic + analyze. LibRaw-WASM supplies the undebayered 16-bit mosaic (`rawImageData()`), so RAW keeps the full sensor bit depth and reuses the SER pipeline. `probeRawFile()` picks the lane: sensors without a 2x2 Bayer grid (Fuji X-Trans, linear DNG such as Apple ProRAW, Foveon, four-colour CFAs) go to `useLibRawRgb` → `useImageReader`, where LibRaw demosaics and the result enters as 8-bit PNG.
+  - **This replaced `useDngParser.js`**, which only handled uncompressed strip-based DNG. It is still on disk but nothing imports it. Analytics before the switch: ~59 pre-`stack_start` DNG failures in 30 days (compression=7, linear DNG, DataView overruns) against 7 jobs that started.
+  - The shared LibRaw instance recycles on every `open()`, so one worker streams a whole sequence. Its state is global, which is why every open+read pair holds the mutex in `useLibRawParser.js`.
+  - CFA phase must be read at the *visible* origin (`top_margin`, `left_margin`), not the raw origin, or odd margins silently swap red and blue. `composables/libRawCfa.js` holds that maths, dependency-free; `scripts/libraw-probe.mjs` tests it and can dump a real file's metadata.
 - **Video (MP4, MOV, etc.)**: `useFFmpegReader` → FFmpeg decode → `useWebGpuAnalyzeWorker` → GPU analyze
 - **AVI MJPEG/BGR**: `useAviReader` → decode → GPU analyze (already RGB, no demosaic)
 - **Images**: `useImageReader` → GPU analyze

@@ -4,7 +4,7 @@
 			<h2>Planetary Image Stacking on Mac</h2>
 			<p class="page-subtitle">Free, native, no Wine</p>
 			<p>
-				Eise.app is a free browser-based planetary image stacker that runs natively on macOS - Apple Silicon and Intel - with WebGPU acceleration. No install, no Wine, no Python setup. Handles SER, AVI, and MP4, and includes integrated wavelet sharpening and RGB alignment so you finish in one tool.
+				Eise.app is a free browser-based planetary image stacker that runs natively on macOS - Apple Silicon and Intel - with WebGPU acceleration. No install, no Wine, no Python setup. Handles SER, AVI, MP4 and camera RAW, and includes integrated wavelet sharpening and RGB alignment so you finish in one tool.
 			</p>
 
 			<div class="verdict">
@@ -88,6 +88,9 @@
 			<h4>DSLR live view via a Mac app</h4>
 			<p>
 				If you're shooting planetary video with a DSLR, tools like <em>digiCamControl</em> (Windows) don't have direct Mac equivalents, but you can use the camera manufacturer's own tethering software (Canon EOS Utility, Sony Imaging Edge, Nikon Camera Control Pro) to capture MP4 or MOV clips, then drop them into Eise.app.
+			</p>
+			<p>
+				You can also skip video entirely. Shoot a burst of RAW stills and drop the whole sequence in: Eise.app reads CR2, CR3, NEF, ARW, RAF, ORF, RW2 and DNG directly, no conversion step. For Bayer sensors the demosaic runs on the GPU from the untouched sensor data, so you keep the full bit depth your camera recorded.
 			</p>
 
 			<h4>iPhone or iPad</h4>

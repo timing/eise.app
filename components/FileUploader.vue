@@ -59,7 +59,7 @@
 				<h3 class="panel-title">Select files</h3>
 				<p class="panel-sub">For stacking and post processing.</p>
 				<div class="file-input-wrapper" :class="{ 'has-files': selectedFiles.length > 0 }">
-					<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser,.dng" multiple @change="onFileChanged" title="" />
+					<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser,.dng,.cr2,.cr3,.nef,.arw,.orf,.rw2,.raf,.pef,.srw,.nrw,.sr2,.srf,.mrw,.rwl,.3fr,.iiq,.x3f" multiple @change="onFileChanged" title="" />
 					<label for="file-upload" class="file-label drop-zone">
 						<template v-if="selectedFiles.length > 0">
 							{{ selectedFilesDescription }}
@@ -71,7 +71,7 @@
 							</svg>
 							<span class="drop-text">Drop files here</span>
 							<span class="drop-sub">or <span class="drop-browse">browse</span> your computer</span>
-							<span class="drop-formats">SER · AVI · MP4 · DNG · PNG · TIFF</span>
+							<span class="drop-formats" title="SER, AVI, MP4, MOV, WebM, camera RAW (CR2, CR3, NEF, ARW, RAF, DNG and more), PNG, JPEG, TIFF">SER · AVI · MP4 · RAW · PNG · TIFF</span>
 							<span class="drop-privacy">Nothing is uploaded.</span>
 						</template>
 					</label>
@@ -314,7 +314,7 @@
 	<!-- Welcome content: only show when not processing -->
 	<div class="content home-intro" v-if="!isProcessing">
 		<h1 class="home-title">Welcome to Eise.app</h1>
-		<p class="intro">Eise.app is a free browser-based planetary image stacker for astrophotography. Pick a SER, AVI, or MP4 video of Jupiter, Saturn, Mars, the Moon, or the Sun, and it uses lucky imaging, combining the sharpest frames, to produce a detailed final image. Runs entirely in your browser using WebGPU. No install, no upload, no signup.</p>
+		<p class="intro">Eise.app is a free browser-based planetary image stacker for astrophotography. Pick a SER, AVI, or MP4 video of Jupiter, Saturn, Mars, the Moon, or the Sun, and it uses lucky imaging, combining the sharpest frames, to produce a detailed final image. Runs entirely in your browser.</p>
 
 		<div class="comparison-images">
 			<figure class="comparison-figure">
@@ -329,24 +329,25 @@
 				<figcaption>Stacked + Sharpened</figcaption>
 			</figure>
 		</div>
-		<p class="sample-credit">
-			The example above was shot with a <a href="https://www.astroshop.eu/telescopes/ts-optics-telescope-n-150-750-photon-ota/p,64564?affiliate_id=Eiseapp" target="_blank" rel="noopener sponsored">TS Optics Photon 150/750 Newtonian</a>.
-		</p>
 
 		<p class="how-it-works-intro">Under the hood, Eise.app automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. After stacking, the post processor opens for wavelet sharpening, RGB alignment, and color adjustments.</p>
 
 		<dl class="spec-rows">
 			<div class="spec-row">
 				<dt>SER or AVI files</dt>
-				<dd>for stacking + post processing. Multiple files open batch mode.</dd>
+				<dd>For stacking + post processing. Multiple files open batch mode.</dd>
 			</div>
 			<div class="spec-row">
 				<dt>Video files</dt>
 				<dd>(MP4, MOV, etc.) for stacking + post processing.</dd>
 			</div>
 			<div class="spec-row">
-				<dt>Image files</dt>
-				<dd>(TIFF, PNG, JPG) for stacking, or a single image to go straight to the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</dd>
+				<dt>Camera RAW Image sequences <span class="opt-badge gilt">new</span></dt>
+				<dd>(CR2, CR3, NEF, ARW, RAF, DNG) from a DSLR or mirrorless, no conversion needed.</dd>
+			</div>
+			<div class="spec-row">
+				<dt>Image sequences (PNG, TIFF)</dt>
+				<dd>Multiple start stacking. A single image opens the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</dd>
 			</div>
 		</dl>
 
@@ -841,12 +842,14 @@ function onFilesSelected(files){
 	setSelectedFileContext(files);
 	eventBusEmit('stop-loading');
 
-	// Categorize files. DNGs are extension-detected because browsers report
-	// inconsistent MIME types for them (image/x-adobe-dng, image/tiff, or empty),
-	// and they route to the Bayer debayer pipeline rather than the RGBA image reader.
-	const dngFiles = files.filter(f => f.name.toLowerCase().endsWith('.dng'));
+	// Categorize files. Camera RAW is extension-detected because browsers report
+	// inconsistent MIME types for it (image/x-adobe-dng, image/tiff, image/x-fuji-raf,
+	// or empty), and it routes through LibRaw rather than the RGBA image reader.
+	// Several RAW types DO carry an image/* MIME, so imageFiles must exclude them
+	// explicitly or a .cr2 would be handed to createImageBitmap.
+	const rawFiles = files.filter(isRawFile);
 	const videoFiles = files.filter(f => f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.ser') || f.name.toLowerCase().endsWith('.avi'));
-	const imageFiles = files.filter(f => f.type.startsWith('image/') && !f.name.toLowerCase().endsWith('.dng'));
+	const imageFiles = files.filter(f => f.type.startsWith('image/') && !isRawFile(f));
 	const serFiles = files.filter(f => f.name.toLowerCase().endsWith('.ser'));
 	const aviFiles = files.filter(f => f.name.toLowerCase().endsWith('.avi'));
 	const batchableFiles = [...serFiles, ...aviFiles];
@@ -877,8 +880,9 @@ function onFilesSelected(files){
 		return;
 	}
 
-	if (dngFiles.length > 0 && (videoFiles.length > 0 || imageFiles.length > 0)) {
-		alert('Please select either DNG files or other file types, not both.');
+	if (rawFiles.length > 0 && (videoFiles.length > 0 || imageFiles.length > 0)) {
+		eventBusEmit('file-rejected', { source: 'bad_combination', message: 'RAW files mixed with other file types' });
+		alert('Please select either RAW camera files or other file types, not both.');
 		clearSelection();
 		return;
 	}
@@ -1387,15 +1391,15 @@ async function processFiles(files, options = {}) {
 
 	setStackingMode(qualityMode.value === 'continuous' ? 'continuous' : 'single');
 
-	const dngFiles = files.filter(file => file.name.toLowerCase().endsWith('.dng'));
+	const rawFiles = files.filter(isRawFile);
 	const videoFiles = files.filter(file => file.type.startsWith('video/') || file.name.endsWith('.ser') || file.name.endsWith('.avi'));
-	// Exclude DNGs from the RGBA image reader; they take the Bayer debayer path below.
-	const imageFiles = files.filter(file => file.type.startsWith('image/') && !file.name.toLowerCase().endsWith('.dng'));
+	// Exclude camera RAW from the RGBA image reader; it takes the LibRaw path below.
+	const imageFiles = files.filter(file => file.type.startsWith('image/') && !isRawFile(file));
 
 	// Set the input filename AND mint a fresh stack_job_id — this is the entry
 	// point for a genuine new stack attempt (each retry = new job). Post-
 	// processor Prev/Next navigation only calls setInputFilename (no new id).
-	const primaryFile = videoFiles[0] || dngFiles[0] || imageFiles[0];
+	const primaryFile = videoFiles[0] || rawFiles[0] || imageFiles[0];
 	if (primaryFile) {
 		startNewStackJob(primaryFile.name);
 		// Pin the log-shipping cursor to THIS moment so the first stack_ping
@@ -1407,27 +1411,84 @@ async function processFiles(files, options = {}) {
 		addLog(`File: ${primaryFile.name}`);
 	}
 
-	// DNG (raw Bayer) files — route to the debayer pipeline. One DNG per file,
-	// so multi-file selection always means combined stacking (no batch dialog
-	// like SER: stacking each single-frame DNG on its own is never useful).
-	if (dngFiles.length > 0) {
+	// Camera RAW (DNG, CR2, CR3, NEF, ARW, ORF, RW2, RAF, ...) — decoded by
+	// LibRaw. One frame per file, so multi-file selection always means combined
+	// stacking (no batch dialog like SER: stacking each single-frame RAW on its
+	// own is never useful).
+	//
+	// The sensor layout decides the lane. Bayer keeps the full 14 bits and goes
+	// through our GPU demosaic; X-Trans and already-demosaiced files have no
+	// Bayer grid our shaders can read, so LibRaw demosaics those itself and they
+	// join the ordinary image pipeline at 8-bit.
+	if (rawFiles.length > 0) {
 		if (!effectiveUseGpu.value) {
 			eventBusEmit('upload-error', gpuRequiredError());
 			eventBusEmit('show-error');
 			isProcessing.value = false;
 			return;
 		}
-		setTrackingContext({ file_type: 'dng', reader: 'debayer', gpu_enabled: effectiveUseGpu.value });
-		addLog(`Processing ${dngFiles.length} DNG file${dngFiles.length > 1 ? 's' : ''}`);
 
-		const { useDngParser, useMultiDngParser } = await import('@/composables/useDngParser');
+		const allDng = rawFiles.every(f => f.name.toLowerCase().endsWith('.dng'));
+		const rawKind = allDng ? 'dng' : 'raw';  // keep the existing dng series intact
+		addLog(`Processing ${rawFiles.length} RAW file${rawFiles.length > 1 ? 's' : ''}`);
+
+		const { probeRawFile } = await import('@/composables/useLibRawParser');
+		const probe = await probeRawFile(rawFiles[0]);
+		addLog(`${probe.make} ${probe.model}: ${probe.cfaKind} sensor, ${probe.width}×${probe.height}`);
+
+		// Everything that is not a plain 2x2 Bayer (or mono) grid goes to LibRaw's
+		// own demosaic: X-Trans, already-demosaiced files, four-colour CFAs.
+		if (probe.cfaKind !== 'bayer' && probe.cfaKind !== 'mono') {
+			// RGB lane. LibRaw demosaics, we stack the result as images.
+			setTrackingContext({ file_type: rawKind, reader: 'libraw_rgb', gpu_enabled: effectiveUseGpu.value });
+			const { decodeRawToPngFile } = await import('@/composables/useLibRawRgb');
+
+			if (rawFiles.length === 1) {
+				// A lone RAW is a post-processor open, not a stack — same
+				// hand-off (and same post_open telemetry) as a single TIFF.
+				// Deliberately no processing-started: that would fire a
+				// stack_start for a job that never stacks anything.
+				eventBusEmit('start-loading', 'Decoding RAW file...');
+				const decoded = await decodeRawToPngFile(rawFiles[0]);
+				eventBusEmit('stop-loading');
+				trackPostOpen(rawFiles[0]);
+				emit('postProcessing', decoded);
+				return;
+			}
+
+			// Multiple files: this is a real stack. Announce it before the decode
+			// loop so the page swaps the file picker for the progress card —
+			// without this the uploader stays on screen underneath, which is the
+			// two-card mess. The decode is part of the job, so it belongs inside
+			// the stack_start/ping window this emit opens.
+			emit('processing-started');
+
+			const decoded = [];
+			for (let i = 0; i < rawFiles.length; i++) {
+				eventBusEmit('set-caption', `Decoding RAW ${i + 1}/${rawFiles.length}...`);
+				decoded.push(await decodeRawToPngFile(rawFiles[i]));
+			}
+
+			const { useImageReader } = await import('@/composables/useImageReader');
+			const { readImageFiles } = useImageReader();
+			await readImageFiles(decoded, $ffmpeg, $loadFFmpeg,
+				effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
+				effectiveCropMargin.value, effectiveStackPercentage.value,
+				effectiveDrizzleScale.value, effectiveUseGpu.value, surfaceMode.value);
+			return;
+		}
+
+		// Bayer (and mono) lane: straight into the existing debayer pipeline.
+		setTrackingContext({ file_type: rawKind, reader: 'debayer', gpu_enabled: effectiveUseGpu.value });
+
+		const { useLibRawParser, useMultiLibRawParser } = await import('@/composables/useLibRawParser');
 		const { useDebayerReader } = await import('@/composables/useDebayerReader');
 
-		const parser = dngFiles.length > 1 ? useMultiDngParser() : useDngParser();
-		await parser.init(dngFiles.length > 1 ? dngFiles : dngFiles[0]);
+		const parser = rawFiles.length > 1 ? useMultiLibRawParser() : useLibRawParser();
+		await parser.init(rawFiles.length > 1 ? rawFiles : rawFiles[0]);
 
 		const reader = useDebayerReader();
-		await reader.init(dngFiles[0], parser);
+		await reader.init(rawFiles[0], parser);
 		await reader.processFile({
 			maxFrames: effectiveMaxFrames.value,
 			manualThreshold: effectiveQualityMode.value === 'manual' || effectiveQualityMode.value === 'continuous',
@@ -2077,14 +2138,9 @@ async function processFiles(files, options = {}) {
 		}
 	
 	} else if (imageFiles.length > 1) {
-		// Multiple images selected - analyze and stack them
-		const rawFile = imageFiles.find(isRawFile);
-		if (rawFile) {
-			eventBusEmit('upload-error', `RAW camera files (${rawFile.name.split('.').pop().toUpperCase()}) are not supported. For planetary imaging, please use SER or AVI format from your capture software.`);
-			eventBusEmit('stop-loading');
-			return;
-		}
-
+		// Multiple images selected - analyze and stack them.
+		// RAW never reaches here: imageFiles excludes it and the LibRaw branch
+		// above claims it first.
 		if (!effectiveUseGpu.value) {
 			eventBusEmit('upload-error', gpuRequiredError());
 			eventBusEmit('show-error');
@@ -2107,13 +2163,8 @@ async function processFiles(files, options = {}) {
 		// PostProcessor.vue — see composables/useDirectImageLoad.js.
 		const file = imageFiles[0];
 		const fmt = detectImageFormat(file);
-
-		if (fmt.isRaw) {
-			eventBusEmit('upload-error', `RAW camera files (${file.name.split('.').pop().toUpperCase()}) are not supported. For planetary imaging, please use SER or AVI format from your capture software.`);
-			eventBusEmit('stop-loading');
-			trackPostFailed(file, 'raw_unsupported', { failed_in: 'processFiles' });
-			return;
-		}
+		// No isRaw check here: imageFiles excludes RAW, which the LibRaw branch
+		// above handles (single RAW lands in the post-processor the same way).
 
 		// Wrapping the whole direct-load branch guarantees no throw escapes to
 		// the outer processFiles catch — that catch fires trackStackFailed, which

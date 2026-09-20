@@ -22,6 +22,7 @@
     "@ffmpeg/ffmpeg": "^0.10.1",
     "@sentry/vue": "^10.33.0",
     "fast-png": "^8.0.0",
+    "libraw-wasm": "^1.6.0",
     "lodash": "^4.17.21",
     "mediabunny": "^1.40.1",
     "nuxt": "^3.10.3",
