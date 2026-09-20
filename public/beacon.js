@@ -13,6 +13,58 @@
   }
   var lastPath = null;
 
+  // --- session id -----------------------------------------------------------
+  // The server mints a session id and hands it back as an HttpOnly cookie, but
+  // that cookie only exists once the FIRST request has completed. pageview()
+  // fires at load and human_interaction fires on the first scroll/mousemove/
+  // touchstart, which routinely lands inside that round trip. Both then arrived
+  // cookieless and the server minted a separate session for each, splitting a
+  // single visit across two session rows (one holding only the pageview, one
+  // holding only the interaction). Measured at ~478 split visits per 21 days,
+  // ~11% of all sessions, which made the reported interaction-to-stack rate
+  // read 40% when the true rate was 57%.
+  //
+  // Minting the id here and sending it on every event removes the race.
+  // resolveSessionId() on the server prefers its own cookie when one exists,
+  // so returning visitors keep the session they already had.
+  //
+  // Deliberately in-memory only, NOT localStorage. The race is entirely within
+  // one page load, so a per-load id closes it; cross-load continuity is still
+  // the HttpOnly cookie's job, exactly as before. That keeps us from writing a
+  // second, script-readable copy of the identifier to the user's device, which
+  // would be a new consent surface (ePrivacy Art 5(3) covers localStorage on
+  // the same terms as cookies) and a new XSS target, for no gain on any visitor
+  // whose cookies work. Visitors who block cookies outright get one session per
+  // page load instead of one per visit; still better than the split sessions
+  // they get today.
+  function uuid() {
+    try {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+      }
+      var b = new Uint8Array(16);
+      crypto.getRandomValues(b);
+      b[6] = (b[6] & 0x0f) | 0x40;
+      b[8] = (b[8] & 0x3f) | 0x80;
+      var h = '';
+      for (var i = 0; i < 16; i++) h += (b[i] + 0x100).toString(16).slice(1);
+      return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+    } catch (e) {
+      // Last resort, if Web Crypto is missing entirely. Not cryptographically
+      // random, but it must still come out in the same 36-char v4 shape as
+      // randUuid() on the server, so ids are one format everywhere.
+      var s = '';
+      for (var j = 0; j < 32; j++) s += Math.floor(Math.random() * 16).toString(16);
+      s = s.slice(0, 12) + '4' + s.slice(13, 16) + '89ab'.charAt(Math.floor(Math.random() * 4)) + s.slice(17);
+      return s.slice(0, 8) + '-' + s.slice(8, 12) + '-' + s.slice(12, 16) + '-' + s.slice(16, 20) + '-' + s.slice(20);
+    }
+  }
+
+  // No sync-back from the server response is needed: when a cookie exists it
+  // outranks this id on every request alike, so the two can never disagree
+  // partway through a load.
+  var sessionId = uuid();
+
   // Returns a Promise<boolean> that resolves to true if the beacon reached the
   // server (2xx) and false otherwise. Never rejects. Callers that don't care
   // can ignore the return value. stack_ping delivery uses it to keep undelivered
@@ -21,6 +73,10 @@
     var body = {
       site_id: siteId,
       event: event,
+      // Sent on every event so the very first burst of a visit shares one
+      // session even before the server's cookie has come back. The cookie still
+      // wins server-side when it exists.
+      session_id: sessionId,
       // client_ts pins the event to its emit time so bursts (stack_start +
       // immediate stack_ping) don't get reordered by concurrent-POST arrival
       // jitter. Server verifies + clamps to ±10min skew before trusting it.
@@ -71,6 +127,7 @@
       var body = {
         site_id: siteId,
         event: event,
+        session_id: sessionId,
         client_ts: Date.now(),
         path: location.pathname + location.search,
         referrer: document.referrer || null,
