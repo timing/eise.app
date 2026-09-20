@@ -37,6 +37,19 @@
 				</select>
 			</div>
 			<div class="control">
+				<label>Page path</label>
+				<div class="path-input">
+					<input type="text" v-model="pathFilter" list="path-suggestions"
+						placeholder="All pages" spellcheck="false"
+						@keyup.enter="applyPathNow" />
+					<button v-if="pathFilter" class="path-clear" title="Clear path filter"
+						@click="clearPathFilter">&times;</button>
+				</div>
+				<datalist id="path-suggestions">
+					<option v-for="p in pathSuggestions" :key="p" :value="p" />
+				</datalist>
+			</div>
+			<div class="control">
 				<label>
 					<input type="checkbox" v-model="includeAdmin" @change="fetchAll" />
 					Include admin traffic
@@ -51,6 +64,11 @@
 			<button class="btn-refresh" @click="fetchAll" :disabled="loading">
 				{{ loading ? 'Loading…' : 'Refresh' }}
 			</button>
+		</div>
+
+		<div v-if="pathFilter" class="active-filter">
+			Everything below counts only pages starting with <code>{{ pathFilter }}</code>.
+			<button @click="clearPathFilter">Show all pages</button>
 		</div>
 
 		<div v-if="error" class="admin-msg error">{{ error }}</div>
@@ -250,20 +268,28 @@
 			</div>
 		</section>
 
-		<section v-if="pages.length">
+		<section v-if="pages.length || pathFilter">
 			<h3>Top pages</h3>
-			<table class="stats-table">
+			<p class="section-hint">
+				Click a path to scope the whole dashboard to it, then read the chart and the
+				By day table for its per-day pageviews. Matching is by prefix.
+			</p>
+			<table v-if="pages.length" class="stats-table">
 				<thead>
 					<tr><th>Path</th><th>Pageviews</th><th>Sessions</th></tr>
 				</thead>
 				<tbody>
 					<tr v-for="p in pages" :key="p.path">
-						<td class="mono">{{ p.path }}</td>
+						<td class="mono">
+							<button class="path-link" :class="{ active: p.path === pathFilter }"
+								@click="setPathFilter(p.path)">{{ p.path }}</button>
+						</td>
 						<td>{{ p.pageviews }}</td>
 						<td>{{ p.sessions }}</td>
 					</tr>
 				</tbody>
 			</table>
+			<div v-else class="breakdown-empty">No pages match this path in the selected range.</div>
 		</section>
 
 		<section v-if="referrers.length">
@@ -390,6 +416,9 @@ const RANGE_STORAGE_KEY = 'eise-admin-analytics-range';
 const SITE_STORAGE_KEY = 'eise-admin-analytics-site';
 const CHART_STORAGE_KEY = 'eise-admin-analytics-chart';
 const OS_STORAGE_KEY = 'eise-admin-analytics-os';
+const PATH_STORAGE_KEY = 'eise-admin-analytics-path';
+// Typing in the path box refetches, but only once the user pauses.
+const PATH_DEBOUNCE_MS = 400;
 
 const ranges = [
 	{ key: 'today', label: 'Today' },
@@ -417,6 +446,14 @@ const includeAdmin = ref(false);
 const includeBots = ref(false);
 const osFilter = ref('');
 const osOptions = ref([]);
+// Prefix filter on the pageview path. Empty means "all pages". Applies to
+// every panel on this page, so the chart and the By day table become the
+// per-day series for whatever section you are looking at.
+const pathFilter = ref('');
+// Suggestions come from the unfiltered top-pages list, kept around so the
+// datalist doesn't collapse to one entry as soon as a filter is applied.
+const pathOptions = ref([]);
+let pathDebounce = null;
 
 const summary = ref(null);
 const pages = ref([]);
@@ -514,6 +551,10 @@ onMounted(async () => {
 		const savedOs = localStorage.getItem(OS_STORAGE_KEY);
 		if (savedOs) osFilter.value = savedOs;
 	} catch {}
+	try {
+		const savedPath = localStorage.getItem(PATH_STORAGE_KEY);
+		if (savedPath) pathFilter.value = savedPath;
+	} catch {}
 
 	watch([rangeKey, customFrom, customTo], () => {
 		try {
@@ -559,6 +600,16 @@ onMounted(async () => {
 		fetchLive();
 	});
 
+	watch(pathFilter, v => {
+		try { localStorage.setItem(PATH_STORAGE_KEY, v || ''); } catch {}
+		cancelPathDebounce();
+		pathDebounce = setTimeout(() => {
+			pathDebounce = null;
+			fetchAll();
+			fetchLive();
+		}, PATH_DEBOUNCE_MS);
+	});
+
 	watch([includeAdmin, includeBots], () => fetchLive());
 
 	document.addEventListener('visibilitychange', onVisibilityChange);
@@ -574,6 +625,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+	cancelPathDebounce();
 	if (chartResizeObserver) chartResizeObserver.disconnect();
 	window.removeEventListener('resize', measureChart);
 	document.removeEventListener('visibilitychange', onVisibilityChange);
@@ -597,6 +649,35 @@ function setChartBucket(b) {
 	fetchChart();
 }
 
+const pathSuggestions = computed(() => {
+	const seen = new Set();
+	for (const p of pathOptions.value) if (p) seen.add(p);
+	for (const p of pages.value) if (p.path) seen.add(p.path);
+	return [...seen];
+});
+
+function cancelPathDebounce() {
+	if (pathDebounce) { clearTimeout(pathDebounce); pathDebounce = null; }
+}
+
+// Apply immediately (Enter, a click in Top pages, the clear button) rather
+// than waiting out the debounce.
+function applyPathNow() {
+	cancelPathDebounce();
+	fetchAll();
+	fetchLive();
+}
+
+function setPathFilter(path) {
+	pathFilter.value = pathFilter.value === path ? '' : path;
+	applyPathNow();
+}
+
+function clearPathFilter() {
+	pathFilter.value = '';
+	applyPathNow();
+}
+
 function commonParams() {
 	const { from, to } = currentRangeMs();
 	const params = new URLSearchParams();
@@ -604,6 +685,7 @@ function commonParams() {
 	params.set('include_admin', includeAdmin.value ? '1' : '0');
 	params.set('include_bots', includeBots.value ? '1' : '0');
 	if (osFilter.value) params.set('os', osFilter.value);
+	if (pathFilter.value) params.set('path', pathFilter.value);
 	if (from != null && to != null) {
 		params.set('from', String(from));
 		params.set('to', String(to));
@@ -650,6 +732,7 @@ async function fetchLive() {
 		params.set('include_admin', includeAdmin.value ? '1' : '0');
 		params.set('include_bots', includeBots.value ? '1' : '0');
 		if (osFilter.value) params.set('os', osFilter.value);
+		if (pathFilter.value) params.set('path', pathFilter.value);
 		const res = await fetch(`${apiBase}/admin/analytics/live?${params.toString()}`, {
 			headers: { Authorization: authHeader.value },
 			credentials: 'include',
@@ -704,6 +787,7 @@ async function fetchAll() {
 		const d = await apiGet('/admin/analytics/dashboard', { limit: '50' });
 		summary.value = { range: d.range, include_admin: d.include_admin, totals: d.totals, days: d.days };
 		pages.value = d.pages || [];
+		if (!pathFilter.value) pathOptions.value = (d.pages || []).map(p => p.path).filter(Boolean);
 		referrers.value = d.referrers || [];
 		events.value = d.events || [];
 		breakdowns.value = d.breakdowns || { country: [], device: [], os: [], browser: [] };
@@ -1069,6 +1153,39 @@ const tooltipStyle = computed(() => {
 	background: white;
 }
 .date-inputs span { color: #888; }
+.path-input { display: flex; align-items: center; gap: 4px; }
+.path-input input {
+	padding: 6px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px;
+	background: white; min-width: 200px; font-family: monospace;
+}
+.path-clear {
+	padding: 4px 9px; background: #f0f0f0; border: 1px solid #ddd;
+	border-radius: 4px; cursor: pointer; font-size: 15px; line-height: 1; color: #555;
+}
+.path-clear:hover { background: #e4e4e4; }
+
+.active-filter {
+	display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+	margin: 0 0 1.5rem; padding: 8px 12px;
+	background: #eaf5e5; border: 1px solid #8CCF7E; border-radius: 6px;
+	font-size: 13px; color: #333;
+}
+.active-filter code { font-size: 13px; }
+.active-filter button {
+	padding: 4px 10px; background: white; border: 1px solid #7ABF6E;
+	border-radius: 4px; cursor: pointer; font-size: 12px; color: #333;
+}
+.active-filter button:hover { background: #f4faf2; }
+
+.section-hint { margin: -4px 0 10px; font-size: 12px; color: #666; }
+.path-link {
+	padding: 0; background: none; border: none; cursor: pointer;
+	font: inherit; color: #333; text-align: left;
+	text-decoration: underline dotted #8CCF7E;
+	text-underline-offset: 3px;
+}
+.path-link:hover { text-decoration: underline solid #7ABF6E; text-underline-offset: 3px; }
+.path-link.active { font-weight: bold; }
 .btn-refresh {
 	padding: 8px 16px; background: #eee; color: #333; border: none;
 	border-radius: 5px; font-size: 13px; cursor: pointer;

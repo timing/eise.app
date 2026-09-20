@@ -355,7 +355,11 @@ const REJECT_CATEGORIES = [
 	[/mixed with|Multiple non-SER/i, 'bad_combination'],
 	[/not supported|unsupported|already demosaiced|use SER or AVI/i, 'unsupported_format'],
 	[/too large|exceeds|downscale below|ran out of memory|allocation failed/i, 'too_large'],
-	[/GPU is required|requires GPU|WebGPU|switch Processing to GPU/i, 'gpu_required'],
+	// Must match the real copy in gpuRequiredError() (FileUploader.vue:1238): the
+	// no-adapter card says "can't access the GPU", the CPU-toggle variant says
+	// "needs GPU processing". Neither contains the literal "WebGPU", so the old
+	// patterns never fired and every GPU block landed in `other`.
+	[/access the GPU|needs GPU processing|GPU is required|requires GPU|WebGPU|Processing back to GPU/i, 'gpu_required'],
 	[/corrupt|could not be read|failed to parse|no video frames|may be corrupted/i, 'unreadable'],
 	[/couldn't open this image|failed to load any images|failed to load/i, 'decode_failed'],
 ];
@@ -374,12 +378,19 @@ function trackFileRejected(source, message) {
 	const key = `${category}|${fileCtx.file_ext || '?'}|${fileCtx.file_count || 0}|${fileCtx.file_mb || 0}`;
 	if (key === lastRejectKey) return;
 	lastRejectKey = key;
+	// gpu_enabled comes from setTrackingContext(), which only runs once a reader
+	// has been picked — i.e. always AFTER this point, so it is null on every
+	// rejection. Ship the pre-start GPU facts instead: capability + the reason
+	// it is unusable, which is exactly what the gpu_required category needs.
 	track('file_rejected', {
 		...fileCtx,
 		category,
 		source,
 		reason: msg,
 		gpu_enabled: getTrackingContext()?.gpu_enabled ?? null,
+		gpu_available: webGPUSupported.value,
+		gpu_status: webGPUStatus.value,
+		lite_mode: liteMode.value,
 	});
 }
 
