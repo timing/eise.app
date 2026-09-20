@@ -1,7 +1,7 @@
 <template>
 	<div>
 		<div v-if="isMounted && liteMode" class="lite-mode-banner">
-			<strong>Lite Mode</strong><span v-if="forceLiteMode"> (forced)</span><span v-else-if="isMobile"> ({{ useGPU ? 'GPU' : 'CPU' }})</span><span v-else> (no WebGPU)</span> · Frame limit auto-adjusted for memory.
+			<strong>Mobile optimizations enabled.</strong> (see settings below)
 		</div>
 
 		<FileUploader v-show="!isProcessing && !isSelectingQuality && !isSelectingColorProfile && !isShowingContinuousResults" @postProcessing="handlePostProcessing" @processing-started="handleProcessingStarted" />
@@ -41,7 +41,6 @@ import QualitySelector from '@/components/QualitySelector.vue';
 import ContinuousStackingResults from '@/components/ContinuousStackingResults.vue';
 
 const liteMode = inject('liteMode');
-const useGPU = inject('useGPU');
 const isMobile = inject('isMobile');
 const forceLiteMode = inject('forceLiteMode');
 const isMounted = inject('isMounted');

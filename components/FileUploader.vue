@@ -4,16 +4,6 @@
 		<!-- LoadingIndicator always mounted so it can receive events -->
 		<LoadingIndicator />
 
-		<!-- Status indicators (mobile only) -->
-		<div v-if="isMobileClient" class="status-indicators panel-section">
-			<span class="status-item" :class="{ active: useGPU }">
-				<span class="status-check">{{ useGPU ? '✓' : '✗' }}</span> GPU
-			</span>
-			<span class="status-item" :class="{ active: !useGPU }">
-				<span class="status-check">{{ !useGPU ? '✓' : '✗' }}</span> CPU
-			</span>
-		</div>
-
 		<!-- Cancel button during processing -->
 		<div v-if="isProcessing" class="action-buttons processing-actions panel-section">
 			<button class="btn-danger" @click="cancelProcessing">Cancel</button>
@@ -239,64 +229,23 @@
 				</div>
 			</template>
 
-			<!-- Max frames - always visible (important for lite mode) -->
-			<div v-if="!showMemoryOptimization && (showAdvanced || liteModeClient)" class="panel-section">
-				<h4 class="panel-label">Max frames <span class="info-icon" @click="showMaxFramesInfo = !showMaxFramesInfo">ⓘ</span></h4>
-				<label class="panel-check">
-					<input type="checkbox" v-model="enableMaxFrames" />
-					Limit frames
-				</label>
-				<div class="slider-row">
-					<span class="slider-label">Frames</span>
-					<input type="range" min="2" :max="liteModeClient ? 100 : 5000" step="1" v-model="selectedMaxFrames" :disabled="!enableMaxFrames" />
-					<span class="panel-value">{{ enableMaxFrames ? selectedMaxFrames : '∞' }}</span>
-				</div>
-				<p v-if="showMaxFramesInfo" class="info-text">Lower this if you experience memory issues.</p>
-			</div>
-
-			<!-- Alignment detail - same class of dial as Max frames (trades stack
-			     quality for headroom), so it follows the same visibility rule. -->
-			<div v-if="!showMemoryOptimization && (showAdvanced || liteModeClient)" class="panel-section">
-				<h4 class="panel-label">Alignment detail <span class="info-icon" @click="showApDensityInfo = !showApDensityInfo">ⓘ</span></h4>
-				<div class="slider-row">
-					<span class="slider-label">Detail</span>
-					<input type="range" min="1" max="3" step="0.25" v-model.number="apSpacingScale" />
-					<span class="panel-value">{{ apDensityLabel }}</span>
-				</div>
-				<p v-if="liteModeClient && apSpacingScale < LITE_AP_SPACING_FLOOR" class="info-text">Lite mode uses at least {{ apDensityLabel }} detail to keep the GPU within budget.</p>
-				<p v-if="showApDensityInfo" class="info-text">Controls how densely alignment points are placed. Fewer points means less local distortion correction (a slightly softer stack) but a much lighter GPU load, since cost falls with the square of the spacing. Lower this if stacking crashes or stalls on this device.</p>
-			</div>
-
 			<!-- Processing backend toggle - only meaningful when GPU is actually available -->
-			<template v-if="useGPU && showAdvanced">
-				<div class="panel-section">
-					<h4 class="panel-label">Processing <span class="info-icon" @click="showProcessingBackendInfo = !showProcessingBackendInfo">ⓘ</span></h4>
-					<div class="opt-group">
-						<label class="opt-row">
-							<input type="radio" v-model="processingBackend" value="gpu" />
-							<span>GPU (fast)</span>
-						</label>
-						<label class="opt-row">
-							<input type="radio" v-model="processingBackend" value="cpu" />
-							<span>CPU (slow)</span>
-						</label>
-					</div>
-					<p v-if="showProcessingBackendInfo" class="info-text">
-						GPU is much faster and is the default. Only pick CPU if the GPU path produces bad results or crashes on your file. CPU processing can take many minutes even for short clips.
-					</p>
-				</div>
-
-				<div class="panel-section">
-					<h4 class="panel-label">Crop detection precision <span class="info-icon" @click="showLowResCropDetectInfo = !showLowResCropDetectInfo">ⓘ</span></h4>
-					<label class="panel-check">
-						<input type="checkbox" v-model="lowResCropDetectValue" />
-						Low-res crop detection (halves memory needed)
+			<div v-if="useGPU && showAdvanced" class="panel-section">
+				<h4 class="panel-label">Processing <span class="info-icon" @click="showProcessingBackendInfo = !showProcessingBackendInfo">ⓘ</span></h4>
+				<div class="opt-group">
+					<label class="opt-row">
+						<input type="radio" v-model="processingBackend" value="gpu" />
+						<span>GPU (fast)</span>
 					</label>
-					<p v-if="showLowResCropDetectInfo" class="info-text">
-						Runs the initial "where's the object" detection at half resolution. The final stack still uses your full-resolution frames — only the detection step is coarser. Turn this on if you see "GPU buffer would exceed device limit" errors on large photos; turn it off if you want the initial detection at full precision. Default is on for mobile devices where per-buffer memory limits are tight.
-					</p>
+					<label class="opt-row">
+						<input type="radio" v-model="processingBackend" value="cpu" />
+						<span>CPU (slow)</span>
+					</label>
 				</div>
-			</template>
+				<p v-if="showProcessingBackendInfo" class="info-text">
+					GPU is much faster and is the default. Only pick CPU if the GPU path produces bad results or crashes on your file. CPU processing can take many minutes even for short clips.
+				</p>
+			</div>
 
 			<div v-if="!liteModeClient && showAdvanced" class="panel-section">
 				<h4 class="panel-label">Color profile <span class="info-icon" @click="showColorPickerInfo = !showColorPickerInfo">ⓘ</span></h4>
@@ -307,6 +256,38 @@
 				<p v-if="showColorPickerInfo" class="info-text">
 					Raw files (SER, DNG, raw AVI) need debayering to become color. When the file states its Bayer pattern, Eise uses it and goes straight to stacking. When it doesn't, you get the picker anyway so you can choose the one with the right colors. Turn this on to always pick by hand, for example when a file declares the wrong pattern.
 				</p>
+			</div>
+
+			<!-- Mobile optimizations: the three dials that trade stack quality for
+			     memory/GPU headroom. Visible in lite mode too (that is where they
+			     matter most), so this group is not behind the Advanced toggle on
+			     mobile. -->
+			<div v-if="showAdvanced || liteModeClient" class="panel-section">
+				<h4 class="panel-label">Mobile optimizations <span class="info-icon" @click="showMobileOptInfo = !showMobileOptInfo">ⓘ</span></h4>
+				<p v-if="showMobileOptInfo" class="info-text">
+					These trade a little stack quality for memory and GPU headroom. Turn them on if stacking crashes, stalls, or runs out of memory on this device.<br>
+					<strong>Limit frames:</strong> stacks only the first N frames of the file.<br>
+					<strong>Minimal alignment detail:</strong> places far fewer alignment points. Less local distortion correction (a slightly softer stack) but a much lighter GPU load, since cost falls with the square of the spacing.<br>
+					<strong>Low-res crop detection:</strong> runs the initial "where's the object" detection at half resolution. The final stack still uses your full-resolution frames, only the detection step is coarser. Helps against "GPU buffer would exceed device limit" errors on large photos. On by default on mobile, where per-buffer memory limits are tight.
+				</p>
+
+				<div class="check-stack">
+					<label v-if="!showMemoryOptimization" class="panel-check">
+						<input type="checkbox" v-model="enableMaxFrames" />
+						Limit frames
+						<input type="number" min="2" :max="liteModeClient ? 100 : 5000" step="1" v-model.number="selectedMaxFrames" class="number-input" :disabled="!enableMaxFrames" />
+					</label>
+
+					<label class="panel-check">
+						<input type="checkbox" v-model="minimalAlignmentDetail" />
+						Minimal alignment detail
+					</label>
+
+					<label v-if="useGPU" class="panel-check">
+						<input type="checkbox" v-model="lowResCropDetectValue" />
+						Low-res crop detection (halves memory needed)
+					</label>
+				</div>
 			</div>
 		</template>
 	</div>
@@ -414,7 +395,6 @@ const useGPU = inject('useGPU', ref(false));
 const webGPUStatus = inject('webGPUStatus', ref(null));
 const detectedBrowser = inject('detectedBrowser', ref(''));
 const isMobile = inject('isMobile', ref(false));
-const isMobileClient = ref(false); // Only true after mount to avoid hydration mismatch
 const liteModeClient = ref(false); // Only true after mount to avoid hydration mismatch
 
 const { track } = useTracking();
@@ -476,7 +456,6 @@ const mismatchedFileNames = ref(new Set());
 const showCancelledMessage = ref(false);
 
 // Info toggle state
-const showMaxFramesInfo = ref(false);
 const showCropMarginInfo = ref(false);
 const showPreCropInfo = ref(false);
 const showTargetInfo = ref(false);
@@ -484,8 +463,8 @@ const showFrameSelectionInfo = ref(false);
 const showStackingModeInfo = ref(false);
 const showContinuousInfo = ref(false);
 const showProcessingBackendInfo = ref(false);
-const showLowResCropDetectInfo = ref(false);
 const showColorPickerInfo = ref(false);
+const showMobileOptInfo = ref(false);
 
 // Pull the shared processing state early: the watch() below references
 // lowResCropDetectValue and hits a TDZ error if the destructure lives after.
@@ -523,7 +502,6 @@ const apPatchSize = ref(30); // Alignment point patch size in pixels
 // AP count scales with 1/scale², so this is the same kind of quality-for-
 // headroom trade as maxFrames, aimed at the GPU rather than at memory.
 const apSpacingScale = ref(1);
-const showApDensityInfo = ref(false);
 const drizzleMethod = ref('normal'); // 'normal', 'bicubic', or 'drizzle'
 const pixfrac = ref(0.7); // Drizzle drop shrink factor (Fruchter & Hook)
 
@@ -534,10 +512,15 @@ const surfaceMode = computed(() => targetType.value === 'sun-moon');
 // Lite mode enforced settings (applies to mobile + no-GPU desktop)
 const effectiveDrizzleScale = computed(() => liteMode.value ? 1.0 : (drizzleMethod.value === 'normal' ? 1.0 : 1.5));
 const effectiveMaxFrames = computed(() => {
-	// Lite mode caps at 100 but respects a lower slider value — the user can
-	// still dial it down for extra headroom on very constrained devices.
-	if (liteMode.value) return Math.min(100, selectedMaxFrames.value || 100);
-	return enableMaxFrames.value ? selectedMaxFrames.value : -1;
+	// The control is a free-text number field, so it can legitimately be empty
+	// or garbage mid-typing. Fall back to the default rather than handing NaN
+	// or '' down the pipeline.
+	const n = Number(selectedMaxFrames.value);
+	const frames = Number.isFinite(n) && n >= 2 ? Math.round(n) : 100;
+	// Lite mode caps at 100 but respects a lower value — the user can still
+	// dial it down for extra headroom on very constrained devices.
+	if (liteMode.value) return Math.min(100, frames);
+	return enableMaxFrames.value ? frames : -1;
 });
 const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPercent.value);
 // Lite-mode floor, deliberately parked at 1 (no auto-reduction) until the NCC
@@ -547,7 +530,7 @@ const effectiveCropMargin = computed(() => liteMode.value ? 15 : cropMarginPerce
 // the watchdog kills we are trying to diagnose would likely vanish and we would
 // never learn whether the diagnosis was right. Once stack_ncc_slow.at_floor has
 // answered that, set LITE_AP_SPACING_FLOOR to 2 (about a quarter of the
-// alignment points) and this becomes the deliberate fix. The slider below is
+// alignment points) and this becomes the deliberate fix. The checkbox below is
 // already live either way, so users hitting crashes have a manual escape hatch.
 const LITE_AP_SPACING_FLOOR = 1;
 const effectiveApSpacingScale = computed(() =>
@@ -555,12 +538,13 @@ const effectiveApSpacingScale = computed(() =>
 		? Math.max(LITE_AP_SPACING_FLOOR, apSpacingScale.value || 1)
 		: (apSpacingScale.value || 1)
 );
-const apDensityLabel = computed(() => {
-	const s = effectiveApSpacingScale.value;
-	if (s <= 1) return 'Full';
-	if (s < 1.75) return 'High';
-	if (s < 2.5) return 'Reduced';
-	return 'Minimal';
+// The UI exposes a single on/off: full density or the minimal end of the scale.
+// The underlying scale stays continuous (persisted values from the old slider
+// still load and still work), the checkbox just picks the two useful ends.
+const MINIMAL_AP_SPACING = 3;
+const minimalAlignmentDetail = computed({
+	get: () => apSpacingScale.value >= 2.5,
+	set: (on) => { apSpacingScale.value = on ? MINIMAL_AP_SPACING : 1; }
 });
 const effectiveQualityMode = computed(() => {
 	if (liteMode.value) return 'percentage';
@@ -587,11 +571,15 @@ function loadSettings() {
 			}
 			if (settings.cropMarginPercent) cropMarginPercent.value = settings.cropMarginPercent;
 			if (settings.enableMaxFrames !== undefined) enableMaxFrames.value = settings.enableMaxFrames;
-			if (settings.selectedMaxFrames) selectedMaxFrames.value = settings.selectedMaxFrames;
+			// Older builds persisted this from a range input, so it can be a string.
+			if (settings.selectedMaxFrames) selectedMaxFrames.value = Number(settings.selectedMaxFrames) || 100;
 			if (settings.targetType) targetType.value = settings.targetType;
 			if (settings.minApQuality !== undefined) minApQuality.value = settings.minApQuality;
 			if (settings.apPatchSize !== undefined) apPatchSize.value = settings.apPatchSize;
-			if (settings.apSpacingScale !== undefined) apSpacingScale.value = settings.apSpacingScale;
+			// Snap to the two ends the checkbox can express: a persisted mid-scale
+			// value from the old slider would otherwise reduce detail while the
+			// checkbox showed unchecked.
+			if (settings.apSpacingScale !== undefined) apSpacingScale.value = settings.apSpacingScale >= 2.5 ? MINIMAL_AP_SPACING : 1;
 			if (settings.pixfrac !== undefined) pixfrac.value = settings.pixfrac;
 			if (settings.drizzleMethod) drizzleMethod.value = settings.drizzleMethod;
 			if (settings.processingBackend === 'gpu' || settings.processingBackend === 'cpu') {
@@ -655,7 +643,6 @@ onMounted(async () => {
 	try {
 		advancedExpanded.value = localStorage.getItem('eise-advanced-expanded') === 'true';
 	} catch {}
-	isMobileClient.value = isMobile.value;
 	liteModeClient.value = liteMode.value;
 
 	// In lite mode, enable max frames with default of 100
@@ -2268,6 +2255,16 @@ async function processFiles(files, options = {}) {
 </script>
 
 <style>
+/* Stacked checkbox/slider rows inside one panel section (Mobile optimizations). */
+.check-stack {
+	display: flex;
+	flex-direction: column;
+	gap: 11px;
+}
+.info-text + .check-stack {
+	margin-top: 12px;
+}
+
 /* Batch choice dialog */
 .batch-choice-dialog {
 	background: #f9f9f9;
@@ -2314,28 +2311,6 @@ async function processFiles(files, options = {}) {
 	color: #333;
 }
 
-.status-indicators {
-	display: flex;
-	gap: 12px;
-	margin-bottom: 15px;
-	flex-wrap: wrap;
-	font-size: 11px;
-}
-.status-item {
-	display: flex;
-	align-items: center;
-	gap: 3px;
-	color: #999;
-}
-.status-item .status-check {
-	font-size: 10px;
-}
-.status-item.active {
-	color: #333;
-}
-.status-item.active .status-check {
-	color: #8CCF7E;
-}
 .error-message {
 	background-color: #ffcccc;
 	color: #D9534F;
@@ -2896,15 +2871,6 @@ async function processFiles(files, options = {}) {
 .panel .btn-secondary:hover {
 	background-color: rgba(255, 255, 255, 0.14);
 	color: #fff;
-}
-.panel .status-indicators .status-item {
-	color: var(--eise-label);
-}
-.panel .status-indicators .status-item.active {
-	color: var(--eise-body);
-}
-.panel .status-indicators .status-item.active .status-check {
-	color: var(--eise-gilt);
 }
 .panel-inset {
 	margin: 16px 22px;

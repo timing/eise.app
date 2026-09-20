@@ -124,7 +124,7 @@ Both paths use `createAPGrid()` to generate alignment point coordinates (lightwe
 - `apPatchSize` - Alignment point patch size in pixels (default 20)
 - `inputFilename` - Current input filename for output naming
 
-- `apSpacingScale` - Alignment-point grid spacing multiplier (default 1 = full density). AP count falls with the SQUARE of this, so it is the dominant lever on NCC dispatch cost. Driven by the "Alignment detail" slider; `LITE_AP_SPACING_FLOOR` in FileUploader.vue can floor it for lite mode (currently 1, i.e. no automatic reduction).
+- `apSpacingScale` - Alignment-point grid spacing multiplier (default 1 = full density). AP count falls with the SQUARE of this, so it is the dominant lever on NCC dispatch cost. Driven by the "Minimal alignment detail" checkbox in the Mobile optimizations section (off = 1, on = 3); `LITE_AP_SPACING_FLOOR` in FileUploader.vue can floor it for lite mode (currently 1, i.e. no automatic reduction).
 
 UI settings in FileUploader.vue sync to this shared state via watchers, and useStacker.js reads from it via getter functions (`getMinApQuality()`, `getApPatchSize()`, `getApSpacingScale()`).
 
