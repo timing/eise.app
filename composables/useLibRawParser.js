@@ -121,7 +121,12 @@ function serColorIdFromFilters(filters, topMargin, leftMargin) {
 export async function probeRawFile(file) {
     return await withLock(async () => {
         const raw = await openFile(file);
-        const meta = await raw.metadata();
+        // metadata(true) is required. libraw-wasm's metadata(flag) passes the
+        // flag straight through to the worker, and the short form omits
+        // `filters`, `colors` and most of `color_data`. Reading `filters` off
+        // the short payload yields undefined -> 0 -> FILTERS_NONE, which sent
+        // every Bayer camera RAW down the 8-bit RGB lane instead of this one.
+        const meta = await raw.metadata(true);
         const filters = Number(meta?.filters ?? 0);
         const colors = Number(meta?.colors ?? 3);
 
@@ -162,7 +167,8 @@ export function useLibRawParser() {
 
         const meta = await withLock(async () => {
             const raw = await openFile(file);
-            return await raw.metadata();
+            // See probeRawFile: the short payload has no filters/colors/levels.
+            return await raw.metadata(true);
         });
 
         const filters = Number(meta?.filters ?? 0);
@@ -178,8 +184,15 @@ export function useLibRawParser() {
             );
         }
 
-        width = Number(meta?.width ?? 0);
-        height = Number(meta?.height ?? 0);
+        // metadata() reports the size the developed image will have AFTER the
+        // orientation flag is applied, but rawImageData() hands back the mosaic
+        // in sensor orientation, which is what this lane consumes. flip 5 (90
+        // CCW) and 6 (90 CW) are the quarter turns, so undo the swap for them
+        // or the size guard in readFrameRaw trips on every portrait phone DNG.
+        const flip = Number(meta?.flip ?? 0);
+        const quarterTurn = flip === 5 || flip === 6;
+        width = Number((quarterTurn ? meta?.height : meta?.width) ?? 0);
+        height = Number((quarterTurn ? meta?.width : meta?.height) ?? 0);
         if (!width || !height) {
             throw new UserError(`"${file.name}" reports no usable image size.`);
         }
@@ -213,7 +226,13 @@ export function useLibRawParser() {
         // Black/white levels drive the same normalisation useDngParser does:
         // subtract black, then stretch what remains across the full 16-bit range
         // so the GPU shaders see a consistent scale whatever the sensor depth.
-        const colorData = meta?.color_data?.ColorData || {};
+        // libraw-wasm puts these directly on color_data; there is no nested
+        // ColorData object. Reading the nested path always produced undefined,
+        // so scaleFactor fell through to 1 and the mosaic stayed at its sensor
+        // range (e.g. 0-1023 for a 10-bit phone DNG) inside a 16-bit container,
+        // leaving the image at ~1.5% of full scale for everything downstream.
+        // The fallback keeps working if a future version does nest them.
+        const colorData = meta?.color_data?.ColorData || meta?.color_data || {};
         blackLevel = Math.max(0, Math.round(Number(colorData.black ?? 0)));
         const maximum = Math.round(Number(colorData.maximum ?? 0));
         if (maximum > blackLevel) {
