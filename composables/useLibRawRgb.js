@@ -17,6 +17,7 @@
  */
 
 import { UserError } from './useSentryReporting';
+import { loadLibRawCtor } from './libRawLoader';
 
 // Camera RAW needs the as-shot white balance and the camera colour matrix, or
 // it comes out green. Astro capture formats (SER/AVI) never need this, which is
@@ -33,7 +34,7 @@ const RGB_SETTINGS = {
  * Decode one RAW file to a PNG blob via LibRaw's own demosaic.
  */
 export async function decodeRawToPngBlob(file) {
-    const { default: LibRaw } = await import('libraw-wasm');
+    const LibRaw = await loadLibRawCtor();
     const raw = new LibRaw();
     try {
         await raw.open(new Uint8Array(await file.arrayBuffer()), RGB_SETTINGS);

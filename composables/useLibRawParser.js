@@ -28,6 +28,7 @@ import {
     getOpenCVBayerPattern, getGpuBayerPattern, needsDemosaic,
 } from './useSerParser';
 import { FILTERS_NONE, FILTERS_XTRANS, bayerPatternFromFilters } from './libRawCfa';
+import { loadLibRawCtor } from './libRawLoader';
 
 // Pattern name → SER colorID, the vocabulary the rest of the pipeline speaks.
 const SER_COLOR_BY_PATTERN = {
@@ -50,9 +51,10 @@ let lock = Promise.resolve();
 async function getInstance() {
     if (sharedInstance) return sharedInstance;
     if (!loadPromise) {
-        // Dynamic import keeps the ~2MB wasm out of the main bundle: it only
-        // downloads once someone actually drops a RAW file.
-        loadPromise = import('libraw-wasm').then(({ default: LibRaw }) => {
+        // Loaded from /libraw/ rather than bundled: see libRawLoader.js for why
+        // letting Vite see this package blows up the production build. Still
+        // lazy, so the ~1.4MB wasm only downloads once a RAW file is dropped.
+        loadPromise = loadLibRawCtor().then((LibRaw) => {
             sharedInstance = new LibRaw();
             return sharedInstance;
         });
