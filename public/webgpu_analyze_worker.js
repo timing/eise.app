@@ -173,6 +173,44 @@ async function withDeviceRecoveryRetry(label, fn) {
     }
 }
 
+/**
+ * Release readback buffers on every exit path, including throws.
+ *
+ * Readback buffers are CACHED and reused across batches (cachedAnalyzeBuffers,
+ * cachedCropBuffers), so a buffer left mapped by a failed batch poisons every
+ * later batch in the session: the next mapAsync on it fails with
+ * "[Buffer] is already mapped" (EISE-PX 529 events, EISE-NA 373). That is why
+ * every map/read block below sits in a try/finally that calls this.
+ *
+ * Buffers in the 'pending' state are unmapped deliberately. safeMapAsync races
+ * mapAsync against deviceLostSignal, so when the device-lost signal wins the
+ * mapAsync is still in flight and WOULD map the buffer moments later. unmap()
+ * aborts that pending map, which is exactly what we want. The resulting
+ * AbortError rejection is already observed by the caller's await / Promise.all,
+ * so it does not surface as an unhandled rejection.
+ *
+ * Only ever pass buffers THIS call mapped. Crop buffers are N-buffered for
+ * concurrent batches, and unmapping another batch's buffer would break it.
+ */
+function unmapAll(buffers) {
+    for (const buf of buffers) {
+        if (!buf) continue;
+        // Tested POSITIVELY on purpose. GPUBuffer.mapState landed in Chrome 121
+        // but WebGPU itself shipped in 113, so on a 113-120 browser mapState is
+        // undefined. A `!== 'unmapped'` check would then be true for every
+        // buffer and call unmap() on unmapped ones, which is a validation error
+        // that lands in onuncapturederror and goes to Sentry. On those browsers
+        // we skip instead: no fix, but no new noise either.
+        const state = buf.mapState;
+        if (state !== 'mapped' && state !== 'pending') continue;
+        try {
+            buf.unmap();
+        } catch (_) {
+            // Buffer was destroyed along with a lost device. Nothing to release.
+        }
+    }
+}
+
 // Acquire a batch slot (waits if max concurrent batches reached)
 async function acquireBatchSlot() {
     if (activeBatchCount < MAX_CONCURRENT_BATCHES) {
@@ -480,6 +518,17 @@ async function init() {
         device = null;
         queue = null;
         isReady = false;
+
+        // Drop every cached buffer set. They belong to the dead device, so
+        // reusing one after recovery hands the fresh device a stale (and
+        // possibly still-mapped) buffer. Null rather than destroy: the driver
+        // already reclaimed these, and destroy() on them can throw.
+        cachedAnalyzeBuffers = null;
+        cachedAnalyzeConfig = null;
+        cachedCropBuffers = null;
+        cachedCropConfig = null;
+        cachedDownscaleBuffer = null;
+        cachedDownscaleConfig = null;
 
         // Unblock any in-flight mapAsync calls that may be hung
         if (fireDeviceLost) {
@@ -1159,37 +1208,42 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     logGpuSubmit(grayOnly ? 'analyzeBatch:reductions+readback(grayOnly)' : 'analyzeBatch:reductions+readback');
     queue.submit([encoder.finish()]);
 
-    // Read back results
-    await safeMapAsync(buffers.reductionReadback, GPUMapMode.READ);
-    await safeMapAsync(buffers.circularityReadback, GPUMapMode.READ);
-    await safeMapAsync(buffers.boundsReadback, GPUMapMode.READ);
-
-    const reductionData = new Float32Array(buffers.reductionReadback.getMappedRange().slice(0, reductionCopySize));
-    const circularityData = new Float32Array(buffers.circularityReadback.getMappedRange().slice(0, circularityCopySize));
-    const boundsData = new Uint32Array(buffers.boundsReadback.getMappedRange().slice(0, boundsCopySize));
-
+    // Read back results.
+    // The map/read/unmap sequence is wrapped so a throw part-way through cannot
+    // leave an earlier buffer mapped — these are cached and reused, see unmapAll.
+    let reductionData, circularityData, boundsData;
     // RGBA and grayscale readback only when not in grayOnly mode
     let rgbaData = null;
     let grayData = null;
-    if (!grayOnly) {
-        await safeMapAsync(buffers.rgbaReadback, GPUMapMode.READ);
-        await safeMapAsync(buffers.grayReadback, GPUMapMode.READ);
-        // RGBA data type depends on bit depth:
-        // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
-        // - 16-bit: Float32Array (4 floats/pixel, values in 0-1 range)
-        const rgbaRawBuffer = buffers.rgbaReadback.getMappedRange().slice(0, rgbaCopySize);
-        rgbaData = bitDepth === 16 ? new Float32Array(rgbaRawBuffer) : new Uint8Array(rgbaRawBuffer);
-        // Grayscale is always Float32 (sharpness values in 0-1 range)
-        const grayRawBuffer = buffers.grayReadback.getMappedRange().slice(0, grayCopySize);
-        grayData = new Float32Array(grayRawBuffer);
-    }
+    const mappedReadbacks = [
+        buffers.reductionReadback,
+        buffers.circularityReadback,
+        buffers.boundsReadback,
+    ];
+    if (!grayOnly) mappedReadbacks.push(buffers.rgbaReadback, buffers.grayReadback);
+    try {
+        await safeMapAsync(buffers.reductionReadback, GPUMapMode.READ);
+        await safeMapAsync(buffers.circularityReadback, GPUMapMode.READ);
+        await safeMapAsync(buffers.boundsReadback, GPUMapMode.READ);
 
-    buffers.reductionReadback.unmap();
-    buffers.circularityReadback.unmap();
-    buffers.boundsReadback.unmap();
-    if (!grayOnly) {
-        buffers.rgbaReadback.unmap();
-        buffers.grayReadback.unmap();
+        reductionData = new Float32Array(buffers.reductionReadback.getMappedRange().slice(0, reductionCopySize));
+        circularityData = new Float32Array(buffers.circularityReadback.getMappedRange().slice(0, circularityCopySize));
+        boundsData = new Uint32Array(buffers.boundsReadback.getMappedRange().slice(0, boundsCopySize));
+
+        if (!grayOnly) {
+            await safeMapAsync(buffers.rgbaReadback, GPUMapMode.READ);
+            await safeMapAsync(buffers.grayReadback, GPUMapMode.READ);
+            // RGBA data type depends on bit depth:
+            // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
+            // - 16-bit: Float32Array (4 floats/pixel, values in 0-1 range)
+            const rgbaRawBuffer = buffers.rgbaReadback.getMappedRange().slice(0, rgbaCopySize);
+            rgbaData = bitDepth === 16 ? new Float32Array(rgbaRawBuffer) : new Uint8Array(rgbaRawBuffer);
+            // Grayscale is always Float32 (sharpness values in 0-1 range)
+            const grayRawBuffer = buffers.grayReadback.getMappedRange().slice(0, grayCopySize);
+            grayData = new Float32Array(grayRawBuffer);
+        }
+    } finally {
+        unmapAll(mappedReadbacks);
     }
 
     // Process results for each frame
@@ -1721,27 +1775,35 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     // Rotate buffers for next batch (so next batch uses alternate set)
     rotateCropBuffers();
 
-    // Map all readback buffers in parallel for better throughput
-    await Promise.all([
-        safeMapAsync(readbackBuf, GPUMapMode.READ),
-        safeMapAsync(momentsReadbackBuf, GPUMapMode.READ),
-        safeMapAsync(croppedReadbackBuf, GPUMapMode.READ),
-        safeMapAsync(packedGrayReadbackBuf, GPUMapMode.READ)
-    ]);
+    // Map all readback buffers in parallel for better throughput.
+    // Promise.all rejects on the FIRST failure while the other three still
+    // resolve and map their buffers, so without the finally below a single
+    // device hiccup leaves up to three cached buffers mapped. See unmapAll.
+    let reductionData, momentsData, croppedData, packedGrayData;
+    const mappedReadbacks = [readbackBuf, momentsReadbackBuf, croppedReadbackBuf, packedGrayReadbackBuf];
+    try {
+        await Promise.all([
+            safeMapAsync(readbackBuf, GPUMapMode.READ),
+            safeMapAsync(momentsReadbackBuf, GPUMapMode.READ),
+            safeMapAsync(croppedReadbackBuf, GPUMapMode.READ),
+            safeMapAsync(packedGrayReadbackBuf, GPUMapMode.READ)
+        ]);
 
-    // Read data from mapped buffers
-    const reductionData = new Float32Array(readbackBuf.getMappedRange().slice(0));
-    readbackBuf.unmap();
+        // Read data from mapped buffers
+        reductionData = new Float32Array(readbackBuf.getMappedRange().slice(0));
+        momentsData = new Float32Array(momentsReadbackBuf.getMappedRange().slice(0));
 
-    const momentsData = new Float32Array(momentsReadbackBuf.getMappedRange().slice(0));
-    momentsReadbackBuf.unmap();
+        // Cropped RGBA data type depends on bit depth:
+        // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
+        // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
+        const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
+        croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
 
-    // Cropped RGBA data type depends on bit depth:
-    // - 8-bit: Uint8Array (packed RGBA, 4 bytes/pixel)
-    // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
-    const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
-    const croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
-    croppedReadbackBuf.unmap();
+        // Packed grayscale for template matching and preview (8-bit, 1 byte per pixel)
+        packedGrayData = new Uint8Array(packedGrayReadbackBuf.getMappedRange().slice(0));
+    } finally {
+        unmapAll(mappedReadbacks);
+    }
 
     // DEBUG: Sample cropped data with full statistics
     if (bitDepth === 16 && batchSize > 0) {
@@ -1764,10 +1826,6 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         console.log(`[GPU] Demosaic output stats: maxR=${maxR.toFixed(4)}, maxG=${maxG.toFixed(4)}, maxB=${maxB.toFixed(4)}, avgR=${avgR.toFixed(4)}`);
         console.log(`[GPU] Center pixel: R=${croppedData[centerIdx].toFixed(4)}, G=${croppedData[centerIdx+1].toFixed(4)}, B=${croppedData[centerIdx+2].toFixed(4)}`);
     }
-
-    // Packed grayscale for template matching and preview (8-bit, 1 byte per pixel)
-    const packedGrayData = new Uint8Array(packedGrayReadbackBuf.getMappedRange().slice(0));
-    packedGrayReadbackBuf.unmap();
 
     // Process results
     const results = [];
@@ -2194,52 +2252,63 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         mapPromises.push(safeMapAsync(grayReadbackBuf, GPUMapMode.READ));
     }
 
-    // ===== PIPELINING: Prepare next batch while waiting for GPU =====
-    // While GPU processes current batch, prepare and upload next batch to next buffer
-    if (nextBatchFrames && nextBatchFrames.length > 0 && needsDemosaic) {
-        const nextSrcPixelCount = srcWidth * srcHeight;  // Same dimensions
-        const nextPrepared = prepareBayerData(nextBatchFrames, nextSrcPixelCount, false);
+    // Only the buffers this call actually mapped may be unmapped below: crop
+    // buffers are N-buffered across concurrent batches, so touching one we did
+    // not map would break the batch that owns it.
+    const mappedReadbacks = [sharpnessReadbackBuf, boundsReadbackBuf];
+    if (!grayOnly) mappedReadbacks.push(croppedReadbackBuf, grayReadbackBuf);
 
-        // Upload to the next buffer in rotation
-        const nextBufferIndex = (pipelinedUpload.bufferIndex + 1) % MAX_CONCURRENT_BATCHES;
-        const nextInputBuffer = analyzeBuffers.inputBuffers[nextBufferIndex];
-
-        queue.writeBuffer(nextInputBuffer, 0, nextPrepared.data);
-
-        // Mark as ready for next batch
-        pipelinedUpload.ready = true;
-        pipelinedUpload.bufferIndex = nextBufferIndex;
-        pipelinedUpload.scale = nextPrepared.scale;
-        pipelinedUpload.batchSize = nextBatchFrames.length;
-    }
-
-    await Promise.all(mapPromises);
-    const tAfterMapAsync = performance.now();
-    dcaMapAsyncTime += (tAfterMapAsync - tAfterSubmit);
-
-    // Read final sharpness values (2 floats per frame: tenengrad, laplacian)
-    const sharpnessData = new Float32Array(sharpnessReadbackBuf.getMappedRange().slice(0));
-    // Read bounds computed by GPU centroid shader
-    const boundsData = new Uint32Array(boundsReadbackBuf.getMappedRange().slice(0));
-
+    let sharpnessData, boundsData;
     // Cropped RGBA and grayscale readback only when not in grayOnly mode
     let croppedData = null;
     let grayData = null;
-    if (!grayOnly) {
-        // Cropped RGBA type depends on bit depth:
-        // - 8-bit: Uint8Array (packed RGBA)
-        // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
-        const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
-        croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
-        // Grayscale is always Float32
-        grayData = new Float32Array(grayReadbackBuf.getMappedRange().slice(0));
-    }
+    // Declared out here: the timing summary at the end of this function reads it.
+    let tAfterMapAsync;
 
-    sharpnessReadbackBuf.unmap();
-    boundsReadbackBuf.unmap();
-    if (!grayOnly) {
-        croppedReadbackBuf.unmap();
-        grayReadbackBuf.unmap();
+    // The try opens BEFORE the pipelining block, not after. mapPromises are
+    // already in flight at this point, so anything that throws in between
+    // (prepareBayerData, queue.writeBuffer) would otherwise leave those maps
+    // unawaited: unhandled rejections plus buffers left mapped in the cache.
+    try {
+        // ===== PIPELINING: Prepare next batch while waiting for GPU =====
+        // While GPU processes current batch, prepare and upload next batch to next buffer
+        if (nextBatchFrames && nextBatchFrames.length > 0 && needsDemosaic) {
+            const nextSrcPixelCount = srcWidth * srcHeight;  // Same dimensions
+            const nextPrepared = prepareBayerData(nextBatchFrames, nextSrcPixelCount, false);
+
+            // Upload to the next buffer in rotation
+            const nextBufferIndex = (pipelinedUpload.bufferIndex + 1) % MAX_CONCURRENT_BATCHES;
+            const nextInputBuffer = analyzeBuffers.inputBuffers[nextBufferIndex];
+
+            queue.writeBuffer(nextInputBuffer, 0, nextPrepared.data);
+
+            // Mark as ready for next batch
+            pipelinedUpload.ready = true;
+            pipelinedUpload.bufferIndex = nextBufferIndex;
+            pipelinedUpload.scale = nextPrepared.scale;
+            pipelinedUpload.batchSize = nextBatchFrames.length;
+        }
+
+        await Promise.all(mapPromises);
+        tAfterMapAsync = performance.now();
+        dcaMapAsyncTime += (tAfterMapAsync - tAfterSubmit);
+
+        // Read final sharpness values (2 floats per frame: tenengrad, laplacian)
+        sharpnessData = new Float32Array(sharpnessReadbackBuf.getMappedRange().slice(0));
+        // Read bounds computed by GPU centroid shader
+        boundsData = new Uint32Array(boundsReadbackBuf.getMappedRange().slice(0));
+
+        if (!grayOnly) {
+            // Cropped RGBA type depends on bit depth:
+            // - 8-bit: Uint8Array (packed RGBA)
+            // - 16-bit: Float32Array (4 floats/pixel, 0-1 range)
+            const croppedRawBuffer = croppedReadbackBuf.getMappedRange().slice(0);
+            croppedData = bitDepth === 16 ? new Float32Array(croppedRawBuffer) : new Uint8Array(croppedRawBuffer);
+            // Grayscale is always Float32
+            grayData = new Float32Array(grayReadbackBuf.getMappedRange().slice(0));
+        }
+    } finally {
+        unmapAll(mappedReadbacks);
     }
 
     // Build bounds and centers arrays from GPU output
@@ -2446,11 +2515,15 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             logGpuSubmit('singleFrame:demosaic');
             queue.submit([encoder.finish()]);
 
-            await safeMapAsync(readbackBuf, GPUMapMode.READ);
-            // Demosaic outputs Float32 RGBA (4 floats per pixel, values 0-1)
-            // Convert to Uint8 for thumbnail display
-            const float32Data = new Float32Array(readbackBuf.getMappedRange().slice(0));
-            readbackBuf.unmap();
+            let float32Data;
+            try {
+                await safeMapAsync(readbackBuf, GPUMapMode.READ);
+                // Demosaic outputs Float32 RGBA (4 floats per pixel, values 0-1)
+                // Convert to Uint8 for thumbnail display
+                float32Data = new Float32Array(readbackBuf.getMappedRange().slice(0));
+            } finally {
+                unmapAll([readbackBuf]);
+            }
 
             fullRgba = new Uint8ClampedArray(pixelCount * 4);
             for (let i = 0; i < pixelCount; i++) {
