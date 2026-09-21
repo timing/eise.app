@@ -1,6 +1,7 @@
 import * as Sentry from '@sentry/vue';
 import { logs } from '@/composables/eventBus';
 import { useProcessingState } from '@/composables/useProcessingState';
+import { classifyGpuCondition } from '@/composables/gpuConditions';
 
 // Small ring buffer of recent errors captured by Sentry. Attached to the
 // User Feedback event via onFormOpen so submitters carry the last N JS
@@ -112,6 +113,11 @@ export default defineNuxtPlugin(async (nuxtApp) => {
             if (/abort\(OOM\)|pthread sent an error/i.test(msg)) return null;
             if (/SharedArrayBuffer is not defined|Can't find variable: SharedArrayBuffer/i.test(msg)) return null;
             if (err && err.name === 'FFmpegUnsupportedError') return null;
+            // Expected GPU conditions are routed to `gpu_condition` analytics by
+            // reportError. This is the backstop for the paths that never go
+            // through it: uncaught worker errors, the Vue error handler, and
+            // WebGPUUnavailableError bubbling out of useStacker.
+            if (classifyGpuCondition(msg)) return null;
             // Mirror the exception into the ring buffer so the NEXT feedback
             // submission carries it as recent_errors context. Feedback events
             // themselves have no exception.values — skip those.

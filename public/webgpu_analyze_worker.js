@@ -151,6 +151,28 @@ async function safeMapAsync(buffer, mode) {
     }
 }
 
+/**
+ * Run a GPU batch operation, retrying once if safeMapAsync recovered the device
+ * mid-flight.
+ *
+ * GPU_DEVICE_RECOVERED is a control-flow sentinel, not a failure: the device was
+ * lost, re-initialised successfully, and the caller is expected to redo the work
+ * on the fresh device. webgpu_template_match.js already does this, but the
+ * analyze handlers did not, so a recoverable device loss surfaced to the user as
+ * a hard stack failure and to Sentry as an "error" named GPU_DEVICE_RECOVERED
+ * (EISE-N1, 32 events). Inputs are plain frame data owned by the worker, so
+ * replaying the same call is safe; only the GPU-side buffers were destroyed.
+ */
+async function withDeviceRecoveryRetry(label, fn) {
+    try {
+        return await fn();
+    } catch (err) {
+        if (((err && err.message) || '') !== 'GPU_DEVICE_RECOVERED') throw err;
+        console.warn(`[GPU] ${label}: device recovered mid-batch, retrying once`);
+        return await fn();
+    }
+}
+
 // Acquire a batch slot (waits if max concurrent batches reached)
 async function acquireBatchSlot() {
     if (activeBatchCount < MAX_CONCURRENT_BATCHES) {
@@ -2590,7 +2612,8 @@ self.addEventListener('message', async (e) => {
         const { frames, width, height, bayerPattern, threshold, requestId, metadataOnly, grayOnly = false, lowResCropDetect = false } = e.data;
 
         try {
-            const results = await analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, grayOnly, lowResCropDetect);
+            const results = await withDeviceRecoveryRetry('analyze-batch', () =>
+                analyzeBatch(frames, width, height, bayerPattern, threshold, metadataOnly, grayOnly, lowResCropDetect));
             // Transfer uint8Buffer or float32Buffer depending on mode (none in grayOnly mode)
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'analyze-result', requestId, results }, transferables);
@@ -2612,7 +2635,8 @@ self.addEventListener('message', async (e) => {
         const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId, metadataOnly } = e.data;
 
         try {
-            const results = await cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly);
+            const results = await withDeviceRecoveryRetry('crop-analyze-batch', () =>
+                cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly));
             // Transfer uint8Buffer or float32Buffer depending on mode
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'crop-analyze-result', requestId, results }, transferables);
@@ -2632,7 +2656,8 @@ self.addEventListener('message', async (e) => {
         const { frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, requestId, metadataOnly, grayOnly = false, nextBatchFrames = null } = e.data;
 
         try {
-            const results = await detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly, grayOnly, nextBatchFrames);
+            const results = await withDeviceRecoveryRetry('detect-crop-analyze-batch', () =>
+                detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bayerPattern, threshold, metadataOnly, grayOnly, nextBatchFrames));
             // Transfer uint8Buffer or float32Buffer depending on mode (none in grayOnly mode)
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'detect-crop-analyze-result', requestId, results }, transferables);

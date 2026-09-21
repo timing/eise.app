@@ -13,6 +13,9 @@ let gpuReady = false;
 let initPromise = null;
 let logListenerAttached = false;
 let deviceLostListenerAttached = false;
+// Max worker-side error logs forwarded to Sentry per session. See
+// attachWorkerLogListener for why this is capped.
+const MAX_WORKER_LOG_REPORTS = 3;
 // Cache getMaxBatchSize results per (width, height, bitDepth) — the underlying
 // message round-trip is ~1ms but adds up on hot paths. Cleared on terminate.
 const maxBatchCache = new Map();
@@ -25,14 +28,24 @@ export function useWebGpuAnalyzeWorker() {
     // Route worker-side {type: 'log'} messages into the app logger + Sentry.
     // Without this, uncaptured WebGPU validation errors (e.g. buffer > maxBufferSize)
     // only appear in the worker's DevTools console and never reach the user or Sentry.
+    //
+    // Capped per session. device.onuncapturederror fires once per GPU operation,
+    // so a single bad allocation used to produce dozens of near-identical Sentry
+    // events from one stack. reportError already drops the known cascade and
+    // expected-condition messages; this cap is the backstop for novel validation
+    // errors we haven't classified yet, where the first few carry the root cause
+    // and the rest are echoes. Every message still reaches addLog, so the full
+    // sequence stays in session_logs and in the user-visible log.
     function attachWorkerLogListener() {
         if (logListenerAttached || !gpuWorker) return;
         logListenerAttached = true;
+        let reportedCount = 0;
         gpuWorker.addEventListener('message', (e) => {
             if (!e.data || e.data.type !== 'log') return;
             const { level, message } = e.data;
             addLog(message);
-            if (level === 'error') {
+            if (level === 'error' && reportedCount < MAX_WORKER_LOG_REPORTS) {
+                reportedCount++;
                 reportError(new Error(message), { component: 'useWebGpuAnalyzeWorker', action: 'workerLog' });
             }
         });

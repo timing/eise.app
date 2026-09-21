@@ -5,6 +5,8 @@
 
 import * as Sentry from '@sentry/vue';
 import { useProcessingState } from './useProcessingState';
+import { useTracking } from './useTracking';
+import { classifyGpuCondition } from './gpuConditions';
 import { logs } from './eventBus';
 
 /**
@@ -20,6 +22,30 @@ export class UserError extends Error {
     }
 }
 
+// One analytics event per condition kind per page session. Without this cap we
+// would just move the firehose from Sentry to our own beacon: a cascade fires
+// hundreds of times in a single stack. First occurrence carries the most
+// diagnostic message (the root), so that is the one we keep.
+const trackedGpuConditions = new Set();
+
+function trackGpuCondition(kind, message, context) {
+    if (trackedGpuConditions.has(kind)) return;
+    trackedGpuConditions.add(kind);
+    try {
+        const { track } = useTracking();
+        track('gpu_condition', {
+            kind,
+            // Kept long enough to preserve the dimensions the guard messages
+            // embed (buffer name, MB, device limits, frame size).
+            message: String(message).slice(0, 300),
+            component: context.component || null,
+            action: context.action || null,
+        });
+    } catch (_) {
+        // Analytics must never break the caller's error handling.
+    }
+}
+
 /**
  * Report an error to Sentry with optional context
  * @param {Error} error - The error to report
@@ -32,6 +58,15 @@ export class UserError extends Error {
  */
 export function reportError(error, context = {}) {
     if (error instanceof UserError) return;
+
+    // Expected GPU conditions go to analytics instead of Sentry. Routing here
+    // rather than in beforeSend means every existing reportError call site is
+    // covered at once, and the event still gets counted.
+    const gpuCondition = classifyGpuCondition(error?.message || String(error || ''));
+    if (gpuCondition) {
+        trackGpuCondition(gpuCondition, error?.message || error, context);
+        return;
+    }
 
     // Auto-fetch filename from processing state if not provided
     const { getInputFilename } = useProcessingState();
