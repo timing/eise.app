@@ -714,10 +714,14 @@ export function useStacker() {
             const refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, isRefFloat32);
 
             // Step 3: Initialize GPU stacker
+            let deviceMaxBatch = Infinity;
+            let deviceCanFitFrame = true;
             await new Promise((resolve, reject) => {
                 const handler = (e) => {
                     if (e.data.type === 'init-stacking-done') {
                         gpuStackWorker.removeEventListener('message', handler);
+                        if (Number.isFinite(e.data.maxBatch)) deviceMaxBatch = e.data.maxBatch;
+                        if (e.data.deviceCanFit === false) deviceCanFitFrame = false;
                         resolve();
                     } else if (e.data.type === 'init-stacking-error') {
                         gpuStackWorker.removeEventListener('message', handler);
@@ -752,7 +756,27 @@ export function useStacker() {
             const { isLiteMode: checkLiteMode } = useLiteMode();
             const inLiteMode = checkLiteMode();
             const targetBatchMemory = inLiteMode ? (256 * 1024 * 1024) : (512 * 1024 * 1024);
-            let effectiveBatchSize = Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
+            // targetBatchMemory is a soft budget; deviceMaxBatch is the hard
+            // per-buffer cap the GPU will actually enforce. Clamp to the device
+            // LAST, and never floor above it.
+            //
+            // The `Math.max(4, ...)` floor was the bug camera RAW exposed. Crops
+            // are capped at min(srcW, srcH), so a ~60MP body (9504×6336) can
+            // produce a 6033² crop = 555MB of Float32 RGBA per frame. The memory
+            // target correctly computed "0 frames fit in 512MB", the floor
+            // overrode it to 4, and demosaicVngCropBatchGpu then asked for
+            // 2222MB against a 2048MB maxBufferSize. Every such stack threw at
+            // stack_ap_grid_built. Small batches are slow but they complete.
+            let effectiveBatchSize = Math.min(
+                Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes))),
+                deviceMaxBatch
+            );
+            if (!deviceCanFitFrame) {
+                addLog(`Warning: ${cropSize}x${cropSize} frames exceed this GPU's per-buffer limit; stacking one frame at a time`);
+            }
+            if (effectiveBatchSize < 4) {
+                addLog(`Large frames (${cropSize}x${cropSize}): GPU allows ${effectiveBatchSize} frame(s) per batch`);
+            }
             const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
             let processedCount = 0;
 
@@ -1756,8 +1780,13 @@ export function useStacker() {
             const { alignmentPoints, patchSize, searchRadius } = alignmentData;
 
             // Init stacking
+            let deviceMaxBatch = Infinity;
             await new Promise((resolve) => {
-                const handler = (e) => { if (e.data.type === 'init-stacking-done') resolve(); };
+                const handler = (e) => {
+                    if (e.data.type !== 'init-stacking-done') return;
+                    if (Number.isFinite(e.data.maxBatch)) deviceMaxBatch = e.data.maxBatch;
+                    resolve();
+                };
                 gpuStackWorker.addEventListener('message', handler);
                 gpuStackWorker.postMessage({
                     type: 'init-stacking',
@@ -1770,7 +1799,11 @@ export function useStacker() {
             // Dynamic batch size based on crop size (same logic as stackWithGpuPipelined)
             const frameBytes = cropSize * cropSize * 16; // Float32 RGBA = 16 bytes/pixel
             const targetBatchMemory = 512 * 1024 * 1024;
-            const batchSize = Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes)));
+            // Clamp to the device's per-buffer cap — see stackWithGpuPipelined.
+            const batchSize = Math.min(
+                Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes))),
+                deviceMaxBatch
+            );
             const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
             let processedCount = 0;
 

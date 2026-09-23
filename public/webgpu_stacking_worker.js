@@ -18,6 +18,7 @@ import {
     demosaicVngBatch,
     demosaicVngCropBatch,
     demosaicVngCropBatchGpu,
+    getMaxStackBatchSize,
     warpAndAccumulateFromGpuBuffer,
     matchTemplatesFromGpuBuffer,
     computeBrightnessFromGpuBuffer,
@@ -188,7 +189,17 @@ self.addEventListener('message', async (e) => {
                 bayerPattern, bitDepth, bayerScale, pixfrac
             };
 
-            self.postMessage({ type: 'init-stacking-done', outWidth, outHeight });
+            // Report the device's real per-batch ceiling alongside the geometry.
+            // useStacker sizes batches from a memory *target*; without this it has
+            // no way to know that a 6000px crop only fits one frame per buffer on
+            // a 2 GB maxBufferSize GPU.
+            const { maxBatch, deviceCanFit, largestPerFrame, limit } =
+                getMaxStackBatchSize(width, stackingContext.srcWidth, stackingContext.srcHeight, bitDepth);
+
+            self.postMessage({
+                type: 'init-stacking-done', outWidth, outHeight,
+                maxBatch, deviceCanFit, largestPerFrame, bufferLimit: limit
+            });
 
         } catch (err) {
             self.postMessage({ type: 'init-stacking-error', error: err.message });

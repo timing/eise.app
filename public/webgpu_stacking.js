@@ -2032,6 +2032,48 @@ function cleanupStackingBuffers() {
 }
 
 /**
+ * How many frames demosaicVngCropBatchGpu can take in one call on THIS device.
+ *
+ * maxBufferSize / maxStorageBufferBindingSize are per-BUFFER caps, not a total
+ * memory budget, so the bound comes from the largest single batch-scaled buffer:
+ *   - rgbaGpuBuffer  cropSize² × 16 B/frame  (Float32 RGBA — almost always the largest)
+ *   - inputBuffer    srcW × srcH × 1|2 B/frame (raw Bayer mosaic)
+ * grayGpuBuffer is 1 B/px and never binds first.
+ *
+ * Why this exists: useStacker used to floor its batch at 4 frames from a memory
+ * *target*, which silently ignored the device cap. Crops are capped at
+ * min(srcW, srcH), so a ~60MP body reaches a 6033² crop = 555 MB of Float32 RGBA
+ * per frame; 4 of those is 2222 MB against a 2048 MB maxBufferSize. The
+ * allocation threw and every camera-RAW stack on that machine died at
+ * stack_ap_grid_built. Big sensors need a small batch, and 1 has to be legal.
+ *
+ * Mirrors the analyze worker's 'get-max-batch-size' (EISE-M2 / EISE-MT / EISE-NJ),
+ * including its 1.2 headroom factor for driver-side padding.
+ *
+ * @returns {{maxBatch: number, deviceCanFit: boolean, largestPerFrame: number,
+ *            limit: number}} maxBatch is floored at 1 so caller loops terminate;
+ *   deviceCanFit is false when even one frame cannot fit.
+ */
+function getMaxStackBatchSize(cropSize, srcWidth, srcHeight, bitDepth = 8) {
+    const maxBufferSize = stackDevice ? stackDevice.limits.maxBufferSize : (256 * 1024 * 1024);
+    const maxBindingSize = stackDevice ? stackDevice.limits.maxStorageBufferBindingSize : (128 * 1024 * 1024);
+    const limit = Math.min(maxBufferSize, maxBindingSize);
+
+    const largestPerFrame = Math.max(
+        cropSize * cropSize * 16,                                    // rgbaGpuBuffer
+        srcWidth * srcHeight * (bitDepth > 8 ? 2 : 1)                // inputBuffer
+    );
+
+    const rawBatch = Math.floor(limit / (largestPerFrame * 1.2));
+    return {
+        maxBatch: Math.max(1, rawBatch),
+        deviceCanFit: rawBatch >= 1,
+        largestPerFrame,
+        limit
+    };
+}
+
+/**
  * VNG demosaic + crop keeping BOTH RGBA and grayscale on GPU (fully zero-copy pipeline)
  * NO CPU READBACK - brightness computed separately on GPU via computeBrightnessFromGpuBuffer
  * @returns {{rgbaGpuBuffer: GPUBuffer, grayGpuBuffer: GPUBuffer, batchSize: number, cropSize: number}}
@@ -2969,6 +3011,7 @@ export {
     demosaicVngBatch,
     demosaicVngCropBatch,
     demosaicVngCropBatchGpu,
+    getMaxStackBatchSize,
     warpAndAccumulateFromGpuBuffer,
     matchTemplatesFromGpuBuffer,
     computeBrightnessFromGpuBuffer,
