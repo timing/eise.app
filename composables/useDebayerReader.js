@@ -21,7 +21,7 @@ const NO_TARGET_MESSAGE = 'No planet or moon detected in your images. eise.app i
 import { useEventBus } from '@/composables/eventBus';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { useStacker } from '@/composables/useStacker';
-import { reportError } from '@/composables/useSentryReporting';
+import { reportError, UserError } from '@/composables/useSentryReporting';
 
 // Import parser helpers for Bayer pattern conversion
 import { getGpuBayerPattern as serGetGpuBayerPattern, isRgbColor, SER_COLOR_BGR } from '@/composables/useSerParser';
@@ -587,15 +587,16 @@ export function useDebayerReader() {
 
     /**
      * Ask the GPU worker how many frames fit in one batch at given dimensions.
+     * Returns the full reply, including `deviceCanFit` — see assertGpuCanFitFrame.
      */
-    async function getGpuMaxBatchSize(width, height, bitDepth) {
+    async function getGpuMaxBatchInfo(width, height, bitDepth) {
         return new Promise((resolve, reject) => {
             let timeout;
             const handler = (e) => {
                 if (e.data.type === 'max-batch-size') {
                     clearTimeout(timeout);
                     gpuWorker.removeEventListener('message', handler);
-                    resolve(e.data.maxBatch);
+                    resolve(e.data);
                 }
             };
             gpuWorker.addEventListener('message', handler);
@@ -605,6 +606,48 @@ export function useDebayerReader() {
                 reject(new Error('GPU worker did not respond. Please reload the page and try again.'));
             }, 15000);
         });
+    }
+
+    async function getGpuMaxBatchSize(width, height, bitDepth) {
+        return (await getGpuMaxBatchInfo(width, height, bitDepth)).maxBatch;
+    }
+
+    /**
+     * Bail with an actionable message when the device's GPU cannot fit even ONE
+     * frame's analysis buffers at these dimensions.
+     *
+     * get-max-batch-size floors maxBatch at 1 so caller chunk loops terminate,
+     * which means "too big for this GPU" is indistinguishable from "fits exactly
+     * one" unless you read deviceCanFit. Without this guard we dispatched the
+     * batch of 1 anyway and the user got a raw WebGPU string —
+     * "momentsPixelBuffer would be 330MB, exceeds device limit 128MB" — which
+     * says nothing about what to do next.
+     *
+     * This matters far more for camera RAW than for SER: astro capture is a few
+     * megapixels, but a 24-48MP DSLR/mirrorless frame needs 24 B/px of moments
+     * buffer (330MB+) against the 128MB maxStorageBufferBindingSize that mobile
+     * Chrome and Safari commonly report.
+     *
+     * Tagged `source: 'device-capability'` to match the mediabunny reader, so
+     * FileUploader's existing handling for that tag applies unchanged.
+     */
+    async function assertGpuCanFitFrame(width, height, bitDepth) {
+        const info = await getGpuMaxBatchInfo(width, height, bitDepth);
+        if (info.deviceCanFit !== false) return info.maxBatch;
+
+        const mp = (width * height / 1e6).toFixed(1);
+        const isMobile = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        const limitMb = Math.round(Math.min(info.maxBufferSize ?? Infinity, info.maxBindingSize ?? Infinity) / 1048576);
+        const msg = isMobile
+            ? `Your frames are ${width}×${height} (${mp}MP), too large for this mobile GPU (${limitMb}MB per buffer). Open eise.app on a laptop or desktop for files this size.`
+            : `Frames are ${width}×${height} (${mp}MP) — a single frame's analysis buffer exceeds this GPU's ${limitMb}MB per-buffer limit. Downscale below ~4000×4000, or use the desktop app.`;
+        addLog(msg);
+        // UserError so FileUploader renders it as an expected condition rather
+        // than a crash, and it stays out of the Sentry error budget — this is a
+        // hardware limit, not a bug.
+        const err = new UserError(msg);
+        err.source = 'device-capability';
+        throw err;
     }
 
     /**
@@ -1026,6 +1069,11 @@ export function useDebayerReader() {
         if (!gpuReady) {
             throw new Error(`Could not initialize GPU worker: ${gpuInitFailReason || 'unknown reason'}`);
         }
+
+        // Fail fast on frames this GPU can never analyze, before we read any
+        // frame data. Everything below (preview, crop detection, pass 1) feeds
+        // the same analyze worker, so there is nothing to fall back to.
+        await assertGpuCanFitFrame(metadata.width, metadata.height, metadata.pixelDepth > 8 ? 16 : 8);
 
         const frameCount = maxFrames > 0 ? Math.min(maxFrames, metadata.frameCount) : metadata.frameCount;
         addLog(`[DebayerReader] Processing ${frameCount} frames`);
