@@ -328,7 +328,7 @@
 			</div>
 			<div class="spec-row">
 				<dt>Image sequences (PNG, TIFF)</dt>
-				<dd>Multiple start stacking. A single image opens the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</dd>
+				<dd>Multiple images will start stacking. A single image opens the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</dd>
 			</div>
 		</dl>
 
@@ -393,6 +393,7 @@ const liteMode = inject('liteMode', ref(false));
 /// GPU vs CPU: use GPU when available (even in lite mode on mobile)
 const useGPU = inject('useGPU', ref(false));
 const webGPUStatus = inject('webGPUStatus', ref(null));
+const refreshWebGpuStatus = inject('refreshWebGpuStatus', async () => webGPUStatus.value);
 const detectedBrowser = inject('detectedBrowser', ref(''));
 const isMobile = inject('isMobile', ref(false));
 const liteModeClient = ref(false); // Only true after mount to avoid hydration mismatch
@@ -1109,31 +1110,12 @@ async function startProcessing() {
 		isProcessing.value = false;
 		eventBusEmit('stop-loading');
 
-		// Device-lost failures used to surface as "Please reload the page" text
-		// with no recovery path. The worker's auto-recovery already retries, so
-		// by the time we see this the retry has been exhausted. Route to the
-		// actionable card so users have a real next step instead of just a wall
-		// of red text. Detection matches the worker error strings verbatim.
-		if (/GPU device (was|is) lost/i.test(errorMsg)) {
-			showActionableError(
-				"The browser's GPU dropped out mid-processing. This can happen on machines with limited GPU memory or when the driver crashes under pressure. Auto-recovery was attempted but didn't stick.",
-				[
-					{
-						label: 'Retry the same file',
-						description: 'Close this message and click Process again. A fresh GPU adapter is often granted after a short wait, especially if you close other GPU-heavy tabs first.'
-					},
-					{
-						label: 'Reload the page and try again',
-						description: 'Fresh page = fresh WebGPU device. This is the surest fix when the driver got itself into a bad state.',
-						url: '/'
-					},
-					{
-						label: 'Download the Eise desktop app',
-						description: 'The Mac, Windows and Linux builds use a dedicated GPU context that survives what browsers cannot.',
-						url: '/download/'
-					}
-				]
-			);
+		// GPU failures used to surface as raw worker text with no recovery path.
+		// Route them to the actionable card so users have a real next step
+		// instead of a wall of red text.
+		const card = await gpuFailureCard(errorMsg);
+		if (card) {
+			showActionableError(card.message, card.alternatives);
 			return;
 		}
 
@@ -1217,6 +1199,54 @@ function ffmpegUnsupportedAlternatives({ context = 'video' } = {}) {
 	];
 }
 
+// Recovery steps for a GPU that worked and then went away: device lost during
+// stacking, or an adapter that can no longer be obtained. Both mean the same
+// thing to the user, so both get the same three ways out.
+function gpuLostAlternatives() {
+	return [
+		{
+			label: 'Reload the page and try again',
+			description: 'Fresh page, fresh WebGPU device. This is the surest fix once the driver is in a bad state.',
+			url: '/'
+		},
+		{
+			label: 'Give the GPU less to do',
+			description: 'Close other GPU-heavy tabs, then stack fewer frames or turn off drizzle. Very large sensors at full resolution are what usually pushes the driver over the edge.'
+		},
+		{
+			label: 'Download the Eise desktop app',
+			description: 'The Mac, Windows and Linux builds use a dedicated GPU context that survives what browsers cannot.',
+			url: '/download/'
+		}
+	];
+}
+
+// Turn a thrown processing error into an actionable GPU card, or null when it
+// is not a GPU failure and the caller should show the raw message.
+//
+// Two shapes reach here. The worker can report the device was lost mid-run, or
+// it can fail to init at all because requestAdapter() now returns null. The
+// second one used to surface raw ("Could not initialize GPU worker: GPU
+// init-error: No WebGPU adapter found"), which reads like the user never had a
+// GPU even when they had just stacked 90 seconds of frames on it. Re-probing
+// tells the two apart, and also updates the pre-flight guard so the next
+// attempt stops at the door instead of running the whole pipeline again.
+async function gpuFailureCard(errorMsg) {
+	if (/GPU device (was|is) lost/i.test(errorMsg)) {
+		return {
+			message: "The browser's GPU dropped out mid-processing. This can happen on machines with limited GPU memory or when the driver crashes under pressure. Auto-recovery was attempted but didn't stick.",
+			alternatives: gpuLostAlternatives()
+		};
+	}
+
+	if (!/No WebGPU adapter found|Could not initialize GPU worker|WebGPU (stacking )?not available/i.test(errorMsg)) {
+		return null;
+	}
+
+	await refreshWebGpuStatus();
+	return gpuRequiredError();
+}
+
 // Build the "GPU is required and unavailable" error. Branches on WHY the GPU
 // is unavailable so the user gets steps that actually apply:
 //   - user picked CPU manually → plain nudge to flip the visible toggle
@@ -1236,6 +1266,18 @@ function gpuRequiredError() {
 	}
 
 	const status = webGPUStatus.value;
+
+	// The adapter worked earlier this session and is gone now. Hardware
+	// acceleration is clearly not switched off, so sending them to browser
+	// settings would waste their time. What actually recovers a crashed GPU
+	// process is a fresh page, or a smaller job that does not crash it again.
+	if (status === 'lost') {
+		return {
+			message: 'The browser lost access to the GPU. It was working a moment ago, so the graphics driver or the browser GPU process most likely crashed under the load.',
+			alternatives: gpuLostAlternatives()
+		};
+	}
+
 	const browser = detectedBrowser.value || '';
 	const isEdge = /Edge/i.test(browser);
 	const isChrome = /Chrome/i.test(browser) && !isEdge;
@@ -1350,8 +1392,15 @@ async function processCombinedMode() {
 		trackStackFailed(error?.message, { failed_in: 'processFiles' });
 		const errorMsg = error.message || 'An error occurred during processing';
 		isProcessing.value = false;
-		setErrorFromException(error, errorMsg);
 		eventBusEmit('stop-loading');
+
+		const card = await gpuFailureCard(errorMsg);
+		if (card) {
+			showActionableError(card.message, card.alternatives);
+			return;
+		}
+
+		setErrorFromException(error, errorMsg);
 		eventBusEmit('show-error');
 	}
 }

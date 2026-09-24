@@ -90,6 +90,9 @@ const webGPUSupported = ref(null);
 //   'no_adapter'  — navigator.gpu present but requestAdapter() returned null
 //                   (usually: browser hardware acceleration is off, or the
 //                   GPU/driver is on Chrome's WebGPU blocklist, or remote desktop)
+//   'lost'        — we HAD an adapter and a later probe found none. The GPU
+//                   process crashed mid-session; nothing about the browser
+//                   config is wrong, so the advice must differ from no_adapter.
 //   'error'       — requestAdapter() threw
 //   'unsupported' — navigator.gpu missing (Safari, older browsers, Firefox
 //                   without dom.webgpu.enabled)
@@ -143,6 +146,7 @@ provide('useGPU', useGPU);
 provide('isMobile', isMobile);
 provide('webGPUSupported', webGPUSupported);
 provide('webGPUStatus', webGPUStatus);
+provide('refreshWebGpuStatus', probeWebGpu);
 provide('detectedBrowser', detectedBrowser);
 provide('forceLiteMode', forceLiteMode);
 provide('isMounted', isMounted);
@@ -156,6 +160,31 @@ provide('handleWebGPUCancel', handleWebGPUCancel);
 provide('handleContinuousSelected', handleContinuousSelected);
 provide('handleCancelContinuous', handleCancelContinuous);
 provide('handleAbortContinuous', handleAbortContinuous);
+
+// Ask the browser for a WebGPU adapter and record why we can or cannot use it.
+// Run once at mount, and again after any GPU failure: the mount-time answer is
+// only a snapshot. A machine that had a working adapter at page load can lose
+// it when the GPU process crashes, and without a re-probe every later attempt
+// runs 90 seconds deep before failing on a worker that can no longer init.
+async function probeWebGpu() {
+	if (!navigator.gpu) {
+		webGPUSupported.value = false;
+		webGPUStatus.value = 'unsupported';
+		return webGPUStatus.value;
+	}
+	const hadAdapter = webGPUStatus.value === 'available';
+	try {
+		const adapter = await navigator.gpu.requestAdapter();
+		webGPUSupported.value = !!adapter;
+		// Losing an adapter we once had is a crashed GPU process, not a browser
+		// setting. Keep the two apart so the error card can say the right thing.
+		webGPUStatus.value = adapter ? 'available' : (hadAdapter ? 'lost' : 'no_adapter');
+	} catch (e) {
+		webGPUSupported.value = false;
+		webGPUStatus.value = hadAdapter ? 'lost' : 'error';
+	}
+	return webGPUStatus.value;
+}
 
 // Browser detection
 function detectBrowser() {
@@ -418,19 +447,7 @@ onMounted(async () => {
 
 	detectedBrowser.value = detectBrowser();
 
-	if (navigator.gpu) {
-		try {
-			const adapter = await navigator.gpu.requestAdapter();
-			webGPUSupported.value = !!adapter;
-			webGPUStatus.value = adapter ? 'available' : 'no_adapter';
-		} catch (e) {
-			webGPUSupported.value = false;
-			webGPUStatus.value = 'error';
-		}
-	} else {
-		webGPUSupported.value = false;
-		webGPUStatus.value = 'unsupported';
-	}
+	await probeWebGpu();
 
 	on('postProcessing', handlePostProcessing);
 	on('stacked-image-ready', handleStackedImageReady);
