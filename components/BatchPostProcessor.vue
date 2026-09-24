@@ -342,8 +342,14 @@ async function exportAll(type) {
 					}
 				}
 			} else {
-				// Unprocessed: use the original stacked blob (not aligned)
-				blob = result.result?.blob;
+				// Unprocessed: re-encode from float32 so the export keeps the full
+				// 16-bit stack. result.blob is an 8-bit canvas PNG, which throws
+				// away most of the range on a dim linear stack.
+				if (result.result?.float32Data) {
+					blob = await float32ToBlob(result.result.float32Data, result.result.width, result.result.height);
+				} else {
+					blob = result.result?.blob;
+				}
 			}
 
 			if (!blob) continue;
