@@ -2,6 +2,8 @@
 // Supports: template matching (single/batch) and GPU stacking
 // This is a module worker - use { type: 'module' } when creating
 
+import { setApSliceLimit } from './gpu/helpers.js';
+
 import {
     initWebGPU,
     matchTemplatesGPU,
@@ -60,6 +62,9 @@ self.addEventListener('message', async (e) => {
     const { type } = e.data;
 
     if (type === 'init') {
+        // Debug knob from ?apslice=N. Forces NCC to cover the AP grid in
+        // slices, which otherwise only happens above 65,535 APs.
+        if (e.data.apSliceLimit) setApSliceLimit(e.data.apSliceLimit);
         await init();
         return;
     }

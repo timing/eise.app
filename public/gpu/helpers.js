@@ -230,3 +230,38 @@ export function checkedReadbackBuffer(device, size, name) {
     assertBufferFits(device, size, name, { binding: false });
     return readbackBuffer(device, size);
 }
+
+// ---------------------------------------------------------------------------
+// NCC alignment-point slicing
+// ---------------------------------------------------------------------------
+//
+// Template matching dispatches one workgroup per (frame, AP) pair, all along
+// X, so framesInDispatch × APs must stay under the WebGPU dispatch limit.
+// Shrinking the frame count bottoms out at 1, which is not enough on its own:
+// a 6024x6024 frame yields a 400x400 grid = 160,000 APs, so even a single
+// frame overruns the limit and the dispatch is rejected outright, before any
+// timing adaptation gets a say. Slicing the AP dimension keeps every dispatch
+// legal and gives the size controller a second lever once frames are at their
+// floor. Each workgroup owns one (frame, AP) pair and writes its own result
+// slot, so slicing changes nothing about the values computed.
+
+export const MAX_WORKGROUPS_X = 65535;
+
+// Largest AP slice we will dispatch. The default is the whole grid, capped at
+// the dispatch limit, so every grid that already fit behaves exactly as before.
+// setApSliceLimit() lowers it on purpose: only very large frames reach the cap
+// naturally, and the multi-slice path should not first run for real on a user's
+// machine. Driven by ?apslice=N so any ordinary file can exercise it.
+let forcedApSliceLimit = 0;
+
+export function setApSliceLimit(n) {
+    forcedApSliceLimit = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    if (forcedApSliceLimit > 0) {
+        console.log(`[gpu] AP slice limit forced to ${forcedApSliceLimit} (debug)`);
+    }
+}
+
+export function apSliceSize(numAPs) {
+    const hard = Math.min(numAPs, MAX_WORKGROUPS_X);
+    return forcedApSliceLimit > 0 ? Math.max(1, Math.min(hard, forcedApSliceLimit)) : hard;
+}

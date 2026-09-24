@@ -32,6 +32,8 @@ const apPatchSize = ref(20);
 // Driven by the Alignment detail slider in FileUploader; lite mode can floor it
 // (see LITE_AP_SPACING_FLOOR there, currently 1 = no automatic reduction).
 const apSpacingScale = ref(1);
+// null = not yet read from the URL (see getApSliceLimit), 0 = slicing off.
+const apSliceLimit = ref(null);
 const pixfrac = ref(1.0);
 
 // Tracking context for analytics
@@ -143,6 +145,22 @@ export function useProcessingState() {
 
     function getApSpacingScale() {
         return apSpacingScale.value;
+    }
+
+    // Debug-only: force the NCC dispatch to cover the alignment-point grid in
+    // slices of this many APs. Slicing only kicks in naturally above 65,535 APs
+    // (roughly a 4000x4000 crop), which almost no test footage reaches, so this
+    // is how the multi-slice path gets exercised on ordinary files. Read once
+    // from ?apslice=N; 0 means "whole grid in one dispatch", the normal path.
+    function getApSliceLimit() {
+        if (apSliceLimit.value === null) {
+            let n = 0;
+            if (typeof window !== 'undefined') {
+                n = Number(new URLSearchParams(window.location.search).get('apslice'));
+            }
+            apSliceLimit.value = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+        }
+        return apSliceLimit.value;
     }
 
     function setPixfrac(value) {
@@ -279,6 +297,7 @@ export function useProcessingState() {
         apSpacingScale,
         setApSpacingScale,
         getApSpacingScale,
+        getApSliceLimit,
         pixfrac,
         setPixfrac,
         getPixfrac,

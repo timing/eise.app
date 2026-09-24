@@ -11,6 +11,8 @@
 // - The NCC computation itself still uses f32 internally for accumulation precision
 // Reference templates remain f32 (small and reused across all frames, negligible savings)
 
+import { MAX_WORKGROUPS_X, apSliceSize } from './gpu/helpers.js';
+
 import { assertBufferFits } from './gpu/helpers.js';
 
 let gpuDevice = null;
@@ -211,6 +213,8 @@ struct Params {
     numFrames: u32,
     frameWidth: u32,
     frameHeight: u32,
+    apStart: u32,       // first AP of this sub-dispatch within the full grid
+    apCount: u32,       // APs in this sub-dispatch (<= numAPs), never 0
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -302,8 +306,13 @@ fn main(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(workgroup_id) wid: vec3<u32>
 ) {
-    let frameIdx = wid.x / params.numAPs;
-    let apIdx = wid.x % params.numAPs;
+    // Workgroups are laid out as (numFrames x apCount) along X. apCount is the
+    // slice width, not the whole grid, so a grid larger than the dispatch limit
+    // can be covered by several launches. apStart maps a slice index back to
+    // its global AP, which is what every buffer below indexes by, so a sliced
+    // run computes exactly the same values as an unsliced one.
+    let frameIdx = wid.x / params.apCount;
+    let apIdx = params.apStart + (wid.x % params.apCount);
     let threadIdx = lid.x;
 
     if (frameIdx >= params.numFrames || apIdx >= params.numAPs) {
@@ -911,8 +920,10 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
     //     43-frame × 1507-AP dispatch exceeded the budget). Cost scales as
     //     frames × APs × searchPositions × patchSize², so from a measured
     //     per-unit cost we can size dispatches to hit a safe target.
-    const MAX_WORKGROUPS_X = 65535;
-    const workgroupCap = Math.max(1, Math.floor(MAX_WORKGROUPS_X / numAPs));
+    // Slice width first: it sets how many frames can ride along in one dispatch.
+    const apSlice = apSliceSize(numAPs);
+    const workPerSliceFrame = apSlice * searchPositions * patchSize * patchSize;
+    const workgroupCap = Math.max(1, Math.floor(MAX_WORKGROUPS_X / apSlice));
 
     const TARGET_MS = 300;   // aim for dispatches around this
     const MAX_MS = 800;      // shrink if a dispatch exceeds this
@@ -921,7 +932,7 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
     // First call: conservative default of 8. Subsequent calls: derive from the
     // learned cost. Clamped to the workgroup cap either way.
     const framesFromCost = deviceCostMs != null && deviceCostMs > 0
-        ? Math.max(1, Math.floor(TARGET_MS / (workPerFrame * deviceCostMs)))
+        ? Math.max(1, Math.floor(TARGET_MS / (workPerSliceFrame * deviceCostMs)))
         : 8;
     let framesPerBatch = Math.min(workgroupCap, framesFromCost);
 
@@ -931,7 +942,7 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
     while (batchStart < numFrames) {
         if (!logged) {
             const src = deviceCostMs != null ? 'learned' : 'default';
-            console.log(`Template matching: ${numFrames} frames, starting at ${framesPerBatch} frames/dispatch (${src}), cap ${workgroupCap}, target ${TARGET_MS}ms, ${numAPs} APs, radius ${searchRadius}`);
+            console.log(`Template matching: ${numFrames} frames, starting at ${framesPerBatch} frames/dispatch (${src}), cap ${workgroupCap}, target ${TARGET_MS}ms, ${numAPs} APs in ${Math.ceil(numAPs / apSlice)} slice(s) of ${apSlice}, radius ${searchRadius}`);
             logged = true;
         }
 
@@ -961,8 +972,10 @@ async function matchTemplatesBatchGPU(refGrayData, frameGrayDatas, width, height
         allShifts.push(...batchShifts);
 
         const elapsed = performance.now() - t0;
-        if (workPerFrame > 0 && batchFrames.length > 0) {
-            const sample = elapsed / (batchFrames.length * workPerFrame);
+        // Cost is per unit of work actually dispatched, so a sliced run learns
+        // the same coefficient an unsliced one would.
+        if (workPerSliceFrame > 0 && batchFrames.length > 0) {
+            const sample = elapsed / (batchFrames.length * workPerSliceFrame);
             const alpha = 0.3;
             deviceCostMs = deviceCostMs == null ? sample : deviceCostMs * (1 - alpha) + sample * alpha;
         }
@@ -1038,7 +1051,7 @@ function getBatchBuffers(numFrames, numAPs, templateSize, frameSize) {
 
     cachedBatchBuffers = {
         paramsBuffer: gpuDevice.createBuffer({
-            size: 8 * 4,
+            size: 12 * 4,   // 10 u32 (incl. apStart/apCount), padded to 16-byte alignment
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         }),
         templatesBuffer: gpuDevice.createBuffer({
@@ -1142,8 +1155,8 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
 
     // Upload data
     const searchSize = patchSize + 2 * searchRadius;
-    const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, numFrames, width, height]);
-    gpuQueue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
+    // apStart/apCount are filled in per slice below.
+    const paramsData = new Uint32Array([patchSize, patchSize, searchSize, searchSize, numAPs, numFrames, width, height, 0, numAPs, 0, 0]);
     gpuQueue.writeBuffer(buffers.templatesBuffer, 0, refTemplatesPacked);
     gpuQueue.writeBuffer(buffers.framesBuffer, 0, allFrameGraysPacked);
     gpuQueue.writeBuffer(buffers.apPosBuffer, 0, apPositions);
@@ -1160,16 +1173,31 @@ async function matchTemplatesBatchGPUSimple(refGrayData, frameGrayDatas, width, 
         ]
     });
 
-    // Dispatch - one workgroup (256 threads) per (frame, AP) pair
-    const commandEncoder = gpuDevice.createCommandEncoder();
-    const passEncoder = commandEncoder.beginComputePass();
-    passEncoder.setPipeline(batchPipeline);
-    passEncoder.setBindGroup(0, bindGroup);
-    passEncoder.dispatchWorkgroups(numFrames * numAPs, 1, 1);
-    passEncoder.end();
+    // Dispatch - one workgroup (256 threads) per (frame, AP) pair, covering the
+    // AP grid in slices so numFrames × APs never exceeds the dispatch limit.
+    // Params is rewritten between slices, so each slice needs its own submit:
+    // queue writes and submits are ordered, but a single submit would see only
+    // the last params value.
+    const apSlice = apSliceSize(numAPs);
+    for (let apStart = 0; apStart < numAPs; apStart += apSlice) {
+        const apCount = Math.min(apSlice, numAPs - apStart);
+        paramsData[8] = apStart;
+        paramsData[9] = apCount;
+        gpuQueue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
 
-    commandEncoder.copyBufferToBuffer(buffers.resultsBuffer, 0, buffers.readbackBuffer, 0, resultsSize);
-    gpuQueue.submit([commandEncoder.finish()]);
+        const commandEncoder = gpuDevice.createCommandEncoder();
+        const passEncoder = commandEncoder.beginComputePass();
+        passEncoder.setPipeline(batchPipeline);
+        passEncoder.setBindGroup(0, bindGroup);
+        passEncoder.dispatchWorkgroups(numFrames * apCount, 1, 1);
+        passEncoder.end();
+        gpuQueue.submit([commandEncoder.finish()]);
+    }
+
+    // Results are complete only once every slice has run.
+    const copyEncoder = gpuDevice.createCommandEncoder();
+    copyEncoder.copyBufferToBuffer(buffers.resultsBuffer, 0, buffers.readbackBuffer, 0, resultsSize);
+    gpuQueue.submit([copyEncoder.finish()]);
 
     // Read results - already reduced on GPU, just (dx, dy, score) per (frame, AP)
     await safeMatchMapAsync(buffers.readbackBuffer, GPUMapMode.READ);

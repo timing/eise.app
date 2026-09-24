@@ -3,6 +3,7 @@ import { useComparisonExport } from '@/composables/useComparisonExport';
 import { useWorkerUrl } from '@/composables/useWorkerUrl';
 import { useLiteMode } from '@/composables/useLiteMode';
 import { useProcessingState } from '@/composables/useProcessingState';
+import { reportError } from '@/composables/useSentryReporting';
 
 // Custom error for WebGPU unavailability - callers can catch this to show user choice
 export class WebGPUUnavailableError extends Error {
@@ -14,9 +15,33 @@ export class WebGPUUnavailableError extends Error {
 
 export function useStacker() {
     const { addLog, emit, on } = useEventBus();
+
+    // Relay for messages the stacking worker pushes on its own initiative (NCC
+    // telemetry, uncaptured GPU errors). addEventListener (not onmessage) on
+    // purpose: the await-per-step helpers reassign worker.onmessage constantly,
+    // and an unsolicited message landing mid-step would otherwise hit whichever
+    // handler happened to be installed and get read as an unexpected reply.
+    function attachStackWorkerRelay(worker) {
+        worker.addEventListener('message', (e) => {
+            if (e.data?.type === 'ncc-telemetry') {
+                emit('stack-step', `stack_ncc_${e.data.kind}`, e.data.props);
+                return;
+            }
+            if (e.data?.type === 'gpu-uncaptured-error') {
+                // Visible in the log tail that rides along with stack_failed, and
+                // counted so a validation failure is diagnosable without having
+                // to reproduce it.
+                addLog(`WebGPU validation error: ${e.data.message}`);
+                reportError(new Error(`Stacking GPU uncaptured error: ${e.data.message}`), {
+                    component: 'useStacker',
+                    action: 'stackingDevice',
+                });
+            }
+        });
+    }
     const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
-    const { getMinApQuality, getApPatchSize, getPixfrac, getApSpacingScale } = useProcessingState();
+    const { getMinApQuality, getApPatchSize, getPixfrac, getApSpacingScale, getApSliceLimit } = useProcessingState();
 
     // Track active workers for cancellation
     let cancelled = false;
@@ -491,18 +516,10 @@ export function useStacker() {
                         if (e.data.type === 'ready') { clearTimeout(timeout); resolve(); }
                         else if (e.data.type === 'init-error') { clearTimeout(timeout); reject(new Error(e.data.error)); }
                     };
-                    gpuStackWorker.postMessage({ type: 'init' });
+                    gpuStackWorker.postMessage({ type: 'init', apSliceLimit: getApSliceLimit() });
                 })
             ]);
-            // NCC dispatch telemetry relay. addEventListener (not onmessage) on
-            // purpose: the await-per-step helpers below reassign worker.onmessage
-            // constantly, and a telemetry message landing mid-step would other-
-            // wise hit whichever handler happened to be installed and get read as
-            // an unexpected reply. A separate listener sidesteps that entirely.
-            gpuStackWorker.addEventListener('message', (e) => {
-                if (e.data?.type !== 'ncc-telemetry') return;
-                emit('stack-step', `stack_ncc_${e.data.kind}`, e.data.props);
-            });
+            attachStackWorkerRelay(gpuStackWorker);
             addLog('GPU workers initialized');
 
             // Helper to load a batch of frames (SER from file, images from memory)
@@ -1682,9 +1699,10 @@ export function useStacker() {
                 }),
                 new Promise((resolve, reject) => {
                     gpuStackWorker.onmessage = (e) => { if (e.data.type === 'ready') resolve(); };
-                    gpuStackWorker.postMessage({ type: 'init' });
+                    gpuStackWorker.postMessage({ type: 'init', apSliceLimit: getApSliceLimit() });
                 })
             ]);
+            attachStackWorkerRelay(gpuStackWorker);
 
             // Helper to load batch (reused from stackWithGpuPipelined logic)
             async function loadRawBatch(batchFrames) {
