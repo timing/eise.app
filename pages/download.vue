@@ -115,14 +115,14 @@
 import { useTracking } from '~/composables/useTracking';
 import MailingListForm from '@/components/MailingListForm.vue';
 const { track } = useTracking();
-const RELEASE_VERSION = '2026.09.19';
+const RELEASE_VERSION = '2026.09.26';
 // Pinned to the release tag rather than /releases/latest/download/: the filenames
 // carry the version anyway, so "latest" bought nothing and broke every link during
 // the window between publishing a release and deploying this page.
 // electron-builder drops the leading zeros when it names artifacts, so the file
 // version and the display version differ.
 const RELEASE_TAG = `v${RELEASE_VERSION}`;
-const FILE_VERSION = '2026.9.19';
+const FILE_VERSION = '2026.9.26';
 const RELEASE_BASE = `https://github.com/timing/eise.app/releases/download/${RELEASE_TAG}`;
 const DOWNLOAD_URLS = {
   mac: `${RELEASE_BASE}/Eise-${FILE_VERSION}-mac-arm64.dmg`,
