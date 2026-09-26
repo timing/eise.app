@@ -38,8 +38,8 @@
 						<h3>Linux</h3>
 					</div>
 					<a :href="DOWNLOAD_URLS.deb" download class="download-btn" @click="track('download', { os: 'linux', arch: 'x64', format: 'deb' })">Download .deb</a>
-					<p class="platform-desc">Debian / Ubuntu on x64, installs on a double-click. On ARM64 take the <a :href="DOWNLOAD_URLS.debArm64" download @click="track('download', { os: 'linux', arch: 'arm64', format: 'deb' })">ARM64 .deb</a>. On other distros use the tarball, <a :href="DOWNLOAD_URLS.tarGz" download @click="track('download', { os: 'linux', arch: 'x64', format: 'tar.gz' })">x64</a> or <a :href="DOWNLOAD_URLS.tarGzArm64" download @click="track('download', { os: 'linux', arch: 'arm64', format: 'tar.gz' })">ARM64</a>, which extracts ready to run.</p>
-					<p class="platform-note">The tarball extracts to a folder you can run straight away, no install step and no root.</p>
+					<p class="platform-desc">For Debian / Ubuntu on x64. On ARM64 download the <a :href="DOWNLOAD_URLS.debArm64" download @click="track('download', { os: 'linux', arch: 'arm64', format: 'deb' })">ARM64 .deb</a>. On other distros use the tarball, <a :href="DOWNLOAD_URLS.tarGz" download @click="track('download', { os: 'linux', arch: 'x64', format: 'tar.gz' })">x64</a> or <a :href="DOWNLOAD_URLS.tarGzArm64" download @click="track('download', { os: 'linux', arch: 'arm64', format: 'tar.gz' })">ARM64</a>.</p>
+					<p class="platform-note">The tarball extracts an executable into a folder.</p>
 				</div>
 			</div>
 
