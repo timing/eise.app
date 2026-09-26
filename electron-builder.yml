@@ -22,8 +22,14 @@ extraResources:
 
 mac:
   category: public.app-category.photography
+  # Without an explicit arch list electron-builder only builds the host arch,
+  # which on an Apple Silicon machine ships an arm64-only dmg and leaves every
+  # Intel Mac with nothing. Same trap as the Linux targets below.
   target:
-    - dmg
+    - target: dmg
+      arch:
+        - x64
+        - arm64
 
 win:
   target:
@@ -35,17 +41,39 @@ win:
 linux:
   category: Graphics
   maintainer: eise@eise.app
+  # Linux is the one platform where executableName does NOT default to
+  # productName, so it is set explicitly here. package.json's name is "eise"
+  # too; both are pinned so neither alone can reintroduce the old scaffold name
+  # into the binary, the .desktop entry or the icon.
+  executableName: eise
   # Without an explicit arch list electron-builder only builds the host arch,
   # which on an Apple Silicon machine means arm64-only Linux downloads.
+  # No AppImage target. Its runtime dlopen()s libfuse.so.2, which Ubuntu 22.04+
+  # and Debian 12+ no longer install, so it fails with "AppImages require FUSE
+  # to run" on the most common desktop Linux. The tar.gz below covers the same
+  # any-distro, no-root case with no FUSE and no chmod.
   target:
-    - target: AppImage
-      arch:
-        - x64
-        - arm64
     - target: deb
       arch:
         - x64
         - arm64
+    # tar.gz for non-Debian distros. tar preserves the executable bit, so this
+    # needs no chmod and no libfuse2, unlike the AppImage it replaces. Extract
+    # and run ./eise.
+    - target: tar.gz
+      arch:
+        - x64
+        - arm64
+
+deb:
+  # Renaming the executable renames the Debian package with it, and dpkg treats
+  # a renamed package as an unrelated one: without these, upgrading would leave
+  # the old nuxt-app package installed alongside the new eise package. Replaces
+  # hands over the shared files, Conflicts makes dpkg remove the old one.
+  packageName: eise
+  fpm:
+    - --replaces=nuxt-app
+    - --conflicts=nuxt-app
 
 nsis:
   oneClick: true

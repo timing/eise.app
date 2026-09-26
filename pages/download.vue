@@ -4,7 +4,7 @@
 			<h1>Download Eise.app for Mac, Windows and Linux</h1>
 			<p class="page-subtitle">Free planetary image stacker</p>
 
-			<p class="download-intro">Native desktop builds of Eise.app for macOS (Apple Silicon), Windows 10+, and Linux. Free planetary image stacker with the same features as the browser version - lucky imaging, alignment-point stacking, wavelet sharpening, RGB alignment - running offline on your own machine.</p>
+			<p class="download-intro">Native desktop builds of Eise.app for macOS (Apple Silicon and Intel), Windows 10+, and Linux. Free planetary image stacker with the same features as the browser version - lucky imaging, alignment-point stacking, wavelet sharpening, RGB alignment - running offline on your own machine.</p>
 
 			<div class="section-head">
 				<h2>Choose your platform</h2>
@@ -17,9 +17,9 @@
 						<svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.7 12.6c0-2.2 1.8-3.3 1.9-3.4-1-1.5-2.6-1.7-3.2-1.7-1.4-.1-2.7.8-3.3.8-.7 0-1.7-.8-2.8-.8-1.5 0-2.8.8-3.6 2.1-1.5 2.6-.4 6.5 1.1 8.6.7 1 1.6 2.2 2.7 2.2 1.1 0 1.5-.7 2.8-.7s1.7.7 2.8.7c1.2 0 1.9-1 2.6-2.1.8-1.2 1.2-2.4 1.2-2.4s-2.2-.9-2.2-3.3zM14.6 5.6c.6-.7 1-1.7.9-2.7-.9 0-2 .6-2.6 1.3-.6.6-1.1 1.6-.9 2.6 1 .1 2-.5 2.6-1.2z" /></svg>
 						<h3>macOS</h3>
 					</div>
-					<a :href="DOWNLOAD_URLS.mac" download class="download-btn" @click="track('download', { os: 'mac' })">Download .dmg</a>
-					<p class="platform-desc">Apple Silicon (M1+).</p>
-					<p class="platform-note">Right-click → Open on first launch.</p>
+					<a :href="DOWNLOAD_URLS.mac" download class="download-btn" @click="track('download', { os: 'mac', arch: 'arm64' })">Download .dmg</a>
+					<p class="platform-desc">Apple Silicon (M1+). On an Intel Mac, take the <a :href="DOWNLOAD_URLS.macIntel" download @click="track('download', { os: 'mac', arch: 'x64' })">Intel build</a>.</p>
+					<p class="platform-note">Eise is not signed yet, so macOS blocks the first launch. Open it, click Done, then go to System Settings → Privacy &amp; Security and click Open Anyway.</p>
 				</div>
 
 				<div class="download-card">
@@ -37,12 +37,9 @@
 						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="3.1" /><path d="M12 2.6v3M12 18.4v3M2.6 12h3M18.4 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1" stroke-linecap="round" /></svg>
 						<h3>Linux</h3>
 					</div>
-					<a :href="DOWNLOAD_URLS.linux" download class="download-btn" @click="track('download', { os: 'linux', arch: 'x64' })">Download .AppImage</a>
-					<p class="platform-desc">x64. Or grab the <a :href="DOWNLOAD_URLS.deb" download @click="track('download', { os: 'linux', arch: 'x64' })">.deb package</a> for Debian / Ubuntu. On ARM64, take the <a :href="DOWNLOAD_URLS.linuxArm64" download @click="track('download', { os: 'linux', arch: 'arm64' })">.AppImage</a> or <a :href="DOWNLOAD_URLS.debArm64" download @click="track('download', { os: 'linux', arch: 'arm64' })">.deb</a>.</p>
-					<div class="platform-note">
-						<p>Make AppImage executable:</p>
-						<code>chmod +x Eise*.AppImage</code>
-					</div>
+					<a :href="DOWNLOAD_URLS.deb" download class="download-btn" @click="track('download', { os: 'linux', arch: 'x64', format: 'deb' })">Download .deb</a>
+					<p class="platform-desc">Debian / Ubuntu on x64, installs on a double-click. On ARM64 take the <a :href="DOWNLOAD_URLS.debArm64" download @click="track('download', { os: 'linux', arch: 'arm64', format: 'deb' })">ARM64 .deb</a>. On other distros use the tarball, <a :href="DOWNLOAD_URLS.tarGz" download @click="track('download', { os: 'linux', arch: 'x64', format: 'tar.gz' })">x64</a> or <a :href="DOWNLOAD_URLS.tarGzArm64" download @click="track('download', { os: 'linux', arch: 'arm64', format: 'tar.gz' })">ARM64</a>, which extracts ready to run.</p>
+					<p class="platform-note">The tarball extracts to a folder you can run straight away, no install step and no root.</p>
 				</div>
 			</div>
 
@@ -129,12 +126,15 @@ const FILE_VERSION = '2026.9.19';
 const RELEASE_BASE = `https://github.com/timing/eise.app/releases/download/${RELEASE_TAG}`;
 const DOWNLOAD_URLS = {
   mac: `${RELEASE_BASE}/Eise-${FILE_VERSION}-mac-arm64.dmg`,
+  macIntel: `${RELEASE_BASE}/Eise-${FILE_VERSION}-mac-x64.dmg`,
   windows: `${RELEASE_BASE}/Eise-${FILE_VERSION}-win-x64.exe`,
   windowsArm64: `${RELEASE_BASE}/Eise-${FILE_VERSION}-win-arm64.exe`,
-  linux: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-x86_64.AppImage`,
-  linuxArm64: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-arm64.AppImage`,
   deb: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-amd64.deb`,
   debArm64: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-arm64.deb`,
+  // tar.gz is the no-chmod, no-FUSE path for non-Debian distros. tar carries
+  // the executable bit through, which a plain zip does not do reliably.
+  tarGz: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-x64.tar.gz`,
+  tarGzArm64: `${RELEASE_BASE}/Eise-${FILE_VERSION}-linux-arm64.tar.gz`,
 };
 const releasesUrl = 'https://github.com/timing/eise.app/releases';
 

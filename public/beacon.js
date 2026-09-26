@@ -11,6 +11,12 @@
   if (typeof window !== 'undefined' && window.electronAPI) {
     siteId = 'eise-electron';
   }
+  // Desktop only. sessionId below is per-launch, which on Electron means every
+  // session looks like a first visit and desktop retention is unmeasurable.
+  // The main process persists this one in userData and hands it to the preload,
+  // so it is native-app storage rather than a script-readable copy on the
+  // device, and the reasoning in the session-id note below still holds for web.
+  var installId = (typeof window !== 'undefined' && window.electronAPI && window.electronAPI.installId) || null;
   var lastPath = null;
 
   // --- session id -----------------------------------------------------------
@@ -87,6 +93,7 @@
     if (extra && extra.props) body.props = extra.props;
     if (extra && extra.variant) body.variant = extra.variant;
     if (extra && extra.variants) body.variants = extra.variants;
+    if (installId) body.user_id = installId;
     if (extra && extra.user_id) body.user_id = extra.user_id;
     try {
       return fetch(endpoint + '/event', {
@@ -133,6 +140,7 @@
         referrer: document.referrer || null,
       };
       if (props) body.props = props;
+      if (installId) body.user_id = installId;
       // Blob with explicit JSON MIME so the server parses it identically to
       // fetch()-posted events.
       var blob = new Blob([JSON.stringify(body)], { type: 'application/json' });

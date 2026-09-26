@@ -1,11 +1,14 @@
 const { app, BrowserWindow, Menu, session, shell, ipcMain, powerSaveBlocker } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { registerScheme, registerHandler } = require('./protocol');
 const { applyPendingUpdate, startUpdateChecker } = require('./updater');
 
-// The packaged package.json still carries the Nuxt scaffold name, which Electron
-// would otherwise use for the macOS app menu ("About nuxt-app", "Quit nuxt-app").
+// package.json is named "eise" now, but builds up to and including 2026.09.19
+// shipped as "nuxt-app" and Electron derived the app name from it. setName keeps
+// the menu titles right on any build; LEGACY_APP_NAME below is only about
+// finding the profile those older installs left on disk.
 const APP_NAME = 'Eise';
 const LEGACY_APP_NAME = 'nuxt-app';
 app.setName(APP_NAME);
@@ -33,9 +36,36 @@ function useExistingProfileIfPresent() {
   }
 }
 
-// Enable WebGPU
+// Enable WebGPU. Vulkan is a Linux concern only: WebGPU goes through Metal on
+// macOS and D3D12 on Windows, so forcing it there buys nothing. Note that
+// appendSwitch REPLACES the value for a switch rather than appending to it, so
+// any future Chromium feature has to comma-join onto this one call.
 app.commandLine.appendSwitch('enable-unsafe-webgpu');
-app.commandLine.appendSwitch('enable-features', 'Vulkan');
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('enable-features', 'Vulkan');
+}
+
+/**
+ * GPU stability switches. Stacking issues long compute dispatches, which is the
+ * exact shape of work Chromium's GPU watchdog and crash limiter are tuned
+ * against, and `device_lost` is the largest gpu_condition bucket in analytics.
+ *
+ * The watchdog is raised rather than disabled (--disable-gpu-watchdog also
+ * exists) so a genuinely wedged GPU still recovers instead of hanging the app
+ * forever. Without --disable-gpu-process-crash-limit, Chromium quietly falls
+ * back to software rendering after a few GPU-process crashes, which presents as
+ * "it still runs but is impossibly slow" rather than as an error anyone can
+ * report. --ignore-gpu-blocklist is worth the risk of a suspect driver, because
+ * a blocklisted adapter means no WebGPU at all, i.e. a dead window.
+ */
+app.commandLine.appendSwitch('gpu-watchdog-timeout-seconds', '60');
+app.commandLine.appendSwitch('disable-gpu-process-crash-limit');
+app.commandLine.appendSwitch('ignore-gpu-blocklist');
+
+// Long stacks have to survive the window being minimized or hidden. Pairs with
+// backgroundThrottling: false on the BrowserWindow below.
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
 
 // Register custom protocol scheme — must happen before app ready
 registerScheme();
@@ -58,12 +88,46 @@ function getAppFilesDir() {
   return path.join(__dirname, '..', 'dist');
 }
 
+/**
+ * Stable identifier for this installation, stored next to the profile.
+ *
+ * Sessions are per-launch by design, so on desktop they can never show whether
+ * anyone came back: every Electron session in analytics is a single day. This
+ * is the cross-launch dimension, sent as `user_id` on every event and never
+ * used for anything else. It stays in userData rather than localStorage so the
+ * renderer cannot read or forge it, and so it survives the auto-updater
+ * swapping out the web bundle underneath.
+ */
+function getInstallId() {
+  const file = path.join(app.getPath('userData'), 'install-id');
+  try {
+    const existing = fs.readFileSync(file, 'utf8').trim();
+    if (/^[0-9a-f-]{36}$/i.test(existing)) return existing;
+  } catch {
+    // No id yet, or an unreadable one. Either way, mint a replacement.
+  }
+  const id = crypto.randomUUID();
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, id, 'utf8');
+  } catch (err) {
+    // A read-only profile directory costs us cross-launch attribution, not the
+    // app. Carry on with an id that lasts only as long as this process.
+    console.error('Could not persist the install id:', err.message);
+  }
+  return id;
+}
+
 function createWindow(appFilesDir) {
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      // Read by preload.js off process.argv. Passed as an argument rather than
+      // over IPC because the beacon needs it synchronously, before the first
+      // page script runs.
+      additionalArguments: [`--eise-install-id=${getInstallId()}`],
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // needed for WebWorker GPU access
