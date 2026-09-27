@@ -442,12 +442,12 @@ export const demosaicVngCropShader = `
 struct Params {
     srcWidth: u32,
     srcHeight: u32,
-    cropSize: u32,
+    cropWidth: u32,     // == srcWidth when the caller is not cropping (surface mode)
+    cropHeight: u32,
     bayerPattern: u32,  // 0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG
     batchSize: u32,
     bitDepth: u32,      // 8 or 16
     scale: f32,         // stretch scale for 16-bit
-    _pad: u32,
 }
 
 struct CropCenter {
@@ -674,7 +674,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let outY = gid.y;
     let frameIdx = gid.z;
 
-    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
+    if (outX >= params.cropWidth || outY >= params.cropHeight || frameIdx >= params.batchSize) {
         return;
     }
 
@@ -684,9 +684,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Bayer residual phase varies across frames, causing it to cancel during stacking.
     // Forcing even alignment locked all frames to the same phase, reinforcing the pattern.
     let center = centers[frameIdx];
-    let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize));
-    let cropStartY = i32(floor(center.y - halfSize));
+    let halfWidth = f32(params.cropWidth) / 2.0;
+    let halfHeight = f32(params.cropHeight) / 2.0;
+    let cropStartX = i32(floor(center.x - halfWidth));
+    let cropStartY = i32(floor(center.y - halfHeight));
 
     let srcX = cropStartX + i32(outX);
     let srcY = cropStartY + i32(outY);
@@ -700,7 +701,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let by = y % 2u;
     let rgb = vngInterpolate(frameIdx, i32(x), i32(y), bx, by, params.bayerPattern);
 
-    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
+    let outIdx = frameIdx * params.cropWidth * params.cropHeight + outY * params.cropWidth + outX;
 
     // Output Float32 RGBA via bitcast
     let baseIdx = outIdx * 4u;
@@ -1521,6 +1522,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 // Offset sharpness shader - reads from full-frame buffer with per-frame center offsets
+// Only reached from detectCropAnalyzeBatch, i.e. the planetary auto-crop path, which is
+// always square. Surface mode does not crop and never gets here.
 export const offsetTenengradShader = `
 struct Params {
     srcWidth: u32,
@@ -1582,14 +1585,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 // RGBA Crop shader - crops RGBA images without demosaicing (for PNG/JPEG input)
+// IMPORTANT: this struct is a prefix of demosaicCropShader's Params, because
+// cropAndAnalyzeBatch writes ONE params buffer up front in the demosaic layout and
+// the 8-bit RGBA branch binds it without rewriting. Slots must stay aligned with
+// demosaicCropShader or batchSize is read from the wrong offset.
 export const rgbaCropShader = `
 struct Params {
     srcWidth: u32,
     srcHeight: u32,
-    cropSize: u32,
-    _pad1: u32,
+    cropWidth: u32,     // == srcWidth when the caller is not cropping (surface mode)
+    cropHeight: u32,
+    _padBayer: u32,     // bayerPattern in the shared layout; unused here
     batchSize: u32,
-    _pad2: u32,
     _pad3: u32,
     _pad4: u32,
 }
@@ -1611,20 +1618,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let outY = gid.y;
     let frameIdx = gid.z;
 
-    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
+    if (outX >= params.cropWidth || outY >= params.cropHeight || frameIdx >= params.batchSize) {
         return;
     }
 
     let center = centers[frameIdx];
-    let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize));
-    let cropStartY = i32(floor(center.y - halfSize));
+    let halfWidth = f32(params.cropWidth) / 2.0;
+    let halfHeight = f32(params.cropHeight) / 2.0;
+    let cropStartX = i32(floor(center.x - halfWidth));
+    let cropStartY = i32(floor(center.y - halfHeight));
 
     let srcX = u32(clamp(cropStartX + i32(outX), 0, i32(params.srcWidth) - 1));
     let srcY = u32(clamp(cropStartY + i32(outY), 0, i32(params.srcHeight) - 1));
 
     let srcIdx = frameIdx * params.srcWidth * params.srcHeight + srcY * params.srcWidth + srcX;
-    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
+    let outIdx = frameIdx * params.cropWidth * params.cropHeight + outY * params.cropWidth + outX;
 
     let rgba = input[srcIdx];
     output[outIdx] = rgba;
@@ -1646,8 +1654,8 @@ export const mono16CropFloat32Shader = `
 struct Params {
     srcWidth: u32,
     srcHeight: u32,
-    cropSize: u32,
-    _pad1: u32,
+    cropWidth: u32,     // == srcWidth when the caller is not cropping (surface mode)
+    cropHeight: u32,
     batchSize: u32,
     scale: f32,
     _pad3: u32,
@@ -1679,20 +1687,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let outY = gid.y;
     let frameIdx = gid.z;
 
-    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
+    if (outX >= params.cropWidth || outY >= params.cropHeight || frameIdx >= params.batchSize) {
         return;
     }
 
     let center = centers[frameIdx];
-    let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize));
-    let cropStartY = i32(floor(center.y - halfSize));
+    let halfWidth = f32(params.cropWidth) / 2.0;
+    let halfHeight = f32(params.cropHeight) / 2.0;
+    let cropStartX = i32(floor(center.x - halfWidth));
+    let cropStartY = i32(floor(center.y - halfHeight));
 
     let srcX = u32(clamp(cropStartX + i32(outX), 0, i32(params.srcWidth) - 1));
     let srcY = u32(clamp(cropStartY + i32(outY), 0, i32(params.srcHeight) - 1));
 
     let srcIdx = frameIdx * params.srcWidth * params.srcHeight + srcY * params.srcWidth + srcX;
-    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
+    let outIdx = frameIdx * params.cropWidth * params.cropHeight + outY * params.cropWidth + outX;
 
     let v = readMono16(srcIdx);
 
@@ -1716,12 +1725,14 @@ export const demosaicCropShader = `
 struct Params {
     srcWidth: u32,
     srcHeight: u32,
-    cropSize: u32,
+    cropWidth: u32,     // == srcWidth when the caller is not cropping (surface mode)
+    cropHeight: u32,
     bayerPattern: u32,
     batchSize: u32,
     useVng: u32,
     bitDepth: u32,
     scale: f32,
+    // 9 u32/f32 = 36 B; the uniform buffer is padded to 48 B by the caller.
 }
 
 struct CropCenter {
@@ -1996,15 +2007,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let outY = gid.y;
     let frameIdx = gid.z;
 
-    if (outX >= params.cropSize || outY >= params.cropSize || frameIdx >= params.batchSize) {
+    if (outX >= params.cropWidth || outY >= params.cropHeight || frameIdx >= params.batchSize) {
         return;
     }
 
     // No even-alignment (& ~1) - see VNG crop shader comment for rationale
     let center = centers[frameIdx];
-    let halfSize = f32(params.cropSize) / 2.0;
-    let cropStartX = i32(floor(center.x - halfSize));
-    let cropStartY = i32(floor(center.y - halfSize));
+    let halfWidth = f32(params.cropWidth) / 2.0;
+    let halfHeight = f32(params.cropHeight) / 2.0;
+    let cropStartX = i32(floor(center.x - halfWidth));
+    let cropStartY = i32(floor(center.y - halfHeight));
 
     let srcX = cropStartX + i32(outX);
     let srcY = cropStartY + i32(outY);
@@ -2025,7 +2037,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         rgb = bilinearInterpolate(frameIdx, ix, iy, bx, by, pattern);
     }
 
-    let outIdx = frameIdx * params.cropSize * params.cropSize + outY * params.cropSize + outX;
+    let outIdx = frameIdx * params.cropWidth * params.cropHeight + outY * params.cropWidth + outX;
 
     let gray = u32(clamp((0.299 * rgb.x + 0.587 * rgb.y + 0.114 * rgb.z) * 255.0, 0.0, 255.0));
     let grayPackedIdx = outIdx >> 2u;

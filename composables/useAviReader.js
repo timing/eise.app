@@ -305,6 +305,14 @@ export function useAviReader() {
     // Detect bounds for a sample of frames to determine crop region
     // @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
     async function detectCropRegion(file, aviHeader, frameCount, cropMarginPercent = 10, frameIndex = null, surfaceMode = false) {
+        // Surface mode never crops: the target fills the frame, so a crop can only
+        // discard real data, and a square crop discards the sides of every non-square
+        // capture. Drift is handled by the alignment stage, which already uses a wider
+        // search radius in surface mode.
+        if (surfaceMode) {
+            addLog('Surface mode: no crop, stacking the full frame');
+            return null;
+        }
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: frameCount });
 
@@ -441,14 +449,9 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Handle cropSize >= frameSize differently based on mode:
-        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        // Crop bigger than the frame: nothing useful to crop to, so skip it and let
+        // stacking alignment handle centering. (Surface mode returns before this.)
         if (desiredSize >= maxAllowedSize) {
-            if (surfaceMode) {
-                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-            }
             addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
             return null;
         }
@@ -1131,6 +1134,14 @@ export function useAviReader() {
     // Detect crop region for MJPEG using GPU
     // @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
     async function detectCropRegionMjpegGpu(file, frameIndex, width, height, cropMarginPercent = 10, surfaceMode = false) {
+        // Surface mode never crops: the target fills the frame, so a crop can only
+        // discard real data, and a square crop discards the sides of every non-square
+        // capture. Drift is handled by the alignment stage, which already uses a wider
+        // search radius in surface mode.
+        if (surfaceMode) {
+            addLog('Surface mode: no crop, stacking the full frame');
+            return null;
+        }
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: frameIndex.length });
 
@@ -1219,14 +1230,9 @@ export function useAviReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Handle cropSize >= frameSize differently based on mode:
-        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        // Crop bigger than the frame: nothing useful to crop to, so skip it and let
+        // stacking alignment handle centering. (Surface mode returns before this.)
         if (desiredSize >= maxAllowedSize) {
-            if (surfaceMode) {
-                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-            }
             addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
             return null;
         }

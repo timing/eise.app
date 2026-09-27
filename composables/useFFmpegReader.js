@@ -253,6 +253,14 @@ export function useFFmpegReader() {
      * @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
      */
     async function detectCropRegionFromPngData(pngDataArray, width, height, cropMarginPercent = 10, surfaceMode = false) {
+        // Surface mode never crops: the target fills the frame, so a crop can only
+        // discard real data, and a square crop discards the sides of every non-square
+        // capture. Drift is handled by the alignment stage, which already uses a wider
+        // search radius in surface mode.
+        if (surfaceMode) {
+            addLog('Surface mode: no crop, stacking the full frame');
+            return null;
+        }
         const decodeCanvas = document.createElement('canvas');
         decodeCanvas.width = width;
         decodeCanvas.height = height;
@@ -298,13 +306,8 @@ export function useFFmpegReader() {
         const desiredSize = Math.ceil(maxSize * marginMultiplier);
         const maxAllowedSize = Math.min(width, height);
 
-        // Handle cropSize >= frameSize differently based on mode:
-        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        // Surface mode returns before this; a crop bigger than the frame is a skip.
         if (desiredSize >= maxAllowedSize) {
-            if (surfaceMode) {
-                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY } };
-            }
             return null;
         }
 
@@ -316,6 +319,14 @@ export function useFFmpegReader() {
      * from a sample of frames. Used by both the pre-extracted-PNGs path and the streamed path.
      */
     function computeCropRegionFromDetections(detectedCenters, detectedSizes, canCropCount, sampleCount, header, cropMarginPercent, surfaceMode) {
+        // Surface mode never crops: the target fills the frame, so a crop can only
+        // discard real data, and a square crop discards the sides of every non-square
+        // capture. Drift is handled by the alignment stage, which already uses a wider
+        // search radius in surface mode.
+        if (surfaceMode) {
+            addLog('Surface mode: no crop, stacking the full frame');
+            return null;
+        }
         const cropThreshold = sampleCount * 0.5;
         if (canCropCount < cropThreshold) {
             addLog(`Only ${canCropCount}/${sampleCount} frames can be cropped. Skipping auto-crop.`);
@@ -334,17 +345,11 @@ export function useFFmpegReader() {
         const medianX = sortedX[Math.floor(sortedX.length / 2)];
         const medianY = sortedY[Math.floor(sortedY.length / 2)];
 
-        // Handle desiredSize >= frameSize differently based on mode:
-        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        // Crop bigger than the frame: nothing useful to crop to, so skip it and let
+        // stacking alignment handle centering. (Surface mode returns before this.)
         if (desiredSize >= maxAllowedSize) {
-            if (surfaceMode) {
-                addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-                return { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-            } else {
-                addLog(`Skipping crop: desired size ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
-                return null;
-            }
+            addLog(`Skipping crop: desired size ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
+            return null;
         }
 
         addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object size: ${Math.round(medianSize)}, margin: ${cropMarginPercent}%`);
@@ -359,6 +364,14 @@ export function useFFmpegReader() {
      * @param {boolean} surfaceMode - If true, always return valid crop (for lunar/solar surface)
      */
     async function detectCropRegionFromPngs(ffmpeg, pngFilenames, header, cropMarginPercent = 10, surfaceMode = false) {
+        // Surface mode never crops: the target fills the frame, so a crop can only
+        // discard real data, and a square crop discards the sides of every non-square
+        // capture. Drift is handled by the alignment stage, which already uses a wider
+        // search radius in surface mode.
+        if (surfaceMode) {
+            addLog('Surface mode: no crop, stacking the full frame');
+            return null;
+        }
         emit('set-caption', 'Detecting planet position...');
         emit('update-loading', { progress: 0, current: 0, total: pngFilenames.length });
 
@@ -1162,12 +1175,21 @@ export function useFFmpegReader() {
                         cropRegion = await detectCropRegionFromPngData(cropSampleData, frameWidth, frameHeight, cropMarginPercent, surfaceMode);
                         if (cropRegion) {
                             addLog(`Auto-crop: ${cropRegion.size}x${cropRegion.size}, margin: ${cropMarginPercent}%`);
+                        }
 
+                        // Cap frames against what actually flows through the pipeline.
+                        // Runs when cropping (as it always has) and in surface mode,
+                        // which has no crop region and so carries full frames — larger,
+                        // and the case the cap exists to stop. Planetary without a crop
+                        // keeps its previous behaviour of no cap.
+                        if (cropRegion || surfaceMode) {
+                            const memWidth = cropRegion?.size || frameWidth;
+                            const memHeight = cropRegion?.size || frameHeight;
                             const { detectPlatform, calculateMaxFrames } = useLiteMemoryLimits();
                             const platform = detectPlatform();
-                            const dynamicMaxFrames = calculateMaxFrames(cropRegion.size, platform);
+                            const dynamicMaxFrames = calculateMaxFrames(memWidth, memHeight, platform);
                             if (dynamicMaxFrames < totalFrames) {
-                                addLog(`Limiting to ${dynamicMaxFrames} frames (${platform}, crop: ${cropRegion.size}px)`);
+                                addLog(`Limiting to ${dynamicMaxFrames} frames (${platform}, frames: ${memWidth}x${memHeight})`);
                                 totalFrames = dynamicMaxFrames;
                             }
                         }

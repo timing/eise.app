@@ -199,7 +199,7 @@ self.addEventListener('message', async (e) => {
             // no way to know that a 6000px crop only fits one frame per buffer on
             // a 2 GB maxBufferSize GPU.
             const { maxBatch, deviceCanFit, largestPerFrame, limit } =
-                getMaxStackBatchSize(width, stackingContext.srcWidth, stackingContext.srcHeight, bitDepth);
+                getMaxStackBatchSize(width, height, stackingContext.srcWidth, stackingContext.srcHeight, bitDepth);
 
             self.postMessage({
                 type: 'init-stacking-done', outWidth, outHeight,
@@ -215,7 +215,7 @@ self.addEventListener('message', async (e) => {
     // Used to ensure reference frame uses same demosaic as stacked frames
     // Accepts full-size frame + center for cropping
     if (type === 'vng-demosaic-ref') {
-        const { bayerData, srcWidth, srcHeight, cropSize, center, bayerPattern, bitDepth, bayerScale = 1.0 } = e.data;
+        const { bayerData, srcWidth, srcHeight, cropWidth, cropHeight, center, bayerPattern, bitDepth, bayerScale = 1.0 } = e.data;
 
         try {
             if (!stackingReady) {
@@ -229,7 +229,7 @@ self.addEventListener('message', async (e) => {
             const { rgbaData, grayData } = await demosaicVngCropBatch(
                 [{ data: bayerData }],
                 srcWidth, srcHeight,
-                cropSize,
+                cropWidth, cropHeight,
                 [center],
                 bayerPattern,
                 bitDepth,
@@ -241,8 +241,8 @@ self.addEventListener('message', async (e) => {
                 type: 'vng-demosaic-ref-done',
                 rgbaBuffer: rgbaData.buffer,
                 grayBuffer: grayData.buffer,
-                width: cropSize,
-                height: cropSize
+                width: cropWidth,
+                height: cropHeight
             }, [rgbaData.buffer, grayData.buffer]);
 
         } catch (err) {
@@ -269,10 +269,10 @@ self.addEventListener('message', async (e) => {
 
         try {
             // VNG demosaic + crop - BOTH RGBA and grayscale stay on GPU!
-            const { rgbaGpuBuffer, grayGpuBuffer, batchSize, cropSize } = await demosaicVngCropBatchGpu(
+            const { rgbaGpuBuffer, grayGpuBuffer, batchSize, cropWidth, cropHeight } = await demosaicVngCropBatchGpu(
                 frames.map(f => ({ data: f.data })),
                 ctx.srcWidth, ctx.srcHeight,
-                ctx.width,  // cropSize
+                ctx.width, ctx.height,
                 centers,
                 ctx.bayerPattern,
                 ctx.bitDepth,
@@ -312,7 +312,8 @@ self.addEventListener('message', async (e) => {
                 brightnessGpuBuffer,
                 apPositionsBuffer,
                 batchSize,
-                cropSize,
+                cropWidth,
+                cropHeight,
                 frameWeights,
                 ctx.outWidth, ctx.outHeight,
                 ctx.alignmentPoints.length,

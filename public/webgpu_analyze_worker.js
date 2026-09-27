@@ -1373,9 +1373,9 @@ let cachedCropConfig = null;
  *
  * @param {number} bitDepth - 8 or 16, determines cropped RGBA buffer size
  */
-async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth = 8) {
+async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropWidth, cropHeight, bitDepth = 8) {
     const srcPixelCount = srcWidth * srcHeight;
-    const cropPixelCount = cropSize * cropSize;
+    const cropPixelCount = cropWidth * cropHeight;
     const numWorkgroups = Math.ceil(cropPixelCount / 256);
 
     // Cropped RGBA size: 4x larger for 16-bit (Float32 output)
@@ -1443,7 +1443,10 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, b
         );
 
     cachedCropBuffers = {
-        paramsBuffer: uniformBuffer(device, 32),  // 8 u32s for params
+        // 48 B, not 32: demosaicCropShader carries 9 u32/f32 (srcW, srcH, cropW,
+        // cropH, bayerPattern, batchSize, useVng, bitDepth, scale) = 36 B, which a
+        // uniform binding rounds up to 48. The rgba/mono16 crop shaders use fewer.
+        paramsBuffer: uniformBuffer(device, 48),
         inputBuffers: createBufferArray(requiredSizes.inputSize, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST),
         centersBuffer: storageBuffer(device, requiredSizes.centersSize, { copyDst: true }),
         boundsOutputBuffer: storageBuffer(device, requiredSizes.boundsOutputSize, { copySrc: true }),
@@ -1489,19 +1492,20 @@ function rotateCropBuffers() {
  * @param {Array} frames - Array of {data: Uint8Array|Uint16Array, index: number}
  * @param {number} srcWidth - Source frame width
  * @param {number} srcHeight - Source frame height
- * @param {number} cropSize - Output crop size (square)
+ * @param {number} cropWidth - Output width (== srcWidth when not cropping)
+ * @param {number} cropHeight - Output height (== srcHeight when not cropping)
  * @param {Array} centers - Array of {x, y} per-frame centers
  * @param {number} bayerPattern - Bayer pattern (0-3, or -1 for mono)
  * @param {number} threshold - Threshold for moments (default 0.1)
  * @param {boolean} metadataOnly - If true, skip float32 buffer readback
  */
-async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold = 0.1, metadataOnly = false) {
+async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropWidth, cropHeight, centers, bayerPattern, threshold = 0.1, metadataOnly = false) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
     const batchSize = frames.length;
     const srcPixelCount = srcWidth * srcHeight;
-    const cropPixelCount = cropSize * cropSize;
+    const cropPixelCount = cropWidth * cropHeight;
     const numWorkgroups = Math.ceil(cropPixelCount / 256);
 
     const needsDemosaic = bayerPattern >= 0;
@@ -1516,7 +1520,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
 
     try {
 
-    const buffers = await getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
+    const buffers = await getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropWidth, cropHeight, bitDepth);
 
     // Upload centers
     const centersData = new Float32Array(batchSize * 2);
@@ -1542,20 +1546,21 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     }
 
     // Set crop params (always bilinear demosaic - VNG is done in stacking worker)
-    const cropParams = new ArrayBuffer(32);
-    new Uint32Array(cropParams).set([srcWidth, srcHeight, cropSize, bayerPattern >= 0 ? bayerPattern : 0, batchSize, 0, bitDepth, 0]);
-    new Float32Array(cropParams)[7] = scale;
+    // 48 B to match the 9-slot demosaicCropShader Params struct.
+    const cropParams = new ArrayBuffer(48);
+    new Uint32Array(cropParams).set([srcWidth, srcHeight, cropWidth, cropHeight, bayerPattern >= 0 ? bayerPattern : 0, batchSize, 0, bitDepth, 0]);
+    new Float32Array(cropParams)[8] = scale;
     queue.writeBuffer(buffers.paramsBuffer, 0, cropParams);
 
     // DEBUG: Log shader params
-    console.log(`[GPU] cropAndAnalyzeBatch shader params: srcWidth=${srcWidth}, srcHeight=${srcHeight}, cropSize=${cropSize}, bayerPattern=${bayerPattern}, batchSize=${batchSize}, bitDepth=${bitDepth}, scale=${scale}`);
+    console.log(`[GPU] cropAndAnalyzeBatch shader params: srcWidth=${srcWidth}, srcHeight=${srcHeight}, crop=${cropWidth}x${cropHeight}, bayerPattern=${bayerPattern}, batchSize=${batchSize}, bitDepth=${bitDepth}, scale=${scale}`);
 
     // Prepare all bind groups and parameters upfront
-    queue.writeBuffer(buffers.grayParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
-    queue.writeBuffer(buffers.reductionParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, cropPixelCount]));
+    queue.writeBuffer(buffers.grayParamsBuffer, 0, new Uint32Array([cropWidth, cropHeight, batchSize, 0]));
+    queue.writeBuffer(buffers.reductionParamsBuffer, 0, new Uint32Array([cropWidth, cropHeight, batchSize, cropPixelCount]));
 
     const momentsParamsData = new ArrayBuffer(16);
-    new Uint32Array(momentsParamsData, 0, 3).set([cropSize, cropSize, batchSize]);
+    new Uint32Array(momentsParamsData, 0, 3).set([cropWidth, cropHeight, batchSize]);
     new Float32Array(momentsParamsData, 12, 1).set([threshold]);
     queue.writeBuffer(buffers.momentsParamsBuffer, 0, momentsParamsData);
 
@@ -1581,7 +1586,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     // Split the crop+analyze pipeline across two queue.submit calls: the
     // first covers the crop/demosaic pass that reads at full source resolution
     // (TDR risk on Windows for large frames); the second covers the
-    // cropSize-sized grayscale/tenengrad/moments/reductions that follow. See
+    // crop-sized grayscale/tenengrad/moments/reductions that follow. See
     // analyzeBatch for the equivalent split — same TDR reasoning.
     let encoder = device.createCommandEncoder();
 
@@ -1602,7 +1607,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         let pass = encoder.beginComputePass();
         pass.setPipeline(demosaicCropPipeline);
         pass.setBindGroup(0, demosaicCropBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.dispatchWorkgroups(Math.ceil(cropWidth / 16), Math.ceil(cropHeight / 16), batchSize);
         pass.end();
     } else if (bitDepth === 16) {
         // 16-bit mono: upload raw u16 data, GPU shader crops and outputs Float32 RGBA
@@ -1623,9 +1628,11 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         const scale = maxVal > 0 ? 1.0 / maxVal : 1.0;
         queue.writeBuffer(buffers.inputBuffers[0], 0, mono16Data);
 
-        // Set params with scale for auto-stretch (same layout as rgbaCropShader, scale in slot 5)
+        // mono16CropFloat32Shader has its own layout (batchSize slot 4, scale slot 5)
+        // and, unlike the 8-bit RGBA branch, rewrites the buffer here rather than
+        // reusing the demosaic-layout write from the top of this function.
         const paramsData = new ArrayBuffer(32);
-        new Uint32Array(paramsData).set([srcWidth, srcHeight, cropSize, 0, batchSize, 0, 0, 0]);
+        new Uint32Array(paramsData).set([srcWidth, srcHeight, cropWidth, cropHeight, batchSize, 0, 0, 0]);
         new Float32Array(paramsData)[5] = scale;
         queue.writeBuffer(buffers.paramsBuffer, 0, paramsData);
 
@@ -1638,7 +1645,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         let pass = encoder.beginComputePass();
         pass.setPipeline(mono16CropFloat32Pipeline);
         pass.setBindGroup(0, mono16CropBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.dispatchWorkgroups(Math.ceil(cropWidth / 16), Math.ceil(cropHeight / 16), batchSize);
         pass.end();
     } else {
         // 8-bit input: RGBA (4 bytes/pixel) or 8-bit mono (1 byte/pixel)
@@ -1705,16 +1712,16 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
         let pass = encoder.beginComputePass();
         pass.setPipeline(rgbaCropPipeline);
         pass.setBindGroup(0, rgbaCropBindGroup);
-        pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+        pass.dispatchWorkgroups(Math.ceil(cropWidth / 16), Math.ceil(cropHeight / 16), batchSize);
         pass.end();
     }
 
     // Submit 1: initial crop / demosaic. This pass reads srcW×srcH input per
-    // frame (full source resolution) even though it writes to a cropSize×
-    // cropSize output — that per-frame read work is what puts this dispatch
+    // frame (full source resolution) even though it writes to a cropWidth×cropHeight
+    // output — that per-frame read work is what puts this dispatch
     // at TDR risk on Windows for big images (source is the same 4000×3000+
     // that trips the analyzeBatch heavy pass). Everything AFTER this runs at
-    // cropSize×cropSize, orders of magnitude smaller, so we only need to
+    // cropWidth×cropHeight, orders of magnitude smaller, so we only need to
     // isolate this one for TDR mitigation.
     logGpuSubmit('cropAnalyzeBatch:crop-demosaic');
     queue.submit([encoder.finish()]);
@@ -1728,17 +1735,17 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     pass = encoder.beginComputePass();
     pass.setPipeline(grayPipeline);
     pass.setBindGroup(0, grayBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+    pass.dispatchWorkgroups(Math.ceil(cropWidth / 16), Math.ceil(cropHeight / 16), batchSize);
     pass.end();
 
     // Combined pass: Tenengrad + Moments (both read from grayBuffer, independent outputs)
     pass = encoder.beginComputePass();
     pass.setPipeline(tenengradPipeline);
     pass.setBindGroup(0, lapBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+    pass.dispatchWorkgroups(Math.ceil(cropWidth / 16), Math.ceil(cropHeight / 16), batchSize);
     pass.setPipeline(momentsPipeline);
     pass.setBindGroup(0, momentsBindGroup);
-    pass.dispatchWorkgroups(Math.ceil(cropSize / 16), Math.ceil(cropSize / 16), batchSize);
+    pass.dispatchWorkgroups(Math.ceil(cropWidth / 16), Math.ceil(cropHeight / 16), batchSize);
     pass.end();
 
     // Combined pass: Both reductions (independent of each other)
@@ -1767,7 +1774,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
     encoder.copyBufferToBuffer(buffers.packedGrayBuffer, 0, packedGrayReadbackBuf, 0, packedGraySize);
 
     // Submit 2: crop-sized grayscale/tenengrad/moments/reductions + readbacks.
-    // All at cropSize×cropSize (typically 300-800 px), so this whole submit
+    // All at cropWidth×cropHeight (typically 300-800 px), so this whole submit
     // is orders of magnitude smaller than Submit 1 — no TDR concern.
     logGpuSubmit('cropAnalyzeBatch:analysis+readback');
     queue.submit([encoder.finish()]);
@@ -1894,8 +1901,8 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, center
             laplacian: laplacianMean,
             circularity,
             index: frames[i].index,
-            width: cropSize,
-            height: cropSize,
+            width: cropWidth,
+            height: cropHeight,
             // 8-bit grayscale for template matching and preview
             packedGrayBuffer: framePackedGray.buffer.slice(framePackedGray.byteOffset, framePackedGray.byteOffset + framePackedGray.byteLength)
         };
@@ -1968,7 +1975,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     const analyzeBuffers = getAnalyzeBuffers(batchSize, srcWidth, srcHeight, bitDepth);
 
     // Get buffers for cropped analysis (reuses some, creates others)
-    const cropBuffers = await getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, bitDepth);
+    // Planetary auto-crop is always square, so both crop dims are cropSize here.
+    const cropBuffers = await getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropSize, cropSize, bitDepth);
 
     // ===== STEP 1: Upload raw data and demosaic =====
     // When grayOnly: demosaic directly to grayscale (fast path)
@@ -2150,7 +2158,9 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     const tCropStart = performance.now();
     // Skip crop when grayOnly - offset Tenengrad reads directly from full-frame grayscale
     if (!grayOnly) {
-        const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, 0, batchSize, 0, 0, 0]);
+        // Slot 4 is bayerPattern in the shared demosaic layout rgbaCropShader mirrors;
+        // batchSize lives in slot 5. See the note on rgbaCropShader.
+        const cropParams = new Uint32Array([srcWidth, srcHeight, cropSize, cropSize, 0, batchSize, 0, 0]);
         queue.writeBuffer(cropBuffers.paramsBuffer, 0, cropParams);
 
         // Clear packed gray buffer before crop (atomicOr requires zeroed memory)
@@ -2705,11 +2715,11 @@ self.addEventListener('message', async (e) => {
             return;
         }
 
-        const { frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, requestId, metadataOnly } = e.data;
+        const { frames, srcWidth, srcHeight, cropWidth, cropHeight, centers, bayerPattern, threshold, requestId, metadataOnly } = e.data;
 
         try {
             const results = await withDeviceRecoveryRetry('crop-analyze-batch', () =>
-                cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, threshold, metadataOnly));
+                cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropWidth, cropHeight, centers, bayerPattern, threshold, metadataOnly));
             // Transfer uint8Buffer or float32Buffer depending on mode
             const transferables = results.map(r => r.uint8Buffer || r.float32Buffer).filter(b => b);
             self.postMessage({ type: 'crop-analyze-result', requestId, results }, transferables);

@@ -1363,21 +1363,22 @@ async function demosaicVngBatch(frames, width, height, bayerPattern, bitDepth, s
  * @param {Array} frames - Array of {data: Uint8Array|Uint16Array} raw Bayer frames (full size)
  * @param {number} srcWidth - Full source frame width
  * @param {number} srcHeight - Full source frame height
- * @param {number} cropSize - Output crop size (square)
+ * @param {number} cropWidth - Output width (== srcWidth when not cropping)
+ * @param {number} cropHeight - Output height (== srcHeight when not cropping)
  * @param {Array} centers - Array of {x, y} per-frame crop centers
  * @param {number} bayerPattern - Bayer pattern (0=RGGB, 1=BGGR, 2=GRBG, 3=GBRG)
  * @param {number} bitDepth - Bit depth (8 or 16)
  * @param {number} scale - Stretch scale for 16-bit data (default 1.0)
  * @returns {{rgbaData: Float32Array, grayData: Uint8Array}} - Cropped RGBA and grayscale
  */
-async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, bitDepth, scale = 1.0) {
+async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropWidth, cropHeight, centers, bayerPattern, bitDepth, scale = 1.0) {
     if (!stackDevice || !vngCropPipeline) {
         throw new Error('Stacking GPU not initialized for VNG crop');
     }
 
     const batchSize = frames.length;
     const srcPixelCount = srcWidth * srcHeight;
-    const cropPixelCount = cropSize * cropSize;
+    const cropPixelCount = cropWidth * cropHeight;
 
     // Input buffer size depends on bit depth
     const bytesPerPixel = bitDepth > 8 ? 2 : 1;
@@ -1439,10 +1440,10 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
     }
     stackQueue.writeBuffer(centersBuffer, 0, centersData);
 
-    // Set params: srcWidth, srcHeight, cropSize, bayerPattern, batchSize, bitDepth, scale, pad
+    // Set params: srcWidth, srcHeight, cropWidth, cropHeight, bayerPattern, batchSize, bitDepth, scale
     const paramsData = new ArrayBuffer(32);
-    new Uint32Array(paramsData).set([srcWidth, srcHeight, cropSize, bayerPattern, batchSize, bitDepth, 0, 0]);
-    new Float32Array(paramsData)[6] = scale;
+    new Uint32Array(paramsData).set([srcWidth, srcHeight, cropWidth, cropHeight, bayerPattern, batchSize, bitDepth, 0]);
+    new Float32Array(paramsData)[7] = scale;
     stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
 
     // Create encoder and clear gray buffer (atomicOr needs zeros)
@@ -1466,8 +1467,8 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
     pass.setPipeline(vngCropPipeline);
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(
-        Math.ceil(cropSize / 16),
-        Math.ceil(cropSize / 16),
+        Math.ceil(cropWidth / 16),
+        Math.ceil(cropHeight / 16),
         batchSize
     );
     pass.end();
@@ -1483,7 +1484,7 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropSize, cente
         size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
-    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
+    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropWidth, cropHeight, batchSize, 0]));
 
     const blurBindGroup = stackDevice.createBindGroup({
         layout: blurPackedPipeline.getBindGroupLayout(0),
@@ -2075,7 +2076,7 @@ function cleanupStackingBuffers() {
  *
  * maxBufferSize / maxStorageBufferBindingSize are per-BUFFER caps, not a total
  * memory budget, so the bound comes from the largest single batch-scaled buffer:
- *   - rgbaGpuBuffer  cropSize² × 16 B/frame  (Float32 RGBA — almost always the largest)
+ *   - rgbaGpuBuffer  cropWidth × cropHeight × 16 B/frame  (Float32 RGBA — almost always the largest)
  *   - inputBuffer    srcW × srcH × 1|2 B/frame (raw Bayer mosaic)
  * grayGpuBuffer is 1 B/px and never binds first.
  *
@@ -2093,13 +2094,13 @@ function cleanupStackingBuffers() {
  *            limit: number}} maxBatch is floored at 1 so caller loops terminate;
  *   deviceCanFit is false when even one frame cannot fit.
  */
-function getMaxStackBatchSize(cropSize, srcWidth, srcHeight, bitDepth = 8) {
+function getMaxStackBatchSize(cropWidth, cropHeight, srcWidth, srcHeight, bitDepth = 8) {
     const maxBufferSize = stackDevice ? stackDevice.limits.maxBufferSize : (256 * 1024 * 1024);
     const maxBindingSize = stackDevice ? stackDevice.limits.maxStorageBufferBindingSize : (128 * 1024 * 1024);
     const limit = Math.min(maxBufferSize, maxBindingSize);
 
     const largestPerFrame = Math.max(
-        cropSize * cropSize * 16,                                    // rgbaGpuBuffer
+        cropWidth * cropHeight * 16,                                 // rgbaGpuBuffer
         srcWidth * srcHeight * (bitDepth > 8 ? 2 : 1)                // inputBuffer
     );
 
@@ -2115,16 +2116,19 @@ function getMaxStackBatchSize(cropSize, srcWidth, srcHeight, bitDepth = 8) {
 /**
  * VNG demosaic + crop keeping BOTH RGBA and grayscale on GPU (fully zero-copy pipeline)
  * NO CPU READBACK - brightness computed separately on GPU via computeBrightnessFromGpuBuffer
- * @returns {{rgbaGpuBuffer: GPUBuffer, grayGpuBuffer: GPUBuffer, batchSize: number, cropSize: number}}
+ * Output is cropWidth × cropHeight. Surface mode passes the full source dimensions,
+ * which makes this a demosaic-only pass that discards nothing.
+ * @returns {{rgbaGpuBuffer: GPUBuffer, grayGpuBuffer: GPUBuffer, batchSize: number,
+ *            cropWidth: number, cropHeight: number}}
  */
-async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, centers, bayerPattern, bitDepth, scale = 1.0) {
+async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropWidth, cropHeight, centers, bayerPattern, bitDepth, scale = 1.0) {
     if (!stackDevice || !vngCropPipeline) {
         throw new Error('Stacking GPU not initialized for VNG crop');
     }
 
     const batchSize = frames.length;
     const srcPixelCount = srcWidth * srcHeight;
-    const cropPixelCount = cropSize * cropSize;
+    const cropPixelCount = cropWidth * cropHeight;
 
     const bytesPerPixel = bitDepth > 8 ? 2 : 1;
     const inputSize = srcPixelCount * batchSize * bytesPerPixel;
@@ -2150,7 +2154,9 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
     });
 
     // RGBA stays on GPU for warp+accumulate. This is the buffer that hit 398MB in
-    // Sentry EISE-NJ on mobile Chrome (batch=N × cropSize² × 16 B for Float32 RGBA).
+    // Sentry EISE-NJ on mobile Chrome (batch=N × cropWidth × cropHeight × 16 B for
+    // Float32 RGBA). Surface mode no longer crops, so this is now full-frame sized
+    // there; getMaxStackBatchSize is what keeps the batch inside the device cap.
     const rgbaGpuBuffer = checkedStorageBuffer(
         stackDevice,
         rgbaOutputSize,
@@ -2189,8 +2195,8 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
 
     // Set params
     const paramsData = new ArrayBuffer(32);
-    new Uint32Array(paramsData).set([srcWidth, srcHeight, cropSize, bayerPattern, batchSize, bitDepth, 0, 0]);
-    new Float32Array(paramsData)[6] = scale;
+    new Uint32Array(paramsData).set([srcWidth, srcHeight, cropWidth, cropHeight, bayerPattern, batchSize, bitDepth, 0]);
+    new Float32Array(paramsData)[7] = scale;
     stackQueue.writeBuffer(paramsBuffer, 0, paramsData);
 
     // Create blurred grayscale buffer (blur suppresses demosaic artifacts for template matching)
@@ -2220,8 +2226,8 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
     vngPass.setPipeline(vngCropPipeline);
     vngPass.setBindGroup(0, bindGroup);
     vngPass.dispatchWorkgroups(
-        Math.ceil(cropSize / 16),
-        Math.ceil(cropSize / 16),
+        Math.ceil(cropWidth / 16),
+        Math.ceil(cropHeight / 16),
         batchSize
     );
     vngPass.end();
@@ -2231,7 +2237,7 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
         size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
-    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropSize, cropSize, batchSize, 0]));
+    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropWidth, cropHeight, batchSize, 0]));
 
     const blurBindGroup = stackDevice.createBindGroup({
         layout: blurPackedPipeline.getBindGroupLayout(0),
@@ -2242,7 +2248,7 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
         ]
     });
 
-    const packedSize = Math.ceil((cropSize * cropSize * batchSize) / 4);
+    const packedSize = Math.ceil((cropWidth * cropHeight * batchSize) / 4);
     const blurWorkgroups = Math.ceil(packedSize / 256);
 
     const blurPass = encoder.beginComputePass();
@@ -2262,7 +2268,7 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
 
     // Return GPU buffer handles - caller must destroy after use
     // Note: grayGpuBuffer is now the BLURRED version for better template matching
-    return { rgbaGpuBuffer, grayGpuBuffer: blurredGrayBuffer, batchSize, cropSize };
+    return { rgbaGpuBuffer, grayGpuBuffer: blurredGrayBuffer, batchSize, cropWidth, cropHeight };
 }
 
 /**
@@ -2271,16 +2277,16 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropSize, ce
  * @param {Array} frameMetadata - Array of {sharpness, brightnessScale, frameWeight} per frame
  * @param {Array} allShifts - Shifts from template matching
  */
-async function warpAndAccumulateFromGpuBuffer(rgbaGpuBuffer, batchSize, cropSize,
+async function warpAndAccumulateFromGpuBuffer(rgbaGpuBuffer, batchSize, cropWidth, cropHeight,
     frameMetadata, allShifts, outWidth, outHeight, alignmentPoints, patchSize, drizzleScale, minApQuality = 0.3, pixfrac = 1.0) {
 
     if (!isStackingReady) {
         throw new Error('WebGPU stacking not available');
     }
 
-    const buffers = getStackingBuffers(cropSize, cropSize, outWidth, outHeight, alignmentPoints.length);
+    const buffers = getStackingBuffers(cropWidth, cropHeight, outWidth, outHeight, alignmentPoints.length);
     const numAPs = alignmentPoints.length;
-    const pixelsPerFrame = cropSize * cropSize;
+    const pixelsPerFrame = cropWidth * cropHeight;
     const bytesPerFrame = pixelsPerFrame * 16;  // Float32 RGBA = 16 bytes/pixel
     const workgroupsX = Math.ceil(outWidth / 16);
     const workgroupsY = Math.ceil(outHeight / 16);
@@ -2319,8 +2325,8 @@ async function warpAndAccumulateFromGpuBuffer(rgbaGpuBuffer, batchSize, cropSize
             const paramsData = new ArrayBuffer(56);
             const paramsU32 = new Uint32Array(paramsData);
             const paramsF32 = new Float32Array(paramsData);
-            paramsU32[0] = cropSize;
-            paramsU32[1] = cropSize;
+            paramsU32[0] = cropWidth;
+            paramsU32[1] = cropHeight;
             paramsU32[2] = outWidth;
             paramsU32[3] = outHeight;
             paramsU32[4] = numAPs;
@@ -2972,7 +2978,8 @@ async function warpAndAccumulateBatchFullyGpu(
     brightnessGpuBuffer,// From computeBrightnessFullyGpu
     apPositionsBuffer,  // From matchTemplatesFullyGpu
     batchSize,
-    cropSize,
+    cropWidth,
+    cropHeight,
     frameWeights,       // Array of weights (small - just numbers)
     outWidth, outHeight,
     numAPs,
@@ -2987,9 +2994,9 @@ async function warpAndAccumulateBatchFullyGpu(
         throw new Error('Stacking GPU not initialized for batch warp');
     }
 
-    console.log(`[WarpBatchFullyGpu] batchSize=${batchSize} cropSize=${cropSize} outSize=${outWidth}x${outHeight} numAPs=${numAPs} patchSize=${patchSize} drizzleScale=${drizzleScale} refBrightness=${refBrightness} searchOffset=(${searchOffset.dx}, ${searchOffset.dy}) weights=${frameWeights.slice(0, 3).join(',')}...`);
+    console.log(`[WarpBatchFullyGpu] batchSize=${batchSize} inSize=${cropWidth}x${cropHeight} outSize=${outWidth}x${outHeight} numAPs=${numAPs} patchSize=${patchSize} drizzleScale=${drizzleScale} refBrightness=${refBrightness} searchOffset=(${searchOffset.dx}, ${searchOffset.dy}) weights=${frameWeights.slice(0, 3).join(',')}...`);
 
-    const buffers = getStackingBuffers(cropSize, cropSize, outWidth, outHeight, numAPs);
+    const buffers = getStackingBuffers(cropWidth, cropHeight, outWidth, outHeight, numAPs);
     const workgroupsX = Math.ceil(outWidth / 16);
     const workgroupsY = Math.ceil(outHeight / 16);
 
@@ -3007,8 +3014,8 @@ async function warpAndAccumulateBatchFullyGpu(
         const paramsData = new ArrayBuffer(56);
         const paramsU32 = new Uint32Array(paramsData);
         const paramsF32 = new Float32Array(paramsData);
-        paramsU32[0] = cropSize;           // inWidth
-        paramsU32[1] = cropSize;           // inHeight
+        paramsU32[0] = cropWidth;          // inWidth
+        paramsU32[1] = cropHeight;         // inHeight
         paramsU32[2] = outWidth;
         paramsU32[3] = outHeight;
         paramsU32[4] = numAPs;

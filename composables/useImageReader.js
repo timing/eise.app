@@ -283,7 +283,8 @@ export function useImageReader() {
                 frames,
                 srcWidth,
                 srcHeight,
-                cropSize,
+                cropWidth: cropSize,
+                cropHeight: cropSize,
                 centers,
                 bayerPattern: -1, // RGBA input
                 threshold: 0.1,
@@ -639,20 +640,14 @@ export function useImageReader() {
                 const medianX = sortedX.length > 0 ? sortedX[Math.floor(sortedX.length / 2)] : firstWidth / 2;
                 const medianY = sortedY.length > 0 ? sortedY[Math.floor(sortedY.length / 2)] : firstHeight / 2;
 
-                // Handle cropSize >= frameSize differently based on mode:
-                // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-                // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
-                if (desiredSize >= maxAllowedSize) {
-                    if (surfaceMode) {
-                        cropRegion = {
-                            size: maxAllowedSize,
-                            referenceCenter: { x: medianX, y: medianY },
-                            medianObjectSize: medianSize
-                        };
-                        addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize} with per-frame centering`);
-                    } else {
-                        addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
-                    }
+                // Surface mode never crops: the target fills the frame, so a crop can
+                // only discard real data, and a square crop discards the sides of every
+                // non-square capture. Drift is handled by the alignment stage, which
+                // already uses a wider search radius in surface mode.
+                if (surfaceMode) {
+                    addLog(`Surface mode: no crop, stacking the full ${firstWidth}x${firstHeight} frame`);
+                } else if (desiredSize >= maxAllowedSize) {
+                    addLog(`Skipping crop: desired ${desiredSize}px exceeds frame ${maxAllowedSize}px. Stacking alignment will handle centering.`);
                 } else if (detectedCenters.length > 0) {
                     cropRegion = {
                         size: desiredSize,

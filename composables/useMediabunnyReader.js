@@ -770,15 +770,16 @@ export function useMediabunnyReader() {
 					// to be rejected — and even if we processed full frames, the planet is
 					// too small relative to the frame for stacking to align correctly. Stop
 					// with a clear message rather than proceed to guaranteed-broken output.
-					if (medianSize <= 4) {
+					if (surfaceMode) {
+						// Surface mode never crops: the target fills the frame, so cropping
+						// can only discard real data, and a square crop discards the sides
+						// of every non-square capture. Drift is handled by the alignment
+						// stage, which already uses a wider search radius in surface mode.
+						addLog(`Surface mode: no crop, stacking the full ${actualWidth}x${actualHeight} frame`);
+					} else if (medianSize <= 4) {
 						throw tagErr(new Error(`Planet detection failed — the detected object was only ${Math.round(medianSize)}px across ${detectedCenters.length} samples. This can happen with very dim planets, unusual video formats, or on some GPUs. Try re-encoding the video at a lower resolution, cropping around the planet in a video editor first, or a different browser.`), 'detect');
 					} else if (desiredSize >= maxAllowedSize) {
-						if (surfaceMode) {
-							addLog(`Surface mode: using full frame ${maxAllowedSize}x${maxAllowedSize}`);
-							cropRegion = { size: maxAllowedSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
-						} else {
-							addLog(`Skipping crop: detected size ${desiredSize}px (median: ${Math.round(medianSize)}px) exceeds frame ${maxAllowedSize}px`);
-						}
+						addLog(`Skipping crop: detected size ${desiredSize}px (median: ${Math.round(medianSize)}px) exceeds frame ${maxAllowedSize}px`);
 					} else {
 						cropRegion = { size: desiredSize, referenceCenter: { x: medianX, y: medianY }, medianObjectSize: medianSize };
 						addLog(`Detected crop size: ${desiredSize}x${desiredSize}, median object: ${Math.round(medianSize)}px`);

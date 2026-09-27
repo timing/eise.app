@@ -329,7 +329,8 @@ export function useWebGpuAnalyzeWorker() {
                 frames,
                 srcWidth,
                 srcHeight,
-                cropSize,
+                cropWidth: cropSize,
+                cropHeight: cropSize,
                 centers,
                 bayerPattern: -1, // RGBA input
                 threshold: 0.1,

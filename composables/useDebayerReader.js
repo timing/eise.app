@@ -760,7 +760,8 @@ export function useDebayerReader() {
                     frames,
                     srcWidth: metadata.width,
                     srcHeight: metadata.height,
-                    cropSize: cropInfo.size,
+                    cropWidth: cropInfo.size,
+                    cropHeight: cropInfo.size,
                     centers: [{ x: cropInfo.centerX, y: cropInfo.centerY }],
                     bayerPattern,
                     threshold: 0.1,
@@ -883,7 +884,8 @@ export function useDebayerReader() {
                 frames,
                 srcWidth: metadata.width,
                 srcHeight: metadata.height,
-                cropSize,
+                cropWidth: cropSize,
+                cropHeight: cropSize,
                 centers,
                 bayerPattern,
                 threshold,
@@ -955,20 +957,12 @@ export function useDebayerReader() {
 
         const maxSize = Math.min(metadata.width, metadata.height);
 
-        // Handle cropSize >= frameSize differently based on mode:
-        // - Surface mode (lunar/solar): Use full frame with per-frame centering to prevent smearing
-        // - Normal mode (Jupiter + moon): Skip cropping to preserve multiple spread objects
+        // Crop bigger than the frame means there is nothing useful to crop to, so skip
+        // it and let stacking alignment handle centering. (Surface mode no longer
+        // reaches this function at all — it never crops.)
         if (cropSize >= maxSize) {
-            if (surfaceMode) {
-                addLog(`[DebayerReader] Surface mode: using full frame ${maxSize}x${maxSize} with per-frame centering`);
-                return {
-                    size: maxSize,
-                    medianSize,
-                };
-            } else {
-                addLog(`[DebayerReader] Skipping crop: desired ${cropSize}px exceeds frame ${maxSize}px`);
-                return null;
-            }
+            addLog(`[DebayerReader] Skipping crop: desired ${cropSize}px exceeds frame ${maxSize}px`);
+            return null;
         }
 
         addLog(`[DebayerReader] Detected crop size: ${cropSize}x${cropSize} (median object: ${medianSize})`);
@@ -1162,9 +1156,15 @@ export function useDebayerReader() {
             }
         }
 
-        // Detect full crop region
+        // Detect full crop region.
+        // Surface mode never crops: the target fills the frame by definition, so a
+        // crop can only discard real data. Auto-crop is a planetary idea (small bright
+        // disc in a big frame) and surface mode used to inherit it by default, which
+        // squashed every non-square capture into a min(w,h) square.
         let cropRegion = null;
-        if (metadata.width >= MIN_SIZE_FOR_CROP && metadata.height >= MIN_SIZE_FOR_CROP) {
+        if (surfaceMode) {
+            addLog(`[DebayerReader] Surface mode: no crop, stacking the full ${metadata.width}x${metadata.height} frame`);
+        } else if (metadata.width >= MIN_SIZE_FOR_CROP && metadata.height >= MIN_SIZE_FOR_CROP) {
             cropRegion = await detectCropRegion(cropMarginPercent, surfaceMode, frameCount);
         }
         emit('stack-step', 'crop_detected');
@@ -1518,11 +1518,12 @@ export function useDebayerReader() {
         // Manual threshold handling - emit to app.vue and return
         if (manualThreshold && allAnalyzedFrames.length > 0) {
             // Add width/height to frames for QualitySelector display
-            const previewSize = cropRegion?.size || metadata.width;
+            const previewWidth = cropRegion?.size || metadata.width;
+            const previewHeight = cropRegion?.size || metadata.height;
             const framesWithSize = allAnalyzedFrames.map(f => ({
                 ...f,
-                width: previewSize,
-                height: previewSize
+                width: previewWidth,
+                height: previewHeight
             }));
             const allFramesSorted = [...framesWithSize].sort((a, b) => b.sharpness - a.sharpness);
             addLog(`Ready for manual threshold selection with ${allFramesSorted.length} frames`);

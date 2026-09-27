@@ -38,15 +38,20 @@ export function useLiteMemoryLimits() {
     }
 
     // Calculate max frames based on crop size
-    function calculateMaxFrames(cropSize, platform) {
+    // frameWidth/frameHeight are the dimensions actually carried through the
+    // pipeline: the crop when there is one, the full frame when there is not
+    // (surface mode). Passing a single square size under-counted every
+    // non-square source.
+    function calculateMaxFrames(frameWidth, frameHeight, platform) {
         const availableMB = estimateAvailableMemory(platform);
+        const pixels = frameWidth * frameHeight;
 
-        // Memory per cropped frame (RGBA + working buffers)
-        const bytesPerFrame = cropSize * cropSize * 4 * 3;
+        // Memory per frame (RGBA + working buffers)
+        const bytesPerFrame = pixels * 4 * 3;
         const mbPerFrame = bytesPerFrame / (1024 * 1024);
 
         // Reserves: 2 workers (~256MB), stacking accumulator, templates
-        const reserves = 256 + (cropSize * cropSize * 16) / (1024 * 1024) + 50;
+        const reserves = 256 + (pixels * 16) / (1024 * 1024) + 50;
 
         const availableForFrames = availableMB - reserves;
         const maxFrames = Math.floor(availableForFrames / mbPerFrame);

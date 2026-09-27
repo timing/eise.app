@@ -449,13 +449,18 @@ export function useStacker() {
         const isSerFile = frameReReader.fileType === 'ser' || frameReReader.header;
         const isImageFile = frameReReader.fileType === 'image' || frameReReader.rgbaFrames;
 
-        let cropSize, srcWidth, srcHeight, bayerPattern;
+        // cropWidth/cropHeight are the dimensions the demosaic+crop pass emits.
+        // With no crop region (surface mode) they are the full source dimensions,
+        // so that pass demosaics and discards nothing. Using srcWidth for both, as
+        // this did before, squashed every non-square source into a square.
+        let cropWidth, cropHeight, srcWidth, srcHeight, bayerPattern;
 
         if (isSerFile) {
             const { header, bayerChoice, cropRegion } = frameReReader;
-            cropSize = cropRegion?.size || header.width;
             srcWidth = header.width;
             srcHeight = header.height;
+            cropWidth = cropRegion?.size || srcWidth;
+            cropHeight = cropRegion?.size || srcHeight;
 
             // Use direct bayerPattern if available (no-crop mode), otherwise map from bayerChoice
             if (frameReReader.bayerPattern !== undefined) {
@@ -472,9 +477,10 @@ export function useStacker() {
                 bayerPattern = bayerMap[bayerChoice] ?? -1;
             }
         } else if (isImageFile) {
-            cropSize = frameReReader.cropRegion?.size || frameReReader.srcWidth;
             srcWidth = frameReReader.srcWidth;
             srcHeight = frameReReader.srcHeight;
+            cropWidth = frameReReader.cropRegion?.size || srcWidth;
+            cropHeight = frameReReader.cropRegion?.size || srcHeight;
             bayerPattern = -1; // RGBA input, no demosaic
         } else {
             throw new Error('Unknown frameReReader type');
@@ -484,7 +490,7 @@ export function useStacker() {
         // 16-bit sources return float32Buffer from GPU analyze, 8-bit returns uint8Buffer
         const is16bit = isSerFile && frameReReader.header?.pixelDepth > 8;
 
-        addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}${is16bit ? ' (16-bit)' : ''}`);
+        addLog(`Pipelined GPU stacking: ${frameCount} frames, ${cropWidth}x${cropHeight}${is16bit ? ' (16-bit)' : ''}`);
         emit('set-caption', 'Initializing GPU workers...');
         cancelled = false; // Reset cancellation flag
 
@@ -521,6 +527,24 @@ export function useStacker() {
             ]);
             attachStackWorkerRelay(gpuStackWorker);
             addLog('GPU workers initialized');
+
+            // Surface mode does not crop, so the output covers the whole frame and the
+            // only centre that maps source 1:1 onto output is the exact frame centre.
+            // Frames carry the brightness centroid from analysis; feeding that in would
+            // offset the window past the frame edge, and the crop shaders clamp per
+            // sample, which shows up as a band of repeated edge pixels.
+            //
+            // Keyed on surfaceMode and NOT on "are we cropping", deliberately. Planetary
+            // searches only ±8px (createAPGrid) and has no global drift tracking — the
+            // searchOffset path is surface-only — so it relies on the centroid centre to
+            // remove gross motion before alignment ever runs. Even in the no-crop
+            // planetary fallback, where a full-size window centred on the centroid does
+            // overhang and smear, that smear is the price of dragging the planet toward
+            // the middle so the 8px search can still find it. Pinning the centre there
+            // removes the smear and the alignment along with it.
+            const frameCenter = { x: srcWidth / 2, y: srcHeight / 2 };
+            const normalizeCenters = (centers) =>
+                surfaceMode ? centers.map(() => ({ ...frameCenter })) : centers;
 
             // Helper to load a batch of frames (SER from file, images from memory)
             async function loadRawBatch(batchFrames) {
@@ -586,7 +610,7 @@ export function useStacker() {
                     }
                 }
 
-                return { frames, centers };
+                return { frames, centers: normalizeCenters(centers) };
             }
 
             // Helper to process batch via GPU analyze worker
@@ -613,7 +637,8 @@ export function useStacker() {
                         frames,
                         srcWidth,
                         srcHeight,
-                        cropSize,
+                        cropWidth,
+                        cropHeight,
                         centers,
                         bayerPattern,
                         threshold: 0.1,
@@ -665,7 +690,8 @@ export function useStacker() {
                         bayerData: refFrames[0].data,
                         srcWidth,
                         srcHeight,
-                        cropSize,
+                        cropWidth,
+                        cropHeight,
                         center: refCenter,
                         bayerPattern,
                         bitDepth: is16bit ? 16 : 8,
@@ -676,7 +702,7 @@ export function useStacker() {
                 // VNG returns Float32 RGBA (0.0-1.0) and Uint8 grayscale
                 refBuffer = new Float32Array(vngResult.rgbaBuffer);
                 refGrayData = new Uint8Array(vngResult.grayBuffer);
-                refBlob = await float32ToBlob(refBuffer, cropSize, cropSize);
+                refBlob = await float32ToBlob(refBuffer, cropWidth, cropHeight);
             } else {
                 // RGBA input: use bilinear from analyze worker
                 const refResults = await processGpuBatch(refFrames, refCenters);
@@ -697,18 +723,18 @@ export function useStacker() {
                     : new Uint8ClampedArray(rawRefBuffer);
                 const refIsFloat = refBuffer instanceof Float32Array;
                 refBlob = refIsFloat
-                    ? await float32ToBlob(refBuffer, cropSize, cropSize)
-                    : await uint8ToBlob(refBuffer, cropSize, cropSize);
+                    ? await float32ToBlob(refBuffer, cropWidth, cropHeight)
+                    : await uint8ToBlob(refBuffer, cropWidth, cropHeight);
                 // Extract grayscale for alignment
-                refGrayData = rgbaToGrayscale(refBuffer, cropSize, cropSize, refIsFloat);
+                refGrayData = rgbaToGrayscale(refBuffer, cropWidth, cropHeight, refIsFloat);
             }
 
             const refFrame = {
                 ...refFrameMeta,
                 float32Buffer: refBuffer instanceof Float32Array ? refBuffer : undefined,
                 uint8Buffer: refBuffer instanceof Uint8Array ? refBuffer : undefined,
-                width: cropSize,
-                height: cropSize,
+                width: cropWidth,
+                height: cropHeight,
                 blob: refBlob
             };
             emit('stacking-started', { referenceFrame: refFrame });
@@ -717,7 +743,7 @@ export function useStacker() {
             // Step 2: Prepare alignment points (pure JS, no OpenCV)
             emit('set-caption', 'Preparing alignment points...');
             // Both paths now have refGrayData ready, just create AP grid
-            const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropSize, cropSize, surfaceMode);
+            const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropWidth, cropHeight, surfaceMode);
             const { alignmentPoints, patchSize, searchRadius } = alignmentData;
             addLog(`Alignment prepared: ${alignmentPoints.length} APs`);
             // G3 checkpoint: AP grid ready. In pipelined mode template-matching
@@ -728,7 +754,7 @@ export function useStacker() {
             // calcMeanBrightness returns 0-255 scale for both formats
             // For raw Bayer, refBuffer is Float32 from VNG; for RGBA depends on is16bit
             const isRefFloat32 = isRawBayer || is16bit;
-            const refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, isRefFloat32);
+            const refBrightness = calcMeanBrightness(refBuffer, cropWidth, cropHeight, isRefFloat32);
 
             // Step 3: Initialize GPU stacker
             let deviceMaxBatch = Infinity;
@@ -748,8 +774,8 @@ export function useStacker() {
                 gpuStackWorker.addEventListener('message', handler);
                 gpuStackWorker.postMessage({
                     type: 'init-stacking',
-                    width: cropSize,
-                    height: cropSize,
+                    width: cropWidth,
+                    height: cropHeight,
                     srcWidth,
                     srcHeight,
                     drizzleScale,
@@ -769,7 +795,7 @@ export function useStacker() {
             emit('set-caption', 'Stacking...');
             // Dynamic batch size - start aggressive, OOM handling will scale back
             // Lite mode stays conservative for mobile/low-memory devices
-            const frameBytes = cropSize * cropSize * 16; // Float32 RGBA = 16 bytes/pixel
+            const frameBytes = cropWidth * cropHeight * 16; // Float32 RGBA = 16 bytes/pixel
             const { isLiteMode: checkLiteMode } = useLiteMode();
             const inLiteMode = checkLiteMode();
             const targetBatchMemory = inLiteMode ? (256 * 1024 * 1024) : (512 * 1024 * 1024);
@@ -789,10 +815,10 @@ export function useStacker() {
                 deviceMaxBatch
             );
             if (!deviceCanFitFrame) {
-                addLog(`Warning: ${cropSize}x${cropSize} frames exceed this GPU's per-buffer limit; stacking one frame at a time`);
+                addLog(`Warning: ${cropWidth}x${cropHeight} frames exceed this GPU's per-buffer limit; stacking one frame at a time`);
             }
             if (effectiveBatchSize < 4) {
-                addLog(`Large frames (${cropSize}x${cropSize}): GPU allows ${effectiveBatchSize} frame(s) per batch`);
+                addLog(`Large frames (${cropWidth}x${cropHeight}): GPU allows ${effectiveBatchSize} frame(s) per batch`);
             }
             const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
             let processedCount = 0;
@@ -923,9 +949,9 @@ export function useStacker() {
                         const frameBuffer = gpuResults[i].float32Buffer || gpuResults[i].uint8Buffer;
                         const isFrameFloat = frameBuffer instanceof Float32Array;
                         const uint8ForCapture = isFrameFloat
-                            ? new Uint8Array(float32ToUint8(frameBuffer, cropSize, cropSize))
+                            ? new Uint8Array(float32ToUint8(frameBuffer, cropWidth, cropHeight))
                             : new Uint8Array(frameBuffer);
-                        capturePostCropFrame(uint8ForCapture, cropSize, cropSize, globalIndex, frameCount);
+                        capturePostCropFrame(uint8ForCapture, cropWidth, cropHeight, globalIndex, frameCount);
                     }
 
                     // Get grayscale for matching
@@ -951,8 +977,8 @@ export function useStacker() {
                             requestId,
                             refGrayData,
                             frameGrayDatas,
-                            width: cropSize,
-                            height: cropSize,
+                            width: cropWidth,
+                            height: cropHeight,
                             alignmentPoints,
                             patchSize,
                             searchRadius,
@@ -1660,12 +1686,14 @@ export function useStacker() {
         const isSerFile = frameReReader.fileType === 'ser' || frameReReader.header;
         const isImageFile = frameReReader.fileType === 'image' || frameReReader.rgbaFrames;
 
-        let cropSize, srcWidth, srcHeight, bayerPattern;
+        // See stackWithGpuPipelined: no crop region means full-frame output.
+        let cropWidth, cropHeight, srcWidth, srcHeight, bayerPattern;
         if (isSerFile) {
             const { header, bayerChoice, cropRegion } = frameReReader;
-            cropSize = cropRegion?.size || header.width;
             srcWidth = header.width;
             srcHeight = header.height;
+            cropWidth = cropRegion?.size || srcWidth;
+            cropHeight = cropRegion?.size || srcHeight;
             if (frameReReader.bayerPattern !== undefined) {
                 bayerPattern = frameReReader.bayerPattern;
             } else {
@@ -1677,14 +1705,15 @@ export function useStacker() {
                 bayerPattern = bayerMap[bayerChoice] ?? -1;
             }
         } else if (isImageFile) {
-            cropSize = frameReReader.cropRegion?.size || frameReReader.srcWidth;
             srcWidth = frameReReader.srcWidth;
             srcHeight = frameReReader.srcHeight;
+            cropWidth = frameReReader.cropRegion?.size || srcWidth;
+            cropHeight = frameReReader.cropRegion?.size || srcHeight;
             bayerPattern = -1;
         }
 
         const is16bit = isSerFile && frameReReader.header?.pixelDepth > 8;
-        addLog(`Incremental GPU stacking: ${frameCount} frames, ${cropSize}x${cropSize}`);
+        addLog(`Incremental GPU stacking: ${frameCount} frames, ${cropWidth}x${cropHeight}`);
         cancelled = false;
 
         const gpuAnalyzeWorker = trackWorker(new Worker(workerUrl('/webgpu_analyze_worker.js'), { type: 'module' }));
@@ -1703,6 +1732,14 @@ export function useStacker() {
                 })
             ]);
             attachStackWorkerRelay(gpuStackWorker);
+
+            // Surface mode does not crop, so the crop centre must be the frame centre.
+            // Planetary keeps its centroid centres in every case — see the long note on
+            // the same guard in stackWithGpuPipelined for why this is keyed on
+            // surfaceMode rather than on whether a crop region exists.
+            const frameCenter = { x: srcWidth / 2, y: srcHeight / 2 };
+            const normalizeCenters = (centers) =>
+                surfaceMode ? centers.map(() => ({ ...frameCenter })) : centers;
 
             // Helper to load batch (reused from stackWithGpuPipelined logic)
             async function loadRawBatch(batchFrames) {
@@ -1730,7 +1767,7 @@ export function useStacker() {
                         }
                     }
                 }
-                return { frames, centers };
+                return { frames, centers: normalizeCenters(centers) };
             }
 
             const isRawBayer = bayerPattern >= 0;
@@ -1754,7 +1791,7 @@ export function useStacker() {
                     gpuAnalyzeWorker.postMessage({
                         type: 'crop-analyze-batch',
                         frames,
-                        srcWidth, srcHeight, cropSize, centers,
+                        srcWidth, srcHeight, cropWidth, cropHeight, centers,
                         bayerPattern,
                         threshold: 0.1,
                         requestId,
@@ -1778,23 +1815,23 @@ export function useStacker() {
                     gpuStackWorker.postMessage({
                         type: 'vng-demosaic-ref',
                         bayerData: refFrames[0].data,
-                        srcWidth, srcHeight, cropSize, center: refCenters[0],
+                        srcWidth, srcHeight, cropWidth, cropHeight, center: refCenters[0],
                         bayerPattern, bitDepth: is16bit ? 16 : 8
                     });
                 });
-                refBrightness = calcMeanBrightness(vngResult.rgbaBuffer, cropSize, cropSize, true);
+                refBrightness = calcMeanBrightness(vngResult.rgbaBuffer, cropWidth, cropHeight, true);
                 refGrayData = new Uint8Array(vngResult.grayBuffer);
             } else {
                 // RGBA: crop via analyze worker
                 const refResults = await processGpuBatch(refFrames, refCenters);
                 const refBuffer = refResults[0].float32Buffer || refResults[0].uint8Buffer;
                 const isRefFloat = refBuffer instanceof Float32Array;
-                refBrightness = calcMeanBrightness(refBuffer, cropSize, cropSize, isRefFloat);
-                refGrayData = rgbaToGrayscale(refBuffer, cropSize, cropSize, isRefFloat);
+                refBrightness = calcMeanBrightness(refBuffer, cropWidth, cropHeight, isRefFloat);
+                refGrayData = rgbaToGrayscale(refBuffer, cropWidth, cropHeight, isRefFloat);
             }
 
             // Prepare alignment points
-            const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropSize, cropSize, surfaceMode);
+            const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropWidth, cropHeight, surfaceMode);
             const { alignmentPoints, patchSize, searchRadius } = alignmentData;
 
             // Init stacking
@@ -1808,14 +1845,14 @@ export function useStacker() {
                 gpuStackWorker.addEventListener('message', handler);
                 gpuStackWorker.postMessage({
                     type: 'init-stacking',
-                    width: cropSize, height: cropSize, srcWidth, srcHeight, drizzleScale, alignmentPoints, patchSize, refBrightness, bayerPattern, bitDepth: is16bit ? 16 : 8,
+                    width: cropWidth, height: cropHeight, srcWidth, srcHeight, drizzleScale, alignmentPoints, patchSize, refBrightness, bayerPattern, bitDepth: is16bit ? 16 : 8,
                     pixfrac: drizzleScale > 1 ? getPixfrac() : 1.0
                 });
             });
 
             // Process frames in batches and take snapshots
             // Dynamic batch size based on crop size (same logic as stackWithGpuPipelined)
-            const frameBytes = cropSize * cropSize * 16; // Float32 RGBA = 16 bytes/pixel
+            const frameBytes = cropWidth * cropHeight * 16; // Float32 RGBA = 16 bytes/pixel
             const targetBatchMemory = 512 * 1024 * 1024;
             // Clamp to the device's per-buffer cap — see stackWithGpuPipelined.
             const batchSize = Math.min(
@@ -1877,7 +1914,7 @@ export function useStacker() {
                             requestId,
                             refGrayData,
                             frameGrayDatas,
-                            width: cropSize, height: cropSize,
+                            width: cropWidth, height: cropHeight,
                             alignmentPoints, patchSize, searchRadius
                         });
                     });
