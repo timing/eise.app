@@ -2,6 +2,7 @@ import * as Sentry from '@sentry/vue';
 import { logs } from '@/composables/eventBus';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { classifyGpuCondition } from '@/composables/gpuConditions';
+import { claimErrorBudget } from '@/composables/sentryErrorBudget';
 
 // Small ring buffer of recent errors captured by Sentry. Attached to the
 // User Feedback event via onFormOpen so submitters carry the last N JS
@@ -113,6 +114,10 @@ export default defineNuxtPlugin(async (nuxtApp) => {
             if (/abort\(OOM\)|pthread sent an error/i.test(msg)) return null;
             if (/SharedArrayBuffer is not defined|Can't find variable: SharedArrayBuffer/i.test(msg)) return null;
             if (err && err.name === 'FFmpegUnsupportedError') return null;
+            // Firefox reader-mode content scripts, not our code: EISE-QQ and
+            // EISE-QR are their injected globals failing on pages we never
+            // touch. No first-party file references __firefox__.
+            if (/__firefox__/.test(msg)) return null;
             // Expected GPU conditions are routed to `gpu_condition` analytics by
             // reportError. This is the backstop for the paths that never go
             // through it: uncaught worker errors, the Vue error handler, and
@@ -120,8 +125,20 @@ export default defineNuxtPlugin(async (nuxtApp) => {
             if (classifyGpuCondition(msg)) return null;
             // Mirror the exception into the ring buffer so the NEXT feedback
             // submission carries it as recent_errors context. Feedback events
-            // themselves have no exception.values — skip those.
-            if (event.exception?.values?.length) pushRecentError(event);
+            // themselves have no exception.values — skip those. Done BEFORE the
+            // budget check on purpose: a budget-dropped error still belongs in
+            // the local context a feedback submission carries.
+            if (event.exception?.values?.length) {
+                pushRecentError(event);
+                // Budget applies to errors only, never to user feedback, and
+                // sits after every filter above so suppressed noise does not
+                // spend it. See composables/sentryErrorBudget.js.
+                const budget = claimErrorBudget();
+                if (!budget.send) return null;
+                if (budget.last) {
+                    event.tags = { ...(event.tags || {}), error_budget: 'exhausted' };
+                }
+            }
             return event;
         },
     });

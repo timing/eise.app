@@ -2,6 +2,7 @@
 // Shared state for the current processing session
 
 import { ref } from 'vue';
+import { resetErrorBudget } from './sentryErrorBudget';
 
 // FNV-1a 32-bit — synchronous, tiny, no crypto dependency. Base-36 keeps the
 // output short. Not cryptographic, but we're deduping analytics events, not
@@ -101,6 +102,10 @@ export function useProcessingState() {
     // enough for uniqueness within a session without bloating props.
     function startNewStackJob(filename) {
         setInputFilename(filename);
+        // A different file deserves a fresh Sentry budget: the SPA never
+        // reloads between attempts, so without this the second file of a visit
+        // would be silent whenever the first one failed loudly.
+        resetErrorBudget();
         stackJobId.value = shortJobHash(`${filename}|${Date.now()}|${Math.random()}`);
         // Reset initial_reader so the next setTrackingContext claims it. Without
         // this, a second attempt would inherit the previous job's initial_reader.
