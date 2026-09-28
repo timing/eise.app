@@ -1412,7 +1412,7 @@ export function useAviReader() {
 
                         // GPU already flagged this frame as cut-off (planet bounds touch source edge).
                         // Its uint8Buffer contains zero-padded borders whose hard edges produce
-                        // artificially high Tenengrad/Laplacian scores, so it would otherwise win
+                        // artificially high Tenengrad scores, so it would otherwise win
                         // the "best frame" preview and pollute the stack. Skip unless Sun/Moon mode.
                         if (gpuResult.cutOff && !surfaceMode) {
                             cutOffFrames++;

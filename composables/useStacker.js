@@ -2016,7 +2016,7 @@ export function useStacker() {
     }
 
     /**
-     * Calculate sharpness metrics (Tenengrad, Laplacian) for a single image buffer
+     * Calculate the Tenengrad sharpness metric for a single image buffer
      * Reuses the webgpu_analyze_worker for consistent results with frame ranking
      */
     async function calculateSharpness(buffer, width, height) {

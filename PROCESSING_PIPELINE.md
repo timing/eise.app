@@ -289,7 +289,7 @@ const result = await reader.stackFrames({
 **Processing per frame:**
 1. Read raw Bayer data from file
 2. GPU grayscale demosaic (bilinear, 8-bit output)
-3. Compute sharpness (Tenengrad via Laplacian)
+3. Compute sharpness (Tenengrad)
 4. Detect object bounds (for cropping)
 5. Store only metadata: `{ index, sharpness, center, bounds }`
 

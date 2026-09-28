@@ -898,7 +898,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 
-// Combined sharpness shader - computes both Tenengrad and Laplacian
+// Sharpness shader - Tenengrad (Sobel gradient energy). This is the ranking key
+// for frame selection. A Laplacian-variance term used to be computed alongside it
+// and folded in as a geometric mean; it was dropped because a 1/N fit across a
+// continuous-stacking sweep put it at 97.9% noise, so it was ranking noisiness
+// rather than detail. Tenengrad alone matches the CPU fallback.
 export const tenengradShader = `
 struct Params {
     width: u32,
@@ -910,7 +914,6 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> input: array<f32>;  // Grayscale
 @group(0) @binding(2) var<storage, read_write> tenengrad: array<f32>;  // Sobel gradient magnitude squared
-@group(0) @binding(3) var<storage, read_write> laplacian: array<f32>;  // Laplacian response
 
 fn sampleGray(frameIdx: u32, x: i32, y: i32) -> f32 {
     let cx = clamp(x, 0, i32(params.width) - 1);
@@ -944,18 +947,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Tenengrad = Gx² + Gy² (gradient magnitude squared)
     let tenengradVal = gx * gx + gy * gy;
 
-    // Laplacian kernel: [0,1,0], [1,-4,1], [0,1,0]
-    let lap = sampleGray(frameIdx, ix, iy-1)
-            + sampleGray(frameIdx, ix-1, iy) - 4.0 * sampleGray(frameIdx, ix, iy) + sampleGray(frameIdx, ix+1, iy)
-            + sampleGray(frameIdx, ix, iy+1);
-
     let idx = frameIdx * params.width * params.height + y * params.width + x;
     tenengrad[idx] = tenengradVal;
-    laplacian[idx] = lap * lap;  // Square for variance calculation (always positive)
 }
 `;
 
-// Reduction shader - sums Tenengrad and Laplacian values across frame
+// Reduction shader - sums Tenengrad values across frame
 export const reductionShader = `
 struct Params {
     width: u32,
@@ -966,11 +963,9 @@ struct Params {
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> tenengrad: array<f32>;
-@group(0) @binding(2) var<storage, read> laplacian: array<f32>;
-@group(0) @binding(3) var<storage, read_write> results: array<f32>;  // [tenengradSum, laplacianSum] per frame
+@group(0) @binding(2) var<storage, read_write> results: array<f32>;  // tenengradSum per workgroup per frame
 
 var<workgroup> sharedTenengrad: array<f32, 256>;
-var<workgroup> sharedLaplacian: array<f32, 256>;
 
 @compute @workgroup_size(256, 1, 1)
 fn main(
@@ -987,25 +982,20 @@ fn main(
         return;
     }
 
-    // Load values from both sharpness metrics
     var tenVal: f32 = 0.0;
-    var lapVal: f32 = 0.0;
 
     if (startPixel < params.inputSize) {
         let idx = frameIdx * params.inputSize + startPixel;
         tenVal = tenengrad[idx];
-        lapVal = laplacian[idx];
     }
 
     sharedTenengrad[localIdx] = tenVal;
-    sharedLaplacian[localIdx] = lapVal;
     workgroupBarrier();
 
     // Parallel reduction
     for (var stride = 128u; stride > 0u; stride = stride >> 1u) {
         if (localIdx < stride) {
             sharedTenengrad[localIdx] += sharedTenengrad[localIdx + stride];
-            sharedLaplacian[localIdx] += sharedLaplacian[localIdx + stride];
         }
         workgroupBarrier();
     }
@@ -1014,14 +1004,12 @@ fn main(
     if (localIdx == 0u) {
         // Calculate actual number of workgroups based on input size
         let numWorkgroups = (params.inputSize + 255u) / 256u;
-        let resultIdx = frameIdx * numWorkgroups + wid.x;
-        results[resultIdx * 2u] = sharedTenengrad[0];
-        results[resultIdx * 2u + 1u] = sharedLaplacian[0];
+        results[frameIdx * numWorkgroups + wid.x] = sharedTenengrad[0];
     }
 }
 `;
 
-// Final sharpness reduction - sums workgroup partial results into 2 floats per frame
+// Final sharpness reduction - sums workgroup partial results into 1 float per frame
 export const sharpnessFinalShader = `
 struct Params {
     numWorkgroups: u32,  // Number of workgroups from first reduction
@@ -1031,8 +1019,8 @@ struct Params {
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> partialSums: array<f32>;  // 2 floats per workgroup per frame
-@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // 2 floats per frame: [tenengrad, laplacian]
+@group(0) @binding(1) var<storage, read> partialSums: array<f32>;  // 1 float per workgroup per frame
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;  // 1 float per frame: tenengrad
 
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -1043,23 +1031,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Sum all workgroup results for this frame
     var tenengradSum: f32 = 0.0;
-    var laplacianSum: f32 = 0.0;
 
     for (var w = 0u; w < params.numWorkgroups; w++) {
-        let idx = (frameIdx * params.numWorkgroups + w) * 2u;
-        tenengradSum += partialSums[idx];
-        laplacianSum += partialSums[idx + 1u];
+        tenengradSum += partialSums[frameIdx * params.numWorkgroups + w];
     }
 
     // Scale and compute mean (matching CPU: scale by 65025, divide by pixelCount)
     let scale: f32 = 65025.0 / f32(params.pixelCount);
-    let tenengradMean = tenengradSum * scale;
-    let laplacianMean = laplacianSum * scale;
-
-    // Output final values
-    let outIdx = frameIdx * 2u;
-    output[outIdx] = tenengradMean;
-    output[outIdx + 1u] = laplacianMean;
+    output[frameIdx] = tenengradSum * scale;
 }
 `;
 
@@ -1536,7 +1515,6 @@ struct Params {
 @group(0) @binding(1) var<storage, read> input: array<f32>;
 @group(0) @binding(2) var<storage, read> centers: array<f32>;
 @group(0) @binding(3) var<storage, read_write> tenengrad: array<f32>;
-@group(0) @binding(4) var<storage, read_write> laplacian: array<f32>;
 
 fn sampleGray(frameIdx: u32, x: i32, y: i32) -> f32 {
     let cx = clamp(x, 0, i32(params.srcWidth) - 1);
@@ -1573,14 +1551,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let tenengradVal = gx * gx + gy * gy;
 
-    // Laplacian
-    let lap = sampleGray(frameIdx, srcX, srcY-1)
-            + sampleGray(frameIdx, srcX-1, srcY) - 4.0 * sampleGray(frameIdx, srcX, srcY) + sampleGray(frameIdx, srcX+1, srcY)
-            + sampleGray(frameIdx, srcX, srcY+1);
-
     let outIdx = frameIdx * params.cropSize * params.cropSize + localY * params.cropSize + localX;
     tenengrad[outIdx] = tenengradVal;
-    laplacian[outIdx] = lap * lap;
 }
 `;
 

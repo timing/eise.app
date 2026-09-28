@@ -1292,8 +1292,6 @@ export function useDebayerReader() {
                 const frame = {
                     index: result.index,
                     sharpness: result.sharpness,
-                    tenengrad: result.tenengrad,
-                    laplacian: result.laplacian,
                     circularity: result.circularity || 0,
                     centerX: result.bounds?.centroidX || metadata.width / 2,
                     centerY: result.bounds?.centroidY || metadata.height / 2,

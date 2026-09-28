@@ -54,13 +54,13 @@
 							<canvas ref="bestFrameCanvas"></canvas>
 						</div>
 					</div>
-					<p class="frame-stats">Sharpness: {{ bestFrame.sharpness?.toFixed(2) }} (Tenengrad: {{ bestFrame.tenengrad?.toFixed(2) }}, Laplacian: {{ bestFrame.laplacian?.toFixed(2) }}) · Circularity: {{ bestFrame.circularity?.toFixed(2) || '?' }}</p>
+					<p class="frame-stats">Sharpness: {{ bestFrame.sharpness?.toFixed(2) }} (Tenengrad) · Circularity: {{ bestFrame.circularity?.toFixed(2) || '?' }}</p>
 				</div>
 
 				<div v-if="processingStage === 'analyzing' && refCandidate" class="preview-frame">
 					<h4 class="preview-label">Reference candidate</h4>
 					<canvas ref="refCandidateCanvas"></canvas>
-					<p class="frame-stats">Sharpness: {{ refCandidate.sharpness?.toFixed(2) }} (Tenengrad: {{ refCandidate.tenengrad?.toFixed(2) }}, Laplacian: {{ refCandidate.laplacian?.toFixed(2) }}) · Circularity: {{ refCandidate.circularity?.toFixed(2) || '?' }}</p>
+					<p class="frame-stats">Sharpness: {{ refCandidate.sharpness?.toFixed(2) }} (Tenengrad) · Circularity: {{ refCandidate.circularity?.toFixed(2) || '?' }}</p>
 				</div>
 			</div>
 

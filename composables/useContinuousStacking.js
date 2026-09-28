@@ -106,9 +106,7 @@ export function useContinuousStacking() {
                         float32Data: snapshot.float32Data,
                         width: snapshot.width,
                         height: snapshot.height,
-                        tenengrad: null,
-                        laplacian: null,
-                        combined: null
+                        sharpness: null
                     };
 
                     results.value.push(item);
@@ -121,13 +119,11 @@ export function useContinuousStacking() {
                     calculateSharpness(bufferCopy, snapshot.width, snapshot.height)
                         .then(sharpness => {
                             if (cancelled) return;
-                            addLog(`Continuous Stacking: Sharpness for ${snapshot.percentage}%: combined=${sharpness.sharpness.toFixed(4)}, tenengrad=${sharpness.tenengrad.toFixed(4)}, laplacian=${sharpness.laplacian.toFixed(4)}`);
-                            
+                            addLog(`Continuous Stacking: Sharpness (Tenengrad) for ${snapshot.percentage}%: ${sharpness.sharpness.toFixed(4)}`);
+
                             // Update the item directly using the captured reference
-                            item.tenengrad = sharpness.tenengrad;
-                            item.laplacian = sharpness.laplacian;
-                            item.combined = sharpness.sharpness;
-                            
+                            item.sharpness = sharpness.sharpness;
+
                             // Trigger re-render by updating shared state with a FRESH array copy
                             const newResults = [...results.value];
                             setContinuousResults(newResults);

@@ -44,7 +44,7 @@
 			<p class="ds-note">Text used in frame preview areas (QualitySelector, VideoFrameProcessor)</p>
 			<div class="ds-examples text-on-gradient">
 				<h4 class="preview-heading">Sharpest Frame</h4>
-				<p class="preview-stats">Sharpness: 0.85 (Tenengrad: 0.72, Laplacian: 0.91) · Circularity: 0.98</p>
+				<p class="preview-stats">Sharpness: 0.85 (Tenengrad) · Circularity: 0.98</p>
 			</div>
 			<div class="ds-variants">
 				<strong>Headings:</strong> #c2d6db (same as body, --eise-on-dark)<br>

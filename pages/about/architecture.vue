@@ -163,7 +163,7 @@ For each batch of frames:
 			</table>
 
 			<h4>Sharpness Calculation</h4>
-			<p>The GPU computes two complementary sharpness metrics and combines them:</p>
+			<p>Every frame is scored with Tenengrad, the mean squared Sobel gradient:</p>
 			<pre class="code">
 Tenengrad (Sobel gradient magnitude):
 ┌─────────────────┐     ┌─────────────────┐
@@ -171,20 +171,10 @@ Tenengrad (Sobel gradient magnitude):
 │      [-2  0  2] │     │      [ 0  0  0] │
 │      [-1  0  1] │     │      [ 1  2  1] │
 └─────────────────┘     └─────────────────┘
-Tenengrad = mean(Gx² + Gy²)
-
-Laplacian (second derivative):
-┌─────────────────┐
-│      [ 0  1  0] │
-│      [ 1 -4  1] │
-│      [ 0  1  0] │
-└─────────────────┘
-Laplacian = mean(lap²)
-
-Combined sharpness = √(Tenengrad × Laplacian)
+Sharpness = mean(Gx² + Gy²)
 </pre>
-			<p>The geometric mean combines edge detection (Tenengrad) with fine detail detection (Laplacian). Higher values indicate sharper frames.</p>
-			<p class="note"><strong>Note:</strong> The CPU fallback path uses Tenengrad only (no Laplacian) for simplicity.</p>
+			<p>Higher values indicate sharper frames. The GPU and CPU paths use the same metric and produce the same numbers.</p>
+			<p class="note"><strong>Note:</strong> Earlier versions folded a Laplacian-variance term into the score as a geometric mean. Measuring how each term averages down with frame count showed the Laplacian was almost entirely reading noise rather than detail, so it was dropped.</p>
 
 			<h4>Per-Frame Centering</h4>
 			<p>Critical for planetary stacking: the planet drifts across frames due to atmospheric refraction and mount drift. Each frame must be cropped with its own detected center.</p>

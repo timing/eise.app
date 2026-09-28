@@ -643,7 +643,7 @@ function calcPerFrameBufferBytes(width, height, bitDepth = 8) {
         pixelCount * rgbaBpp +               // rgbaBufferSize
         pixelCount * 6 * 4 +                // momentsPixelSize
         pixelCount * 4 * 4 +                // boundsPixelSize
-        numWorkgroups * 2 * 4 +             // reductionSize
+        numWorkgroups * 4 +                 // reductionSize (1 float/workgroup: tenengrad)
         numWorkgroups * 6 * 4 +             // momentsReductionSize
         numWorkgroups * 4 * 4               // boundsReductionSize
     );
@@ -697,7 +697,7 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8, analyzeWidth 
         analyzeBufferSize: batchSize * analyzePixelCount * 4,
         momentsPixelSize: batchSize * analyzePixelCount * 6 * 4,
         boundsPixelSize: batchSize * analyzePixelCount * 4 * 4,
-        reductionSize: batchSize * numWorkgroups * 2 * 4,
+        reductionSize: batchSize * numWorkgroups * 4,
         momentsReductionSize: batchSize * numWorkgroups * 6 * 4,
         boundsReductionSize: batchSize * numWorkgroups * 4 * 4,
         // 4 floats/frame for circularity (circ, cx, cy, tiltAngle). Untracked in
@@ -795,7 +795,6 @@ function getAnalyzeBuffers(batchSize, width, height, bitDepth = 8, analyzeWidth 
         grayReadback: readbackBuffer(device, analyzeBufferSize),
         blurredGrayBuffer: storageBuffer(device, analyzeBufferSize),
         tenengradBuffer: storageBuffer(device, analyzeBufferSize),
-        laplacianBuffer: storageBuffer(device, analyzeBufferSize),
         reductionBuffer: storageBuffer(device, reductionSize, { copySrc: true }),
         momentsBuffer: storageBuffer(device, momentsPixelSize),
         momentsReductionBuffer: storageBuffer(device, momentsReductionSize, { copySrc: true }),
@@ -1074,11 +1073,11 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     const grayBindGroup = createBindGroup(device, grayPipeline, [
         buffers.paramsBuffer, grayInputBuffer, buffers.grayBuffer
     ]);
-    const lapBindGroup = createBindGroup(device, tenengradPipeline, [
-        buffers.paramsBuffer, buffers.grayBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer
+    const sharpnessBindGroup = createBindGroup(device, tenengradPipeline, [
+        buffers.paramsBuffer, buffers.grayBuffer, buffers.tenengradBuffer
     ]);
     const reductionBindGroup = createBindGroup(device, reductionPipeline, [
-        buffers.reductionParamsBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer, buffers.reductionBuffer
+        buffers.reductionParamsBuffer, buffers.tenengradBuffer, buffers.reductionBuffer
     ]);
     const momentsBindGroup = createBindGroup(device, momentsPipeline, [
         buffers.momentsParamsBuffer, buffers.grayBuffer, buffers.momentsBuffer
@@ -1144,7 +1143,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     encoder = device.createCommandEncoder();
     pass = encoder.beginComputePass();
     pass.setPipeline(tenengradPipeline);
-    pass.setBindGroup(0, lapBindGroup);
+    pass.setBindGroup(0, sharpnessBindGroup);
     pass.dispatchWorkgroups(Math.ceil(analyzeWidth / 16), Math.ceil(analyzeHeight / 16), batchSize);
     pass.setPipeline(momentsPipeline);
     pass.setBindGroup(0, momentsBindGroup);
@@ -1184,7 +1183,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     pass.end();
 
     // Copy results for readback.
-    const reductionCopySize = batchSize * numWorkgroups * 2 * 4;
+    const reductionCopySize = batchSize * numWorkgroups * 4;
     const circularityCopySize = batchSize * 4 * 4;  // 4 floats per frame: circ, cx, cy, tiltAngle (computed on GPU)
     const boundsCopySize = batchSize * numWorkgroups * 4 * 4;
     // RGBA copy size: 4x larger for 16-bit (Float32 output vs packed Uint8).
@@ -1250,25 +1249,17 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
     const results = [];
 
     for (let i = 0; i < batchSize; i++) {
-        // Sum up partial reductions for both Tenengrad and Laplacian
+        // Sum up partial Tenengrad reductions
         let tenengradSum = 0;
-        let laplacianSum = 0;
         for (let w = 0; w < numWorkgroups; w++) {
-            const idx = (i * numWorkgroups + w) * 2;
-            tenengradSum += reductionData[idx];
-            laplacianSum += reductionData[idx + 1];
+            tenengradSum += reductionData[i * numWorkgroups + w];
         }
 
         // Sharpness is a normalized per-pixel intensity metric — scale-invariant
         // enough that computing the mean over analyzePixelCount (matching what
         // the shader actually processed) keeps the values comparable to the
         // non-downsampled path. Scale by 255² to match CPU 0-255 convention.
-        const tenengradMean = (tenengradSum / analyzePixelCount) * 65025;
-        const laplacianMean = (laplacianSum / analyzePixelCount) * 65025;
-
-        // Combined sharpness = geometric mean of Tenengrad and Laplacian
-        // Geometric mean naturally balances metrics regardless of their absolute scales
-        const sharpness = Math.sqrt(tenengradMean * laplacianMean);
+        const sharpness = (tenengradSum / analyzePixelCount) * 65025;
 
         // Get circularity, centroid, and tilt angle from GPU (computed in
         // circularityFinalShader). These are in ANALYZE-coordinate space when
@@ -1315,8 +1306,6 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
         // Build result object
         const result = {
             sharpness,
-            tenengrad: tenengradMean,
-            laplacian: laplacianMean,
             circularity,
             tiltAngle,
             bounds,
@@ -1392,11 +1381,10 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropWidth, 
         packedGraySize: packedGraySize,                 // Packed u8 grayscale for template matching (4 pixels per u32)
         graySize: batchSize * cropPixelCount * 4,       // Grayscale float (always f32)
         tenengradSize: batchSize * cropPixelCount * 4,
-        laplacianSize: batchSize * cropPixelCount * 4,
-        reductionSize: batchSize * numWorkgroups * 8,
+        reductionSize: batchSize * numWorkgroups * 4,   // 1 float per workgroup (tenengrad)
         momentsSize: batchSize * cropPixelCount * 6 * 4,      // 6 floats per pixel
         momentsReductionSize: batchSize * numWorkgroups * 6 * 4,  // 6 floats per workgroup
-        sharpnessFinalSize: batchSize * 2 * 4,          // 2 floats per frame (tenengrad, laplacian)
+        sharpnessFinalSize: batchSize * 4,              // 1 float per frame (tenengrad)
         bitDepth,
         numWorkgroups  // Store for use in shader params
     };
@@ -1411,7 +1399,6 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropWidth, 
         cachedCropConfig.packedGraySize >= requiredSizes.packedGraySize &&
         cachedCropConfig.graySize >= requiredSizes.graySize &&
         cachedCropConfig.tenengradSize >= requiredSizes.tenengradSize &&
-        cachedCropConfig.laplacianSize >= requiredSizes.laplacianSize &&
         cachedCropConfig.momentsSize >= requiredSizes.momentsSize &&
         cachedCropConfig.reductionSize >= requiredSizes.reductionSize &&
         cachedCropConfig.momentsReductionSize >= requiredSizes.momentsReductionSize &&
@@ -1460,7 +1447,6 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropWidth, 
         grayBuffer: storageBuffer(device, requiredSizes.graySize, { copySrc: true }),
         grayReadbacks: createBufferArray(requiredSizes.graySize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         tenengradBuffer: storageBuffer(device, requiredSizes.tenengradSize),
-        laplacianBuffer: storageBuffer(device, requiredSizes.laplacianSize),
         reductionBuffer: storageBuffer(device, requiredSizes.reductionSize, { copySrc: true }),
         readbackBuffers: createBufferArray(requiredSizes.reductionSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         momentsBuffer: storageBuffer(device, requiredSizes.momentsSize),
@@ -1470,7 +1456,7 @@ async function getCropAnalyzeBuffers(batchSize, srcWidth, srcHeight, cropWidth, 
         grayParamsBuffer: uniformBuffer(device, 16),
         reductionParamsBuffer: uniformBuffer(device, 16),
         momentsParamsBuffer: uniformBuffer(device, 16),
-        // Final sharpness reduction: 2 floats per frame (tenengrad, laplacian)
+        // Final sharpness reduction: 1 float per frame (tenengrad)
         sharpnessFinalBuffer: storageBuffer(device, requiredSizes.sharpnessFinalSize, { copySrc: true }),
         sharpnessFinalReadbacks: createBufferArray(requiredSizes.sharpnessFinalSize, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST),
         sharpnessFinalParamsBuffer: uniformBuffer(device, 16)
@@ -1570,11 +1556,11 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropWidth, cropH
     const grayBindGroup = createBindGroup(device, grayPipeline, [
         buffers.grayParamsBuffer, buffers.croppedRgbaBuffer, buffers.grayBuffer
     ]);
-    const lapBindGroup = createBindGroup(device, tenengradPipeline, [
-        buffers.grayParamsBuffer, buffers.grayBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer
+    const sharpnessBindGroup = createBindGroup(device, tenengradPipeline, [
+        buffers.grayParamsBuffer, buffers.grayBuffer, buffers.tenengradBuffer
     ]);
     const reduceBindGroup = createBindGroup(device, reductionPipeline, [
-        buffers.reductionParamsBuffer, buffers.tenengradBuffer, buffers.laplacianBuffer, buffers.reductionBuffer
+        buffers.reductionParamsBuffer, buffers.tenengradBuffer, buffers.reductionBuffer
     ]);
     const momentsBindGroup = createBindGroup(device, momentsPipeline, [
         buffers.momentsParamsBuffer, buffers.grayBuffer, buffers.momentsBuffer
@@ -1741,7 +1727,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropWidth, cropH
     // Combined pass: Tenengrad + Moments (both read from grayBuffer, independent outputs)
     pass = encoder.beginComputePass();
     pass.setPipeline(tenengradPipeline);
-    pass.setBindGroup(0, lapBindGroup);
+    pass.setBindGroup(0, sharpnessBindGroup);
     pass.dispatchWorkgroups(Math.ceil(cropWidth / 16), Math.ceil(cropHeight / 16), batchSize);
     pass.setPipeline(momentsPipeline);
     pass.setBindGroup(0, momentsBindGroup);
@@ -1768,7 +1754,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropWidth, cropH
     // Copy results to readback buffers
     // 16-bit needs 4x more bytes per pixel (4 floats vs 1 packed u32)
     const croppedRgbaCopySize = batchSize * cropPixelCount * (bitDepth === 16 ? 16 : 4);
-    encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroups * 8);
+    encoder.copyBufferToBuffer(buffers.reductionBuffer, 0, readbackBuf, 0, batchSize * numWorkgroups * 4);
     encoder.copyBufferToBuffer(buffers.momentsReductionBuffer, 0, momentsReadbackBuf, 0, batchSize * numWorkgroups * 6 * 4);
     encoder.copyBufferToBuffer(buffers.croppedRgbaBuffer, 0, croppedReadbackBuf, 0, croppedRgbaCopySize);
     encoder.copyBufferToBuffer(buffers.packedGrayBuffer, 0, packedGrayReadbackBuf, 0, packedGraySize);
@@ -1837,18 +1823,13 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropWidth, cropH
     // Process results
     const results = [];
     for (let i = 0; i < batchSize; i++) {
-        // Sum both Tenengrad and Laplacian from workgroups
-        let tenengradSum = 0, laplacianSum = 0;
+        // Sum Tenengrad partials from workgroups
+        let tenengradSum = 0;
         for (let w = 0; w < numWorkgroups; w++) {
-            const idx = (i * numWorkgroups + w) * 2;
-            tenengradSum += reductionData[idx];
-            laplacianSum += reductionData[idx + 1];
+            tenengradSum += reductionData[i * numWorkgroups + w];
         }
         // Scale by 255² = 65025 to match CPU which uses 0-255 grayscale (GPU uses 0-1)
-        const tenengradMean = (tenengradSum / cropPixelCount) * 65025;
-        const laplacianMean = (laplacianSum / cropPixelCount) * 65025;
-        // Combined sharpness = geometric mean of both metrics
-        const sharpness = Math.sqrt(tenengradMean * laplacianMean);
+        const sharpness = (tenengradSum / cropPixelCount) * 65025;
 
         // Sum moments for circularity (6 values per workgroup: m00, m10, m01, m20, m11, m02)
         let m00 = 0, m10 = 0, m01 = 0, m20 = 0, m11 = 0, m02 = 0;
@@ -1897,8 +1878,6 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropWidth, cropH
 
         const result = {
             sharpness,
-            tenengrad: tenengradMean,
-            laplacian: laplacianMean,
             circularity,
             index: frames[i].index,
             width: cropWidth,
@@ -2190,11 +2169,11 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     if (grayOnly) {
         // Offset Tenengrad: reads from full-frame grayscale with per-frame center offsets
         queue.writeBuffer(cropBuffers.paramsBuffer, 0, new Uint32Array([srcWidth, srcHeight, cropSize, batchSize]));
-        const offsetLapBindGroup = createBindGroup(device, offsetTenengradPipeline, [
+        const offsetSharpnessBindGroup = createBindGroup(device, offsetTenengradPipeline, [
             cropBuffers.paramsBuffer, analyzeBuffers.grayBuffer, cropBuffers.centersBuffer,
-            cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer
+            cropBuffers.tenengradBuffer
         ]);
-        addComputePass(encoder, offsetTenengradPipeline, offsetLapBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
+        addComputePass(encoder, offsetTenengradPipeline, offsetSharpnessBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
     } else {
         // Standard path: grayscale from cropped RGBA + tenengrad on cropped
         // Use Float32 shader for 16-bit RGBA (4 floats per pixel), regular shader for 8-bit (packed u32)
@@ -2203,21 +2182,21 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         const cropGrayBindGroup = createBindGroup(device, cropGrayPipeline, [
             cropBuffers.grayParamsBuffer, cropBuffers.croppedRgbaBuffer, cropBuffers.grayBuffer
         ]);
-        const lapBindGroup = createBindGroup(device, tenengradPipeline, [
-            cropBuffers.grayParamsBuffer, cropBuffers.grayBuffer, cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer
+        const sharpnessBindGroup = createBindGroup(device, tenengradPipeline, [
+            cropBuffers.grayParamsBuffer, cropBuffers.grayBuffer, cropBuffers.tenengradBuffer
         ]);
         addComputePass(encoder, cropGrayPipeline, cropGrayBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
-        addComputePass(encoder, tenengradPipeline, lapBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
+        addComputePass(encoder, tenengradPipeline, sharpnessBindGroup, imageWorkgroups(cropSize, cropSize, batchSize));
     }
 
     // Reduction is the same for both paths (reads from tenengradBuffer)
     const reductionBindGroup = createBindGroup(device, reductionPipeline, [
-        cropBuffers.reductionParamsBuffer, cropBuffers.tenengradBuffer, cropBuffers.laplacianBuffer, cropBuffers.reductionBuffer
+        cropBuffers.reductionParamsBuffer, cropBuffers.tenengradBuffer, cropBuffers.reductionBuffer
     ]);
     addComputePass(encoder, reductionPipeline, reductionBindGroup, reductionWorkgroups(numWorkgroupsCrop, batchSize));
 
-    // Final sharpness reduction: sum all workgroup partials into 2 floats per frame
-    // This reduces readback from ~1.1MB to 800 bytes per batch
+    // Final sharpness reduction: sum all workgroup partials into 1 float per frame
+    // This reduces readback from ~1.1MB to a few hundred bytes per batch
     queue.writeBuffer(cropBuffers.sharpnessFinalParamsBuffer, 0, new Uint32Array([numWorkgroupsCrop, batchSize, cropPixelCount, 0]));
     const sharpnessFinalBindGroup = createBindGroup(device, sharpnessFinalPipeline, [
         cropBuffers.sharpnessFinalParamsBuffer, cropBuffers.reductionBuffer, cropBuffers.sharpnessFinalBuffer
@@ -2232,8 +2211,8 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     const boundsReadbackBuf = cropBuffers.boundsOutputReadbacks[bufferIdx];
     const grayReadbackBuf = cropBuffers.grayReadbacks[bufferIdx];
 
-    // Copy results for readback (sharpnessFinal is only 800 bytes vs 1.1MB for partial sums)
-    encoder.copyBufferToBuffer(cropBuffers.sharpnessFinalBuffer, 0, sharpnessReadbackBuf, 0, batchSize * 2 * 4);
+    // Copy results for readback (sharpnessFinal is a few hundred bytes vs 1.1MB for partial sums)
+    encoder.copyBufferToBuffer(cropBuffers.sharpnessFinalBuffer, 0, sharpnessReadbackBuf, 0, batchSize * 4);
     encoder.copyBufferToBuffer(cropBuffers.boundsOutputBuffer, 0, boundsReadbackBuf, 0, batchSize * 16);
     // Copy cropped RGBA and grayscale only when not in grayOnly mode (saves significant bandwidth)
     if (!grayOnly) {
@@ -2303,7 +2282,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         tAfterMapAsync = performance.now();
         dcaMapAsyncTime += (tAfterMapAsync - tAfterSubmit);
 
-        // Read final sharpness values (2 floats per frame: tenengrad, laplacian)
+        // Read final sharpness values (1 float per frame: tenengrad)
         sharpnessData = new Float32Array(sharpnessReadbackBuf.getMappedRange().slice(0));
         // Read bounds computed by GPU centroid shader
         boundsData = new Uint32Array(boundsReadbackBuf.getMappedRange().slice(0));
@@ -2381,16 +2360,11 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
     // Build results
     const results = [];
     for (let i = 0; i < batchSize; i++) {
-        // Read final sharpness values from GPU (already scaled and averaged by sharpnessFinalShader)
-        const tenengradMean = sharpnessData[i * 2];
-        const laplacianMean = sharpnessData[i * 2 + 1];
-        // Combined sharpness = geometric mean of both metrics
-        const sharpness = Math.sqrt(tenengradMean * laplacianMean);
+        // Read final sharpness from GPU (already scaled and averaged by sharpnessFinalShader)
+        const sharpness = sharpnessData[i];
 
         const result = {
             sharpness,
-            tenengrad: tenengradMean,
-            laplacian: laplacianMean,
             circularity: bounds[i]?.circularity || 0,
             index: frames[i].index,
             bounds: bounds[i],

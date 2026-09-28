@@ -8,7 +8,7 @@ Planetary stacking (lucky imaging) combines hundreds or thousands of video frame
 
 ## Key Features
 
-- **Frame Analysis**: Automatic sharpness ranking using Laplacian variance. Quality histogram for manual threshold selection.
+- **Frame Analysis**: Automatic sharpness ranking using a Tenengrad (Sobel gradient) score. Quality histogram for manual threshold selection.
 - **Auto-Cropping**: Detects and centers the target in each frame. Rejects frames where the planet is cut off.
 - **Local Alignment**: Alignment Points (APs) distributed across the frame track local atmospheric distortion using template matching.
 - **De-warping**: Displacement maps correct atmospheric wobble using inverse distance weighted interpolation.

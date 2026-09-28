@@ -39,15 +39,7 @@
 					</div>
 					<div class="info-row">
 						<span class="label">Sharpness:</span>
-						<span class="value">{{ formatScore(result.combined) }}</span>
-					</div>
-					<div class="info-row small">
-						<span class="label">Tenengrad:</span>
-						<span class="value">{{ formatScore(result.tenengrad) }}</span>
-					</div>
-					<div class="info-row small">
-						<span class="label">Laplacian:</span>
-						<span class="value">{{ formatScore(result.laplacian) }}</span>
+						<span class="value">{{ formatScore(result.sharpness) }}</span>
 					</div>
 				</div>
 			</div>
@@ -109,11 +101,6 @@ onUnmounted(() => {
 
 const sortedResults = computed(() => {
     return [...props.results].sort((a, b) => a.percentage - b.percentage);
-});
-
-const maxCombined = computed(() => {
-    if (props.results.length === 0) return 0;
-    return Math.max(...props.results.map(r => r.combined));
 });
 
 function formatScore(val) {

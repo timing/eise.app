@@ -1203,7 +1203,7 @@ function applyCropWithPadding(srcMat, cropRegion, frameWidth, frameHeight) {
 
 
 function calculateSharpnessFromMat(grayMat, frameIndex) {
-    // Use Tenengrad (Sobel-based) sharpness metric - more robust than Laplacian variance
+    // Tenengrad (Sobel-based) sharpness metric — matches the WebGPU path exactly
     // Tenengrad = sum of squared Sobel gradients, normalized by image size
 
     if (!_cv || !_cv.Mat) {

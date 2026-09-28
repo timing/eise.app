@@ -658,9 +658,7 @@ function handleContinuousSelected(result) {
     const formattedResults = continuousResults.value.map(res => ({
         id: `continuous-${res.percentage}`,
         name: `${res.percentage}% Stack`,
-        sharpness: res.combined,
-        tenengrad: res.tenengrad,
-        laplacian: res.laplacian,
+        sharpness: res.sharpness,
         frameCount: res.frameCount,
         result: {
             blob: res.blob,

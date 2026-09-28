@@ -11,9 +11,7 @@
                 
                 <!-- Continuous stacking sharpness info -->
                 <div v-if="isContinuousMode && currentResult" class="sharpness-info">
-                    S: <span class="score">{{ formatScore(currentResult.sharpness) }}</span> 
-                    (T: <span class="score">{{ formatScore(currentResult.tenengrad) }}</span>, 
-                    L: <span class="score">{{ formatScore(currentResult.laplacian) }}</span>)
+                    Sharpness: <span class="score">{{ formatScore(currentResult.sharpness) }}</span>
                 </div>
 			</span>
 			<button class="nav-btn" @click="nextImage" :disabled="currentIndex >= results.length - 1 || isNavigating">&rarr;</button>

@@ -18,7 +18,7 @@
 			<p>Understanding what happens under the hood helps you get better results:</p>
 			<ul>
 				<li><strong>File support:</strong> SER files (recommended for planetary imaging), AVI (uncompressed), any video format via FFmpeg.js, or a sequence of camera RAW photos (CR2, CR3, NEF, ARW, RAF, DNG and more) straight off a DSLR or mirrorless body</li>
-				<li><strong>Frame ranking:</strong> Laplacian variance calculates sharpness for each frame. You manually select the quality threshold using a histogram graph.</li>
+				<li><strong>Frame ranking:</strong> A Tenengrad (Sobel gradient) score measures sharpness for each frame. You manually select the quality threshold using a histogram graph.</li>
 				<li><strong>Auto-crop:</strong> Detects and centers the target in each frame. For planets, frames where the disk is cut off are automatically rejected.</li>
 				<li><strong>Surface mode:</strong> For Moon and Sun closeups, enables drift tracking to handle larger frame-to-frame motion.</li>
 				<li><strong>Local alignment:</strong> Alignment Points (APs) are distributed across the frame and track local motion using template matching.</li>

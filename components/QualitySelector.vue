@@ -64,7 +64,7 @@
 					<div class="stat">
 						<div class="stat-label">Sharpness</div>
 						<div class="stat-value">{{ previewFrame.sharpness?.toFixed(2) || '?' }}</div>
-						<div class="stat-sub">Tenengrad {{ previewFrame.tenengrad?.toFixed(2) || '?' }} · Laplacian {{ previewFrame.laplacian?.toFixed(2) || '?' }}</div>
+						<div class="stat-sub">Tenengrad</div>
 					</div>
 					<div class="stat">
 						<div class="stat-label">Circularity</div>

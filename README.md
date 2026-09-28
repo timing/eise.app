@@ -7,7 +7,7 @@ The name is an ode to [Eise Eisinga](https://en.wikipedia.org/wiki/Eise_Eisinga)
 ## How it works
 
 1. **Load your capture** - Select a SER file (recommended), AVI, or any video format
-2. **Frame ranking** - Sharpness analysis scores each frame using Laplacian variance
+2. **Frame ranking** - Sharpness analysis scores each frame using Tenengrad (Sobel gradient energy)
 3. **Quality selection** - Choose which percentage of frames to stack with an interactive quality graph
 4. **Auto-crop** - Detects and centers the target in each frame, rejects cut-off frames
 5. **Local alignment** - Alignment Points (APs) track motion across the frame using template matching
