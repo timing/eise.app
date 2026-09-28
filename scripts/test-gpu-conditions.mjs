@@ -15,6 +15,8 @@ const CASES = [
     ['validation_cascade', 'WebGPU validation error: [Invalid Buffer (unlabeled)] is invalid due to a previous error.'],
     ['validation_cascade', 'WebGPU validation error: [Invalid BindGroup (unlabeled)] is invalid due to a previous error.\n - While encoding [ComputePassEncoder (unlabeled)].SetBindGroup(0, ...)'],
     ['validation_cascade', 'WebGPU validation error: [Invalid CommandBuffer] is invalid due to a previous error.\n - While calling [Queue].Submit'],
+    // Same cascade without the explanatory tail (EISE-RQ, Chrome 154).
+    ['validation_cascade', 'Stacking GPU uncaptured error: [Invalid CommandBuffer] is invalid.\n - While calling [Queue].Submit([[Invalid CommandBuffer]])'],
 
     // --- device loss family (EISE-NJ/P3/P0/MK/NV/MR/ME/JJ/GD/MW) ---
     ['device_lost', 'GPU device lost and recovery failed: No WebGPU adapter found. Please reload the page.'],
@@ -47,6 +49,9 @@ const CASES = [
     [null, 'GPU worker not initialized'],
     [null, 'GPU worker crashed - try reloading the page'],
     [null, 'layout size is invalid'],
+    // The root cause behind the EISE-RQ cascade: a real dispatch bug, and the
+    // one event in the sequence worth a stacktrace.
+    [null, 'Stacking GPU uncaptured error: Dispatch workgroup count X (94376) exceeds max compute workgroups per dimension (65535).'],
     [null, 'Worker initialization timed out after 10s'],
     [null, 'Decoder stalled: no frame output in 12020ms (queue=4, frames_out=48, packets_in=55)'],
     [null, 'Stacking failed: no valid frames'],

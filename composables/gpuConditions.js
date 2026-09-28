@@ -19,7 +19,11 @@ export const GPU_CONDITIONS = [
     // uncaptured error for EVERY later operation that touches it. EISE-NH was
     // 2,412 events, all downstream echoes of a root cause that is reported
     // separately, up to 30+ from a single session. Never worth sending.
-    { kind: 'validation_cascade', test: /is invalid due to a previous error/i },
+    // Chrome drops the "due to a previous error" tail on the Submit-time echo
+    // ("[Invalid CommandBuffer] is invalid."), so match the [Invalid <Object>]
+    // prefix too. Narrow on purpose: "layout size is invalid" is a real defect
+    // and must keep reaching Sentry.
+    { kind: 'validation_cascade', test: /is invalid due to a previous error|\[Invalid [^\]]+\] is invalid/i },
 
     // Control-flow sentinel thrown by safeMapAsync in webgpu_analyze_worker.js
     // and webgpu_stacking.js: the device WAS recovered and the caller should

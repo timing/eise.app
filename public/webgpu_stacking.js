@@ -286,7 +286,11 @@ struct BlurParams {
     width: u32,
     height: u32,
     numFrames: u32,
-    padding: u32,
+    // Workgroups dispatched in X. The packed element count for a full-sensor
+    // RAW frame overruns maxComputeWorkgroupsPerDimension (65535) on its own
+    // (a 24 MP frame at 4 frames/batch needs 94,376), so the dispatch spills
+    // into Y and the shader re-linearises it here.
+    dispatchWidth: u32,
 }
 
 const BLACK_THRESHOLD: u32 = 12u;  // Skip blur if any neighbor is below this
@@ -388,7 +392,7 @@ fn blurPixel(frameIdx: u32, x: i32, y: i32) -> u32 {
 @compute @workgroup_size(256, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let totalPacked = (params.width * params.height * params.numFrames + 3u) / 4u;
-    let packedIdx = gid.x;
+    let packedIdx = gid.y * params.dispatchWidth * 256u + gid.x;
 
     if (packedIdx >= totalPacked) {
         return;
@@ -781,6 +785,15 @@ function reportGpuUncaptured(message) {
             self.postMessage({ type: 'gpu-uncaptured-error', message: `${message}${suffix}` });
         }
     } catch {}
+}
+
+// Split a 1-D workgroup count across X and Y when it exceeds the device's
+// maxComputeWorkgroupsPerDimension. The whole command encoder is rejected when
+// any dispatch in it is over the limit, so an over-wide blur used to silently
+// take the VNG demosaic sharing its encoder down with it (EISE-RQ).
+function splitDispatch(total) {
+    const x = Math.min(Math.max(1, total), MAX_WORKGROUPS_X);
+    return { x, y: Math.ceil(Math.max(1, total) / x) };
 }
 
 // Cached buffers
@@ -1484,7 +1497,10 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropWidth, crop
         size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
-    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropWidth, cropHeight, batchSize, 0]));
+
+    const packedSize = Math.ceil((cropPixelCount * batchSize) / 4);
+    const blurDispatch = splitDispatch(Math.ceil(packedSize / 256));
+    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropWidth, cropHeight, batchSize, blurDispatch.x]));
 
     const blurBindGroup = stackDevice.createBindGroup({
         layout: blurPackedPipeline.getBindGroupLayout(0),
@@ -1495,11 +1511,10 @@ async function demosaicVngCropBatch(frames, srcWidth, srcHeight, cropWidth, crop
         ]
     });
 
-    const packedSize = Math.ceil((cropPixelCount * batchSize) / 4);
     const blurPass = encoder.beginComputePass();
     blurPass.setPipeline(blurPackedPipeline);
     blurPass.setBindGroup(0, blurBindGroup);
-    blurPass.dispatchWorkgroups(Math.ceil(packedSize / 256), 1, 1);
+    blurPass.dispatchWorkgroups(blurDispatch.x, blurDispatch.y, 1);
     blurPass.end();
 
     // Readback both buffers
@@ -2237,7 +2252,10 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropWidth, c
         size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
-    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropWidth, cropHeight, batchSize, 0]));
+    const packedSize = Math.ceil((cropWidth * cropHeight * batchSize) / 4);
+    const blurDispatch = splitDispatch(Math.ceil(packedSize / 256));
+
+    stackQueue.writeBuffer(blurParamsBuffer, 0, new Uint32Array([cropWidth, cropHeight, batchSize, blurDispatch.x]));
 
     const blurBindGroup = stackDevice.createBindGroup({
         layout: blurPackedPipeline.getBindGroupLayout(0),
@@ -2248,13 +2266,10 @@ async function demosaicVngCropBatchGpu(frames, srcWidth, srcHeight, cropWidth, c
         ]
     });
 
-    const packedSize = Math.ceil((cropWidth * cropHeight * batchSize) / 4);
-    const blurWorkgroups = Math.ceil(packedSize / 256);
-
     const blurPass = encoder.beginComputePass();
     blurPass.setPipeline(blurPackedPipeline);
     blurPass.setBindGroup(0, blurBindGroup);
-    blurPass.dispatchWorkgroups(blurWorkgroups, 1, 1);
+    blurPass.dispatchWorkgroups(blurDispatch.x, blurDispatch.y, 1);
     blurPass.end();
 
     stackQueue.submit([encoder.finish()]);

@@ -5,6 +5,15 @@ import { useLiteMode } from '@/composables/useLiteMode';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { reportError } from '@/composables/useSentryReporting';
 
+// Uncaptured stacking-GPU errors, capped per PAGE SESSION. The worker already
+// caps at 3 per device, but a device is built per stack run, so a user retrying
+// the same bad file sent that burst again each time (EISE-RQ: 22 events from a
+// handful of sessions on the first day of a billing cycle). The first errors
+// carry the root cause; the rest are echoes, and the full sequence still rides
+// along in session_logs.
+const MAX_STACK_GPU_ERROR_REPORTS = 3;
+let stackGpuErrorReports = 0;
+
 // Custom error for WebGPU unavailability - callers can catch this to show user choice
 export class WebGPUUnavailableError extends Error {
     constructor(message) {
@@ -32,6 +41,8 @@ export function useStacker() {
                 // counted so a validation failure is diagnosable without having
                 // to reproduce it.
                 addLog(`WebGPU validation error: ${e.data.message}`);
+                if (stackGpuErrorReports >= MAX_STACK_GPU_ERROR_REPORTS) return;
+                stackGpuErrorReports++;
                 reportError(new Error(`Stacking GPU uncaptured error: ${e.data.message}`), {
                     component: 'useStacker',
                     action: 'stackingDevice',
