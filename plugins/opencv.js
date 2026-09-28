@@ -20,7 +20,10 @@ export default defineNuxtPlugin(nuxtApp => {
 		window.__cvLoadPromise = new Promise((resolve, reject) => {
 			console.log('Loading OpenCV...');
 			const script = document.createElement('script');
-			script.src = 'https://cdn.jsdelivr.net/npm/opencv-bindings@4.5.5/index.min.js';
+			// Served from public/ rather than a CDN: the Electron build has no
+			// network guarantee, and a blocked or unreachable jsdelivr took out
+			// the CPU fallback for exactly the users who have no WebGPU (EISE-E).
+			script.src = '/opencv/opencv-bindings-4.5.5.min.js';
 			script.id = 'opencv-script';
 			script.onload = () => {
 				cv['onRuntimeInitialized'] = () => {

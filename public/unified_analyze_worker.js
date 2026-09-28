@@ -39,8 +39,8 @@ function getAviBytesPerPixel(header) {
     return { 'DIB ': 3, 'RGB ': 3, 'Y800': 1, 'YUY2': 2, 'UYVY': 2, 'RGBA': 4 }[fourCC] || 3;
 }
 
-// Load OpenCV
-self.importScripts('https://cdn.jsdelivr.net/npm/opencv-bindings@4.5.5/index.min.js');
+// Load OpenCV. Served from our own origin, see plugins/opencv.js.
+self.importScripts('/opencv/opencv-bindings-4.5.5.min.js');
 
 // Wait for OpenCV WASM and then call callback
 function waitForOpenCV(onReady, onError) {

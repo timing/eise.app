@@ -3,7 +3,8 @@
 	Runs in parallel with other channel workers for ~3x speedup.
 */
 
-self.importScripts('https://cdn.jsdelivr.net/npm/opencv-bindings@4.5.5/index.min.js');
+// Served from our own origin, see plugins/opencv.js.
+self.importScripts('/opencv/opencv-bindings-4.5.5.min.js');
 
 let _cv = null;
 let isCvReady = false;

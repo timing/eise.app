@@ -81,3 +81,13 @@ Cache-Control: no-cache, must-revalidate
 /libraw/*
 Cross-Origin-Embedder-Policy: require-corp
 Cache-Control: no-cache, must-revalidate
+
+# opencv-bindings is served from public/ rather than cdn.jsdelivr.net: the
+# Electron build has no network guarantee, and a blocked CDN took out the CPU
+# fallback for exactly the users who have no WebGPU (EISE-E). Loaded by
+# plugins/opencv.js as a <script> and by unified_analyze_worker.js /
+# deconv_channel_worker.js via importScripts, so it needs COEP on a
+# require-corp page. The version is in the filename, so it can cache forever.
+/opencv/*
+Cross-Origin-Embedder-Policy: require-corp
+Cache-Control: public, max-age=31536000, immutable
