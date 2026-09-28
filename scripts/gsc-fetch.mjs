@@ -29,6 +29,10 @@ const SEO_DIR = path.join(repoRoot, 'seo-data');
 // so coverage state shows up in reports before organic impressions accumulate.
 const ALWAYS_INSPECT_URLS = [
 	'https://eise.app/seestar-planetary-stacking/',
+	// Prerendered 2026-09-19 (gallery fetch moved to useAsyncData). Graded on
+	// Google Images indexation 2026-11-15, so coverage state must be tracked
+	// through the ramp. Sits below the top-10-by-impressions cutoff.
+	'https://eise.app/gallery/',
 ];
 
 const auth = new google.auth.GoogleAuth({
