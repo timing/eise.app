@@ -88,17 +88,27 @@ noise 10%, uncorrelated noise 110%.
 - **Auto AP sizing is default on.** It has already failed once, on a 48px crop,
   producing a near-black stack. Everything here was calibrated on a 384px frame
   plus synthetics. **Default it off until the small-crop regime is covered.**
-- **Search radius must not be derived from the measured subject.** A `D/15` rule
-  regressed two real captures. On an uncropped frame containing a moon, the
-  area-based diameter inflated past 503px, hit the 34px ceiling and handed the
-  matcher a window it filled with 20px of random wander, visibly wobbling the
-  planet. Reverted to the 8/34 defaults.
+- **UNVERIFIED: the bundled sample clip stacked visibly wobbly on this branch.**
+  Jupiter came out non-round where prod renders it round, on the clip every new
+  user stacks first, so this is a user-facing regression and not a curiosity.
+  Diagnosis was a `D/15` search-radius rule: the frame is uncropped and contains
+  a moon, so the area-based diameter inflated past 503px, hit the 34px ceiling
+  and handed the matcher a window it promptly filled with 20px of random wander
+  (`mean 20.57px`, `disagree 70.3%`, `capped 10.7%`). The rule is reverted to the
+  8/34 defaults, which should bound wander at 8px, **but the clip was never
+  re-stacked after the revert**. Re-run it and confirm round before trusting any
+  of this. If it is still wobbly, the next suspect is the trackability gate
+  thinning APs (see noise averaging below), which on that same clip kept only
+  972 of 3311.
+- **Search radius must not be derived from the measured subject.** Two real
+  captures regressed when it was. Keep it at the 8/34 defaults and let the
+  `capped` readout say when a specific file needs more.
 - **`measureTargetDiameter` sums total lit area**, so it does not isolate the
   largest object and is unreliable with more than one subject (Jupiter plus a
   moon) or with bright background. It now only caps patch size, where an
   overestimate is mostly harmless, but the `target Npx` readout is not trustworthy.
-- **The trackability gate can cost noise averaging.** On one clip it kept 972 of
-  3311 APs. The warp at each pixel is a Gaussian average over APs within
+- **The trackability gate can cost noise averaging.** On the wobbly sample clip
+  above it kept 972 of 3311 APs. The warp at each pixel is a Gaussian average over APs within
   `patchSize * 4`, so thinning the set by ~3.4x raises field noise by roughly
   sqrt of that, ~1.9x. Filtering helps when bad APs are *biased* and hurts when
   they are merely *noisy*. This trade-off is untested.
@@ -110,6 +120,11 @@ noise 10%, uncorrelated noise 110%.
 
 ## Next steps, in order
 
+0. **Re-stack the bundled sample clip and confirm Jupiter is round.** It was
+   visibly wobbly on this branch and the fix is unverified. Nothing else here
+   matters until that is known, because it is the first file every new user
+   stacks. Compare `disagree` and `capped` against the pre-revert numbers
+   (`mean 20.57px`, `disagree 70.3%`, `capped 10.7%`).
 1. **Default auto AP sizing off.** One line. Do this before anything else goes to
    prod.
 2. **Quality-based fallback.** The current fallback counts APs, which cannot
