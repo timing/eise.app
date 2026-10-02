@@ -26,6 +26,10 @@ const inputFilenameWithExt = ref('');
 const stackJobId = ref('');
 const minApQuality = ref(0.3);
 const apPatchSize = ref(20);
+// When true, patch size and search radius are derived from the subject instead
+// of the manual values: scaled to the measured disk for planetary, to the frame
+// for surface. See autoAlignmentGeometry in useStacker.
+const autoApSizing = ref(true);
 // Multiplier on the alignment-point grid spacing. 1 = current density.
 // Higher = sparser grid = fewer APs. AP count falls with the SQUARE of this,
 // so 2 is roughly a quarter of the alignment points. Same kind of quality-for-
@@ -131,6 +135,14 @@ export function useProcessingState() {
 
     function getMinApQuality() {
         return minApQuality.value;
+    }
+
+    function setAutoApSizing(value) {
+        autoApSizing.value = !!value;
+    }
+
+    function getAutoApSizing() {
+        return autoApSizing.value;
     }
 
     function setApPatchSize(value) {
@@ -299,6 +311,9 @@ export function useProcessingState() {
         apPatchSize,
         setApPatchSize,
         getApPatchSize,
+        autoApSizing,
+        setAutoApSizing,
+        getAutoApSizing,
         apSpacingScale,
         setApSpacingScale,
         getApSpacingScale,

@@ -769,6 +769,29 @@ function reportNcc(kind, props) {
     } catch {}
 }
 
+// Hand the raw (dx, dy, score) triples to the main thread for the local-warp
+// histogram. Only the fully-GPU raw Bayer path needs this: every other path
+// already reads its shifts back. Diagnostic only - a failure here must never
+// take the stack down with it.
+async function reportWarpShifts(shiftsGpuBuffer, resultsSize) {
+    if (typeof WorkerGlobalScope === 'undefined' || !(self instanceof WorkerGlobalScope)) return;
+    let staging = null;
+    try {
+        staging = checkedReadbackBuffer(stackDevice, resultsSize, 'warpShifts.readback');
+        const encoder = stackDevice.createCommandEncoder();
+        encoder.copyBufferToBuffer(shiftsGpuBuffer, 0, staging, 0, resultsSize);
+        stackQueue.submit([encoder.finish()]);
+        await safeStackMapAsync(staging, GPUMapMode.READ);
+        const shifts = new Float32Array(staging.getMappedRange().slice(0));
+        staging.unmap();
+        self.postMessage({ type: 'warp-shifts', shifts }, [shifts.buffer]);
+    } catch (err) {
+        console.warn('[stacking] warp shift readback failed:', err.message);
+    } finally {
+        try { staging?.destroy(); } catch {}
+    }
+}
+
 // Uncaptured WebGPU errors on the stacking device. Capped per device because a
 // single invalid buffer makes every later operation that touches it raise one
 // too, and an unbounded relay would just move that firehose onto the beacon.
@@ -2924,6 +2947,11 @@ async function matchTemplatesFullyGpu(grayGpuBuffer, refGrayData, width, height,
     paramsBuffer.destroy();
     templatesBuffer.destroy();
     searchPosBuffer.destroy();
+
+    // The shifts stay on the GPU from here on, so this is the only chance to
+    // see them. Copy them out for the local-warp histogram (tens of KB per
+    // batch, behind work the GPU has already finished).
+    await reportWarpShifts(shiftsGpuBuffer, resultsSize);
 
     return {
         shiftsGpuBuffer,
