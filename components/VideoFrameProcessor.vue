@@ -64,9 +64,33 @@
 				</div>
 			</div>
 
-			<div v-if="processingStage === 'stacking' && referenceFrame" class="preview-frame">
-				<h4 class="preview-label">Reference frame for alignment</h4>
-				<canvas ref="referenceFrameCanvas"></canvas>
+			<div v-if="processingStage === 'stacking' && referenceFrame" class="preview-frame" :class="{ 'dual-preview': alignmentOverlay }">
+				<h4 class="preview-label">Reference frame for alignment{{ alignmentOverlay ? ' (frame vs alignment points)' : '' }}</h4>
+				<div class="dual-canvas-row">
+					<div class="canvas-wrapper">
+						<span v-if="alignmentOverlay" class="canvas-label">Reference frame</span>
+						<canvas ref="referenceFrameCanvas"></canvas>
+					</div>
+					<div v-if="alignmentOverlay" class="canvas-wrapper">
+						<span class="canvas-label">Alignment points (stretched)</span>
+						<canvas ref="alignmentCanvas"></canvas>
+					</div>
+				</div>
+				<div v-if="apReviewOpen" class="ap-review-bar">
+					<span>Paused so you can check the alignment points.</span>
+					<label class="ap-review-field">
+						AP size
+						<input type="number" min="10" step="2" v-model.number="apSizeDraft" class="number-input" />
+						px
+					</label>
+					<span v-if="apRebuilding" class="ap-review-status">rebuilding…</span>
+					<button type="button" class="ap-review-continue" @click="continueFromApReview">Continue stacking</button>
+				</div>
+				<p v-if="alignmentOverlay" class="frame-stats">
+					{{ alignmentOverlay.alignmentPoints.length }} alignment points · {{ alignmentOverlay.patchSize }}px patches{{ alignmentOverlay.autoPatchSize === false ? ' (manual)' : ' (measured)' }} · {{ alignmentOverlay.searchRadius }}px search
+					<template v-if="alignmentOverlay.overlapPct != null"> · {{ alignmentOverlay.overlapPct }}% overlap</template>
+					<template v-if="alignmentOverlay.localWarp === false"><br>local de-warping off, aligning globally</template>
+				</p>
 			</div>
 
 			<!-- Nothing to show yet: hold the space so the column does not pop. -->
@@ -154,6 +178,40 @@ const refCandidate = ref(null);  // Most circular from top frames
 const bestFrameCanvas = ref(null);
 const bestFrameGrayCanvas = ref(null);  // Grayscale preview for side-by-side comparison
 const referenceFrameCanvas = ref(null);
+const alignmentOverlay = ref(null);
+const alignmentCanvas = ref(null);
+const apReviewOpen = ref(false);
+
+const apSizeDraft = ref(null);
+const apRebuilding = ref(false);
+let apResizeTimer = null;
+
+function continueFromApReview() {
+	clearTimeout(apResizeTimer);
+	apReviewOpen.value = false;
+	emit('ap-review-continue');
+}
+
+// Rebuild as the number changes, rather than behind a button.
+//
+// Debounced because a number input emits on every keystroke: typing "80" goes
+// 8 then 80, and "120" goes 1, 12, 120, so firing on each one would rebuild
+// the grid at sizes nobody asked for. The review bar deliberately stays open
+// during the rebuild; the stacker re-publishes the grid and the overlay
+// redraws underneath, which is the whole point of changing the value here.
+const AP_RESIZE_DEBOUNCE_MS = 450;
+watch(apSizeDraft, (val) => {
+	if (!apReviewOpen.value) return;
+	clearTimeout(apResizeTimer);
+	const size = Math.round(Number(val));
+	if (!Number.isFinite(size) || size < 10) return;
+	// Seeding the field from a rebuilt grid must not trigger another rebuild.
+	if (size === alignmentOverlay.value?.patchSize) return;
+	apResizeTimer = setTimeout(() => {
+		apRebuilding.value = true;
+		emit('ap-review-continue', { patchSize: size });
+	}, AP_RESIZE_DEBOUNCE_MS);
+});
 const refCandidateCanvas = ref(null);
 const croppedSerData = ref(null);
 const skippedFrames = ref(0);
@@ -264,6 +322,10 @@ onMounted(async () => {
 			bestFrame.value = null;
 			referenceFrame.value = null;
 			refCandidate.value = null;
+			alignmentOverlay.value = null;
+			apReviewOpen.value = false;
+			apRebuilding.value = false;
+			clearTimeout(apResizeTimer);
 		}
 	});
 
@@ -295,6 +357,21 @@ onMounted(async () => {
 			updateReferenceFrameCanvas();
 		}
 	});
+
+	// Emitted once the AP grid is built, which is after stacking-started, so the
+	// frame may already be on the canvas. Redraw rather than depend on ordering.
+	on('alignment-points', (data) => {
+		alignmentOverlay.value = data;
+		// Set after the overlay, so the watcher above sees them equal and does
+		// not bounce straight into another rebuild.
+		apSizeDraft.value = data.patchSize;
+		apRebuilding.value = false;
+		updateReferenceFrameCanvas();
+	});
+
+	on('ap-review-open', () => { apReviewOpen.value = true; });
+	// Closed by the stacker itself too, so cancelling mid-review clears the bar.
+	on('ap-review-closed', () => { apReviewOpen.value = false; });
 
 	on('upload-error', (message) => {
 		uploadError.value = message;
@@ -357,25 +434,122 @@ function updateReferenceFrameCanvas() {
 				drawImageOnCanvas(referenceFrameCanvas.value, blob);
 			}
 		}
-	});
-}
-
-function updateRefCandidateCanvas() {
-	nextTick(() => {
-		if (refCandidate.value && refCandidateCanvas.value) {
-			const blob = refCandidate.value instanceof Blob ? refCandidate.value : refCandidate.value?.blob;
+		// Drawn bigger than the plain preview: at half size a 28px patch is 14
+		// wide and the grid collapses into texture.
+		if (referenceFrame.value && alignmentCanvas.value && alignmentOverlay.value) {
+			const blob = referenceFrame.value instanceof Blob ? referenceFrame.value : referenceFrame.value?.blob;
 			if (blob) {
-				drawImageOnCanvas(refCandidateCanvas.value, blob);
+				drawImageOnCanvas(alignmentCanvas.value, blob, drawAlignmentPoints, { minSize: 260, stretch: true });
 			}
 		}
 	});
 }
 
-function drawImageOnCanvas(canvas, blob) {
+// Draw the AP grid over the reference frame: every patch at its true size and
+// position, translucent fill with a solid border.
+//
+// Overlap shows itself through the fill, so the fill has to be strong enough to
+// see. Coverage is not uniform: at 50% overlap a pixel sits under 1, 2, 3 or 4
+// patches depending on where it falls between centres, and stacked alpha turns
+// those counts into distinct brightness levels. That banding IS the overlap,
+// which is why PSS's view reads the way it does.
+//
+// Measured at these settings the four levels land at opacity 0.15 / 0.28 /
+// 0.39 / 0.48. Borders stay visible but step back, because at full strength
+// they dominate the very banding that carries the information.
+const AP_OVERLAY_FILL_ALPHA = 0.15;
+const AP_OVERLAY_EDGE_ALPHA = 0.55;
+
+function drawAlignmentPoints(ctx, scale, img) {
+	const overlay = alignmentOverlay.value;
+	if (!overlay?.alignmentPoints?.length) return;
+	// AP coordinates are in reference-frame pixels. If the canvas is showing a
+	// differently sized frame the overlay belongs to another run, and drawing
+	// it would put the markers in the wrong place rather than simply look odd.
+	if (img && overlay.width && overlay.width !== img.width) return;
+
+	const css = getComputedStyle(document.documentElement);
+	// Muted when the points were measured but are not being applied, so the
+	// overlay never implies de-warping that is not happening.
+	const token = overlay.localWarp === false ? '--eise-muted' : '--eise-gilt';
+	const colour = css.getPropertyValue(token).trim() || '#d9a94a';
+
+	const points = overlay.alignmentPoints;
+	const box = Math.max(2, Math.round(overlay.patchSize * scale));
+	const corner = (ap) => [
+		Math.round(ap.x * scale - box / 2),
+		Math.round(ap.y * scale - box / 2),
+	];
+
+	ctx.save();
+	ctx.lineWidth = 1;
+
+	ctx.fillStyle = colour;
+	ctx.globalAlpha = AP_OVERLAY_FILL_ALPHA;
+	for (const ap of points) {
+		const [x, y] = corner(ap);
+		ctx.fillRect(x, y, box, box);
+	}
+
+	ctx.strokeStyle = colour;
+	ctx.globalAlpha = AP_OVERLAY_EDGE_ALPHA;
+	for (const ap of points) {
+		const [x, y] = corner(ap);
+		ctx.strokeRect(x + 0.5, y + 0.5, box, box);
+	}
+	ctx.restore();
+}
+
+// Linear display stretch for the preview.
+//
+// A dim capture can be perfectly good data and still show as near-black, which
+// makes it impossible to judge whether the alignment points landed on the
+// subject. Purely cosmetic: this touches the preview canvas only, never the
+// greyscale the matcher sees or anything that is stacked.
+//
+// Black and white points come from percentiles rather than min/max, so one hot
+// pixel or one dead pixel cannot flatten the whole stretch. The same scale is
+// applied to all three channels so colour balance is preserved.
+const STRETCH_LOW_PCT = 0.005;
+const STRETCH_HIGH_PCT = 0.995;
+function stretchCanvas(ctx, w, h) {
+	if (!w || !h) return;
+	let data;
+	try {
+		data = ctx.getImageData(0, 0, w, h);
+	} catch (e) {
+		return; // tainted canvas; not worth breaking the preview over
+	}
+	const px = data.data;
+	const hist = new Uint32Array(256);
+	for (let i = 0; i < px.length; i += 4) {
+		hist[(px[i] * 77 + px[i + 1] * 150 + px[i + 2] * 29) >> 8]++;
+	}
+	const total = px.length / 4;
+	let lo = 0, hi = 255, acc = 0;
+	for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * STRETCH_LOW_PCT) { lo = v; break; } }
+	acc = 0;
+	for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= total * (1 - STRETCH_HIGH_PCT)) { hi = v; break; } }
+	if (hi - lo < 8) return; // already uses the range, or there is nothing there
+
+	const scale = 255 / (hi - lo);
+	const lut = new Uint8Array(256);
+	for (let v = 0; v < 256; v++) {
+		lut[v] = Math.max(0, Math.min(255, Math.round((v - lo) * scale)));
+	}
+	for (let i = 0; i < px.length; i += 4) {
+		px[i] = lut[px[i]];
+		px[i + 1] = lut[px[i + 1]];
+		px[i + 2] = lut[px[i + 2]];
+	}
+	ctx.putImageData(data, 0, 0);
+}
+
+function drawImageOnCanvas(canvas, blob, afterDraw = null, opts = {}) {
   const ctx = canvas.getContext('2d');
   createImageBitmap(blob).then(img => {
-    // Scale to half size, but ensure minimum 120px display
-    const minSize = 120;
+    // Scale to half size, but ensure a minimum display size
+    const minSize = opts.minSize || 120;
     let scale = 0.5;
     if (img.width * scale < minSize || img.height * scale < minSize) {
       // Scale up to meet minimum size
@@ -386,6 +560,10 @@ function drawImageOnCanvas(canvas, blob) {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    // Stretch before the overlay, never after: the overlay's colours are
+    // chosen from design tokens and must not be rescaled with the image.
+    if (opts.stretch) stretchCanvas(ctx, canvas.width, canvas.height);
+    if (afterDraw) afterDraw(ctx, scale, img);
   }).catch(error => {
     console.error('Error drawing image to canvas:', error, 'Blob size:', blob.size, 'Blob type:', blob.type);
     // Optionally, draw a placeholder or error message on the canvas
@@ -576,6 +754,45 @@ async function processImageFrames(files) {
 		border: 1px solid rgba(255, 255, 255, 0.12);
 		border-radius: 10px;
 		box-shadow: 0 12px 44px rgba(0, 0, 0, 0.45);
+	}
+	.ap-review-bar {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+		flex-wrap: wrap;
+		margin-top: 12px;
+		padding: 10px 14px;
+		border: 1px solid rgba(217, 169, 74, 0.35);
+		border-radius: 8px;
+		background: rgba(217, 169, 74, 0.08);
+		font-size: 13px;
+		color: var(--eise-body);
+	}
+	.ap-review-field {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		color: var(--eise-body);
+	}
+	.ap-review-field .number-input {
+		width: 70px;
+	}
+	.ap-review-status {
+		color: var(--eise-label);
+		font-style: italic;
+	}
+	.ap-review-continue {
+		padding: 6px 14px;
+		border: 1px solid rgba(217, 169, 74, 0.5);
+		border-radius: 6px;
+		background: transparent;
+		font-size: 13px;
+		font-weight: 600;
+		color: var(--eise-gilt);
+		cursor: pointer;
+	}
+	.ap-review-continue:hover {
+		background: rgba(217, 169, 74, 0.14);
 	}
 	.preview-placeholder {
 		display: flex;

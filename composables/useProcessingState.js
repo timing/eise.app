@@ -26,10 +26,14 @@ const inputFilenameWithExt = ref('');
 const stackJobId = ref('');
 const minApQuality = ref(0.3);
 const apPatchSize = ref(20);
-// When true, patch size and search radius are derived from the subject instead
-// of the manual values: scaled to the measured disk for planetary, to the frame
-// for surface. See autoAlignmentGeometry in useStacker.
-const autoApSizing = ref(true);
+// Pause the workflow once the alignment point grid exists, so it can be
+// inspected before any frame is matched against it.
+const showApChecker = ref(false);
+// Manual patch size, set from the AP checker. null means "measure it", which
+// is the default and the only mode reachable without opening the checker:
+// patch size is chosen by measurement, and overridden only by someone looking
+// at the grid that choice produced.
+const apPatchOverride = ref(null);
 // Multiplier on the alignment-point grid spacing. 1 = current density.
 // Higher = sparser grid = fewer APs. AP count falls with the SQUARE of this,
 // so 2 is roughly a quarter of the alignment points. Same kind of quality-for-
@@ -105,6 +109,8 @@ export function useProcessingState() {
     // attempt share one identifier. 8 base-36 chars ≈ 40 bits of entropy —
     // enough for uniqueness within a session without bloating props.
     function startNewStackJob(filename) {
+        // Patch size overrides belong to the grid they were chosen on.
+        apPatchOverride.value = null;
         setInputFilename(filename);
         // A different file deserves a fresh Sentry budget: the SPA never
         // reloads between attempts, so without this the second file of a visit
@@ -137,12 +143,21 @@ export function useProcessingState() {
         return minApQuality.value;
     }
 
-    function setAutoApSizing(value) {
-        autoApSizing.value = !!value;
+    function setApPatchOverride(value) {
+        const n = Number(value);
+        apPatchOverride.value = Number.isFinite(n) && n > 0 ? Math.round(n) : null;
     }
 
-    function getAutoApSizing() {
-        return autoApSizing.value;
+    function getApPatchOverride() {
+        return apPatchOverride.value;
+    }
+
+    function setShowApChecker(value) {
+        showApChecker.value = !!value;
+    }
+
+    function getShowApChecker() {
+        return showApChecker.value;
     }
 
     function setApPatchSize(value) {
@@ -311,9 +326,12 @@ export function useProcessingState() {
         apPatchSize,
         setApPatchSize,
         getApPatchSize,
-        autoApSizing,
-        setAutoApSizing,
-        getAutoApSizing,
+        showApChecker,
+        setShowApChecker,
+        getShowApChecker,
+        apPatchOverride,
+        setApPatchOverride,
+        getApPatchOverride,
         apSpacingScale,
         setApSpacingScale,
         getApSpacingScale,

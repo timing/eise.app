@@ -439,6 +439,9 @@ struct Params {
     pixfrac: f32,         // Drop shrink factor (0.0-1.0, typical 0.7)
 }
 
+const ROBUST_C2: f32 = 4.0;        // reject beyond ~2 sigma, smoothly
+const ROBUST_MIN_VAR: f32 = 0.25;  // 0.5px: below this the points agree
+
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> frameData: array<u32>;      // All frames: Float32 RGBA
 @group(0) @binding(2) var<storage, read> apPositions: array<u32>;    // AP positions: packed (x | y<<16)
@@ -548,6 +551,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let frameIdx = params.frameIdx;
 
+    var weightedSq: f32 = 0.0;
+
     for (var i: u32 = 0u; i < params.numAPs; i++) {
         let shiftIdx = (frameIdx * params.numAPs + i) * 3u;
         let apDx = shifts[shiftIdx] + params.searchOffsetX;
@@ -571,6 +576,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let weight = gaussWeight * quality;
             weightedDx += apDx * weight;
             weightedDy += apDy * weight;
+            weightedSq += (apDx * apDx + apDy * apDy) * weight;
             totalApWeight += weight;
         }
     }
@@ -578,8 +584,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dispX: f32 = 0.0;
     var dispY: f32 = 0.0;
     if (totalApWeight > 0.0) {
-        dispX = weightedDx / totalApWeight;
-        dispY = weightedDy / totalApWeight;
+        let meanX = weightedDx / totalApWeight;
+        let meanY = weightedDy / totalApWeight;
+        dispX = meanX;
+        dispY = meanY;
+
+        // Spread of the contributing shifts about their own mean.
+        let variance = max(weightedSq / totalApWeight - (meanX * meanX + meanY * meanY),
+                           ROBUST_MIN_VAR);
+
+        var robustW: f32 = 0.0;
+        var robustX: f32 = 0.0;
+        var robustY: f32 = 0.0;
+        for (var i: u32 = 0u; i < params.numAPs; i++) {
+            let shiftIdx = (frameIdx * params.numAPs + i) * 3u;
+            let apDx = shifts[shiftIdx] + params.searchOffsetX;
+            let apDy = shifts[shiftIdx + 1u] + params.searchOffsetY;
+            let quality = shifts[shiftIdx + 2u];
+            if (quality < params.minQuality) {
+                continue;
+            }
+            let apPacked = apPositions[i];
+            let dx = cellCenterX - f32(apPacked & 0xFFFFu);
+            let dy = cellCenterY - f32(apPacked >> 16u);
+            let dist2 = dx * dx + dy * dy;
+            if (dist2 < influenceRadius2) {
+                let ddx = apDx - meanX;
+                let ddy = apDy - meanY;
+                let dev2 = ddx * ddx + ddy * ddy;
+                let w = exp(-dist2 / sigma2) * quality / (1.0 + dev2 / (ROBUST_C2 * variance));
+                robustW += w;
+                robustX += apDx * w;
+                robustY += apDy * w;
+            }
+        }
+        if (robustW > 0.0) {
+            dispX = robustX / robustW;
+            dispY = robustY / robustW;
+        }
     }
 
     // Compute brightness scale from GPU buffer
@@ -856,6 +898,9 @@ struct AP {
     _pad: f32,
 }
 
+const ROBUST_C2: f32 = 4.0;        // reject beyond ~2 sigma, smoothly
+const ROBUST_MIN_VAR: f32 = 0.25;  // 0.5px: below this the points agree
+
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> frameData: array<u32>;     // Input: packed Uint8 (1 u32/pixel) or Float32 (reinterpreted)
 @group(0) @binding(2) var<storage, read> apData: array<AP>;         // AP positions + shifts
@@ -971,6 +1016,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var weightedDx: f32 = 0.0;
     var weightedDy: f32 = 0.0;
 
+    var weightedSq: f32 = 0.0;
+
     for (var i: u32 = 0u; i < params.numAPs; i++) {
         let ap = apData[i];
 
@@ -987,6 +1034,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let weight = gaussWeight * ap.quality;
             weightedDx += ap.dx * weight;
             weightedDy += ap.dy * weight;
+            weightedSq += (ap.dx * ap.dx + ap.dy * ap.dy) * weight;
             totalApWeight += weight;
         }
     }
@@ -994,8 +1042,41 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dispX = params.globalOffsetX;
     var dispY = params.globalOffsetY;
     if (totalApWeight > 0.0) {
-        dispX += weightedDx / totalApWeight;
-        dispY += weightedDy / totalApWeight;
+        let meanX = weightedDx / totalApWeight;
+        let meanY = weightedDy / totalApWeight;
+        var bestX = meanX;
+        var bestY = meanY;
+
+        let variance = max(weightedSq / totalApWeight - (meanX * meanX + meanY * meanY),
+                           ROBUST_MIN_VAR);
+
+        var robustW: f32 = 0.0;
+        var robustX: f32 = 0.0;
+        var robustY: f32 = 0.0;
+        for (var i: u32 = 0u; i < params.numAPs; i++) {
+            let ap = apData[i];
+            if (ap.quality < params.minQuality) {
+                continue;
+            }
+            let dx = cellCenterX - ap.x;
+            let dy = cellCenterY - ap.y;
+            let dist2 = dx * dx + dy * dy;
+            if (dist2 < influenceRadius2) {
+                let ddx = ap.dx - meanX;
+                let ddy = ap.dy - meanY;
+                let dev2 = ddx * ddx + ddy * ddy;
+                let w = exp(-dist2 / sigma2) * ap.quality / (1.0 + dev2 / (ROBUST_C2 * variance));
+                robustW += w;
+                robustX += ap.dx * w;
+                robustY += ap.dy * w;
+            }
+        }
+        if (robustW > 0.0) {
+            bestX = robustX / robustW;
+            bestY = robustY / robustW;
+        }
+        dispX += bestX;
+        dispY += bestY;
     }
 
     let fw = params.frameWeight;

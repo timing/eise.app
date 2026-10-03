@@ -23,7 +23,7 @@ export class WebGPUUnavailableError extends Error {
 }
 
 export function useStacker() {
-    const { addLog, emit, on } = useEventBus();
+    const { addLog, emit, on, off } = useEventBus();
 
     // Relay for messages the stacking worker pushes on its own initiative (NCC
     // telemetry, uncaptured GPU errors). addEventListener (not onmessage) on
@@ -58,7 +58,7 @@ export function useStacker() {
     }
     const { captureUnstackedImage, capturePostCropFrame, capturePreCropFrame } = useComparisonExport();
     const { workerUrl } = useWorkerUrl();
-    const { getMinApQuality, getApPatchSize, getPixfrac, getApSpacingScale, getApSliceLimit, getAutoApSizing } = useProcessingState();
+    const { getMinApQuality, getApPatchSize, getPixfrac, getApSpacingScale, getApSliceLimit, getShowApChecker, getApPatchOverride, setApPatchOverride } = useProcessingState();
 
     // Track active workers for cancellation
     let cancelled = false;
@@ -170,37 +170,60 @@ export function useStacker() {
     // really are tracking something that moved. A field as rough as its own
     // magnitude means the NCC argmax is wandering and the "displacements" are
     // noise, which no amount of search window will fix.
-    // Lattice neighbours (left/right/up/down) per AP, as flat typed arrays so a
-    // dense grid does not allocate one JS array per point. Returns null when the
-    // grid is too large to be worth the bookkeeping, which disables the
-    // coherence readout rather than slowing the stack down for a diagnostic.
+    // Nearest neighbours per AP, as flat typed arrays so a dense grid does not
+    // allocate one JS array per point.
+    //
+    // Found by proximity through a spatial hash, not by walking a lattice:
+    // rows are staggered and points near the subject edge get nudged off the
+    // grid entirely, so there is no lattice left to walk. Bucketing by spacing
+    // and checking the 3x3 neighbourhood keeps this linear in AP count.
     const MAX_APS_FOR_COHERENCE = 20000;
-    function buildApNeighbours(alignmentPoints) {
-        if (!alignmentPoints || !alignmentPoints.length) return null;
+    const AP_NEIGHBOUR_RADIUS = 1.3;   // x spacing; catches the 6 neighbours of a staggered grid
+    const AP_MAX_NEIGHBOURS = 6;
+    function buildApNeighbours(alignmentPoints, spacing) {
+        if (!alignmentPoints || alignmentPoints.length < 2) return null;
         if (alignmentPoints.length > MAX_APS_FOR_COHERENCE) return null;
-
-        const xs = [...new Set(alignmentPoints.map(a => a.x))].sort((a, b) => a - b);
-        const ys = [...new Set(alignmentPoints.map(a => a.y))].sort((a, b) => a - b);
-        const colOf = new Map(xs.map((x, i) => [x, i]));
-        const rowOf = new Map(ys.map((y, i) => [y, i]));
-        const cols = xs.length;
-        const cellToAp = new Map();
-        alignmentPoints.forEach((ap, i) => {
-            cellToAp.set(rowOf.get(ap.y) * cols + colOf.get(ap.x), i);
-        });
+        if (!spacing || spacing <= 0) return null;
 
         const n = alignmentPoints.length;
+        const cell = spacing;
+        const buckets = new Map();
+        const key = (cx, cy) => cx * 100000 + cy;
+        for (let i = 0; i < n; i++) {
+            const k = key(Math.floor(alignmentPoints[i].x / cell), Math.floor(alignmentPoints[i].y / cell));
+            let list = buckets.get(k);
+            if (!list) buckets.set(k, (list = []));
+            list.push(i);
+        }
+
+        const maxDist2 = (spacing * AP_NEIGHBOUR_RADIUS) ** 2;
         const offsets = new Int32Array(n + 1);
-        const indices = new Int32Array(n * 4);
+        const indices = new Int32Array(n * AP_MAX_NEIGHBOURS);
         let w = 0;
+        const candidates = [];
         for (let i = 0; i < n; i++) {
             offsets[i] = w;
-            const c = colOf.get(alignmentPoints[i].x);
-            const r = rowOf.get(alignmentPoints[i].y);
-            if (c > 0) { const j = cellToAp.get(r * cols + c - 1); if (j !== undefined) indices[w++] = j; }
-            if (c < cols - 1) { const j = cellToAp.get(r * cols + c + 1); if (j !== undefined) indices[w++] = j; }
-            if (r > 0) { const j = cellToAp.get((r - 1) * cols + c); if (j !== undefined) indices[w++] = j; }
-            if (r < ys.length - 1) { const j = cellToAp.get((r + 1) * cols + c); if (j !== undefined) indices[w++] = j; }
+            const ap = alignmentPoints[i];
+            const cx = Math.floor(ap.x / cell);
+            const cy = Math.floor(ap.y / cell);
+            candidates.length = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                    const list = buckets.get(key(cx + dx, cy + dy));
+                    if (!list) continue;
+                    for (const j of list) {
+                        if (j === i) continue;
+                        const ddx = alignmentPoints[j].x - ap.x;
+                        const ddy = alignmentPoints[j].y - ap.y;
+                        const d2 = ddx * ddx + ddy * ddy;
+                        if (d2 <= maxDist2) candidates.push([d2, j]);
+                    }
+                }
+            }
+            // Closest first, so a dense pocket cannot crowd out true neighbours.
+            candidates.sort((a, b) => a[0] - b[0]);
+            const take = Math.min(candidates.length, AP_MAX_NEIGHBOURS);
+            for (let c = 0; c < take; c++) indices[w++] = candidates[c][1];
         }
         offsets[n] = w;
         return { offsets, indices };
@@ -238,32 +261,31 @@ export function useStacker() {
     // to be derived, not assumed: the disagreement figure is only comparable
     // between runs at the same overlap. More overlap means neighbours are more
     // correlated by construction and the number flatters itself.
-    function apGeometry(alignmentPoints, patchSize) {
+    function apGeometry(alignmentPoints, patchSize, spacing) {
         if (!alignmentPoints?.length) return null;
-        const xs = [...new Set(alignmentPoints.map(a => a.x))].sort((a, b) => a - b);
-        const ys = [...new Set(alignmentPoints.map(a => a.y))].sort((a, b) => a - b);
-        const spacing = xs.length > 1 ? xs[1] - xs[0] : null;
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const ap of alignmentPoints) {
+            if (ap.x < minX) minX = ap.x;
+            if (ap.x > maxX) maxX = ap.x;
+            if (ap.y < minY) minY = ap.y;
+            if (ap.y > maxY) maxY = ap.y;
+        }
         return {
             patchSize,
-            spacing,
-            cols: xs.length,
-            rows: ys.length,
-            // Grid extent, which is the frame minus twice the margin. Printed so
-            // a changed AP count can be traced to the frame or to the spacing
-            // rather than guessed at.
-            spanX: xs.length > 1 ? xs[xs.length - 1] - xs[0] : 0,
-            spanY: ys.length > 1 ? ys[ys.length - 1] - ys[0] : 0,
+            spacing: spacing || null,
+            spanX: Math.round(maxX - minX),
+            spanY: Math.round(maxY - minY),
             overlapPct: (patchSize && spacing > 0)
                 ? Math.max(0, ((patchSize - spacing) / patchSize) * 100)
                 : null,
         };
     }
 
-    function resetWarpStats(searchRadius, alignmentPoints = null, patchSize = 0) {
+    function resetWarpStats(searchRadius, alignmentPoints = null, patchSize = 0, spacing = 0) {
         warpStats = {
             searchRadius,
-            geom: apGeometry(alignmentPoints, patchSize),
-            neighbours: buildApNeighbours(alignmentPoints),
+            geom: apGeometry(alignmentPoints, patchSize, spacing),
+            neighbours: buildApNeighbours(alignmentPoints, spacing),
             numAPs: alignmentPoints ? alignmentPoints.length : 0,
             residualSum: 0,
             residualCount: 0,
@@ -392,7 +414,7 @@ export function useStacker() {
         const frames = numAPs ? Math.round(total / numAPs) : 0;
         const g = warpStats.geom;
         const grid = g
-            ? `${g.cols}x${g.rows} grid, patch ${g.patchSize}px, spacing ${g.spacing}px, overlap ${g.overlapPct != null ? g.overlapPct.toFixed(0) : '?'}%, span ${g.spanX}x${g.spanY}px`
+            ? `patch ${g.patchSize}px, spacing ${g.spacing}px (staggered), overlap ${g.overlapPct != null ? g.overlapPct.toFixed(0) : '?'}%, span ${g.spanX}x${g.spanY}px`
             : 'grid ?';
 
         addLog(`─── Warp @ APs ───`);
@@ -589,7 +611,14 @@ export function useStacker() {
      */
     // AP grid spacing bounds.
     //   PATCH_FRACTION: floor on spacing as a fraction of patch size, so
-    //     overlap can never exceed 50% however large the patch gets.
+    //     overlap can never exceed 25% however large the patch gets. Matches
+    //     PSS. Extra overlap buys no information: the warp at each pixel is
+    //     smoothed over a Gaussian of sigma = 1.5 x patch, and the independent
+    //     evidence inside that kernel is set by its area divided by the patch
+    //     area, not by how finely it is sampled. At 0.5 we sampled 3x finer
+    //     than we smooth and re-measured the same pixels. The redundancy did
+    //     quietly dilute outliers, which is why the robust estimator in the
+    //     warp shader had to land first.
     //   MIN: cost floor. NCC work scales as 1/spacing^2, and atmospheric warp
     //     is smooth over tens of pixels, so sampling finer than this buys
     //     resolution the signal does not have.
@@ -607,6 +636,27 @@ export function useStacker() {
     // target's calibration, so expect to revisit it; the log prints the score
     // distribution so a bad bar is visible rather than silent.
     const AP_TRACK_SCORE_MIN = 40;
+    // Selection is RELATIVE: keep points scoring at least this fraction of the
+    // best point in the same image. An absolute bar cannot work for selection,
+    // because it is calibrated against whatever target happened to be measured
+    // and every other capture has its own scale of structure. Kept low on
+    // purpose: the warp at each pixel is an average over nearby points, so
+    // discarding weak-but-unbiased ones costs noise averaging (measured at
+    // roughly 1.9x more field noise on one clip). Selection should remove the
+    // useless, not chase the best.
+    // 4%, matching PSS. 10% was measured to carve holes in the very targets it
+    // should handle best: on a bright planet the limb lifts the best score, the
+    // bar rises with it, and mid-disk points fall under, leaving 50% of the
+    // disk with no alignment point at all. Selection is meant to drop the
+    // useless, not rank the good, and a near-inert bar is the correct shape for
+    // that now the warp shader rejects outliers on its own.
+    const AP_TRACK_RELATIVE = 0.04;
+    // Floor for "this patch has essentially no gradient at all", so a frame
+    // whose best point is itself noise does not keep everything by default.
+    const AP_TRACK_SCORE_FLOOR = 4;
+    // Brightness gate, as a fraction of the frame's own range above its
+    // background. Small: this only separates subject from sky.
+    const AP_BRIGHTNESS_RELATIVE = 0.02;
     // Share of probe positions that must clear the bar for a patch size to be
     // accepted. Well under half, because on a planetary disk only the limb and
     // the belt edges are ever trackable and that is enough to pin the frame.
@@ -618,25 +668,29 @@ export function useStacker() {
     // Search radii, unchanged from the long-standing defaults.
     const PLANETARY_SEARCH_RADIUS = 8;
     const SURFACE_SEARCH_RADIUS = 34;
-    const AP_SPACING_PATCH_FRACTION = 1 / 2;
+    const AP_SPACING_PATCH_FRACTION = 3 / 4;
     const AP_SPACING_MIN = 10;
     const AP_SPACING_MAX = 64;
     const AP_MIN_GRID_STEPS = 6;
 
     function createAPGrid(width, height, surfaceMode = false, refGray = null) {
-        let patchSize = getApPatchSize();
-        let searchRadius = surfaceMode ? SURFACE_SEARCH_RADIUS : PLANETARY_SEARCH_RADIUS;
+        const override = getApPatchOverride();
+        let patchSize = override || getApPatchSize();
+        const searchRadius = surfaceMode ? SURFACE_SEARCH_RADIUS : PLANETARY_SEARCH_RADIUS;
 
-        // Auto sizing replaces both manual values. Logged either way so a run
-        // always says which geometry it used and why.
-        if (getAutoApSizing() && refGray) {
+        // Patch size is always measured unless someone has overridden it from
+        // the AP checker, having seen the grid. There is no separate "auto"
+        // switch: a setting that silently disables another setting, with
+        // neither showing its consequence, is worse than no setting at all.
+        if (override) {
+            addLog(`AP sizing: manual override, patch ${patchSize}px`);
+        } else if (refGray) {
             const auto = autoAlignmentGeometry(refGray, width, height, surfaceMode);
             if (auto) {
                 patchSize = auto.patchSize;
-                searchRadius = auto.searchRadius;
-                addLog(`Auto AP sizing (${auto.basis}): patch ${patchSize}px, search radius ${searchRadius}px`);
+                addLog(`AP sizing (${auto.basis}): patch ${patchSize}px, search radius ${searchRadius}px`);
             } else {
-                addLog(`Auto AP sizing: could not measure a target, using patch ${patchSize}px, radius ${searchRadius}px`);
+                addLog(`AP sizing: could not measure a target, using patch ${patchSize}px`);
             }
         }
 
@@ -656,10 +710,12 @@ export function useStacker() {
         } else if (minDim < 800) {
             spacing = 15;
         } else {
-            spacing = Math.floor(patchSize / 2);
+            // Large frames were already patch-driven; the floor below now sets
+            // the policy for every size, so this just defers to it.
+            spacing = Math.floor(patchSize * AP_SPACING_PATCH_FRACTION);
         }
 
-        // Cap overlap at 50% by never spacing APs closer than half a patch.
+        // Cap overlap at 25% by never spacing APs closer than 3/4 of a patch.
         // Applied as a FLOOR on the rule above rather than a replacement, so
         // every existing configuration keeps its exact spacing and only large
         // patches move. Those are where the waste is: an 84px patch at 20px
@@ -681,21 +737,69 @@ export function useStacker() {
         }
 
         const alignmentPoints = [];
-        const marginX = Math.floor((width % spacing) / 2) + patchSize / 2;
-        const marginY = Math.floor((height % spacing) / 2) + patchSize / 2;
+        // A patch that overhangs the frame cannot be matched, so centres are
+        // confined to half a patch in from each edge. That margin is
+        // unavoidable; stopping short of it is not.
+        const margin = patchSize / 2;
 
-        for (let y = marginY; y < height - patchSize / 2; y += spacing) {
-            for (let x = marginX; x < width - patchSize / 2; x += spacing) {
-                alignmentPoints.push({ x, y });
+        // Spread points evenly across the usable span instead of stepping by a
+        // fixed spacing and giving up when the next step would overflow. The
+        // fixed-step version stranded whatever did not divide evenly: on a
+        // tightly cropped 220px frame at patch 56 it reached x=174 when it
+        // could have reached 192, and the leftover was dumped on one side, so
+        // the bare band was 30px on the left and 46px on the right. Tight crops
+        // are the normal planetary case, and that is precisely where the subject
+        // runs right up to the edge and most needs covering. PSS corrects the
+        // step the same way.
+        const axisLocations = (total, offsetHalfStep) => {
+            const span = total - 2 * margin;
+            if (span <= 0) return [];
+            const steps = Math.max(1, Math.ceil(span / spacing));
+            const step = span / steps;
+            if (offsetHalfStep) {
+                // Staggered row: half a step across, one point fewer, which
+                // leaves it short of the margin at BOTH ends. Copied from PSS
+                // as-is at first, and it scalloped the left and right edges of
+                // the grid by half a step on alternate rows. Put the two edge
+                // points back so every row reaches the margin; the stagger that
+                // matters is in the interior, and the slightly tighter pair at
+                // each end costs a little redundancy rather than coverage.
+                const inner = Array.from({ length: steps }, (_, i) => margin + step * (i + 0.5));
+                const out = [margin];
+                for (const v of inner) {
+                    if (v - out[out.length - 1] > 1) out.push(v);
+                }
+                const last = total - margin;
+                if (last - out[out.length - 1] > 1) out.push(last);
+                return out;
             }
-        }
+            return Array.from({ length: steps + 1 }, (_, i) => margin + step * i);
+        };
+
+        // Staggered rows, offset by half a step on alternate lines, the way PSS
+        // lays its grid out. A square lattice lines up in both directions at
+        // once, which samples the warp field on a coarser effective grid along
+        // the diagonals and makes the patches moire into a chessboard when
+        // drawn. Brickwork avoids both for free.
+        const ysAll = axisLocations(height, false);
+        const xsEven = axisLocations(width, false);
+        const xsOdd = axisLocations(width, true);
+        ysAll.forEach((y, row) => {
+            for (const x of (row % 2 ? xsOdd : xsEven)) {
+                alignmentPoints.push({ x: Math.round(x), y: Math.round(y) });
+            }
+        });
+
+        // Report the corrected step, not the nominal one: overlap and the
+        // neighbour search are both computed from it.
+        if (xsEven.length > 1) spacing = Math.round(xsEven[1] - xsEven[0]);
 
         // Ensure at least one center AP for very small images
         if (alignmentPoints.length === 0 && minDim >= 8) {
             alignmentPoints.push({ x: Math.floor(width / 2), y: Math.floor(height / 2) });
         }
 
-        return { alignmentPoints, patchSize, searchRadius };
+        return { alignmentPoints, patchSize, searchRadius, spacing };
     }
 
     /**
@@ -881,13 +985,18 @@ export function useStacker() {
     // what survives is the subject. Returns null when the subject fills the
     // frame (no dark border to bound it against), which is the surface case and
     // is handled by its own rule.
-    function measureTargetDiameter(refGray, width, height) {
-        if (!refGray?.length) return null;
-
-        // Background is the median, not the minimum: a dim capture sits on a
-        // haze floor well above zero, and thresholding from the minimum lets
-        // that haze into the subject. For a subject covering less than half the
-        // frame the median IS the background, by definition.
+    // Background level and peak of the reference greyscale.
+    //
+    // Background is a low percentile, not the minimum and not the median. Not
+    // the minimum, because a capture sits on a haze floor well above zero and
+    // the single darkest pixel is noise. Not the median, because that only
+    // equals the background when the subject covers less than half the frame:
+    // on a lunar or solar frame the subject IS the frame, the median lands
+    // mid-surface, and a bar measured from it rejects everything darker than
+    // average. Measured on a synthetic full-frame lunar, a median-based bar
+    // threw away half the surface (61 of 138 points); the percentile keeps it.
+    const BACKGROUND_PERCENTILE = 0.10;
+    function greyBackgroundPeak(refGray) {
         const hist = new Uint32Array(256);
         let sampled = 0;
         for (let i = 0; i < refGray.length; i += 3) {
@@ -895,14 +1004,26 @@ export function useStacker() {
             sampled++;
         }
         if (!sampled) return null;
-
         let cumulative = 0, background = 0;
         for (let v = 0; v < 256; v++) {
             cumulative += hist[v];
-            if (cumulative >= sampled / 2) { background = v; break; }
+            if (cumulative >= sampled * BACKGROUND_PERCENTILE) { background = v; break; }
         }
         let peak = 255;
         while (peak > 0 && hist[peak] === 0) peak--;
+        return { background, peak };
+    }
+
+    function measureTargetDiameter(refGray, width, height) {
+        if (!refGray?.length) return null;
+
+        // Shared estimator, deliberately not a local copy: an earlier inline
+        // version here used the median and silently under-measured every
+        // tightly cropped subject, because a tight crop leaves no sky for the
+        // median to land in. A 200px disk measured 144px at a 2% crop margin.
+        const levels = greyBackgroundPeak(refGray);
+        if (!levels) return null;
+        const { background, peak } = levels;
         if (peak - background < 10) return null;
 
         // Area above threshold, converted to the diameter of the equivalent
@@ -916,11 +1037,15 @@ export function useStacker() {
         }
         if (!area) return null;
 
+        // Cap rather than reject when the subject fills the frame. An earlier
+        // version bailed above 95%, on the theory that no dark surround meant
+        // no measurable subject. That is wrong here: planetary frames are
+        // cropped tightly on purpose, so filling the frame is the normal case
+        // and the measurement is correct. Surface frames never reach this code,
+        // they take their own branch, and a frame with genuinely no subject is
+        // already rejected above on peak minus background.
         const diameter = 2 * Math.sqrt(area / Math.PI);
-        // Filling ~95% of the frame means there is no dark surround, so this is
-        // not a disk on sky and the measurement means nothing.
-        if (diameter >= Math.min(width, height) * 0.95) return null;
-        return Math.round(diameter);
+        return Math.round(Math.min(diameter, Math.min(width, height)));
     }
 
     // Alignment geometry derived from the subject rather than fixed constants.
@@ -1044,6 +1169,153 @@ export function useStacker() {
         };
     }
 
+    // Slide any point whose patch overhangs the frame back inside, rather than
+    // discarding it.
+    //
+    // Dropping was the old behaviour and it is the wrong trade on a tight crop,
+    // where the subject runs right up to the edge: the points nearest the rim
+    // cover real signal, and a few pixels of displacement costs far less than
+    // losing them. The grid already places its outermost row exactly at the
+    // margin, so this mostly matters after the brightness nudge and for odd
+    // patch sizes, where rounding can leave a point a pixel over the line.
+    function clampApsIntoFrame(alignmentPoints, width, height, patchSize) {
+        const half = Math.floor(patchSize / 2);
+        // x0 = x - half must be >= 0, and x0 + patchSize must be <= width.
+        const hiX = width - (patchSize - half);
+        const hiY = height - (patchSize - half);
+        if (hiX < half || hiY < half) return 0;
+
+        let moved = 0;
+        for (const ap of alignmentPoints) {
+            const nx = Math.max(half, Math.min(hiX, ap.x));
+            const ny = Math.max(half, Math.min(hiY, ap.y));
+            if (nx !== ap.x || ny !== ap.y) {
+                ap.x = nx;
+                ap.y = ny;
+                moved++;
+            }
+        }
+        return moved;
+    }
+
+    // Pull alignment points onto the subject.
+    //
+    // A point whose patch is mostly empty sky carries almost no signal, and on
+    // a round target that is every point near the limb: exactly where the
+    // sharpest feature in a soft planetary frame lives. Discarding them wastes
+    // the best structure in the image, so instead each mostly-dark patch is
+    // moved to the centre of brightness within its own patch, which slides it
+    // back onto the disk. This is why the PSS grid visibly follows the planet's
+    // curve instead of stopping at a straight lattice edge.
+    //
+    // Only mostly-dark patches move, so interior points stay exactly on the
+    // lattice and the warp field keeps its regular sampling where it matters.
+    const AP_NUDGE_DARK_FRACTION = 0.6;
+    function nudgeApsToBrightness(alignmentPoints, refGray, width, height, patchSize, minBrightness) {
+        const half = Math.floor(patchSize / 2);
+        // Keep the moved point far enough inside that its patch still fits.
+        const lo = half + 1;
+        const hiX = width - half - 2;
+        const hiY = height - half - 2;
+        if (hiX <= lo || hiY <= lo) return 0;
+
+        let moved = 0;
+        for (const ap of alignmentPoints) {
+            const x0 = ap.x - half;
+            const y0 = ap.y - half;
+            if (x0 < 0 || y0 < 0 || x0 + patchSize > width || y0 + patchSize > height) continue;
+
+            let dark = 0, total = 0, mass = 0, mx = 0, my = 0;
+            for (let py = 0; py < patchSize; py++) {
+                const rowBase = (y0 + py) * width + x0;
+                for (let px = 0; px < patchSize; px++) {
+                    const v = refGray[rowBase + px];
+                    if (v < minBrightness) dark++;
+                    total++;
+                    mass += v;
+                    mx += v * px;
+                    my += v * py;
+                }
+            }
+            if (!total || !mass) continue;
+            if (dark / total <= AP_NUDGE_DARK_FRACTION) continue;
+
+            const nx = Math.round(x0 + mx / mass);
+            const ny = Math.round(y0 + my / mass);
+            const cx = Math.max(lo, Math.min(hiX, nx));
+            const cy = Math.max(lo, Math.min(hiY, ny));
+            if (cx !== ap.x || cy !== ap.y) {
+                ap.x = cx;
+                ap.y = cy;
+                moved++;
+            }
+        }
+        return moved;
+    }
+
+    // Build the AP grid, publish it to the UI, and let the reviewer rebuild it
+    // with a different patch size before any frame is matched.
+    //
+    // A loop rather than a single pass, because patch size is the parameter
+    // that decides nearly everything about a stack and the only honest way to
+    // choose it is to see the grid it produces. Falls straight through when
+    // the checker is off.
+    async function prepareAlignmentWithReview(build) {
+        let data = build();
+        for (;;) {
+            resetWarpStats(data.searchRadius, data.alignmentPoints, data.patchSize, data.spacing);
+            emit('alignment-points', {
+                alignmentPoints: data.alignmentPoints,
+                patchSize: data.patchSize,
+                searchRadius: data.searchRadius,
+                localWarp: data.localWarp,
+                overlapPct: warpStats?.geom?.overlapPct != null ? Math.round(warpStats.geom.overlapPct) : null,
+                spacing: data.spacing,
+                width: data.width,
+                height: data.height,
+                autoPatchSize: getApPatchOverride() == null,
+            });
+
+            const action = await awaitApReview();
+            const requested = action && Number(action.patchSize);
+            if (requested && requested !== data.patchSize) {
+                setApPatchOverride(requested);
+                addLog(`Alignment points: rebuilding at ${requested}px patches`);
+                data = build();
+                continue;
+            }
+            return data;
+        }
+    }
+
+    // Optional stop in the workflow so the alignment points can be inspected
+    // before any frame is matched against them.
+    //
+    // Worth having because the AP grid decides nearly everything about a stack
+    // and is the hardest part to reason about after the fact: by the time the
+    // result looks wrong, the grid that caused it is gone. Pausing here also
+    // gives a natural place to hang manual AP editing later.
+    //
+    // Resolves on cancel as well as continue, so a cancelled job cannot leave
+    // the pipeline parked on a promise nobody will ever settle.
+    async function awaitApReview() {
+        if (!getShowApChecker()) return null;
+        emit('set-caption', 'Review alignment points');
+        emit('ap-review-open');
+        const action = await new Promise((resolve) => {
+            const done = (payload) => {
+                off('ap-review-continue', done);
+                off('cancel-processing', done);
+                resolve(payload || null);
+            };
+            on('ap-review-continue', done);
+            on('cancel-processing', done);
+        });
+        emit('ap-review-closed');
+        emit('set-caption', 'Stacking...');
+        return action;
+    }
+
     // Is a local warp field worth computing at all?
     //
     // When almost nothing in the frame can be tracked, every displacement the
@@ -1060,7 +1332,14 @@ export function useStacker() {
         return localWarp === false ? 2.0 : getMinApQuality();
     }
 
-    function assessLocalWarp(trackableCount, gridCount) {
+    function assessLocalWarp(trackableCount, gridCount, bestTrackScore) {
+        // Absolute question, separate from selection: if the single best patch
+        // in the frame still cannot be located, no choice of points helps and
+        // the warp field would be noise. Stack globally aligned instead.
+        if (bestTrackScore !== undefined && bestTrackScore < AP_TRACK_SCORE_MIN) {
+            addLog(`Local de-warping disabled: nothing in this frame is trackable (best alignment point scores ${bestTrackScore.toFixed(0)}, needs ${AP_TRACK_SCORE_MIN}). Stacking with global alignment only - softer, but free of warp artifacts.`);
+            return false;
+        }
         // "Enough" has to be relative to how many points the grid could ever
         // hold. A 48px crop has 16 lattice points in total and most sit on
         // empty sky, so a flat floor of 6 would switch off local warping on a
@@ -1072,9 +1351,38 @@ export function useStacker() {
         return false;
     }
 
+    // Returns { points, bestTrackScore }. The best score is the global
+    // decision input: selection is relative, but whether local warping is worth
+    // attempting at all depends on whether ANYTHING in the frame is trackable,
+    // and that question needs an absolute answer.
     function filterAPsByQuality(alignmentPoints, refGray, width, height, patchSize, minStructure = 0.02, minBrightness = 5) {
+        // minStructure is retained in the signature for callers but no longer
+        // gates anything; see the note at the brightness check below.
         const halfPatch = Math.floor(patchSize / 2);
         const filtered = [];
+
+        // Pass 1: score every candidate, so the bar can be set from this image.
+        const scores = new Map();
+        let bestTrackScore = 0;
+        for (const ap of alignmentPoints) {
+            const sx = ap.x - halfPatch;
+            const sy = ap.y - halfPatch;
+            if (!patchInFrame(sx, sy, patchSize, width, height)) continue;
+            const st = patchStructure(refGray, width, sx, sy, patchSize);
+            if (!st) continue;
+            scores.set(ap, st.trackScore);
+            if (st.trackScore > bestTrackScore) bestTrackScore = st.trackScore;
+        }
+        const trackBar = Math.max(AP_TRACK_SCORE_FLOOR, bestTrackScore * AP_TRACK_RELATIVE);
+
+        // Sky sits at the background; the subject is anything meaningfully
+        // above it. The margin is small because trackScore already rejects
+        // featureless patches: this gate only has to answer "is there a
+        // subject here at all".
+        const levels = greyBackgroundPeak(refGray);
+        const brightnessBar = levels
+            ? levels.background + Math.max(2, (levels.peak - levels.background) * AP_BRIGHTNESS_RELATIVE)
+            : minBrightness;
 
         for (const ap of alignmentPoints) {
             const x0 = ap.x - halfPatch;
@@ -1084,16 +1392,6 @@ export function useStacker() {
                 continue;
             }
 
-            // Trackability gate. The brightness and standard-deviation tests
-            // below ask "does this patch have contrast?", which a smooth
-            // limb-darkened disk passes easily while being impossible to
-            // locate. This asks the question that actually matters: "can I
-            // find this patch again?" Rejecting here costs one measurement,
-            // where rejecting at match time costs one per frame.
-            if (patchInFrame(x0, y0, patchSize, width, height)) {
-                const st = patchStructure(refGray, width, x0, y0, patchSize);
-                if (st && st.trackScore < AP_TRACK_SCORE_MIN) continue;
-            }
 
             let sum = 0;
             let sumSq = 0;
@@ -1112,12 +1410,23 @@ export function useStacker() {
             const stdDev = Math.sqrt(Math.max(0, variance));
             const structure = stdDev / 255;
 
-            if (mean >= minBrightness && structure >= minStructure) {
+            const trackScore = scores.get(ap);
+            if (trackScore !== undefined && trackScore < trackBar) continue;
+
+            // Brightness gates against empty sky, and like every other
+            // threshold here it has to be relative to the frame. A fixed bar
+            // of 5/255 cut the faint outer disk off a dim capture, because
+            // real signal there sits below 5 in the raw data even though it is
+            // plainly part of the subject once stretched. Measuring from the
+            // background instead admits faint signal while still excluding
+            // sky, and tightens automatically on a hazy frame where the
+            // background is high.
+            if (mean >= brightnessBar) {
                 filtered.push(ap);
             }
         }
 
-        return filtered;
+        return { points: filtered, bestTrackScore };
     }
 
     /**
@@ -1142,20 +1451,34 @@ export function useStacker() {
         const refGrayData = rgbaToGrayscale(buffer, width, height, isFloat32);
 
         // Create AP grid
-        const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode, refGrayData);
+        const { alignmentPoints, patchSize, searchRadius, spacing } = createAPGrid(width, height, surfaceMode, refGrayData);
 
         // Filter APs by quality
-        const filteredAPs = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
-        const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
+        // Nudge first: a point that lands on the subject can then be judged on
+        // what it actually sees, instead of being rejected for the sky it used
+        // to be sitting on.
+        const nudged = nudgeApsToBrightness(alignmentPoints, refGrayData, width, height, patchSize, 5);
+        // After nudging, so a point pulled toward the subject cannot end up
+        // overhanging. Any point that still does not fit is slid in, not lost.
+        const slid = clampApsIntoFrame(alignmentPoints, width, height, patchSize);
+        const filtered = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
+        const activeAPs = filtered.points.length > 0 ? filtered.points : alignmentPoints;
         apGridTotal = alignmentPoints.length;
+        if (nudged || slid) {
+            const parts = [];
+            if (nudged) parts.push(`${nudged} moved onto the subject`);
+            if (slid) parts.push(`${slid} slid in from the frame edge`);
+            addLog(`Alignment points: ${parts.join(', ')} (of ${alignmentPoints.length})`);
+        }
         measureApLocalizability(activeAPs, refGrayData, width, height, patchSize);
-        const localWarp = assessLocalWarp(filteredAPs.length, alignmentPoints.length);
+        const localWarp = assessLocalWarp(filtered.points.length, alignmentPoints.length, filtered.bestTrackScore);
 
         return {
             alignmentPoints: activeAPs,
             refGrayData,
             patchSize,
             searchRadius,
+            spacing,
             localWarp,
             width,
             height
@@ -1168,20 +1491,34 @@ export function useStacker() {
      */
     function prepareAlignmentDataWithGray(refGrayData, width, height, surfaceMode = false) {
         // Create AP grid
-        const { alignmentPoints, patchSize, searchRadius } = createAPGrid(width, height, surfaceMode, refGrayData);
+        const { alignmentPoints, patchSize, searchRadius, spacing } = createAPGrid(width, height, surfaceMode, refGrayData);
 
         // Filter APs by quality
-        const filteredAPs = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
-        const activeAPs = filteredAPs.length > 0 ? filteredAPs : alignmentPoints;
+        // Nudge first: a point that lands on the subject can then be judged on
+        // what it actually sees, instead of being rejected for the sky it used
+        // to be sitting on.
+        const nudged = nudgeApsToBrightness(alignmentPoints, refGrayData, width, height, patchSize, 5);
+        // After nudging, so a point pulled toward the subject cannot end up
+        // overhanging. Any point that still does not fit is slid in, not lost.
+        const slid = clampApsIntoFrame(alignmentPoints, width, height, patchSize);
+        const filtered = filterAPsByQuality(alignmentPoints, refGrayData, width, height, patchSize, 0.02, 5);
+        const activeAPs = filtered.points.length > 0 ? filtered.points : alignmentPoints;
         apGridTotal = alignmentPoints.length;
+        if (nudged || slid) {
+            const parts = [];
+            if (nudged) parts.push(`${nudged} moved onto the subject`);
+            if (slid) parts.push(`${slid} slid in from the frame edge`);
+            addLog(`Alignment points: ${parts.join(', ')} (of ${alignmentPoints.length})`);
+        }
         measureApLocalizability(activeAPs, refGrayData, width, height, patchSize);
-        const localWarp = assessLocalWarp(filteredAPs.length, alignmentPoints.length);
+        const localWarp = assessLocalWarp(filtered.points.length, alignmentPoints.length, filtered.bestTrackScore);
 
         return {
             alignmentPoints: activeAPs,
             refGrayData,
             patchSize,
             searchRadius,
+            spacing,
             localWarp,
             width,
             height
@@ -1500,9 +1837,8 @@ export function useStacker() {
             // Step 2: Prepare alignment points (pure JS, no OpenCV)
             emit('set-caption', 'Preparing alignment points...');
             // Both paths now have refGrayData ready, just create AP grid
-            const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropWidth, cropHeight, surfaceMode);
+            const alignmentData = await prepareAlignmentWithReview(() => prepareAlignmentDataWithGray(refGrayData, cropWidth, cropHeight, surfaceMode));
             const { alignmentPoints, patchSize, searchRadius, localWarp } = alignmentData;
-            resetWarpStats(searchRadius, alignmentPoints, patchSize);
             addLog(`Alignment prepared: ${alignmentPoints.length} APs`);
             // G3 checkpoint: AP grid ready. In pipelined mode template-matching
             // interleaves with accumulation so there's no separate "matched" step.
@@ -2031,9 +2367,8 @@ export function useStacker() {
             };
 
             // Prepare alignment data (pure JS, no OpenCV)
-            const alignmentData = prepareAlignmentData(refFrameData, surfaceMode);
+            const alignmentData = await prepareAlignmentWithReview(() => prepareAlignmentData(refFrameData, surfaceMode));
             const { alignmentPoints, refGrayData, patchSize, searchRadius, localWarp } = alignmentData;
-            resetWarpStats(searchRadius, alignmentPoints, patchSize);
             addLog(`Alignment prepared: ${alignmentPoints.length} APs, reference frame ${refIndex}`);
             // G3 checkpoint: AP grid ready.
             emit('stack-step', 'stack_ap_grid_built');
@@ -2595,9 +2930,8 @@ export function useStacker() {
             }
 
             // Prepare alignment points
-            const alignmentData = prepareAlignmentDataWithGray(refGrayData, cropWidth, cropHeight, surfaceMode);
+            const alignmentData = await prepareAlignmentWithReview(() => prepareAlignmentDataWithGray(refGrayData, cropWidth, cropHeight, surfaceMode));
             const { alignmentPoints, patchSize, searchRadius, localWarp } = alignmentData;
-            resetWarpStats(searchRadius, alignmentPoints, patchSize);
 
             // Init stacking
             let deviceMaxBatch = Infinity;
