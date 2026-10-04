@@ -439,6 +439,9 @@ struct Params {
     pixfrac: f32,         // Drop shrink factor (0.0-1.0, typical 0.7)
 }
 
+const ROBUST_C2: f32 = 4.0;        // reject beyond ~2 sigma, smoothly
+const ROBUST_MIN_VAR: f32 = 0.25;  // 0.5px: below this the points agree
+
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> frameData: array<u32>;      // All frames: Float32 RGBA
 @group(0) @binding(2) var<storage, read> apPositions: array<u32>;    // AP positions: packed (x | y<<16)
@@ -548,6 +551,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let frameIdx = params.frameIdx;
 
+    var weightedSq: f32 = 0.0;
+
     for (var i: u32 = 0u; i < params.numAPs; i++) {
         let shiftIdx = (frameIdx * params.numAPs + i) * 3u;
         let apDx = shifts[shiftIdx] + params.searchOffsetX;
@@ -571,6 +576,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let weight = gaussWeight * quality;
             weightedDx += apDx * weight;
             weightedDy += apDy * weight;
+            weightedSq += (apDx * apDx + apDy * apDy) * weight;
             totalApWeight += weight;
         }
     }
@@ -578,8 +584,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dispX: f32 = 0.0;
     var dispY: f32 = 0.0;
     if (totalApWeight > 0.0) {
-        dispX = weightedDx / totalApWeight;
-        dispY = weightedDy / totalApWeight;
+        let meanX = weightedDx / totalApWeight;
+        let meanY = weightedDy / totalApWeight;
+        dispX = meanX;
+        dispY = meanY;
+
+        // Spread of the contributing shifts about their own mean.
+        let variance = max(weightedSq / totalApWeight - (meanX * meanX + meanY * meanY),
+                           ROBUST_MIN_VAR);
+
+        var robustW: f32 = 0.0;
+        var robustX: f32 = 0.0;
+        var robustY: f32 = 0.0;
+        for (var i: u32 = 0u; i < params.numAPs; i++) {
+            let shiftIdx = (frameIdx * params.numAPs + i) * 3u;
+            let apDx = shifts[shiftIdx] + params.searchOffsetX;
+            let apDy = shifts[shiftIdx + 1u] + params.searchOffsetY;
+            let quality = shifts[shiftIdx + 2u];
+            if (quality < params.minQuality) {
+                continue;
+            }
+            let apPacked = apPositions[i];
+            let dx = cellCenterX - f32(apPacked & 0xFFFFu);
+            let dy = cellCenterY - f32(apPacked >> 16u);
+            let dist2 = dx * dx + dy * dy;
+            if (dist2 < influenceRadius2) {
+                let ddx = apDx - meanX;
+                let ddy = apDy - meanY;
+                let dev2 = ddx * ddx + ddy * ddy;
+                let w = exp(-dist2 / sigma2) * quality / (1.0 + dev2 / (ROBUST_C2 * variance));
+                robustW += w;
+                robustX += apDx * w;
+                robustY += apDy * w;
+            }
+        }
+        if (robustW > 0.0) {
+            dispX = robustX / robustW;
+            dispY = robustY / robustW;
+        }
     }
 
     // Compute brightness scale from GPU buffer
@@ -769,6 +811,29 @@ function reportNcc(kind, props) {
     } catch {}
 }
 
+// Hand the raw (dx, dy, score) triples to the main thread for the local-warp
+// histogram. Only the fully-GPU raw Bayer path needs this: every other path
+// already reads its shifts back. Diagnostic only - a failure here must never
+// take the stack down with it.
+async function reportWarpShifts(shiftsGpuBuffer, resultsSize) {
+    if (typeof WorkerGlobalScope === 'undefined' || !(self instanceof WorkerGlobalScope)) return;
+    let staging = null;
+    try {
+        staging = checkedReadbackBuffer(stackDevice, resultsSize, 'warpShifts.readback');
+        const encoder = stackDevice.createCommandEncoder();
+        encoder.copyBufferToBuffer(shiftsGpuBuffer, 0, staging, 0, resultsSize);
+        stackQueue.submit([encoder.finish()]);
+        await safeStackMapAsync(staging, GPUMapMode.READ);
+        const shifts = new Float32Array(staging.getMappedRange().slice(0));
+        staging.unmap();
+        self.postMessage({ type: 'warp-shifts', shifts }, [shifts.buffer]);
+    } catch (err) {
+        console.warn('[stacking] warp shift readback failed:', err.message);
+    } finally {
+        try { staging?.destroy(); } catch {}
+    }
+}
+
 // Uncaptured WebGPU errors on the stacking device. Capped per device because a
 // single invalid buffer makes every later operation that touches it raise one
 // too, and an unbounded relay would just move that firehose onto the beacon.
@@ -832,6 +897,9 @@ struct AP {
     quality: f32,
     _pad: f32,
 }
+
+const ROBUST_C2: f32 = 4.0;        // reject beyond ~2 sigma, smoothly
+const ROBUST_MIN_VAR: f32 = 0.25;  // 0.5px: below this the points agree
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> frameData: array<u32>;     // Input: packed Uint8 (1 u32/pixel) or Float32 (reinterpreted)
@@ -948,6 +1016,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var weightedDx: f32 = 0.0;
     var weightedDy: f32 = 0.0;
 
+    var weightedSq: f32 = 0.0;
+
     for (var i: u32 = 0u; i < params.numAPs; i++) {
         let ap = apData[i];
 
@@ -964,6 +1034,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let weight = gaussWeight * ap.quality;
             weightedDx += ap.dx * weight;
             weightedDy += ap.dy * weight;
+            weightedSq += (ap.dx * ap.dx + ap.dy * ap.dy) * weight;
             totalApWeight += weight;
         }
     }
@@ -971,8 +1042,41 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dispX = params.globalOffsetX;
     var dispY = params.globalOffsetY;
     if (totalApWeight > 0.0) {
-        dispX += weightedDx / totalApWeight;
-        dispY += weightedDy / totalApWeight;
+        let meanX = weightedDx / totalApWeight;
+        let meanY = weightedDy / totalApWeight;
+        var bestX = meanX;
+        var bestY = meanY;
+
+        let variance = max(weightedSq / totalApWeight - (meanX * meanX + meanY * meanY),
+                           ROBUST_MIN_VAR);
+
+        var robustW: f32 = 0.0;
+        var robustX: f32 = 0.0;
+        var robustY: f32 = 0.0;
+        for (var i: u32 = 0u; i < params.numAPs; i++) {
+            let ap = apData[i];
+            if (ap.quality < params.minQuality) {
+                continue;
+            }
+            let dx = cellCenterX - ap.x;
+            let dy = cellCenterY - ap.y;
+            let dist2 = dx * dx + dy * dy;
+            if (dist2 < influenceRadius2) {
+                let ddx = ap.dx - meanX;
+                let ddy = ap.dy - meanY;
+                let dev2 = ddx * ddx + ddy * ddy;
+                let w = exp(-dist2 / sigma2) * ap.quality / (1.0 + dev2 / (ROBUST_C2 * variance));
+                robustW += w;
+                robustX += ap.dx * w;
+                robustY += ap.dy * w;
+            }
+        }
+        if (robustW > 0.0) {
+            bestX = robustX / robustW;
+            bestY = robustY / robustW;
+        }
+        dispX += bestX;
+        dispY += bestY;
     }
 
     let fw = params.frameWeight;
@@ -2924,6 +3028,11 @@ async function matchTemplatesFullyGpu(grayGpuBuffer, refGrayData, width, height,
     paramsBuffer.destroy();
     templatesBuffer.destroy();
     searchPosBuffer.destroy();
+
+    // The shifts stay on the GPU from here on, so this is the only chance to
+    // see them. Copy them out for the local-warp histogram (tens of KB per
+    // batch, behind work the GPU has already finished).
+    await reportWarpShifts(shiftsGpuBuffer, resultsSize);
 
     return {
         shiftsGpuBuffer,

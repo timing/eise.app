@@ -210,12 +210,14 @@
 					<div class="field-grid">
 						<label v-if="drizzleMethod === 'drizzle'" class="field-label" for="pixfrac-input">Pixfrac</label>
 						<input v-if="drizzleMethod === 'drizzle'" id="pixfrac-input" type="number" min="0.3" max="0.95" step="0.05" v-model.number="pixfrac" class="number-input" />
-						<label class="field-label" for="ap-size-input">AP size</label>
-						<input id="ap-size-input" type="number" min="10" max="64" step="2" v-model.number="apPatchSize" class="number-input" />
+						<label class="checkbox-option field-grid-full">
+							<input type="checkbox" v-model="showApCheckerValue" />
+							Show manual AP checker
+						</label>
 						<label class="field-label" for="ap-quality-input">AP quality threshold</label>
 						<input id="ap-quality-input" type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="number-input" />
 					</div>
-					<p v-if="showStackingModeInfo" class="info-text"><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Bicubic drizzle:</strong> 1.5x upscale using bicubic interpolation. Good general-purpose drizzle.<br><strong>Pixfrac drizzle:</strong> True Fruchter &amp; Hook drizzle with area-overlap accumulation. Each input pixel is shrunk by pixfrac before mapping to the output grid. Smaller pixfrac (0.5-0.7) recovers more sub-pixel detail but needs more frames for coverage.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points. Higher values reject more uncertain matches, reducing artifacts but may leave gaps. Try 0.5-0.6 if you see polygon artifacts.<br><strong>AP size:</strong> Size of alignment point patches in pixels. Smaller = finer precision for local distortion correction, but needs enough features to match. Default 30 is a safe middle ground.</p>
+					<p v-if="showStackingModeInfo" class="info-text"><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Bicubic drizzle:</strong> 1.5x upscale using bicubic interpolation. Good general-purpose drizzle.<br><strong>Pixfrac drizzle:</strong> True Fruchter &amp; Hook drizzle with area-overlap accumulation. Each input pixel is shrunk by pixfrac before mapping to the output grid. Smaller pixfrac (0.5-0.7) recovers more sub-pixel detail but needs more frames for coverage.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points, applied per frame. Try 0.5-0.6 if you see polygon artifacts on a detailed target. Note it only helps where matches genuinely score badly, such as a feature drifting out of the search window. It cannot catch featureless patches, which score deceptively high because a smooth patch matches itself at every offset; alignment point selection handles those instead.<br><strong>Show manual AP checker:</strong> Pauses after the alignment points are chosen and draws them over the reference frame, so you can see where they landed before any frames are matched. AP size is measured automatically; the checker is also where you override it, since that is the one place you can see what the choice produces.</p>
 				</div>
 
 				<div v-if="targetType !== 'sun-moon'" class="panel-section">
@@ -473,7 +475,7 @@ const showMobileOptInfo = ref(false);
 // their call sites for clarity.
 const {
 	setMinApQuality: setSharedMinApQuality,
-	setApPatchSize: setSharedApPatchSize,
+	setShowApChecker: setSharedShowApChecker,
 	setApSpacingScale: setSharedApSpacingScale,
 	setPixfrac: setSharedPixfrac,
 	getTrackingContext,
@@ -498,7 +500,7 @@ const qualityMode = ref('manual');
 const stackPercentage = ref(30);
 const drizzleMode = ref('1.5x'); // kept for backward compat with saved settings migration
 const minApQuality = ref(0.3); // Alignment point quality threshold (NCC score)
-const apPatchSize = ref(30); // Alignment point patch size in pixels
+const showApCheckerValue = ref(false); // Pause on the AP grid before matching
 // Alignment-point grid spacing multiplier. 1 = full density (current default).
 // AP count scales with 1/scale², so this is the same kind of quality-for-
 // headroom trade as maxFrames, aimed at the GPU rather than at memory.
@@ -576,7 +578,7 @@ function loadSettings() {
 			if (settings.selectedMaxFrames) selectedMaxFrames.value = Number(settings.selectedMaxFrames) || 100;
 			if (settings.targetType) targetType.value = settings.targetType;
 			if (settings.minApQuality !== undefined) minApQuality.value = settings.minApQuality;
-			if (settings.apPatchSize !== undefined) apPatchSize.value = settings.apPatchSize;
+			if (typeof settings.showApChecker === 'boolean') showApCheckerValue.value = settings.showApChecker;
 			// Snap to the two ends the checkbox can express: a persisted mid-scale
 			// value from the old slider would otherwise reduce detail while the
 			// checkbox showed unchecked.
@@ -610,7 +612,7 @@ function saveSettings() {
 			selectedMaxFrames: selectedMaxFrames.value,
 			targetType: targetType.value,
 			minApQuality: minApQuality.value,
-			apPatchSize: apPatchSize.value,
+			showApChecker: showApCheckerValue.value,
 			apSpacingScale: apSpacingScale.value,
 			pixfrac: pixfrac.value,
 			drizzleMethod: drizzleMethod.value,
@@ -625,7 +627,7 @@ function saveSettings() {
 }
 
 // Watch all settings and save on change
-watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, apPatchSize, apSpacingScale, pixfrac, processingBackend, lowResCropDetectValue, alwaysShowColorPickerValue], saveSettings);
+watch([qualityMode, stackPercentage, drizzleMethod, cropMarginPercent, enableMaxFrames, selectedMaxFrames, targetType, minApQuality, showApCheckerValue, apSpacingScale, pixfrac, processingBackend, lowResCropDetectValue, alwaysShowColorPickerValue], saveSettings);
 
 onMounted(async () => {
 	// Read the raw persisted setting BEFORE loadSettings runs, so we can tell
@@ -762,7 +764,7 @@ const { getLogTail, markLogStart } = useStackLogTelemetry();
 
 // Sync stacking settings to shared state for stacker to use
 watch(minApQuality, (val) => setSharedMinApQuality(val), { immediate: true });
-watch(apPatchSize, (val) => setSharedApPatchSize(val), { immediate: true });
+watch(showApCheckerValue, (val) => setSharedShowApChecker(val), { immediate: true });
 // Sync the EFFECTIVE value, so lite mode's floor reaches useStacker without the
 // slider position lying about what will actually run.
 watch(effectiveApSpacingScale, (val) => setSharedApSpacingScale(val), { immediate: true });
@@ -2793,6 +2795,14 @@ async function processFiles(files, options = {}) {
 	margin-top: 16px;
 	padding-top: 14px;
 	border-top: 1px solid var(--eise-panel-line);
+}
+/* Checkbox rows inside the two-column field grid span both tracks, so they read
+   as a setting for the fields below rather than as a stray label/value pair. */
+.field-grid-full {
+	grid-column: 1 / -1;
+	margin: 0;
+	font-size: 13px;
+	color: var(--eise-body);
 }
 .field-label {
 	font-size: 13px;
