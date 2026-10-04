@@ -27,7 +27,7 @@ import {
     SER_COLOR_MONO, SER_COLOR_RGGB, SER_COLOR_GRBG, SER_COLOR_GBRG, SER_COLOR_BGGR,
     getOpenCVBayerPattern, getGpuBayerPattern, needsDemosaic,
 } from './useSerParser';
-import { FILTERS_NONE, FILTERS_XTRANS, bayerPatternFromFilters } from './libRawCfa';
+import { FILTERS_NONE, FILTERS_XTRANS, bayerPatternFromFilters, fc } from './libRawCfa';
 import { loadLibRawCtor } from './libRawLoader';
 
 // Pattern name → SER colorID, the vocabulary the rest of the pipeline speaks.
@@ -161,6 +161,9 @@ export function useLibRawParser() {
     let blackLevel = 0;
     let scaleFactor = 1;
     let cfaKind = 'bayer';
+    let levelsNeedMeasuring = false;
+    let levelsMeasured = false;
+    let wbGain = null;   // Float32Array(4) of per-CFA-phase gains, or null
 
     async function init(inputFile) {
         file = inputFile;
@@ -243,6 +246,93 @@ export function useLibRawParser() {
             scaleFactor = 1;
         }
 
+        // Both numbers above can be LibRaw defaults rather than measurements,
+        // and a default looks exactly like a real answer. A Panasonic RW2 from
+        // a DC-G9M2 reports black=0 and maximum=65535, so the normalisation
+        // computes to precisely 1.0 and does nothing, while the actual mosaic
+        // sits at min 1604 / median 2058 / max 35837: 3% of full scale, with a
+        // black pedestal that is never removed. Measure the file instead when
+        // the reported levels carry no information.
+        // Scoped deliberately narrowly: measure ONLY when LibRaw has told us
+        // nothing usable, meaning it reported the container maximum (its
+        // default) or a maximum at or below black.
+        //
+        // NOTE: the white-balance block below widens this to every Bayer RAW
+        // that gets WB applied, because WB invalidates LibRaw's white level.
+        // This line alone is the narrow "LibRaw told us nothing" case.
+        levelsNeedMeasuring = (maximum >= CONTAINER_MAX) || (maximum <= blackLevel);
+
+        // Camera white balance.
+        //
+        // Why this lane needs it and SER does not: planetary capture software
+        // writes SER with the red/blue gains already applied, so that data
+        // arrives roughly balanced. A camera RAW stores the unbalanced sensor
+        // readout and leaves the gains in metadata. Green sits about twice
+        // red on this class of sensor, so a CORRECT demosaic of an untouched
+        // RAW mosaic is bright green — which reads as "the Bayer pattern is
+        // wrong" when the pattern is in fact right.
+        //
+        // The RGB lane has always done this (useLibRawRgb passes
+        // useCameraWb), which is why a lone RAW looked neutral in the post
+        // processor while the same file stacked green.
+        //
+        // Normalised so the LARGEST gain is 1, i.e. channels are attenuated,
+        // never amplified. Scaling red up by 2.4x would clip every bright red
+        // highlight; scaling the others down cannot clip anything, and the
+        // brightness it costs is handed straight back by measureLevels, which
+        // runs on the balanced data.
+        const camMul = [].concat(colorData.cam_mul || []).map(Number);
+        const preMul = [].concat(colorData.pre_mul || []).map(Number);
+        const usable = (m) => m.length >= 3 && m[0] > 0 && m[1] > 0 && m[2] > 0;
+        const mul = usable(camMul) ? camMul : (usable(preMul) ? preMul : null);
+
+        wbGain = null;
+        if (mul && cfaKind === 'bayer') {
+            // dcraw channel order: 0=R, 1=G, 2=B, 3=second G (often 0, in
+            // which case it shares the first green's gain).
+            const g = [mul[0], mul[1], mul[2], mul[3] > 0 ? mul[3] : mul[1]];
+            // g[3] MUST be in here. It is divided by maxG like the rest, so
+            // leaving it out lets a camera reporting cam_mul[3] above the
+            // other three produce a gain above 1 — and the store below is into
+            // a Uint16Array, which wraps modulo 65536 instead of clamping. A
+            // near-saturated second-green pixel would come back as near-black,
+            // i.e. speckle on every other row and column.
+            const maxG = Math.max(g[0], g[1], g[2], g[3]);
+            const gains = new Float32Array(4);
+            let anyChange = false;
+            for (let p = 0; p < 4; p++) {
+                // Phase index (x & 1) + 2 * (y & 1) in VISIBLE coordinates, so
+                // the margins are folded in here exactly as they are for the
+                // pattern itself. Odd margins shift the phase.
+                const channel = fc(filters, topMargin + (p >> 1), leftMargin + (p & 1));
+                gains[p] = g[channel] / maxG;
+                if (Math.abs(gains[p] - 1) > 1e-3) anyChange = true;
+            }
+            if (anyChange) {
+                wbGain = gains;
+                console.log(
+                    `[LibRaw] camera WB from ${usable(camMul) ? 'cam_mul' : 'pre_mul'} ` +
+                    `[${g.slice(0, 3).map(v => v.toFixed(0)).join(', ')}] -> per-phase gains ` +
+                    `[${Array.from(gains).map(v => v.toFixed(3)).join(', ')}] (attenuating only)`
+                );
+            }
+        }
+
+        // Applying WB invalidates LibRaw's white level, so re-derive it.
+        //
+        // scaleFactor above comes from `maximum`, which describes the mosaic
+        // BEFORE white balance. Attenuating green to ~0.42 drops the brightest
+        // channel of a typical subject by that much, and nothing gives it
+        // back: a Canon CR2 reporting black=2048/maximum=16383 would come out
+        // of readFrameScaled at under half the level it does today. That is
+        // not cosmetic — Tenengrad frame ranking, the fractional crop-detect
+        // threshold and the AP brightness floor all read absolute levels.
+        //
+        // So the rule is simply: if we changed the data, we measure the data.
+        // Costs one extra decode per sequence (measureLevels caches, and
+        // useMultiLibRawParser shares one measurement across files).
+        if (wbGain) levelsNeedMeasuring = true;
+
         return getMetadata();
     }
 
@@ -304,12 +394,27 @@ export function useLibRawParser() {
         const top = top_margin || 0;
         const left = left_margin || 0;
 
-        for (let y = 0; y < outH; y++) {
-            const srcRow = (y + top) * rawW + left;
-            const dstRow = y * outW;
-            for (let x = 0; x < outW; x++) {
-                const v = data[srcRow + x] - blackLevel;
-                out[dstRow + x] = v > 0 ? v : 0;
+        if (wbGain) {
+            // Per-CFA-phase gain, all <= 1, so this can never clip. Kept as a
+            // separate loop so files with no white balance to apply pay
+            // nothing: this runs over every sensor pixel on the main thread.
+            for (let y = 0; y < outH; y++) {
+                const srcRow = (y + top) * rawW + left;
+                const dstRow = y * outW;
+                const gRow = (y & 1) << 1;
+                for (let x = 0; x < outW; x++) {
+                    const v = data[srcRow + x] - blackLevel;
+                    out[dstRow + x] = v > 0 ? v * wbGain[gRow + (x & 1)] : 0;
+                }
+            }
+        } else {
+            for (let y = 0; y < outH; y++) {
+                const srcRow = (y + top) * rawW + left;
+                const dstRow = y * outW;
+                for (let x = 0; x < outW; x++) {
+                    const v = data[srcRow + x] - blackLevel;
+                    out[dstRow + x] = v > 0 ? v : 0;
+                }
             }
         }
         return out.buffer;
@@ -326,7 +431,112 @@ export function useLibRawParser() {
         return new Uint16Array(await readFrame(frameIndex));
     }
 
+    // Derive black and white levels from the mosaic itself.
+    //
+    // Percentiles, not min/max: one hot pixel must not set the white point and
+    // one dead pixel must not set the black. Deliberately conservative on
+    // black, taking a low percentile rather than the floor, so a frame that
+    // genuinely reaches zero is left alone.
+    const CONTAINER_MAX = 65535;
+    const BLACK_PERCENTILE = 0.001;
+    // White point is the Nth brightest sample, NOT a percentile.
+    //
+    // A percentile assumes the subject occupies a decent share of the frame,
+    // and the whole point of this app is small bright things on large dark
+    // ones. At 25 megapixels the 99.99th percentile is the 2500th brightest
+    // sample, so a planet covering fewer pixels than that would put the white
+    // point in the SKY and the stretch would blow the planet to flat white.
+    // Counting from the top instead stays correct however small the subject.
+    //
+    // 50 absorbs a handful of hot pixels. Err high on purpose: under-stretching
+    // merely leaves the image dim, over-stretching destroys the subject.
+    const WHITE_RANK_FROM_TOP = 50;
+    const MAX_DERIVED_STRETCH = 64;   // sanity bound on the amplification
+
+    // In-flight guard, separate from the success flag below. Without it two
+    // concurrent readFrameScaled calls would each start a measurement; with
+    // it they await the same one.
+    let measurePromise = null;
+
+    function measureLevels() {
+        if (levelsMeasured || !levelsNeedMeasuring) return Promise.resolve();
+        if (!measurePromise) {
+            measurePromise = doMeasureLevels().finally(() => { measurePromise = null; });
+        }
+        return measurePromise;
+    }
+
+    async function doMeasureLevels() {
+        // readFrameRaw already subtracts the current blackLevel, so measure
+        // with it at zero and fold the result in afterwards.
+        const priorBlack = blackLevel;
+        blackLevel = 0;
+        let u16;
+        try {
+            u16 = new Uint16Array(await readFrameRaw());
+        } catch {
+            // Deliberately NOT marking this measured. A transient decode
+            // failure used to latch the flag permanently, leaving the file
+            // unnormalised at ~3% of full scale for the rest of the session —
+            // the exact black-stack condition this function exists to stop.
+            blackLevel = priorBlack;
+            return;
+        }
+
+        // Full scan, no subsampling: the white point counts individual samples
+        // from the top, so skipping any of them moves it.
+        const hist = new Uint32Array(CONTAINER_MAX + 1);
+        for (let i = 0; i < u16.length; i++) hist[u16[i]]++;
+        const n = u16.length;
+        if (!n) { blackLevel = priorBlack; return; }
+
+        let acc = 0, black = 0;
+        const blackTarget = n * BLACK_PERCENTILE;
+        for (let v = 0; v <= CONTAINER_MAX; v++) { acc += hist[v]; if (acc >= blackTarget) { black = v; break; } }
+
+        acc = 0;
+        let white = CONTAINER_MAX;
+        for (let v = CONTAINER_MAX; v >= 0; v--) { acc += hist[v]; if (acc >= WHITE_RANK_FROM_TOP) { white = v; break; } }
+        if (!(white > black)) { blackLevel = priorBlack; return; }
+
+        // Never weaken what LibRaw told us, only fill in what it did not.
+        blackLevel = Math.max(priorBlack, black);
+        scaleFactor = Math.min(MAX_DERIVED_STRETCH, CONTAINER_MAX / (white - blackLevel));
+        levelsMeasured = true;   // only now: every early return above is a retry
+
+        // State what the whole pipeline will actually be working with. Crop
+        // detection, Tenengrad frame scoring, AP quality and the stack all read
+        // the output of this function, so if it leaves the frame at 3% of full
+        // scale every one of them is scoring noise — and silently. One line
+        // here replaces guessing at the far end of the pipeline.
+        let acc2 = 0, median = 0;
+        for (let v = 0; v <= CONTAINER_MAX; v++) { acc2 += hist[v]; if (acc2 >= n / 2) { median = v; break; } }
+        const after = (v) => Math.round(Math.max(0, v - blackLevel) * scaleFactor);
+        const pct = (v) => `${((100 * after(v)) / CONTAINER_MAX).toFixed(1)}%`;
+        console.log(
+            `[LibRaw] levels measured for ${file?.name}: black=${blackLevel} white=${white} scale=${scaleFactor.toFixed(2)}x` +
+            ` | median ${median}->${after(median)} (${pct(median)}), white point -> 100%`
+        );
+        if (after(median) > CONTAINER_MAX * 0.5) {
+            console.warn(`[LibRaw] median lands at ${pct(median)} of full scale — the frame is mostly subject, or the black point is too low.`);
+        }
+    }
+
+    // Lets a sequence share one measurement, so frames of the same take are
+    // never scaled differently from each other.
+    function getLevels() {
+        return { blackLevel, scaleFactor, measured: levelsMeasured || !levelsNeedMeasuring };
+    }
+
+    function setLevels(levels) {
+        if (!levels) return;
+        blackLevel = levels.blackLevel;
+        scaleFactor = levels.scaleFactor;
+        levelsMeasured = true;
+    }
+
     async function readFrameScaled(frameIndex) {
+        await measureLevels();
         const buffer = await readFrame(frameIndex);
         if (scaleFactor > 1) {
             const u16 = new Uint16Array(buffer);
@@ -338,7 +548,7 @@ export function useLibRawParser() {
         return buffer;
     }
 
-    return { init, getMetadata, readFrame, readFrameTyped, readFrameScaled };
+    return { init, getMetadata, readFrame, readFrameTyped, readFrameScaled, measureLevels, getLevels, setLevels };
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +622,44 @@ export function useMultiLibRawParser() {
         return parsers[globalIndex].readFrameTyped(0);
     }
     async function readFrameScaled(globalIndex) {
+        // One measurement for the whole sequence. Measured per file, two frames
+        // of the same take could get different black and white points and so
+        // different brightness, which would show up as flicker in the stack and
+        // as a bogus displacement signal at the alignment points.
+        await shareLevels();
         return parsers[globalIndex].readFrameScaled(0);
+    }
+
+    // Cache the PROMISE, not a boolean.
+    //
+    // A boolean set before the await is only correct if callers arrive one at
+    // a time, and they do not: useDebayerReader loads a batch with
+    // `Promise.all(indices.map(readFrame))`, so callers 2..N would see the
+    // flag already true, return immediately, and then each measure its own
+    // file — producing exactly the per-file black/white points, brightness
+    // flicker and bogus AP displacement this function exists to prevent, plus
+    // one redundant full decode and 25M-sample histogram per file.
+    let levelsSharedPromise = null;
+    function shareLevels() {
+        if (parsers.length < 1) return Promise.resolve();
+        if (!levelsSharedPromise) levelsSharedPromise = doShareLevels();
+        return levelsSharedPromise;
+    }
+
+    async function doShareLevels() {
+        const first = parsers[0];
+        if (!first.measureLevels) return;
+        await first.measureLevels();
+        const levels = first.getLevels();
+        if (!levels.measured) {
+            // Measurement failed; let a later batch retry rather than latching
+            // the whole sequence into "shared" with nothing to share.
+            levelsSharedPromise = null;
+            return;
+        }
+        for (let i = 1; i < parsers.length; i++) {
+            parsers[i].setLevels?.(levels);
+        }
     }
 
     return { init, getMetadata, readFrame, readFrameTyped, readFrameScaled };

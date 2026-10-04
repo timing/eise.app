@@ -183,6 +183,7 @@ export function useDebayerReader() {
     let scaleFactor = 1;
     let cancelled = false;
     let isRgbPassthrough = false;  // true for SER colorID 100 (RGB) or 101 (BGR)
+    let loggedFrameStats = false;  // see readFrame: one-shot levels report
     let isBgr = false;             // true for SER colorID 101 (BGR) - swap R/B channels
 
     // SER colorIDs 8-11 name the Bayer pattern outright (RGGB/GRBG/GBRG/BGGR),
@@ -360,6 +361,53 @@ export function useDebayerReader() {
     }
 
     /**
+     * One-shot sanity report on the frame the pipeline is about to consume.
+     *
+     * Everything downstream treats its input as "signal spread across the
+     * container": crop detection thresholds a fraction of the range, Tenengrad
+     * scores gradients, AP quality needs structure above a brightness floor.
+     * A frame that sits at 3% of full scale fails all of them quietly — no
+     * exception, no error, just a black stack. This makes that condition
+     * readable in one line instead of inferred from the far end.
+     */
+    function logFrameLevels(frameData, meta) {
+        try {
+            const buf = frameData instanceof ArrayBuffer ? frameData : (frameData?.buffer || frameData);
+            const depth = meta?.pixelDepth > 8 ? 16 : 8;
+            const data = depth === 16 ? new Uint16Array(buf) : new Uint8Array(buf);
+            const full = depth === 16 ? 65535 : 255;
+            if (!data.length) return;
+
+            // Sample rather than sort 25 million values; percentiles this
+            // coarse only need to separate "has signal" from "does not".
+            const step = Math.max(1, Math.floor(data.length / 200000));
+            const vals = [];
+            for (let i = 0; i < data.length; i += step) vals.push(data[i]);
+            vals.sort((a, b) => a - b);
+            const at = (f) => vals[Math.min(vals.length - 1, Math.floor(vals.length * f))];
+            const median = at(0.5), p99 = at(0.99), max = vals[vals.length - 1];
+            const pct = (v) => `${((100 * v) / full).toFixed(1)}%`;
+
+            addLog(
+                `[DebayerReader] Frame levels (${depth}-bit): median ${median} (${pct(median)}) ` +
+                `p99 ${p99} (${pct(p99)}) max ${max} (${pct(max)})`
+            );
+
+            // p99 is the subject, whatever it is. If even the brightest 1% of
+            // the frame is down in the noise, nothing downstream can work.
+            if (p99 < full * 0.05) {
+                addLog(
+                    `[DebayerReader] WARNING: brightest 1% of the frame is only ${pct(p99)} of full scale. ` +
+                    `Crop detection, frame scoring and stacking all have nothing to work with — ` +
+                    `the black/white levels are wrong, not the sensor data.`
+                );
+            }
+        } catch (e) {
+            console.warn('[DebayerReader] Frame level report failed:', e);
+        }
+    }
+
+    /**
      * Read a single frame from the file.
      * For RGB/BGR SER files, converts packed 3-channel data → RGBA (4 bytes/pixel)
      * so it can be fed directly to the GPU's no-demosaic RGBA path.
@@ -376,6 +424,17 @@ export function useDebayerReader() {
             frameData = await parser.readFrameFlipped(frameIndex);
         } else {
             frameData = await parser.readFrame(frameIndex);
+        }
+
+        // Report, once, what the rest of the pipeline is being handed. Crop
+        // detection, Tenengrad frame scoring, alignment-point quality and the
+        // stack itself all consume this buffer, and all of them degrade
+        // silently on a frame that never left the bottom few percent of its
+        // container — there is no error, just a black stack and bounds that
+        // find a hot pixel instead of the planet.
+        if (!loggedFrameStats && !isRgbPassthrough) {
+            loggedFrameStats = true;
+            logFrameLevels(frameData, metadata);
         }
 
         if (isRgbPassthrough) {
@@ -1106,15 +1165,57 @@ export function useDebayerReader() {
                 const frames = [{ data: firstFrameData, index: 0 }];
                 const results = await analyzeFrameBatchGpu(frames, 0.1, true);
 
-                if (results?.[0]?.bounds?.width > 0) {
-                    const size = Math.max(results[0].bounds.width, results[0].bounds.height);
+                // A detection this small is not the subject, it is a single hot
+                // pixel that cleared the threshold. It happens on dim linear
+                // RAW (a Panasonic RW2 sits at 3% of full scale), and the crop
+                // below used the bounds verbatim: a 2-pixel blob produced a 2x2
+                // preview, so the colour picker rendered four giant squares.
+                const MIN_DETECTED_OBJECT = 16;
+                // Even a real but tiny detection gives nothing to judge colour
+                // by at 150px. Never hand the picker less than this.
+                //
+                // Deliberately small: the tight crop on the subject is the
+                // point of this code, and a planetary SER (Jupiter ~200px in
+                // a 640x480 frame) must keep its tight crop. A larger floor
+                // would clamp to the whole frame and shrink the planet to a
+                // dot in the thumbnail.
+                const MIN_PREVIEW_CROP = 128;
+                // Hard ceiling on what the picker ever demosaics.
+                //
+                // generateBayerThumbnails demosaics the WHOLE preview to
+                // float32 RGBA, once per Bayer pattern. At 16 bytes a pixel a
+                // 25MP sensor frame needs a 400MB storage buffer plus a 400MB
+                // readback, past maxStorageBufferBindingSize on any mobile GPU
+                // and most desktop ones — the GPU path throws and the picker
+                // silently falls back to its crude CPU thumbnails, which is
+                // the unreadable picker this whole thing set out to fix.
+                // 1024x1024 is 16MB, safe everywhere, and far more detail than
+                // a 150px thumbnail can show.
+                //
+                // Applies to a SUCCESSFUL detection too: a moon filling a
+                // 4000px frame would otherwise hit exactly the same wall.
+                // Cropping into a large subject costs the picker nothing — it
+                // only has to show colour.
+                const MAX_PREVIEW_CROP = 1024;
+
+                const bounds = results?.[0]?.bounds;
+                const detected = Math.max(bounds?.width || 0, bounds?.height || 0);
+                const detectionUsable = detected >= MIN_DETECTED_OBJECT;
+
+                {
                     const margin = 1 + (cropMarginPercent / 100);
+                    const wanted = detectionUsable
+                        ? Math.max(MIN_PREVIEW_CROP, Math.ceil(detected * margin / 2) * 2)
+                        : MAX_PREVIEW_CROP;
+                    // Even, always: an odd crop shifts the Bayer phase and the
+                    // picker would be judging a red/blue swap we introduced.
                     const cropSize = Math.min(
-                        Math.ceil(size * margin / 2) * 2,
-                        Math.min(metadata.width, metadata.height)
-                    );
-                    const centerX = results[0].bounds.centroidX;
-                    const centerY = results[0].bounds.centroidY;
+                        wanted, MAX_PREVIEW_CROP, metadata.width, metadata.height
+                    ) & ~1;
+                    // Detection failed: centre of frame is the best guess, and
+                    // bounded so it cannot blow the buffer either way.
+                    const centerX = detectionUsable ? bounds.centroidX : metadata.width / 2;
+                    const centerY = detectionUsable ? bounds.centroidY : metadata.height / 2;
 
                     // Crop the preview buffer (single-channel Bayer, 1 or 2 bytes/pixel)
                     const bpp = metadata.bytesPerPixel || (metadata.bpp ? metadata.bpp / 8 : 1);
@@ -1138,7 +1239,9 @@ export function useDebayerReader() {
                     previewBuffer = croppedBuffer;
                     previewWidth = cropSize;
                     previewHeight = cropSize;
-                    addLog(`[DebayerReader] Cropped preview to ${cropSize}x${cropSize} for color selector`);
+                    addLog(detectionUsable
+                        ? `[DebayerReader] Cropped preview to ${cropSize}x${cropSize} for color selector`
+                        : `[DebayerReader] Preview detection found only ${detected}px (noise, not a subject); using a centred ${cropSize}x${cropSize} window for the colour picker`);
                 }
             }
 

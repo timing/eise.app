@@ -99,9 +99,12 @@ async function renderThumbnailsGpu() {
 	const { width, height, pixelDepth } = headerData.value;
 	const buffer = frameData.value;
 
-	// Calculate thumbnail size (max 150px, maintain aspect ratio)
+	// Calculate thumbnail size (max 150px, maintain aspect ratio).
+	// Never above 1: a 2x2 preview was being blown up to 150x150, which looks
+	// like a broken demosaic (four giant squares) instead of like what it is,
+	// a preview that arrived far too small.
 	const maxSize = 150;
-	const scale = Math.min(maxSize / width, maxSize / height);
+	const scale = Math.min(1, maxSize / width, maxSize / height);
 	const thumbWidth = Math.floor(width * scale);
 	const thumbHeight = Math.floor(height * scale);
 
@@ -157,7 +160,12 @@ async function renderThumbnails() {
 			return;
 		}
 	} catch (err) {
-		console.warn('GPU thumbnail generation failed:', err);
+		// Loud on purpose. The CPU fallback below renders a 16-bit linear
+		// mosaic with no black point, so when the GPU path fails on a camera
+		// RAW the picker still shows five thumbnails - just unreadable ones.
+		// A console.warn made that look like the file was unreadable rather
+		// than like our GPU path had thrown.
+		console.error('[ColorProfileSelector] GPU demosaic FAILED, falling back to the crude CPU thumbnails:', err);
 	}
 
 	// Fallback: simple CPU demosaic (no OpenCV)
@@ -169,8 +177,11 @@ async function renderThumbnailsCpu() {
 	const { width, height, pixelDepth } = headerData.value;
 	const buffer = frameData.value;
 
+	// Never above 1, same as the GPU path. This is the path taken precisely
+	// when the GPU demosaic failed on a problem file, so it is the one that
+	// most needs to show a small preview as small rather than as giant blocks.
 	const maxSize = 150;
-	const scale = Math.min(maxSize / width, maxSize / height);
+	const scale = Math.min(1, maxSize / width, maxSize / height);
 	const thumbWidth = Math.floor(width * scale);
 	const thumbHeight = Math.floor(height * scale);
 

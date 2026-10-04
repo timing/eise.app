@@ -452,8 +452,14 @@ self.addEventListener('message', async (e) => {
 
             // Find max values in accumulators
             let maxAccumR = 0, maxAccumW = 0, maxNormalized = 0;
-            let sumW = 0, countW = 0;
+            let sumW = 0, countW = 0, nanW = 0;
             for (let i = 0; i < accumR.length; i++) {
+                // NaN must be counted explicitly. Every comparison against NaN
+                // is false, so a fully NaN-poisoned accumulator reports
+                // max=0.00 and pixelsWithData=0 — indistinguishable from "the
+                // warp never wrote anything", which is a completely different
+                // bug. One NaN weight anywhere turns the whole stack black.
+                if (Number.isNaN(accumW[i])) { nanW++; continue; }
                 if (accumR[i] > maxAccumR) maxAccumR = accumR[i];
                 if (accumW[i] > maxAccumW) maxAccumW = accumW[i];
                 if (accumW[i] > 0) {
@@ -462,6 +468,13 @@ self.addEventListener('message', async (e) => {
                     sumW += accumW[i];
                     countW++;
                 }
+            }
+            if (nanW > 0) {
+                console.error(
+                    `[Finalize] ${nanW}/${accumR.length} accumulator weights are NaN. ` +
+                    `The stack will be black. A NaN frame weight (sharpness / totalSharpness ` +
+                    `with totalSharpness 0 or a missing sharpness) is the usual cause.`
+                );
             }
 
             console.log(`[Finalize] Accumulator stats:`);

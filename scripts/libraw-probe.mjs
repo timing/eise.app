@@ -66,6 +66,71 @@ console.log(`\n${failures === 0 ? 'All maths checks passed.' : `${failures} CHEC
 // also means we exercise the very same /libraw/ files the browser loads.
 const path = process.argv[2];
 
+// Is what rawImageData() hands back the real undebayered sensor mosaic, or an
+// already-developed image (an embedded preview, or a demosaic LibRaw did for
+// us)? Two independent signals, both computed over the brightest region so a
+// dark sky cannot wash them out:
+//
+//  1. Per-CFA-phase means. Raw Bayer carries no white balance, and green sits
+//     well above red and blue on every consumer sensor, so the four phases
+//     must differ clearly. A developed image has them roughly equal.
+//  2. Checkerboard contrast. In a mosaic, horizontal neighbours are different
+//     colours and differ a lot; samples two apart are the same colour and
+//     differ little. A developed image has no such alternation, so the ratio
+//     sits near 1.
+function reportPhases(ph) {
+    if (!ph) return;
+    console.log(`\n  --- mosaic vs developed image (brightest ${ph.tile}x${ph.tile} tile at ${ph.tx},${ph.ty}) ---`);
+    const names = ['(even x, even y)', '(odd x,  even y)', '(even x, odd y)', '(odd x,  odd y)'];
+    const means = ph.phaseMeans;
+    for (let i = 0; i < 4; i++) {
+        console.log(`  phase ${i} ${names[i]}: mean ${means[i].toFixed(1)}  ${ph.phaseLabels[i]}`);
+    }
+    const spread = (Math.max(...means) - Math.min(...means)) / (means.reduce((s, v) => s + v, 0) / 4);
+    console.log(`  phase spread:      ${(100 * spread).toFixed(1)}% of mean   (mosaic: tens of %, developed: ~0%)`);
+    console.log(`  checkerboard:      adjacent |d|=${ph.adjDiff.toFixed(1)}  same-phase |d|=${ph.sameDiff.toFixed(1)}  ratio=${(ph.adjDiff / (ph.sameDiff || 1)).toFixed(2)}`);
+    console.log(`  zero samples:      ${ph.zeros}/${ph.total} of the whole visible frame (${(100 * ph.zeros / ph.total).toFixed(3)}%)`);
+    const isMosaic = spread > 0.12 && ph.adjDiff > 1.5 * ph.sameDiff;
+    console.log(`\n  VERDICT: ${isMosaic ? 'undebayered Bayer mosaic (real sensor data)' : 'looks DEVELOPED/flat, not a raw mosaic'}`);
+}
+
+// What colour does this bright region actually come out as, at each stage of
+// the development LibRaw performs? We apply the white balance but not the
+// camera->sRGB matrix, so this shows whether the cast we produce is supposed
+// to survive that matrix or be removed by it.
+function reportColour(ph, meta, blackGuess) {
+    if (!ph?.rgb) return;
+    const cd = meta?.color_data?.ColorData || meta?.color_data || {};
+    const mul = [].concat(cd.cam_mul || []).map(Number);
+    const mat = cd.rgb_cam || cd.cmatrix;
+    const show = (label, c) => {
+        const g = c[1] || 1;
+        console.log(`  ${label.padEnd(28)} R ${c[0].toFixed(0).padStart(6)}  G ${c[1].toFixed(0).padStart(6)}  B ${c[2].toFixed(0).padStart(6)}   ratio to G: ${(c[0] / g).toFixed(2)} / 1.00 / ${(c[2] / g).toFixed(2)}`);
+    };
+
+    console.log(`\n  --- colour of that tile through the development chain (black ${blackGuess}) ---`);
+    const raw = ph.rgb.map((v) => Math.max(0, v - blackGuess));
+    show('raw mosaic (no WB)', raw);
+
+    if (!(mul.length >= 3 && mul[0] > 0 && mul[1] > 0 && mul[2] > 0)) {
+        console.log('  cam_mul unusable; cannot model white balance.');
+        return;
+    }
+    const wb = [raw[0] * mul[0], raw[1] * mul[1], raw[2] * mul[2]];
+    const norm = wb[1] / raw[1];
+    show('+ camera WB (what we do)', wb.map((v) => v / norm));
+
+    if (!Array.isArray(mat) || mat.length < 3) {
+        console.log('  no rgb_cam matrix reported; cannot model the camera->sRGB step.');
+        return;
+    }
+    const m = mat.slice(0, 3).map((r) => [].concat(r).map(Number));
+    const out = [0, 1, 2].map((i) => m[i][0] * wb[0] + m[i][1] * wb[1] + m[i][2] * wb[2]);
+    show('+ rgb_cam (what LibRaw does)', out.map((v) => v / norm));
+    console.log('  If the last row is near-neutral and the middle one is not, the cast is the');
+    console.log('  missing colour matrix, not the white balance and not the Bayer pattern.');
+}
+
 function report(meta, mosaic, histo) {
     const filters = Number(meta?.filters ?? 0);
     const cd = meta?.color_data?.ColorData || meta?.color_data || {};
@@ -79,6 +144,10 @@ function report(meta, mosaic, histo) {
     if (cd.cam_mul) console.log(`  cam_mul:  [${[].concat(cd.cam_mul).join(', ')}]`);
     if (cd.pre_mul) console.log(`  pre_mul:  [${[].concat(cd.pre_mul).join(', ')}]`);
     if (Array.isArray(cd.cblack)) console.log(`  cblack:   [${cd.cblack.slice(0, 8).join(', ')}]`);
+    const mat = cd.rgb_cam || cd.cmatrix;
+    if (Array.isArray(mat)) {
+        console.log(`  rgb_cam:  ${mat.map(r => `[${[].concat(r).map(v => Number(v).toFixed(3)).join(', ')}]`).join(' ')}`);
+    }
     console.log(`  pattern:  ${bayerPatternFromFilters(filters, top, left)}`);
     if (mosaic) console.log(`  mosaic:   ${mosaic.raw_width}x${mosaic.raw_height} samples=${mosaic.samples} type=${mosaic.type}`);
 
@@ -152,12 +221,92 @@ if (path) {
                     mean: vals.reduce((s, v) => s + v, 0) / n,
                 };
             }
+            // Mosaic-vs-developed test. Find the brightest tile first: the
+            // phase means only separate where there is signal, and most of an
+            // astro frame is sky.
+            let phases = null;
+            if (r?.data) {
+                const rw = r.raw_width, top = Number(meta?.top_margin || 0), left = Number(meta?.left_margin || 0);
+                const vw = Number(meta?.width || 0), vh = Number(meta?.height || 0);
+                const TILE = 128;
+                let best = -1, tx = 0, ty = 0;
+                for (let y0 = 0; y0 + TILE <= vh; y0 += TILE) {
+                    for (let x0 = 0; x0 + TILE <= vw; x0 += TILE) {
+                        let s = 0;
+                        for (let y = y0; y < y0 + TILE; y += 4) {
+                            const row = (y + top) * rw + left;
+                            for (let x = x0; x < x0 + TILE; x += 4) s += r.data[row + x];
+                        }
+                        if (s > best) { best = s; tx = x0; ty = y0; }
+                    }
+                }
+
+                // Phase index is (x&1) + 2*(y&1) relative to the VISIBLE
+                // origin, which is the phase the rest of the app works in.
+                const sums = [0, 0, 0, 0], counts = [0, 0, 0, 0];
+                let adjDiff = 0, sameDiff = 0, pairs = 0;
+                for (let y = ty; y < ty + TILE; y++) {
+                    const row = (y + top) * rw + left;
+                    for (let x = tx; x < tx + TILE; x++) {
+                        const v = r.data[row + x];
+                        const p = (x & 1) + 2 * (y & 1);
+                        sums[p] += v; counts[p]++;
+                        if (x < tx + TILE - 2) {
+                            adjDiff += Math.abs(v - r.data[row + x + 1]);
+                            sameDiff += Math.abs(v - r.data[row + x + 2]);
+                            pairs++;
+                        }
+                    }
+                }
+
+                // Zero count over the whole visible frame: "is it pure black?"
+                // answered directly rather than inferred from a histogram.
+                let zeros = 0, total = 0;
+                const zstep = Math.max(1, Math.floor(Math.sqrt((vw * vh) / 1000000)));
+                for (let y = 0; y < vh; y += zstep) {
+                    const row = (y + top) * rw + left;
+                    for (let x = 0; x < vw; x += zstep) { if (r.data[row + x] === 0) zeros++; total++; }
+                }
+
+                phases = {
+                    tile: TILE, tx, ty, zeros, total,
+                    phaseMeans: sums.map((s, i) => s / (counts[i] || 1)),
+                    adjDiff: adjDiff / (pairs || 1),
+                    sameDiff: sameDiff / (pairs || 1),
+                };
+            }
+
             const mosaic = r ? { raw_width: r.raw_width, raw_height: r.raw_height, samples: r.data?.length, type: r.data?.constructor?.name } : null;
             raw.dispose?.();
-            return { meta, mosaic, histo };
+            return { meta, mosaic, histo, phases };
         }, b64);
 
         report(out.meta, out.mosaic, out.histo);
+
+        if (out.phases) {
+            // Label each phase with the colour the CFA says it carries, so a
+            // green-highest reading can be confirmed against the pattern
+            // rather than assumed.
+            const filters = Number(out.meta?.filters ?? 0);
+            const top = Number(out.meta?.top_margin || 0), left = Number(out.meta?.left_margin || 0);
+            const COLOURS = ['R', 'G', 'B', 'G'];
+            out.phases.phaseLabels = [0, 1, 2, 3].map((p) => {
+                const dx = p & 1, dy = p >> 1;
+                return COLOURS[fc(filters, top + dy, left + dx)];
+            });
+            // Collapse the four phases into R, G, B for the colour model.
+            const means = out.phases.phaseMeans;
+            let r = 0, b = 0, gSum = 0, gN = 0;
+            out.phases.phaseLabels.forEach((lab, p) => {
+                if (lab === 'R') r = means[p];
+                else if (lab === 'B') b = means[p];
+                else { gSum += means[p]; gN++; }
+            });
+            out.phases.rgb = [r, gN ? gSum / gN : 0, b];
+
+            reportPhases(out.phases);
+            reportColour(out.phases, out.meta, out.histo?.p1 ?? 0);
+        }
     } catch (e) {
         console.log(`  could not decode: ${e?.message || e}`);
         console.log(`  (needs the dev server on ${devUrl} and playwright; set EISE_DEV_URL to change)`);

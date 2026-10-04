@@ -22,6 +22,50 @@ export class WebGPUUnavailableError extends Error {
     }
 }
 
+/**
+ * Total sharpness for weighting, plus a usable flag.
+ *
+ * Frames are accumulated with weight `sharpness / totalSharpness * frameCount`.
+ * That expression has two ways to produce NaN, and the GPU propagates NaN
+ * silently: `accumW[idx] += NaN` poisons the accumulator, every later
+ * comparison against it is false, and the stack finalises to a fully black
+ * image with no error anywhere.
+ *
+ *   - totalSharpness === 0  -> 0 / 0.  Happens when every frame scores zero,
+ *     which a very dim linear RAW can do.
+ *   - any sharpness missing -> the reduce itself becomes NaN, poisoning the
+ *     weights of every frame including the good ones.
+ *
+ * Neither is a reason to produce a black image: a frame set with no usable
+ * sharpness spread should stack as a plain unweighted average, which is what
+ * `usable: false` tells callers to do.
+ */
+function sumSharpness(frames) {
+    let total = 0;
+    let bad = 0;
+    for (const f of frames) {
+        const s = Number(f?.sharpness);
+        if (Number.isFinite(s) && s > 0) total += s;
+        else bad++;   // counted, but treated as 0 rather than poisoning the sum
+    }
+    return { total, bad, usable: total > 0 };
+}
+
+/**
+ * Per-frame accumulation weight. Guaranteed finite.
+ *
+ * Identical to the old `sharpness / total * frameCount` in every case that
+ * previously produced a number: an unscored frame still gets weight 0 and
+ * contributes nothing. Only the two NaN cases behave differently, and there
+ * the fallback is an unweighted average instead of a black image.
+ */
+function frameWeight(sharpness, sharpnessTotal, frameCount) {
+    if (!sharpnessTotal.usable) return 1;   // no usable spread at all: equal weights
+    const s = Number(sharpness);
+    if (!Number.isFinite(s) || s <= 0) return 0;
+    return (s / sharpnessTotal.total) * frameCount;
+}
+
 export function useStacker() {
     const { addLog, emit, on } = useEventBus();
 
@@ -831,7 +875,14 @@ export function useStacker() {
             if (effectiveBatchSize < 4) {
                 addLog(`Large frames (${cropWidth}x${cropHeight}): GPU allows ${effectiveBatchSize} frame(s) per batch`);
             }
-            const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
+            const totalSharpness = sumSharpness(frameMetadata);
+            if (!totalSharpness.usable) {
+                addLog(`Sharpness weighting unavailable (all ${frameMetadata.length} frames scored zero); stacking with equal weights.`);
+            } else if (totalSharpness.bad > 0) {
+                // These get weight 0 and contribute nothing. Silent before, so
+                // a 100-frame job could quietly stack 10 frames.
+                addLog(`${totalSharpness.bad}/${frameMetadata.length} frames have no usable sharpness score and will not contribute to the stack.`);
+            }
             let processedCount = 0;
 
             // Helper to check for OOM errors
@@ -889,7 +940,7 @@ export function useStacker() {
                     ? { dx: cumulativeDrift.dx, dy: cumulativeDrift.dy }
                     : null;
 
-                const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
+                const batchWeights = batchFrames.map(f => frameWeight(f.sharpness, totalSharpness, frameCount));
                 const t0Stack = performance.now();
 
                 if (isRawBayer) {
@@ -1420,7 +1471,14 @@ export function useStacker() {
             addLog('Starting GPU stacking');
 
             // Calculate total sharpness for weighting
-            const totalSharpness = frameData.reduce((sum, f) => sum + f.sharpness, 0);
+            const totalSharpness = sumSharpness(frameData);
+            if (!totalSharpness.usable) {
+                addLog(`Sharpness weighting unavailable (all ${frameData.length} frames scored zero); stacking with equal weights.`);
+            } else if (totalSharpness.bad > 0) {
+                // These get weight 0 and contribute nothing. Silent before, so
+                // a 100-frame job could quietly stack 10 frames.
+                addLog(`${totalSharpness.bad}/${frameData.length} frames have no usable sharpness score and will not contribute to the stack.`);
+            }
 
             // Calculate reference brightness (refFrame already defined above)
             // calcMeanBrightness returns 0-255 for Uint8, 0-1 for Float32
@@ -1479,7 +1537,7 @@ export function useStacker() {
                         sharpness: frame.sharpness
                     });
                     batchShifts.push(frameShifts[i]);
-                    batchWeights.push(frame.sharpness / totalSharpness * frameCount);
+                    batchWeights.push(frameWeight(frame.sharpness, totalSharpness, frameCount));
                 }
 
                 const t0Accum = performance.now();
@@ -1870,7 +1928,14 @@ export function useStacker() {
                 Math.max(4, Math.min(64, Math.floor(targetBatchMemory / frameBytes))),
                 deviceMaxBatch
             );
-            const totalSharpness = frameMetadata.reduce((sum, f) => sum + f.sharpness, 0);
+            const totalSharpness = sumSharpness(frameMetadata);
+            if (!totalSharpness.usable) {
+                addLog(`Sharpness weighting unavailable (all ${frameMetadata.length} frames scored zero); stacking with equal weights.`);
+            } else if (totalSharpness.bad > 0) {
+                // These get weight 0 and contribute nothing. Silent before, so
+                // a 100-frame job could quietly stack 10 frames.
+                addLog(`${totalSharpness.bad}/${frameMetadata.length} frames have no usable sharpness score and will not contribute to the stack.`);
+            }
             let processedCount = 0;
 
             for (let i = 0; i < frameCount; i += batchSize) {
@@ -1880,7 +1945,7 @@ export function useStacker() {
                 const batchFrames = frameMetadata.slice(i, batchEnd);
                 const { frames: rawFrames, centers: batchCenters } = await loadRawBatch(batchFrames);
 
-                const batchWeights = batchFrames.map(f => f.sharpness / totalSharpness * frameCount);
+                const batchWeights = batchFrames.map(f => frameWeight(f.sharpness, totalSharpness, frameCount));
 
                 if (isRawBayer) {
                     // RAW BAYER: VNG demosaic + crop + match + accumulate all on stack worker

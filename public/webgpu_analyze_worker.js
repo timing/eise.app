@@ -353,7 +353,7 @@ function detectBitDepth(frames) {
 let prepareBayerDataTime = 0;
 let prepareBayerDataCount = 0;
 
-function prepareBayerData(frames, pixelCount, skipStretch = false) {
+function prepareBayerData(frames, pixelCount, skipStretch = false, srcWidth = 0) {
     const t0 = performance.now();
     const batchSize = frames.length;
     const is16bit = frames[0]?.data instanceof Uint16Array;
@@ -372,11 +372,53 @@ function prepareBayerData(frames, pixelCount, skipStretch = false) {
         if (!skipStretch) {
             const sampleSize = Math.min(10000, frames[0].data.length);
             const sample = [];
-            for (let i = 0; i < batchSize && sample.length < sampleSize; i++) {
-                const data = frames[i].data;
-                const step = Math.max(1, Math.floor(data.length / (sampleSize / batchSize)));
-                for (let j = 0; j < data.length && sample.length < sampleSize; j += step) {
-                    sample.push(data[j]);
+
+            // Sample whole 2x2 CFA blocks, so all four phases are weighted
+            // equally.
+            //
+            // This used to walk the frame with step = length / sampleSize and
+            // take one pixel per step. On a Bayer mosaic that is a trap: the
+            // step is usually EVEN, and with an even frame width an even step
+            // from index 0 only ever lands on even columns, so HALF THE PHASES
+            // WERE NEVER SAMPLED. A 5784x4344 RAW (step 2512) measured its p99
+            // from red and one green and never saw blue; at odd widths it saw
+            // red and blue and never green. Worse, the step is derived from
+            // the batch size, so the same footage measured in batches of 5
+            // (step 153, odd) sampled all four phases and got a different
+            // stretch from the same data in batches of 1.
+            //
+            // The stretch is one scalar applied to every pixel, so nothing was
+            // ever stretched unevenly — but the scalar was derived from half
+            // the sensor, and raw green runs about 2x raw red, so it depended
+            // on CFA phase and frame width parity instead of on the image.
+            const width = srcWidth > 1 ? srcWidth : 0;
+            if (width && (width & 1) === 0) {
+                const blocksPerFrame = Math.max(1, Math.floor(sampleSize / 4 / batchSize));
+                for (let i = 0; i < batchSize && sample.length < sampleSize; i++) {
+                    const data = frames[i].data;
+                    const rows = Math.floor(data.length / width);
+                    const blocksX = width >> 1;
+                    const blocksY = rows >> 1;
+                    const totalBlocks = blocksX * blocksY;
+                    if (totalBlocks < 1) continue;
+                    const blockStep = Math.max(1, Math.floor(totalBlocks / blocksPerFrame));
+                    for (let b = 0; b < totalBlocks && sample.length < sampleSize; b += blockStep) {
+                        const bx = (b % blocksX) * 2;
+                        const by = Math.floor(b / blocksX) * 2;
+                        const o = by * width + bx;
+                        sample.push(data[o], data[o + 1], data[o + width], data[o + width + 1]);
+                    }
+                }
+            } else {
+                // No width known (or an odd width, where there is no consistent
+                // 2x2 grid to walk): force an ODD stride so consecutive samples
+                // at least alternate column parity instead of locking onto one.
+                for (let i = 0; i < batchSize && sample.length < sampleSize; i++) {
+                    const data = frames[i].data;
+                    const step = Math.max(1, Math.floor(data.length / (sampleSize / batchSize))) | 1;
+                    for (let j = 0; j < data.length && sample.length < sampleSize; j += step) {
+                        sample.push(data[j]);
+                    }
                 }
             }
             sample.sort((a, b) => a - b);
@@ -895,7 +937,7 @@ async function analyzeBatch(frames, width, height, bayerPattern, threshold, meta
 
     if (needsDemosaic) {
         // Upload Bayer data to input buffer (auto-stretch for 16-bit to handle dark data)
-        const { data: bayerData, scale } = prepareBayerData(frames, pixelCount, false);
+        const { data: bayerData, scale } = prepareBayerData(frames, pixelCount, false, width);
         queue.writeBuffer(buffers.inputBuffers[0], 0, bayerData);
 
         // Demosaic params (mixed u32/f32 for scale)
@@ -1526,7 +1568,7 @@ async function cropAndAnalyzeBatch(frames, srcWidth, srcHeight, cropWidth, cropH
             const midIdx = Math.floor(rawData.length / 2);
             console.log(`[GPU] cropAndAnalyzeBatch raw input: type=${rawData.constructor?.name}, midValue=${rawData[midIdx]}, sample=[${rawData[midIdx]}, ${rawData[midIdx+1]}, ${rawData[midIdx+2]}]`);
         }
-        const prepared = prepareBayerData(frames, srcPixelCount, false);
+        const prepared = prepareBayerData(frames, srcPixelCount, false, srcWidth);
         bayerData = prepared.data;
         scale = prepared.scale;
     }
@@ -1976,7 +2018,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
             pipelinedUpload.ready = false;  // Consume the pre-uploaded data
         } else {
             // Normal path: prepare and upload data
-            const prepared = prepareBayerData(frames, srcPixelCount, false);
+            const prepared = prepareBayerData(frames, srcPixelCount, false, srcWidth);
             scale = prepared.scale;
             queue.writeBuffer(currentInputBuffer, 0, prepared.data);
         }
@@ -2263,7 +2305,7 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
         // While GPU processes current batch, prepare and upload next batch to next buffer
         if (nextBatchFrames && nextBatchFrames.length > 0 && needsDemosaic) {
             const nextSrcPixelCount = srcWidth * srcHeight;  // Same dimensions
-            const nextPrepared = prepareBayerData(nextBatchFrames, nextSrcPixelCount, false);
+            const nextPrepared = prepareBayerData(nextBatchFrames, nextSrcPixelCount, false, srcWidth);
 
             // Upload to the next buffer in rotation
             const nextBufferIndex = (pipelinedUpload.bufferIndex + 1) % MAX_CONCURRENT_BATCHES;
@@ -2424,7 +2466,82 @@ async function detectCropAnalyzeBatch(frames, srcWidth, srcHeight, cropSize, bay
  * Generate thumbnails for all Bayer patterns from a single raw frame
  * Used by ColorProfileSelector to show demosaic options without loading OpenCV
  */
-async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth, thumbWidth, thumbHeight) {
+// Percentile stretch bounds over a strided buffer.
+//
+// Percentiles rather than min/max so one hot or dead pixel cannot flatten the
+// whole stretch, and a guard for the degenerate case: when everything really
+// is one value, return an identity rather than a scale that maps it to black.
+// The old code did `range = max - min || 1` and then `(v - min) * 255`, which
+// turns a uniform image into a pure black one.
+// Black point PER CHANNEL, gain SHARED.
+//
+// A single black point pooled over all three channels cannot remove a colour
+// cast from the background, and raw Bayer always has one: with no white
+// balance green runs about 2x red, so the pooled low percentile lands in the
+// red tail, the green background stays well above it, and the thumbnail shows
+// a visibly green sky. Subtracting each channel's own floor puts the
+// background at zero in all three.
+//
+// The GAIN stays shared on purpose. Per-channel gain would be a grey-world
+// normalisation, which neutralises the subject too — and a red/blue swap from
+// the wrong Bayer pattern would come out looking almost right, defeating the
+// one thing this picker exists to show. Shared gain keeps the subject's hue
+// while the background goes neutral.
+const STRETCH_BLACK_PERCENTILE = 0.05;   // see note below
+const STRETCH_WHITE_PERCENTILE = 0.001;  // from the top; absorbs hot pixels
+
+function stretchRange(data, count, stride, lo, hi, channels = 1) {
+    const BINS = 4096;
+    const span = hi - lo;
+    const identity = { lo: new Float32Array(channels).fill(lo), scale: 1 / (span || 1) };
+    if (!(span > 0) || count < 1) return identity;
+
+    // One histogram per channel rather than one pooled across them.
+    const hists = [];
+    for (let c = 0; c < channels; c++) hists.push(new Uint32Array(BINS));
+    const step = Math.max(1, Math.floor(count / 200000));   // cap the scan
+    let n = 0;
+    for (let i = 0; i < count; i += step) {
+        for (let c = 0; c < channels; c++) {
+            const v = data[i * stride + c];
+            let b = Math.floor(((v - lo) / span) * (BINS - 1));
+            if (b < 0) b = 0; else if (b >= BINS) b = BINS - 1;
+            hists[c][b]++;
+        }
+        n++;
+    }
+    if (!n) return identity;
+
+    const pick = (hist, frac, fromTop) => {
+        let acc = 0;
+        const target = n * frac;
+        if (fromTop) {
+            for (let b = BINS - 1; b >= 0; b--) { acc += hist[b]; if (acc >= target) return lo + span * (b / (BINS - 1)); }
+            return hi;
+        }
+        for (let b = 0; b < BINS; b++) { acc += hist[b]; if (acc >= target) return lo + span * (b / (BINS - 1)); }
+        return lo;
+    };
+
+    // The black percentile is deliberately well above zero. At 0.1% it sat
+    // essentially on the floor of the histogram, so a background only a little
+    // above the true black survived the subtraction and was then amplified by
+    // the gain — the "dark pixels are too visible" look. On an astro frame the
+    // background is the bulk of the pixels, so clipping the darkest few percent
+    // costs nothing and puts the sky at zero.
+    const blacks = new Float32Array(channels);
+    let widest = 0;
+    for (let c = 0; c < channels; c++) {
+        blacks[c] = pick(hists[c], STRETCH_BLACK_PERCENTILE, false);
+        const white = pick(hists[c], STRETCH_WHITE_PERCENTILE, true);
+        if (white - blacks[c] > widest) widest = white - blacks[c];
+    }
+    // Nothing to stretch: leave the data where it is instead of flattening it.
+    if (!(widest > 0)) return identity;
+    return { lo: blacks, scale: 1 / widest };
+}
+
+async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth, thumbWidth, thumbHeight, fullPrecisionStretch = false) {
     if (!device || !queue) {
         throw new Error('WebGPU not initialized or device lost');
     }
@@ -2438,17 +2555,23 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
 
     const pixelCount = srcWidth * srcHeight;
 
-    // Convert raw data to packed Uint32Array (2 pixels per u32 for 16-bit)
-    const u32Count = Math.ceil(pixelCount / 2);
-    let inputData = new Uint32Array(u32Count);
-    const u16View = new Uint16Array(inputData.buffer);
-
+    // 16-bit goes through prepareBayerData, the same preparation every working
+    // demosaic in this worker uses. It packs identically AND measures the data
+    // to produce a stretch scale for the shader. Hand-rolled packing here with
+    // a hardcoded scale of 1.0 was why a dim 16-bit RAW demosaiced to nothing
+    // while the analyze path handled the same file: that path was quietly
+    // applying up to 2x, this one applied none.
+    let inputData;
+    let bayerScale = 1.0;
     if (pixelDepth > 8) {
-        // 16-bit: direct copy using TypedArray.set
-        const src = new Uint16Array(rawData);
-        u16View.set(src);
+        const prepared = prepareBayerData([{ data: new Uint16Array(rawData) }], pixelCount, false, srcWidth);
+        inputData = prepared.data;
+        bayerScale = prepared.scale;
     } else {
-        // 8-bit: scale to 16-bit range
+        // 8-bit: scale to 16-bit range. Left as it was; the 8-bit picker works.
+        const u32Count = Math.ceil(pixelCount / 2);
+        inputData = new Uint32Array(u32Count);
+        const u16View = new Uint16Array(inputData.buffer);
         const src = new Uint8Array(rawData);
         for (let i = 0; i < pixelCount; i++) {
             u16View[i] = src[i] << 8;
@@ -2460,7 +2583,13 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
     // We use bitDepth=16 for input reading, so output is Float32
     const outputBytesPerPixel = 16;  // Float32 RGBA
 
-    const inputBuffer = storageBuffer(device, u32Count * 4, { copyDst: true });
+    // Size from the packed array itself. Reading a u32Count variable here was
+    // a ReferenceError: the only declaration left is block-scoped inside the
+    // 8-bit branch above, so this threw on EVERY call, 8- and 16-bit alike,
+    // before a single GPU command was recorded. ColorProfileSelector caught it
+    // and silently fell back to its CPU thumbnails, which is why the GPU
+    // picker appeared to do nothing.
+    const inputBuffer = storageBuffer(device, inputData.length * 4, { copyDst: true });
     queue.writeBuffer(inputBuffer, 0, inputData);
 
     const outputBuffer = storageBuffer(device, pixelCount * outputBytesPerPixel, { copySrc: true });  // Float32 RGBA output
@@ -2476,9 +2605,15 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             // Mono: convert raw to grayscale RGBA directly
             fullRgba = new Uint8ClampedArray(pixelCount * 4);
             const src = pixelDepth > 8 ? new Uint16Array(rawData) : new Uint8Array(rawData);
-            const scale = pixelDepth > 8 ? 1/256 : 1;
+            // Stretch from the full-precision source, not after quantising. See
+            // the note on stretchRange below.
+            const full = pixelDepth > 8 ? 65535 : 255;
+            const srcRange = fullPrecisionStretch
+                ? stretchRange(src, src.length, 1, 0, full)
+                : { lo: [0], scale: 1 / full };
+            const monoBlack = srcRange.lo[0];
             for (let i = 0; i < pixelCount; i++) {
-                const v = Math.min(255, Math.max(0, Math.round(src[i] * scale)));
+                const v = Math.min(255, Math.max(0, Math.round((src[i] - monoBlack) * srcRange.scale * 255)));
                 fullRgba[i * 4] = v;
                 fullRgba[i * 4 + 1] = v;
                 fullRgba[i * 4 + 2] = v;
@@ -2489,7 +2624,7 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
             // bitDepth=16 since 8-bit data was already scaled to 16-bit range above, scale=1.0
             const paramsData = new ArrayBuffer(32);
             new Uint32Array(paramsData).set([srcWidth, srcHeight, 1, pattern, 0, 16, 0, 0]);
-            new Float32Array(paramsData)[6] = 1.0;  // No stretch needed
+            new Float32Array(paramsData)[6] = bayerScale;  // same scale the analyze path uses
             queue.writeBuffer(paramsBuffer, 0, paramsData);
 
             const bindGroup = createBindGroup(device, demosaicPipeline, [paramsBuffer, inputBuffer, outputBuffer]);
@@ -2509,61 +2644,75 @@ async function generateBayerThumbnails(rawData, srcWidth, srcHeight, pixelDepth,
                 unmapAll([readbackBuf]);
             }
 
+            // Stretch from the float32 data, THEN quantise. The other way
+            // round destroys the information the stretch needs: a linear RAW
+            // can sit at 3% of full scale, where one 8-bit step spans 257 raw
+            // levels, so a patch of sky collapses to a single value before the
+            // stretch ever sees it. The stretch then maps that one value to
+            // zero and every thumbnail renders pure black, which is exactly
+            // what a Panasonic RW2 of the moon produced: 67,500 samples, all 0.
+            const fRange = fullPrecisionStretch
+                ? stretchRange(float32Data, pixelCount, 4, 0, 1, 3)
+                : { lo: [0, 0, 0], scale: 1 };
+            // Per-channel black: this is what puts a green sky at neutral
+            // black instead of leaving it visibly green.
+            const [blackR, blackG, blackB] = fRange.lo;
             fullRgba = new Uint8ClampedArray(pixelCount * 4);
             for (let i = 0; i < pixelCount; i++) {
                 const srcIdx = i * 4;
                 const dstIdx = i * 4;
-                fullRgba[dstIdx] = Math.min(255, Math.max(0, Math.round(float32Data[srcIdx] * 255)));
-                fullRgba[dstIdx + 1] = Math.min(255, Math.max(0, Math.round(float32Data[srcIdx + 1] * 255)));
-                fullRgba[dstIdx + 2] = Math.min(255, Math.max(0, Math.round(float32Data[srcIdx + 2] * 255)));
+                fullRgba[dstIdx] = Math.min(255, Math.max(0, Math.round((float32Data[srcIdx] - blackR) * fRange.scale * 255)));
+                fullRgba[dstIdx + 1] = Math.min(255, Math.max(0, Math.round((float32Data[srcIdx + 1] - blackG) * fRange.scale * 255)));
+                fullRgba[dstIdx + 2] = Math.min(255, Math.max(0, Math.round((float32Data[srcIdx + 2] - blackB) * fRange.scale * 255)));
                 fullRgba[dstIdx + 3] = 255;
             }
         }
 
-        // Auto-stretch: find min/max and normalize
-        let minVal = 255, maxVal = 0;
-        for (let i = 0; i < pixelCount; i++) {
-            const idx = i * 4;
-            const lum = (fullRgba[idx] + fullRgba[idx + 1] + fullRgba[idx + 2]) / 3;
-            minVal = Math.min(minVal, lum);
-            maxVal = Math.max(maxVal, lum);
+        // With fullPrecisionStretch the data was already stretched above, at
+        // full precision, so this becomes an identity. Without it, fall back to
+        // the original quantise-then-stretch so callers that depend on the old
+        // behaviour (the comparison-video frames) are untouched.
+        let minVal = 0, scale = 1;
+        if (!fullPrecisionStretch) {
+            let lo = 255, hi = 0;
+            for (let i = 0; i < pixelCount; i++) {
+                const idx = i * 4;
+                const lum = (fullRgba[idx] + fullRgba[idx + 1] + fullRgba[idx + 2]) / 3;
+                if (lum < lo) lo = lum;
+                if (lum > hi) hi = lum;
+            }
+            minVal = lo;
+            scale = 255 / ((hi - lo) || 1);
         }
-        const range = maxVal - minVal || 1;
-        const scale = 255 / range;
 
-        // Resize to thumbnail (simple bilinear)
+        // Resize to thumbnail by averaging each output pixel's whole source
+        // footprint.
+        //
+        // This used to be a bilinear sample, which is fine when the source is
+        // a 640x480 SER and each output pixel covers ~4x4. On a 5784x4344
+        // camera RAW each output pixel covers 38x38, and bilinear reads 2x2 of
+        // those 1444 samples: it throws away 99.7% of the frame and renders
+        // the shot noise of whichever pixels it happened to land on. Averaging
+        // costs one pass over the frame and is what a downscale is supposed to
+        // do.
         const thumbRgba = new Uint8ClampedArray(thumbWidth * thumbHeight * 4);
-        const xRatio = srcWidth / thumbWidth;
-        const yRatio = srcHeight / thumbHeight;
-
         for (let ty = 0; ty < thumbHeight; ty++) {
+            const y0 = Math.floor((ty * srcHeight) / thumbHeight);
+            const y1 = Math.max(y0 + 1, Math.floor(((ty + 1) * srcHeight) / thumbHeight));
             for (let tx = 0; tx < thumbWidth; tx++) {
-                const srcX = tx * xRatio;
-                const srcY = ty * yRatio;
-                const x0 = Math.floor(srcX);
-                const y0 = Math.floor(srcY);
-                const x1 = Math.min(x0 + 1, srcWidth - 1);
-                const y1 = Math.min(y0 + 1, srcHeight - 1);
-                const xFrac = srcX - x0;
-                const yFrac = srcY - y0;
-
-                const tidx = (ty * thumbWidth + tx) * 4;
-
-                for (let c = 0; c < 3; c++) {
-                    const i00 = (y0 * srcWidth + x0) * 4 + c;
-                    const i01 = (y0 * srcWidth + x1) * 4 + c;
-                    const i10 = (y1 * srcWidth + x0) * 4 + c;
-                    const i11 = (y1 * srcWidth + x1) * 4 + c;
-
-                    // Bilinear interpolation
-                    const v = (fullRgba[i00] * (1 - xFrac) * (1 - yFrac) +
-                               fullRgba[i01] * xFrac * (1 - yFrac) +
-                               fullRgba[i10] * (1 - xFrac) * yFrac +
-                               fullRgba[i11] * xFrac * yFrac);
-
-                    // Auto-stretch
-                    thumbRgba[tidx + c] = Math.min(255, Math.max(0, Math.round((v - minVal) * scale)));
+                const x0 = Math.floor((tx * srcWidth) / thumbWidth);
+                const x1 = Math.max(x0 + 1, Math.floor(((tx + 1) * srcWidth) / thumbWidth));
+                let r = 0, g = 0, b = 0, n = 0;
+                for (let y = y0; y < y1; y++) {
+                    let i = (y * srcWidth + x0) * 4;
+                    for (let x = x0; x < x1; x++, i += 4) {
+                        r += fullRgba[i]; g += fullRgba[i + 1]; b += fullRgba[i + 2]; n++;
+                    }
                 }
+                const tidx = (ty * thumbWidth + tx) * 4;
+                thumbRgba[tidx] = Math.min(255, Math.max(0, Math.round((r / n - minVal) * scale)));
+                thumbRgba[tidx + 1] = Math.min(255, Math.max(0, Math.round((g / n - minVal) * scale)));
+                thumbRgba[tidx + 2] = Math.min(255, Math.max(0, Math.round((b / n - minVal) * scale)));
                 thumbRgba[tidx + 3] = 255;
             }
         }
@@ -2734,7 +2883,10 @@ self.addEventListener('message', async (e) => {
         const { rawData, width, height, pixelDepth, thumbWidth, thumbHeight } = e.data;
 
         try {
-            const results = await generateBayerThumbnails(rawData, width, height, pixelDepth, thumbWidth, thumbHeight);
+            // true: the picker exists to be judged by eye, so it needs the
+            // stretch that survives dim linear data. demosaicAndScale keeps
+            // the old path, so comparison-video frames are unaffected.
+            const results = await generateBayerThumbnails(rawData, width, height, pixelDepth, thumbWidth, thumbHeight, true);
             self.postMessage({ type: 'demosaic-thumbnails-result', results },
                 results.map(r => r.rgba));
         } catch (err) {
