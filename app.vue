@@ -890,11 +890,25 @@ function handleProcessingStarted() {
 	startStackPing();
 }
 
-async function handlePostProcessing(data) {
+async function handlePostProcessing(data, float32Data = null, width = 0, height = 0) {
 	if (isShowingContinuousResults.value) {
 		return;
 	}
 	selectedFile.value = data;
+	// These MUST be written on every route into the post processor, including
+	// the ones that have no 16-bit data to offer.
+	//
+	// They live on app.vue, which never unmounts, so leaving them alone does
+	// not mean "no float32 data" — it means "whatever the last stack put
+	// there". This handler used to leave them alone, so opening a plain image
+	// after any stack handed the post processor the new file together with the
+	// OLD stack's float32 buffer at the OLD dimensions. It took the 16-bit
+	// branch and rendered the wrong image at the wrong size.
+	//
+	// The null defaults do the clearing for the single-image, lone-RAW and
+	// HEIC flows, which emit this event with the file alone.
+	stackedFloat32Data.value = float32Data || null;
+	stackedImageDimensions.value = (width && height) ? { width, height } : null;
 	isProcessing.value = false;
 	// Mirror handleStackedImageReady's terminal handling — but only when a
 	// stack was actually in flight. `postProcessing` is also emitted from

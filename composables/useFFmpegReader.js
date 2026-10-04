@@ -1234,7 +1234,17 @@ export function useFFmpegReader() {
         liteWorkers.forEach(w => w.terminate());
 
         if (stackResult) {
-            emit('postProcessing', stackResult.blob, stackResult.float32Data, stackResult.width, stackResult.height);
+            // Same object shape as every other stack hand-off. This was the
+            // second site emitting `postProcessing` positionally, where the
+            // float32 buffer and dimensions were dropped by a single-parameter
+            // handler — costing this path its 16-bit result and leaving
+            // stackedFloat32Data holding the previous stack's image.
+            emit('stacked-image-ready', {
+                blob: stackResult.blob,
+                float32Data: stackResult.float32Data,
+                width: stackResult.width,
+                height: stackResult.height
+            });
         } else {
             addLog('Stacking failed');
             emit('upload-error', 'Stacking failed. Please try again.');

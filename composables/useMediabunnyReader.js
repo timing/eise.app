@@ -1421,11 +1421,32 @@ export function useMediabunnyReader() {
 			// stackResult is truthy, we made it past the stacker call. Between
 			// mediabunny_pass2_stacking and this event = time spent inside the
 			// stacker. If a job dies AFTER this fires, the failure is downstream
-			// (postProcessing handoff, blob encoding, navigation).
+			// (stacked-image-ready handoff, blob encoding, navigation).
 			emit('stack-step', 'mediabunny_pass2_finished');
 
 			if (stackResult) {
-				emit('postProcessing', stackResult.blob, stackResult.float32Data, stackResult.width, stackResult.height);
+				// The same hand-off every other reader uses. This used to emit
+				// `postProcessing` with POSITIONAL arguments instead, and
+				// handlePostProcessing declares a single parameter, so the
+				// float32 buffer and the dimensions were silently dropped:
+				// no error, just a 16-bit stack delivered as an 8-bit PNG,
+				// throwing away the ~4 bits that averaging hundreds of frames
+				// had just earned.
+				//
+				// Worse, dropping them meant stackedFloat32Data was never
+				// WRITTEN on this path, so it kept whatever the previous stack
+				// left there. Stack a SER, then a video, and the post processor
+				// received the video's blob alongside the SER's float32 buffer
+				// at the SER's dimensions, and rendered a dark mess.
+				//
+				// Six readers already emit exactly this object. Making it seven
+				// is what keeps that class of bug from coming back.
+				emit('stacked-image-ready', {
+					blob: stackResult.blob,
+					float32Data: stackResult.float32Data,
+					width: stackResult.width,
+					height: stackResult.height
+				});
 			} else {
 				addLog('Stacking failed');
 				emit('upload-error', 'Stacking failed. Please try again.');
