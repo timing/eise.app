@@ -207,17 +207,24 @@
 						</label>
 					</div>
 
+					<div v-if="drizzleMethod === 'drizzle'" class="field-grid">
+						<label class="field-label" for="pixfrac-input">Pixfrac</label>
+						<input id="pixfrac-input" type="number" min="0.3" max="0.95" step="0.05" v-model.number="pixfrac" class="number-input" />
+					</div>
+					<p v-if="showStackingModeInfo" class="info-text"><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Bicubic drizzle:</strong> 1.5x upscale using bicubic interpolation. Good general-purpose drizzle.<br><strong>Pixfrac drizzle:</strong> True Fruchter &amp; Hook drizzle with area-overlap accumulation. Each input pixel is shrunk by pixfrac before mapping to the output grid. Smaller pixfrac (0.5-0.7) recovers more sub-pixel detail but needs more frames for coverage.</p>
+				</div>
+
+				<div class="panel-section">
+					<h4 class="panel-label">Alignment points <span class="info-icon" @click="showAlignmentPointsInfo = !showAlignmentPointsInfo">ⓘ</span></h4>
 					<div class="field-grid">
-						<label v-if="drizzleMethod === 'drizzle'" class="field-label" for="pixfrac-input">Pixfrac</label>
-						<input v-if="drizzleMethod === 'drizzle'" id="pixfrac-input" type="number" min="0.3" max="0.95" step="0.05" v-model.number="pixfrac" class="number-input" />
 						<label class="checkbox-option field-grid-full">
 							<input type="checkbox" v-model="showApCheckerValue" />
-							Show manual AP checker
+							Show Alignment Points editor
 						</label>
 						<label class="field-label" for="ap-quality-input">AP quality threshold</label>
 						<input id="ap-quality-input" type="number" min="0.1" max="0.9" step="0.05" v-model.number="minApQuality" class="number-input" />
 					</div>
-					<p v-if="showStackingModeInfo" class="info-text"><strong>Normal:</strong> Stacks at original resolution. Faster and uses less memory.<br><strong>Bicubic drizzle:</strong> 1.5x upscale using bicubic interpolation. Good general-purpose drizzle.<br><strong>Pixfrac drizzle:</strong> True Fruchter &amp; Hook drizzle with area-overlap accumulation. Each input pixel is shrunk by pixfrac before mapping to the output grid. Smaller pixfrac (0.5-0.7) recovers more sub-pixel detail but needs more frames for coverage.<br><strong>AP quality threshold:</strong> Minimum NCC correlation score for alignment points, applied per frame. Try 0.5-0.6 if you see polygon artifacts on a detailed target. Note it only helps where matches genuinely score badly, such as a feature drifting out of the search window. It cannot catch featureless patches, which score deceptively high because a smooth patch matches itself at every offset; alignment point selection handles those instead.<br><strong>Show manual AP checker:</strong> Pauses after the alignment points are chosen and draws them over the reference frame, so you can see where they landed before any frames are matched. AP size is measured automatically; the checker is also where you override it, since that is the one place you can see what the choice produces.</p>
+					<p v-if="showAlignmentPointsInfo" class="info-text"><strong>AP quality threshold:</strong> An alignment point whose match score falls below this is ignored for that frame, so one bad match cannot drag the de-warp. Default 0.3. Raising it to 0.5-0.6 only helps where a match genuinely scores low, such as a feature drifting outside the search window, and it cannot catch featureless patches, which score high against anything.<br><strong>Show Alignment Points editor:</strong> Pauses after the alignment points are chosen and draws them over the reference frame, so you can see where they landed before any frames are matched. AP size is measured automatically; the editor is also where you override it, since that is the one place you can see what the choice produces.</p>
 				</div>
 
 				<div v-if="targetType !== 'sun-moon'" class="panel-section">
@@ -464,6 +471,7 @@ const showPreCropInfo = ref(false);
 const showTargetInfo = ref(false);
 const showFrameSelectionInfo = ref(false);
 const showStackingModeInfo = ref(false);
+const showAlignmentPointsInfo = ref(false);
 const showContinuousInfo = ref(false);
 const showProcessingBackendInfo = ref(false);
 const showColorPickerInfo = ref(false);
@@ -2795,6 +2803,15 @@ async function processFiles(files, options = {}) {
 	margin-top: 16px;
 	padding-top: 14px;
 	border-top: 1px solid var(--eise-panel-line);
+}
+/* That divider is there to split the grid from controls ABOVE it in the same
+   section. A grid that opens a section has nothing above it to divide from,
+   and the rule reads as a stray separator under the heading. The heading's own
+   12px bottom margin is the spacing, same as every other section. */
+.panel-label + .field-grid {
+	margin-top: 0;
+	padding-top: 0;
+	border-top: none;
 }
 /* Checkbox rows inside the two-column field grid span both tracks, so they read
    as a setting for the fields below rather than as a stray label/value pair. */

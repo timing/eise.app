@@ -65,7 +65,7 @@
 			</div>
 
 			<div v-if="processingStage === 'stacking' && referenceFrame" class="preview-frame" :class="{ 'dual-preview': alignmentOverlay }">
-				<h4 class="preview-label">Reference frame for alignment{{ alignmentOverlay ? ' (frame vs alignment points)' : '' }}</h4>
+				<h4 class="preview-label">{{ apReviewOpen ? 'Alignment Points editor' : 'Reference frame for alignment' }}{{ alignmentOverlay && !apReviewOpen ? ' (frame vs alignment points)' : '' }}</h4>
 				<div class="dual-canvas-row">
 					<div class="canvas-wrapper">
 						<span v-if="alignmentOverlay" class="canvas-label">Reference frame</span>
