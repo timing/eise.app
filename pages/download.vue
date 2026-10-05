@@ -266,14 +266,14 @@ useBreadcrumbSchema([
 }
 .platform-desc {
 	margin: 0;
-	font-size: 13px;
+	font-size: 14px;
 	line-height: 1.55;
 	color: var(--eise-body);
 }
 .platform-note {
 	margin: 0;
 	align-self: end;
-	font-size: 12.5px;
+	font-size: 12px;
 	line-height: 1.55;
 	color: var(--eise-muted-2);
 }
@@ -287,7 +287,7 @@ useBreadcrumbSchema([
 	background: rgba(0, 0, 0, 0.35);
 	color: var(--eise-gilt-lt);
 	font-family: var(--eise-mono);
-	font-size: 11.5px;
+	font-size: 11px;
 	line-height: 1.5;
 	overflow-wrap: anywhere;
 }
@@ -338,7 +338,7 @@ useBreadcrumbSchema([
 /* MailingListForm is scoped and light-themed; only this page's copy is dark. */
 .interest-form :deep(.form-row label) {
 	color: var(--eise-body);
-	font-size: 13px;
+	font-size: 14px;
 }
 .interest-form :deep(.form-row input),
 .interest-form :deep(.form-row select) {

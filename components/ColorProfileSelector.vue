@@ -386,7 +386,7 @@ onUnmounted(() => {
 	align-items: center;
 	justify-content: center;
 	gap: 8px;
-	font-size: 13.5px;
+	font-size: 14px;
 	font-weight: 500;
 	color: var(--eise-bright);
 }
@@ -400,7 +400,7 @@ onUnmounted(() => {
 	border-radius: 10px;
 	background: rgba(0, 0, 0, 0.16);
 	color: #6b8792;
-	font-size: 13px;
+	font-size: 14px;
 }
 .loading-thumbnails p {
 	margin: 0;

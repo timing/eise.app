@@ -320,8 +320,9 @@
 			</figure>
 		</div>
 
-		<p class="how-it-works-intro">Eise.app automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. 
-		After stacking, the post processor opens so you can sharpen the image or fix colors. All aligning and stacking algorithms are inspired on Planetary System Stacker, created by Rolf Hempel.</p>
+		<p class="how-it-works-intro">Eise.app automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones.
+		This is called lucky imaging: the atmosphere ruins most of your frames, so you only keep the sharp ones and stack those.
+		After stacking, the post processor opens so you can sharpen the image or fix colors. All aligning and stacking algorithms are inspired on <NuxtLink to="/about/planetary-system-stacker-vs-eise/">Planetary System Stacker</NuxtLink>, created by Rolf Hempel.</p>
 		<!-- Featured community stack. Falls back to hidden when the gallery API is unreachable. -->
 		<NuxtLink v-if="featuredStack" to="/gallery/" class="gallery-pick">
 			<span class="gallery-pick-thumb">
@@ -361,7 +362,7 @@
 		</dl>
 
 		<h2 class="home-h2">Eise's post processor</h2>
-		<p>Eise has its own <NuxtLink to="/post-processor">post processor</NuxtLink> included and automatically opens after your stack is finished. There is however no need to go through the whole stacking pipeline to open Eise's postprocessor. You can also open images stacked with Autostakkert! if you have stacks lying around, or you prefer AutoStakkert! over Eise.</p>
+		<p>Eise has its own <NuxtLink to="/post-processor/">post processor</NuxtLink> included and automatically opens after your stack is finished. There is however no need to go through the whole stacking pipeline to open Eise's postprocessor. You can also open images stacked with <NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert!</NuxtLink> if you have stacks lying around, or you prefer AutoStakkert! over Eise.</p>
 
 		<h2 class="home-h2">Download Eise for offline use</h2>
 		<p>Head over to the <NuxtLink to="/download/">Eise download page</NuxtLink> to get an offline version of Eise for OSX, Windows or Linux. For now these are free, but I'm considering making those paid.</p>
@@ -2373,7 +2374,7 @@ async function processFiles(files, options = {}) {
 	border: none;
 	color: #666;
 	cursor: pointer;
-	font-size: 13px;
+	font-size: 14px;
 	text-decoration: underline;
 }
 .btn-text:hover {
@@ -2510,7 +2511,7 @@ async function processFiles(files, options = {}) {
 }
 .selected-file-item .file-name {
 	flex: 1;
-	font-size: 13px;
+	font-size: 14px;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
@@ -2741,13 +2742,13 @@ async function processFiles(files, options = {}) {
 	margin-bottom: 10px;
 }
 .panel .drop-text {
-	font-size: 13.5px;
+	font-size: 14px;
 	font-weight: 500;
 	color: var(--eise-bright);
 }
 .panel .drop-sub {
 	margin-top: 3px;
-	font-size: 12.5px;
+	font-size: 12px;
 	color: var(--eise-muted-2);
 }
 .panel .drop-browse {
@@ -2757,7 +2758,7 @@ async function processFiles(files, options = {}) {
 .panel .drop-formats {
 	margin-top: 12px;
 	font-family: var(--eise-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	letter-spacing: 0.05em;
 	color: var(--eise-muted-2);
 }
@@ -2775,7 +2776,7 @@ async function processFiles(files, options = {}) {
 	gap: 12px;
 	flex-wrap: wrap;
 	margin: 16px 0 0;
-	font-size: 12.5px;
+	font-size: 12px;
 	color: var(--eise-muted-2);
 	text-align: left;
 }
@@ -2828,11 +2829,11 @@ async function processFiles(files, options = {}) {
 .field-grid-full {
 	grid-column: 1 / -1;
 	margin: 0;
-	font-size: 13px;
+	font-size: 14px;
 	color: var(--eise-body);
 }
 .field-label {
-	font-size: 13px;
+	font-size: 14px;
 	color: var(--eise-body);
 }
 .panel .panel-check + .slider-row {
@@ -2912,7 +2913,7 @@ async function processFiles(files, options = {}) {
 }
 .panel .memory-optimization-box .checkbox-option {
 	color: var(--eise-body);
-	font-size: 13px;
+	font-size: 14px;
 }
 .panel .lite-mode-warning {
 	margin-top: 14px;
@@ -2979,7 +2980,7 @@ async function processFiles(files, options = {}) {
 }
 .home-intro .intro {
 	margin: 0 0 30px;
-	font-size: 15.5px;
+	font-size: 15px;
 	line-height: 1.65;
 	color: #b7ccd2;
 	text-wrap: pretty;
@@ -2998,7 +2999,7 @@ async function processFiles(files, options = {}) {
 }
 .home-intro .comparison-figure figcaption {
 	font-family: var(--eise-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
 	color: var(--eise-muted);
@@ -3009,7 +3010,17 @@ async function processFiles(files, options = {}) {
 .home-intro .sample-credit {
 	margin: 0 0 30px;
 }
-.how-it-works-intro {
+/* Body copy under each home-h2. These paragraphs carry no class, so this is
+   what holds them at the body size next to the 15px lead above them. */
+.home-intro > p {
+	font-size: 14px;
+	line-height: 1.65;
+	color: #b7ccd2;
+	text-wrap: pretty;
+}
+/* Scoped to beat .home-intro > p, which is one specificity point higher than
+   a bare class and would otherwise drag the lead paragraph down to 14px. */
+.home-intro .how-it-works-intro {
 	margin: 0 0 26px;
 	font-size: 15px;
 	line-height: 1.65;
@@ -3028,7 +3039,7 @@ async function processFiles(files, options = {}) {
 	border-bottom: 1px solid var(--eise-panel-line);
 }
 .spec-row dt {
-	font-size: 13.5px;
+	font-size: 14px;
 	font-weight: 600;
 	color: #f1f7f8;
 }
@@ -3085,7 +3096,7 @@ async function processFiles(files, options = {}) {
 	display: block;
 	margin-bottom: 7px;
 	font-family: var(--eise-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	font-weight: 500;
 	letter-spacing: 0.12em;
 	text-transform: uppercase;
@@ -3104,7 +3115,7 @@ async function processFiles(files, options = {}) {
 .gallery-pick-by {
 	display: block;
 	margin-top: 2px;
-	font-size: 13px;
+	font-size: 14px;
 	color: #8aa3ab;
 }
 .gallery-pick-cta {
@@ -3112,7 +3123,7 @@ async function processFiles(files, options = {}) {
 	align-items: center;
 	gap: 6px;
 	margin-top: 12px;
-	font-size: 13.5px;
+	font-size: 14px;
 	font-weight: 500;
 	color: var(--eise-gilt-lt);
 }

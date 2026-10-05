@@ -583,7 +583,7 @@ watch(currentResult, (result) => {
 
 .btn-small {
 	padding: 6px 12px;
-	font-size: 13px;
+	font-size: 14px;
 }
 
 .nav-btn {

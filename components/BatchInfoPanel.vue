@@ -262,7 +262,7 @@ on('batch-cancelled', () => {
 
 .file-name {
 	flex: 1;
-	font-size: 13px;
+	font-size: 14px;
 	font-weight: 500;
 	overflow: hidden;
 	text-overflow: ellipsis;

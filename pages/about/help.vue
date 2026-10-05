@@ -256,7 +256,7 @@ dd {
 	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
 }
 .help-figure figcaption {
-	font-size: 13px;
+	font-size: 14px;
 	color: #666;
 	margin-top: 0.6rem;
 	line-height: 1.5;

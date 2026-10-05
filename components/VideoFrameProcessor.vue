@@ -673,7 +673,7 @@ async function processImageFrames(files) {
 		gap: 10px;
 		padding: 11px 0;
 		border-bottom: 1px solid var(--eise-panel-line);
-		font-size: 13.5px;
+		font-size: 14px;
 		color: #5d7580;
 	}
 	.stage-step.active {
@@ -704,7 +704,7 @@ async function processImageFrames(files) {
 	}
 	.step-meta {
 		font-family: var(--eise-mono);
-		font-size: 11.5px;
+		font-size: 12px;
 		color: #5d7580;
 	}
 	.stage-step.active .step-meta,
@@ -720,7 +720,7 @@ async function processImageFrames(files) {
 		border: 1px solid rgba(255, 255, 255, 0.18);
 		color: #f0d6d6;
 		font: inherit;
-		font-size: 13.5px;
+		font-size: 14px;
 		font-weight: 500;
 		cursor: pointer;
 		transition: background 120ms ease, border-color 120ms ease;
@@ -765,7 +765,7 @@ async function processImageFrames(files) {
 		border: 1px solid rgba(217, 169, 74, 0.35);
 		border-radius: 8px;
 		background: rgba(217, 169, 74, 0.08);
-		font-size: 13px;
+		font-size: 14px;
 		color: var(--eise-body);
 	}
 	.ap-review-field {
@@ -786,7 +786,7 @@ async function processImageFrames(files) {
 		border: 1px solid rgba(217, 169, 74, 0.5);
 		border-radius: 6px;
 		background: transparent;
-		font-size: 13px;
+		font-size: 14px;
 		font-weight: 600;
 		color: var(--eise-gilt);
 		cursor: pointer;
@@ -806,13 +806,13 @@ async function processImageFrames(files) {
 		border: 1px dashed rgba(255, 255, 255, 0.18);
 		border-radius: 10px;
 		background: rgba(0, 0, 0, 0.16);
-		font-size: 13px;
+		font-size: 14px;
 		color: #6b8792;
 	}
 	.sharpness-label, .frame-stats {
 		margin: 10px 0 0 0;
 		font-family: var(--eise-mono);
-		font-size: 11.5px;
+		font-size: 12px;
 		line-height: 1.5;
 		color: var(--eise-muted);
 	}
@@ -880,7 +880,7 @@ async function processImageFrames(files) {
 	}
 	.processing-hint {
 		margin: 12px 0 0 0;
-		font-size: 12.5px;
+		font-size: 12px;
 		line-height: 1.55;
 		color: #8fa9b1;
 		text-wrap: pretty;

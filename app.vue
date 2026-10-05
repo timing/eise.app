@@ -961,7 +961,10 @@ html,body {
 	padding: 0;
 	margin: 0;
 	font-family: -apple-system,\.SFNSText-Regular,San Francisco,Roboto,Segoe UI,Helvetica Neue,Lucida Grande,sans-serif;
-	font-size: 13px;
+	/* Base size for anything that does not set its own. 14px is also the body
+	   size across the app, so text that forgets a rule lands on the right size
+	   instead of a stray 13px. rem values scale off this. */
+	font-size: 14px;
 	-moz-osx-font-smoothing: grayscale;
 	-webkit-font-smoothing: antialiased;
 	-webkit-min-device-pixel-ratio: 1.5;
@@ -1006,7 +1009,7 @@ button, a.button {
 	transition: background-color 0.3s;
 	border-radius: 5px;
 	text-decoration: none;
-	font-size: 13px;
+	font-size: 14px;
 }
 button:hover, a.button:hover {
 	background-color: #70f1ec;
@@ -1324,18 +1327,18 @@ canvas {
 }
 .panel-sub {
 	margin: 0 0 16px;
-	font-size: 12.5px;
+	font-size: 12px;
 	line-height: 1.5;
 	color: var(--eise-muted-2);
 }
 .panel-note {
-	font-size: 12.5px;
+	font-size: 12px;
 	line-height: 1.5;
 	color: var(--eise-muted-2);
 }
 .panel-mono {
 	font-family: var(--eise-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	letter-spacing: 0.05em;
 	color: var(--eise-muted-2);
 }
@@ -1355,7 +1358,7 @@ canvas {
 	border: 1px solid rgba(255, 255, 255, 0.09);
 	background: rgba(255, 255, 255, 0.04);
 	color: var(--eise-body);
-	font-size: 13.5px;
+	font-size: 14px;
 	line-height: 1.35;
 	cursor: pointer;
 	transition: background 110ms ease, border-color 110ms ease;
@@ -1447,7 +1450,7 @@ canvas {
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	font-size: 13.5px;
+	font-size: 14px;
 	color: var(--eise-body);
 	cursor: pointer;
 }
@@ -1460,7 +1463,7 @@ canvas {
 }
 .slider-row > label,
 .slider-row > .slider-label {
-	font-size: 13px;
+	font-size: 14px;
 	color: var(--eise-body);
 }
 .panel-value {
@@ -1478,7 +1481,7 @@ canvas {
 	border: 1px solid var(--eise-panel-border);
 	color: #dfeaed;
 	font: inherit;
-	font-size: 13px;
+	font-size: 14px;
 	cursor: pointer;
 	transition: background 120ms ease;
 }
@@ -1506,7 +1509,7 @@ canvas {
 	border-radius: 6px;
 	white-space: nowrap;
 	flex-shrink: 0;
-	font-size: 13.5px;
+	font-size: 14px;
 	color: var(--eise-gilt-lt);
 	text-decoration: none;
 	background: rgba(217, 169, 74, 0.08);
@@ -1535,7 +1538,7 @@ canvas {
 	background: transparent;
 	color: var(--eise-body);
 	font: inherit;
-	font-size: 13px;
+	font-size: 14px;
 	cursor: pointer;
 }
 .seg-btn:hover {
@@ -1582,7 +1585,7 @@ canvas {
 	border-radius: 6px;
 	background: rgba(0, 0, 0, 0.2);
 	border: 1px solid var(--eise-panel-line);
-	font-size: 12.5px;
+	font-size: 12px;
 	line-height: 1.55;
 	color: var(--eise-muted-2);
 }
@@ -1758,7 +1761,7 @@ canvas {
 	padding: 10px 15px;
 	margin: 10px 20px 0px 20px;
 	border-radius: 5px;
-	font-size: 13px;
+	font-size: 14px;
 }
 .home-testimonial {
 	margin: 20px 0;

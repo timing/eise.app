@@ -229,7 +229,7 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 	padding: 0 0 14px;
 }
 .zoom-indicator {
-	font-size: 13px;
+	font-size: 14px;
 	color: var(--eise-muted-2);
 	display: inline-flex;
 	align-items: center;
@@ -242,7 +242,7 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 	border-radius: 5px;
 	color: var(--eise-bright);
 	font-family: var(--eise-mono);
-	font-size: 12.5px;
+	font-size: 12px;
 	padding: 4px 7px;
 	text-align: right;
 	box-sizing: border-box;
@@ -298,7 +298,7 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 	background: none;
 	text-align: left;
 	cursor: pointer;
-	font-size: 13px;
+	font-size: 14px;
 	font-weight: bold;
 	color: #333;
 }

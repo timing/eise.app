@@ -97,7 +97,7 @@ onUnmounted(() => {
 	backdrop-filter: blur(10px);
 	border-top: 1px solid rgba(255, 255, 255, 0.08);
 	font-family: var(--eise-mono);
-	font-size: 11.5px;
+	font-size: 12px;
 	color: var(--eise-muted);
 }
 .logger-row {

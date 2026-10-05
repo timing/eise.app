@@ -365,7 +365,7 @@ useHead({
 	flex: 0 0 auto;
 	max-width: 100%;
 	margin-left: auto;
-	font-size: 12.5px;
+	font-size: 12px;
 	color: var(--eise-muted);
 	text-align: right;
 	white-space: nowrap;
@@ -447,7 +447,7 @@ useHead({
 .lightbox-captured {
 	color: #666;
 	margin: 0 0 8px 0;
-	font-size: 13px;
+	font-size: 14px;
 }
 .lightbox-desc {
 	white-space: pre-wrap;

@@ -123,6 +123,7 @@
 
 			<h3>Try it</h3>
 			<p>The homepage has a sample Jupiter clip you can process without capturing your own footage.</p>
+			<NuxtLink to="/" class="cta-link">Try Eise.app in your browser &rarr;</NuxtLink>
 
 			<h3>See also</h3>
 			<ul>

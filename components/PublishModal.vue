@@ -198,7 +198,7 @@ function close() {
 	font-size: 18px;
 }
 .publish-intro {
-	font-size: 13px;
+	font-size: 14px;
 	color: #666;
 	margin: 0 0 20px 0;
 }
@@ -209,7 +209,7 @@ function close() {
 	display: block;
 	margin-bottom: 5px;
 	font-weight: bold;
-	font-size: 13px;
+	font-size: 14px;
 }
 .publish-field .required {
 	color: #c33;
@@ -260,7 +260,7 @@ function close() {
 	color: #a33;
 	padding: 8px 12px;
 	border-radius: 5px;
-	font-size: 13px;
+	font-size: 14px;
 	margin-bottom: 12px;
 }
 .publish-success {
@@ -269,7 +269,7 @@ function close() {
 	color: #333;
 }
 .publish-success .subtle {
-	font-size: 13px;
+	font-size: 14px;
 	color: #666;
 	margin-top: 5px;
 }

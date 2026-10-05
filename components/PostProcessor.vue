@@ -2613,7 +2613,7 @@ canvas {
 .intro-content .supported-formats {
 	margin: 10px 0 0;
 	font-family: var(--eise-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	letter-spacing: 0.06em;
 	color: var(--eise-muted);
 }
@@ -2630,7 +2630,7 @@ canvas {
 }
 .pp-lede {
 	margin: 0 0 34px;
-	font-size: 15.5px;
+	font-size: 15px;
 	line-height: 1.65;
 	color: #b7ccd2;
 	text-wrap: pretty;
@@ -2655,7 +2655,7 @@ canvas {
 	gap: 8px;
 }
 .toolbar-actions > button {
-	font-size: 13.5px;
+	font-size: 14px;
 	line-height: 1;
 }
 /* Secondary toolbar actions (Rate, Publish) sit on the dark work area. */
@@ -2774,7 +2774,7 @@ canvas {
 }
 .manual-link {
 	margin-left: auto;
-	font-size: 12.5px;
+	font-size: 12px;
 	font-weight: normal;
 	text-transform: none;
 	letter-spacing: 0;
@@ -2810,7 +2810,7 @@ canvas {
 	justify-content: space-between;
 	gap: 12px;
 	margin-top: 14px;
-	font-size: 13px;
+	font-size: 14px;
 	color: var(--eise-body);
 }
 .field-row .number-input {
@@ -2821,7 +2821,7 @@ canvas {
 	align-items: center;
 	gap: 8px;
 	cursor: pointer;
-	font-size: 13.5px;
+	font-size: 14px;
 	color: var(--eise-body);
 }
 .checkbox-label input[type="checkbox"] {
@@ -2831,7 +2831,7 @@ canvas {
 }
 .luminance-only-option {
 	margin: 14px 0 0;
-	font-size: 12.5px;
+	font-size: 12px;
 }
 .info-icon {
 	cursor: pointer;
@@ -2848,7 +2848,7 @@ canvas {
 	border-radius: 6px;
 	background: rgba(0, 0, 0, 0.2);
 	border: 1px solid var(--eise-panel-line);
-	font-size: 12.5px;
+	font-size: 12px;
 	line-height: 1.55;
 	color: var(--eise-muted-2);
 }
@@ -2932,7 +2932,7 @@ canvas {
 	align-items: center;
 	gap: 6px;
 	color: white;
-	font-size: 13px;
+	font-size: 14px;
 	z-index: 10;
 }
 /* Sits under the slider, right-aligned with the value column instead of
@@ -2988,7 +2988,7 @@ canvas {
 	display: block;
 	margin-bottom: 5px;
 	font-weight: bold;
-	font-size: 13px;
+	font-size: 14px;
 }
 .export-filename input {
 	width: 100%;
@@ -3011,7 +3011,7 @@ canvas {
 }
 .export-resize label {
 	font-weight: bold;
-	font-size: 13px;
+	font-size: 14px;
 }
 .export-resize input {
 	width: 64px;
@@ -3110,7 +3110,7 @@ canvas {
 	border: none;
 	border-radius: 5px;
 	cursor: pointer;
-	font-size: 13px;
+	font-size: 14px;
 	text-align: center;
 	transition: background-color 0.2s;
 	background-color: #8CCF7E;
@@ -3140,7 +3140,7 @@ canvas {
 	cursor: not-allowed;
 }
 .share-note {
-	font-size: 13px;
+	font-size: 14px;
 	color: #666;
 	text-align: center;
 	margin: 15px 0 0 0;
@@ -3148,7 +3148,7 @@ canvas {
 	border-top: 1px solid #eee;
 }
 .popup-intro {
-	font-size: 13px;
+	font-size: 14px;
 	color: #555;
 	margin: 0 0 20px 0;
 	line-height: 1.5;
@@ -3163,7 +3163,7 @@ canvas {
 }
 .publish-section-text {
 	margin: 0 0 12px 0;
-	font-size: 13px;
+	font-size: 14px;
 	color: #333;
 	line-height: 1.5;
 }

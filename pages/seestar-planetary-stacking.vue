@@ -206,7 +206,7 @@ useBreadcrumbSchema([
 	background: #000;
 }
 .image-comparison figcaption {
-	font-size: 13px;
+	font-size: 14px;
 	color: #444;
 	line-height: 1.4;
 }

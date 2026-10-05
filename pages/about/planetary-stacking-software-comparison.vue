@@ -515,7 +515,7 @@ useBreadcrumbSchema([
 }
 .video-fallback {
 	margin: 6px 0 0;
-	font-size: 13px;
+	font-size: 14px;
 	text-align: right;
 }
 h4 {

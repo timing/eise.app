@@ -465,7 +465,7 @@ function proceedWithStacking() {
 .threshold-total,
 .threshold-pct {
 	font-family: var(--eise-mono);
-	font-size: 13px;
+	font-size: 14px;
 	color: #8fa9b1;
 }
 .threshold-pct {
@@ -490,7 +490,7 @@ function proceedWithStacking() {
 	display: flex;
 	justify-content: space-between;
 	font-family: var(--eise-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	letter-spacing: 0.05em;
 	color: var(--eise-label);
 }
@@ -513,7 +513,7 @@ function proceedWithStacking() {
 	justify-content: space-between;
 	margin-top: 7px;
 	font-family: var(--eise-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	color: var(--eise-label);
 }
 /* Own class, not .action-buttons: that global rule is a flex row. */
@@ -547,7 +547,7 @@ function proceedWithStacking() {
 	border: 1px solid rgba(255, 255, 255, 0.18);
 	color: #f0d6d6;
 	font: inherit;
-	font-size: 13.5px;
+	font-size: 14px;
 	font-weight: 500;
 	cursor: pointer;
 	transition: background 120ms ease, border-color 120ms ease;
@@ -585,7 +585,7 @@ function proceedWithStacking() {
 }
 .preview-frame-no {
 	font-family: var(--eise-mono);
-	font-size: 13px;
+	font-size: 14px;
 	color: var(--eise-bright);
 }
 /* Verdict pill: whether this frame makes the cut. */
@@ -595,7 +595,7 @@ function proceedWithStacking() {
 	gap: 7px;
 	padding: 4px 11px;
 	border-radius: 999px;
-	font-size: 12.5px;
+	font-size: 12px;
 	font-weight: 500;
 	background: rgba(255, 255, 255, 0.06);
 	border: 1px solid rgba(255, 255, 255, 0.14);
@@ -658,7 +658,7 @@ function proceedWithStacking() {
 .frame-position {
 	flex: 0 0 auto;
 	font-family: var(--eise-mono);
-	font-size: 12.5px;
+	font-size: 12px;
 	color: #8fa9b1;
 }
 .frame-stats-grid {
@@ -688,7 +688,7 @@ function proceedWithStacking() {
 .stat-sub {
 	margin-top: 4px;
 	font-family: var(--eise-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	color: var(--eise-muted);
 }
 .no-preview {
@@ -700,7 +700,7 @@ function proceedWithStacking() {
 	border-radius: 10px;
 	background: rgba(0, 0, 0, 0.16);
 	color: #6b8792;
-	font-size: 13px;
+	font-size: 14px;
 }
 @media (max-width: 560px) {
 	.frame-stats-grid {

@@ -312,7 +312,7 @@ watch(() => route.path, () => {
 }
 
 .eise-tagline {
-	font-size: 12.5px;
+	font-size: 12px;
 	letter-spacing: 0.01em;
 	color: var(--eise-muted);
 }
@@ -335,7 +335,7 @@ watch(() => route.path, () => {
 	border-radius: 6px;
 	white-space: nowrap;
 	flex-shrink: 0;
-	font-size: 13.5px;
+	font-size: 14px;
 	color: var(--eise-on-dark);
 	text-decoration: none;
 	transition: background 120ms ease, color 120ms ease;
@@ -509,7 +509,7 @@ watch(() => route.path, () => {
 }
 .affiliate-caption {
 	margin: 14px 0 0;
-	font-size: 13px;
+	font-size: 14px;
 	line-height: 1.5;
 	color: rgba(var(--eise-on-dark-rgb), 0.7);
 }
@@ -523,7 +523,7 @@ watch(() => route.path, () => {
 	background: rgba(4, 28, 36, 0.5);
 	border-top: 1px solid rgba(255, 255, 255, 0.09);
 	color: rgba(var(--eise-on-dark-rgb), 0.75);
-	font-size: 13px;
+	font-size: 14px;
 	line-height: 1.6;
 }
 /* When the Logger sticky bar is present, keep some space below the footer so
@@ -543,7 +543,7 @@ watch(() => route.path, () => {
 .site-footer-col h4 {
 	margin: 0 0 11px;
 	font-family: var(--eise-mono);
-	font-size: 10.5px;
+	font-size: 11px;
 	font-weight: 500;
 	text-transform: uppercase;
 	letter-spacing: 0.12em;
@@ -580,7 +580,7 @@ watch(() => route.path, () => {
 }
 .site-footer-copy {
 	margin: 0;
-	font-size: 13px;
+	font-size: 14px;
 	line-height: 1.6;
 	color: #8aa3ab;
 }

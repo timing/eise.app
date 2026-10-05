@@ -192,7 +192,7 @@ onUnmounted(() => {
 	margin-bottom: 6px;
 }
 .error-subtitle {
-	font-size: 12.5px;
+	font-size: 12px;
 	color: var(--eise-muted-2);
 }
 </style>
