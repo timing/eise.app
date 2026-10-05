@@ -976,9 +976,14 @@ html {
 		radial-gradient(1200px 600px at 78% -10%, var(--eise-teal-600) 0%, rgba(43, 122, 149, 0) 60%),
 		linear-gradient(180deg, var(--eise-teal-800) 0%, var(--eise-teal-900) 100%);
 }
-.content a:not(.btn-primary):not(.btn-secondary):not(.btn-danger),
-.content a:visited:not(.btn-primary):not(.btn-secondary):not(.btn-danger) {
-	color: inherit;
+a {
+	color: #8fcfe0;
+	text-decoration: none;
+	border-bottom: 1px solid rgba(143, 207, 224, 0.35);
+}
+a:hover {
+	color: #b7e4f2;
+	border-bottom-color: rgba(150, 205, 220, 0.6);
 }
 body {
 	padding-bottom: 80px;
@@ -1492,6 +1497,27 @@ canvas {
 	color: var(--eise-ink);
 }
 
+/* Gilt call-to-action link. Lives here, not in the layout, so any page can
+   drop <a class="eise-cta"> in and get the exact header button. */
+.eise-cta {
+	display: inline-block;
+	padding: 7px 14px;
+	border: 1px solid rgba(217, 169, 74, 0.55);
+	border-radius: 6px;
+	white-space: nowrap;
+	flex-shrink: 0;
+	font-size: 13.5px;
+	color: var(--eise-gilt-lt);
+	text-decoration: none;
+	background: rgba(217, 169, 74, 0.08);
+	transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.eise-cta:hover {
+	background: var(--eise-gilt);
+	border-color: var(--eise-gilt);
+	color: var(--eise-ink);
+}
+
 /* Segmented control (sharpening method picker). */
 .seg-group {
 	display: flex;
@@ -1759,12 +1785,7 @@ canvas {
 	flex-wrap: wrap;
 }
 .home-testimonial-cite a {
-	color: #8CCF7E;
-	text-decoration: none;
 	white-space: nowrap;
-}
-.home-testimonial-cite a:hover {
-	text-decoration: underline;
 }
 .comparison-images {
 	display: flex;

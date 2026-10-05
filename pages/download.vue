@@ -4,7 +4,7 @@
 			<h1>Download Eise.app for Mac, Windows and Linux</h1>
 			<p class="page-subtitle">Free planetary image stacker</p>
 
-			<p class="download-intro">Native desktop builds of Eise.app for macOS (Apple Silicon and Intel), Windows 10+, and Linux. Free planetary image stacker with the same features as the browser version - lucky imaging, alignment-point stacking, wavelet sharpening, RGB alignment - running offline on your own machine.</p>
+			<p class="download-intro">Below you can find native desktop builds of Eise.app for macOS (Apple Silicon and Intel), Windows 10+, and Linux. The features are the same as the website, but having a local build comes with some advantages, like offline usage and no throttling when the app is running in the background.</p>
 
 			<div class="section-head">
 				<h2>Choose your platform</h2>
@@ -43,6 +43,11 @@
 				</div>
 			</div>
 
+			<div class="support">
+				<p class="support-copy">If you are happy with Eise, please consider donating. It is free and open source, and your support keeps it going. I'm also considering requiring a paid license for the offline builds, but I'd first like to know your opinion on that :-).</p>
+				<a href="https://buymeacoffee.com/timing" target="_blank" rel="noopener" class="eise-cta">Buy me a coffee</a>
+			</div>
+
 			<div class="interest-form">
 				<h2>Want a mobile app?</h2>
 				<p>Eise.app already runs in mobile browsers. A native iOS and Android build is on the list. Sign up to the mailinglist to be notified when it becomes available.</p>
@@ -58,7 +63,7 @@
 
 			<div class="comparison">
 				<h2>Desktop app vs. web version</h2>
-				<p>Stacking uses the same WebGPU pipeline in both, so end results are identical. The desktop build changes what runs in the background and what depends on a network connection.</p>
+				<p>All algorithms and stack results are the same between web and desktop, there are however some convenient differences.</p>
 
 				<div class="table-scroll">
 					<table class="compare-table">
@@ -73,7 +78,7 @@
 							<tr>
 								<th scope="row">Runs while minimized</th>
 								<td class="yes">Full speed</td>
-								<td class="no">Throttled by the browser when the tab is backgrounded</td>
+								<td class="no">Throttled when the Eise tab is in the background</td>
 							</tr>
 							<tr>
 								<th scope="row">Works offline</th>
@@ -87,8 +92,8 @@
 							</tr>
 							<tr>
 								<th scope="row">WebGPU</th>
-								<td class="yes">Always available (bundled Chromium with WebGPU enabled)</td>
-								<td>Depends on the browser (Chrome, Edge, and recent Safari support it; some browsers still fall back to the slower CPU path)</td>
+								<td class="yes">Always available</td>
+								<td>Depends on the browser and its configuration</td>
 							</tr>
 							<tr>
 								<th scope="row">Stacking speed</th>
@@ -286,14 +291,25 @@ useBreadcrumbSchema([
 	line-height: 1.5;
 	overflow-wrap: anywhere;
 }
-.download-panel a:not(.download-btn) {
-	color: var(--eise-link);
-	text-decoration: none;
-	border-bottom: 1px solid rgba(143, 207, 224, 0.35);
+/* Donation ask under the platform cards. */
+.support {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 18px;
+	flex-wrap: wrap;
+	margin-top: 24px;
+	padding: 18px 22px;
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.045);
+	border: 1px solid rgba(255, 255, 255, 0.1);
 }
-.download-panel a:not(.download-btn):hover {
-	color: #b7e4f2;
-	border-bottom-color: rgba(183, 228, 242, 0.6);
+.support-copy {
+	margin: 0;
+	max-width: 58ch;
+	font-size: 14px;
+	line-height: 1.6;
+	color: var(--eise-body);
 }
 
 /* Mobile-app interest. The design collapses this to a single "Request it"

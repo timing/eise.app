@@ -304,7 +304,7 @@
 	<!-- Welcome content: only show when not processing -->
 	<div class="content home-intro" v-if="!isProcessing">
 		<h1 class="home-title">Welcome to Eise.app</h1>
-		<p class="intro">Eise.app is a free browser-based planetary image stacker for astrophotography. Pick a SER, AVI, or MP4 video of Jupiter, Saturn, Mars, the Moon, or the Sun, and it uses lucky imaging, combining the sharpest frames, to produce a detailed final image. Runs entirely in your browser.</p>
+		<p class="intro">Eise.app is a free browser-based planetary image stacker for astrophotography. Turn your video of Jupiter, Saturn, Mars, the Moon, or the Sun into a detailed image. Runs entirely in your browser.</p>
 
 		<div class="comparison-images">
 			<figure class="comparison-figure">
@@ -320,7 +320,26 @@
 			</figure>
 		</div>
 
-		<p class="how-it-works-intro">Under the hood, Eise.app automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. After stacking, the post processor opens for wavelet sharpening, RGB alignment, and color adjustments.</p>
+		<p class="how-it-works-intro">Eise.app automatically analyzes, crops, centers, and ranks every frame, then aligns and stacks the best ones. 
+		After stacking, the post processor opens so you can sharpen the image or fix colors. All aligning and stacking algorithms are inspired on Planetary System Stacker, created by Rolf Hempel.</p>
+		<!-- Featured community stack. Falls back to hidden when the gallery API is unreachable. -->
+		<NuxtLink v-if="featuredStack" to="/gallery/" class="gallery-pick">
+			<span class="gallery-pick-thumb">
+				<img :src="featuredStack.thumb_url" :alt="`${featuredStack.title || 'Planetary stack'} by ${featuredStack.name}, stacked with Eise.app`" loading="lazy" decoding="async" width="128" height="128" />
+			</span>
+			<span class="gallery-pick-body">
+				<span class="gallery-pick-eyebrow">From the gallery</span>
+				<span class="gallery-pick-title">{{ featuredStack.title || 'Untitled' }}</span>
+				<span class="gallery-pick-by">by {{ featuredStack.name }}</span>
+				<span class="gallery-pick-cta">See all community stacks
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13m0 0-5-5m5 5-5 5" /></svg>
+				</span>
+			</span>
+		</NuxtLink>
+
+
+		<h2 class="home-h2">File support (no PIPP needed!)</h2>
+		<p>Eise supports a wide range of video files like SER, AVI, MP4, MOV and raw image formats. If you select a video, the frames will be stacked and the postprocessor opens. If you select multiple videos you can either start batch mode to have one stack per video, or you can combine all frames into one stack. In batch mode you can also export all separate frames as a video. Nice for a Jupiter rotation video. Let me know if your file format does not work.</p>
 
 		<dl class="spec-rows">
 			<div class="spec-row">
@@ -337,24 +356,15 @@
 			</div>
 			<div class="spec-row">
 				<dt>Image sequences (PNG, TIFF)</dt>
-				<dd>Multiple images will start stacking. A single image opens the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</dd>
+				<dd>Multiple images start a stack. A single image opens the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</dd>
 			</div>
 		</dl>
 
-		<!-- Featured community stack. Falls back to hidden when the gallery API is unreachable. -->
-		<NuxtLink v-if="featuredStack" to="/gallery/" class="gallery-pick">
-			<span class="gallery-pick-thumb">
-				<img :src="featuredStack.thumb_url" :alt="`${featuredStack.title || 'Planetary stack'} by ${featuredStack.name}, stacked with Eise.app`" loading="lazy" decoding="async" width="128" height="128" />
-			</span>
-			<span class="gallery-pick-body">
-				<span class="gallery-pick-eyebrow">From the gallery</span>
-				<span class="gallery-pick-title">{{ featuredStack.title || 'Untitled' }}</span>
-				<span class="gallery-pick-by">by {{ featuredStack.name }}</span>
-				<span class="gallery-pick-cta">See all community stacks
-					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13m0 0-5-5m5 5-5 5" /></svg>
-				</span>
-			</span>
-		</NuxtLink>
+		<h2 class="home-h2">Eise's post processor</h2>
+		<p>Eise has its own <NuxtLink to="/post-processor">post processor</NuxtLink> included and automatically opens after your stack is finished. There is however no need to go through the whole stacking pipeline to open Eise's postprocessor. You can also open images stacked with Autostakkert! if you have stacks lying around, or you prefer AutoStakkert! over Eise.</p>
+
+		<h2 class="home-h2">Download Eise for offline use</h2>
+		<p>Head over to the <NuxtLink to="/download/">Eise download page</NuxtLink> to get an offline version of Eise for OSX, Windows or Linux. For now these are free, but I'm considering making those paid.</p>
 
 		<h2 class="home-h2">More information, bugs and feature requests?</h2>
 		<p>Read more on the <NuxtLink to="/about/">About page</NuxtLink>, or head over to <a href="https://github.com/timing/eise.app" target="_blank">Eise.app on Github</a>. If you have feedback or you run into issues, <a href="https://github.com/timing/eise.app/issues" target="_blank" data-no-track @click="onLetMeKnowClick">Let me know!</a>. If you want to support this project, consider to <NuxtLink to="https://buymeacoffee.com/timing" target="_blank">buy me a coffee</NuxtLink>. <br/><br/>Happy stacking,<br/> Tijmen</p>

@@ -2,17 +2,13 @@
 	<div class="page-layout page-layout-wide">
 		<div class="content content-card">
 			<h2>Planetary Image Stacking on Mac</h2>
-			<p class="page-subtitle">Free, native, no Wine</p>
+			<p class="page-subtitle">A guide on how to run the full capture and stacking pipeline on OSX.</p>
 			<p>
-				Eise.app is a free browser-based planetary image stacker that runs natively on macOS - Apple Silicon and Intel - with WebGPU acceleration. No install, no Wine, no Python setup. Handles SER, AVI, MP4 and camera RAW, and includes integrated wavelet sharpening and RGB alignment so you finish in one tool.
+			Eise.app is a free browser-based planetary image stacker that runs in any modern browser. Therefore also on macOS (Apple Silicon and Intel). There is no need to install anything, no Wine needed, and no Python dependency issues. Next to Eise being a website, you can also <NuxtLink to="/download/">Download Eise for your mac</NuxtLink>.
 			</p>
 
-			<div class="verdict">
-				<p><strong>Short version:</strong> If you're on a Mac, you have real native options for both capturing and stacking planetary video without touching Windows. This page walks through them and explains where Eise.app fits.</p>
-			</div>
-
-			<h3>What Mac users actually have for stacking</h3>
-			<p>The classic Windows planetary-imaging stack (AutoStakkert! + Registax) doesn't run natively on macOS. Here's what does.</p>
+			<h3>What Mac users have for stacking</h3>
+			<p>The classic Windows planetary-imaging stack (AutoStakkert! + Registax) doesn't run natively on macOS. Here are some other options.</p>
 			<div class="table-wrapper">
 				<table class="comparison-table">
 					<thead>
@@ -28,7 +24,7 @@
 						<tr>
 							<td class="feature-name">Eise.app</td>
 							<td class="highlight">Yes (browser)</td>
-							<td class="highlight">None</td>
+							<td class="highlight">Optional</td>
 							<td class="highlight">WebGPU (Metal-backed on Apple Silicon)</td>
 							<td class="highlight">Free</td>
 						</tr>
@@ -41,7 +37,7 @@
 						</tr>
 						<tr>
 							<td class="feature-name">Planetary System Stacker (PSS)</td>
-							<td>Yes (via Python)</td>
+							<td class="highlight">Yes</td>
 							<td>Python + OpenCV + PyQt setup</td>
 							<td>No (CPU)</td>
 							<td class="highlight">Free</td>
@@ -63,10 +59,10 @@
 					</tbody>
 				</table>
 			</div>
-			<p>Real choices for staying native on Mac: <strong>Eise.app</strong>, <strong>Planet Stacker X</strong>, or <strong>PSS</strong> if you're comfortable with Python. Eise.app has the lowest friction (open a URL) and includes post-processing; Planet Stacker X is a proper Mac-native app with Metal acceleration; PSS is the most technical and hackable.</p>
+			<p>Good choices for proper support on Mac are: <strong>Eise.app</strong>, <strong>Planet Stacker X</strong>, or <strong>PSS</strong> if you're comfortable with some CLI struggles. Eise.app has the lowest friction (open a URL) and includes post-processing; Planet Stacker X is a proper Mac-native app with Metal acceleration; PSS is the most technical and hackable.</p>
 
 			<h3>Native Mac capture software</h3>
-			<p>Half the story is capture. The desktop Windows tools most tutorials assume (FireCapture, SharpCap) don't run well on Mac. These do.</p>
+			<p>Most capture tutorials assume Windows tools (FireCapture, SharpCap), but they don't run well on Mac. Below some that do.</p>
 
 			<h4>ASIStudio (ZWO)</h4>
 			<p>
@@ -93,15 +89,9 @@
 				You can also skip video entirely. Shoot a burst of RAW stills and drop the whole sequence in: Eise.app reads CR2, CR3, NEF, ARW, RAF, ORF, RW2 and DNG directly, no conversion step. For Bayer sensors the demosaic runs on the GPU from the untouched sensor data, so you keep the full bit depth your camera recorded.
 			</p>
 
-			<h4>iPhone or iPad</h4>
-			<p>
-				Yes, this works. Modern iPhones can capture usable video of the Moon (and, with a telescope adapter, planets) at 4K 60fps. Drop the resulting MOV or MP4 into Eise.app on any device - it stacks in the browser.
-				For iPhone-specific tips, see <NuxtLink to="/about/help/">the help page</NuxtLink>.
-			</p>
-
 			<h3>Why Eise.app works well on Mac specifically</h3>
 			<ul>
-				<li><strong>Apple Silicon WebGPU acceleration.</strong> M1, M2, M3, and M4 chips expose their GPU through WebGPU, which Eise.app uses for demosaicing, template matching, and stacking. Performance is real - close to what a native Metal app would give you.</li>
+				<li><strong>Apple Silicon WebGPU acceleration.</strong> M1, M2, M3, and M4 chips expose their GPU through WebGPU, which Eise.app uses for demosaicing, template matching, and stacking. Performance is as good as any native Metal app.</li>
 				<li><strong>Safari 18+ supported.</strong> You don't need Chrome. Safari on macOS Sequoia (15+) and iOS 18+ ships WebGPU. Chrome and Edge also work.</li>
 				<li><strong>Handles the Mac workflow.</strong> Files from ASIStudio Mac, DSLR clips exported by EOS Utility, screen-recordings from a Seestar S50, and iPhone MOVs all work without conversion.</li>
 				<li><strong>Post-processing included.</strong> No separate Registax step. Wavelet sharpening, RGB alignment, deconvolution, and color adjustments all live in the same session.</li>
@@ -133,7 +123,6 @@
 
 			<h3>Try it</h3>
 			<p>The homepage has a sample Jupiter clip you can process without capturing your own footage.</p>
-			<NuxtLink to="/" class="cta-link">Try Eise.app in your browser &rarr;</NuxtLink>
 
 			<h3>See also</h3>
 			<ul>

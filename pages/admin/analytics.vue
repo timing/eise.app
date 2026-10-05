@@ -145,6 +145,22 @@
 				</div>
 				<div class="stat-value">{{ stackConversionLabel }}</div>
 			</button>
+			<button type="button" class="stat" :class="{ active: chartMetric === 'export_conversion' }"
+				@click="pickChartMetric('export_conversion')">
+				<div class="stat-label">
+					Export conversion
+					<span class="info-icon" @click.stop>?<span class="info-tooltip">
+						Sessions with an export ÷ sessions with a finished stack, as a
+						percentage. Counted per SESSION, not per event, because one export
+						button press per format (8-bit PNG, 16-bit PNG, comparison video,
+						cropped SER) would otherwise push a raw ratio past 100%.
+						Not a strict funnel: a session can hold several stacks, or an
+						export with no stack at all (an image opened straight in the post
+						processor), so read it as "did the stack turn out worth keeping".
+					</span></span>
+				</div>
+				<div class="stat-value">{{ exportConversionLabel }}</div>
+			</button>
 			<div class="stat" v-if="includeAdmin">
 				<div class="stat-label">Admin pageviews</div>
 				<div class="stat-value">{{ summary.totals.admin_pageviews || 0 }}</div>
@@ -161,6 +177,7 @@
 						<option value="uniques">Unique visitors</option>
 						<option value="returning">Returning visitors</option>
 						<option value="stack_conversion">Stack conversion rate</option>
+						<option value="export_conversion">Export conversion rate</option>
 						<optgroup v-if="events.length" label="Events">
 							<option v-for="e in events" :key="e.event_name" :value="'event:' + e.event_name">
 								{{ e.event_name }}
@@ -502,12 +519,41 @@ function eventCount(name) {
 
 const stackFinishedCount = computed(() => eventCount('stack_finished'));
 
-const stackConversionLabel = computed(() => {
-	const starts = eventCount('stack_start');
-	if (!starts) return '—';
-	const pct = (stackFinishedCount.value / starts) * 100;
-	return `${pct.toFixed(1)}%`;
-});
+// Conversion metrics are one event divided by another. Declared here rather
+// than spread through the chart code, so adding the next one is a single entry
+// instead of a dozen `=== 'some_metric'` checks to find and duplicate.
+//
+// `field` picks WHAT is counted:
+//   'count'    - raw occurrences. What stack conversion has always used; the
+//                stack-conversion-check script reproduces that exact number,
+//                so it must not change.
+//   'sessions' - distinct sessions, i.e. one vote per visit. Right for export,
+//                because `export` fires once per button (8-bit PNG, 16-bit PNG,
+//                comparison video, cropped SER), so a raw ratio would routinely
+//                exceed 100% and one enthusiastic user would move a daily
+//                number noticeably.
+const CONVERSION_METRICS = {
+	stack_conversion: { denominator: 'stack_start', numerator: 'stack_finished', field: 'count' },
+	export_conversion: { denominator: 'stack_finished', numerator: 'export', field: 'sessions' },
+};
+const conversionOf = (key) => CONVERSION_METRICS[key] || null;
+const activeConversion = computed(() => conversionOf(chartMetric.value));
+
+function conversionLabel(key) {
+	const cfg = conversionOf(key);
+	if (!cfg) return '—';
+	const pick = (name) => {
+		const e = events.value.find(x => x.event_name === name);
+		if (!e) return 0;
+		return Number(cfg.field === 'sessions' ? e.sessions : e.occurrences) || 0;
+	};
+	const denom = pick(cfg.denominator);
+	if (!denom) return '—';
+	return `${((pick(cfg.numerator) / denom) * 100).toFixed(1)}%`;
+}
+
+const stackConversionLabel = computed(() => conversionLabel('stack_conversion'));
+const exportConversionLabel = computed(() => conversionLabel('export_conversion'));
 
 function currentRangeMs() {
 	const now = Date.now();
@@ -813,13 +859,14 @@ async function fetchChart() {
 	chartLoading.value = true;
 	chartHover.value = null;
 	try {
-		if (chartMetric.value === 'stack_conversion') {
-			const [starts, finishes] = await Promise.all([
-				apiGet('/admin/analytics/timeseries', { bucket: chartBucket.value, event_name: 'stack_start' }),
-				apiGet('/admin/analytics/timeseries', { bucket: chartBucket.value, event_name: 'stack_finished' }),
+		const conversion = activeConversion.value;
+		if (conversion) {
+			const [denom, numer] = await Promise.all([
+				apiGet('/admin/analytics/timeseries', { bucket: chartBucket.value, event_name: conversion.denominator }),
+				apiGet('/admin/analytics/timeseries', { bucket: chartBucket.value, event_name: conversion.numerator }),
 			]);
-			chartData.value = starts.items || [];
-			chartData2.value = finishes.items || [];
+			chartData.value = denom.items || [];
+			chartData2.value = numer.items || [];
 		} else if (chartMetric.value === 'returning') {
 			const data = await apiGet('/admin/analytics/timeseries', { bucket: chartBucket.value, metric: 'returning' });
 			chartData.value = data.items || [];
@@ -904,7 +951,7 @@ async function toggleRefUrls(host) {
 // ---- Chart computations ----
 
 const chartSeries = computed(() => {
-	const isConversion = chartMetric.value === 'stack_conversion';
+	const conversion = activeConversion.value;
 	const primary = chartData.value;
 	const secondary = chartData2.value;
 	if (!primary.length && !secondary.length) return [];
@@ -937,9 +984,10 @@ const chartSeries = computed(() => {
 	for (let t = start; t <= end; t += bucketMs) {
 		const row = map.get(t);
 		const row2 = map2.get(t);
-		const count = row ? Number(row.count) || 0 : 0;
-		const count2 = row2 ? Number(row2.count) || 0 : 0;
-		const rate = isConversion && count > 0 ? (count2 / count) * 100 : 0;
+		const field = conversion ? conversion.field : 'count';
+		const count = row ? Number(row[field]) || 0 : 0;
+		const count2 = row2 ? Number(row2[field]) || 0 : 0;
+		const rate = conversion && count > 0 ? (count2 / count) * 100 : 0;
 		out.push({
 			bucket_ts: t,
 			count,
@@ -953,7 +1001,7 @@ const chartSeries = computed(() => {
 });
 
 const chartValues = computed(() => {
-	if (chartMetric.value === 'stack_conversion') {
+	if (activeConversion.value) {
 		return chartSeries.value.map(r => r.rate);
 	}
 	const field = chartMetric.value === 'sessions' ? 'sessions'
@@ -963,11 +1011,11 @@ const chartValues = computed(() => {
 });
 
 const chartTotal = computed(() => {
-	if (chartMetric.value === 'stack_conversion') {
-		const starts = chartSeries.value.reduce((s, r) => s + r.count, 0);
-		const finishes = chartSeries.value.reduce((s, r) => s + r.count2, 0);
-		if (!starts) return '—';
-		return `${((finishes / starts) * 100).toFixed(1)}%`;
+	if (activeConversion.value) {
+		const denom = chartSeries.value.reduce((s, r) => s + r.count, 0);
+		const numer = chartSeries.value.reduce((s, r) => s + r.count2, 0);
+		if (!denom) return '—';
+		return `${((numer / denom) * 100).toFixed(1)}%`;
 	}
 	// Returning: use the distinct-session total from the dashboard summary.
 	// Summing per-bucket counts would double-count sessions active in multiple buckets.
@@ -982,7 +1030,7 @@ const chartValueUnit = computed(() => {
 	if (chartMetric.value === 'sessions') return 'sessions';
 	if (chartMetric.value === 'uniques') return chartBucket.value === 'day' ? 'daily uniques' : 'unique visitors';
 	if (chartMetric.value === 'returning') return 'returning visitors';
-	if (chartMetric.value === 'stack_conversion') return '%';
+	if (activeConversion.value) return '%';
 	if (chartMetric.value.startsWith('event:')) return chartMetric.value.slice(6);
 	return '';
 });
@@ -1007,7 +1055,7 @@ const chartPoints = computed(() => {
 	const plotW = chartW.value - pad.left - pad.right;
 	const plotH = chartH - pad.top - pad.bottom;
 	const step = n > 1 ? plotW / (n - 1) : 0;
-	const isConversion = chartMetric.value === 'stack_conversion';
+	const conversion = activeConversion.value;
 	return chartValues.value.map((v, i) => {
 		const row = chartSeries.value[i];
 		return {
@@ -1015,7 +1063,7 @@ const chartPoints = computed(() => {
 			y: pad.top + plotH * (1 - v / max),
 			v,
 			ts: row.bucket_ts,
-			detail: isConversion ? `${row.count2} / ${row.count} stack_start` : null,
+			detail: conversion ? `${row.count2} / ${row.count} ${conversion.denominator}` : null,
 		};
 	});
 });
@@ -1037,7 +1085,7 @@ const chartArea = computed(() => {
 const yTicks = computed(() => {
 	const max = chartMax.value;
 	const plotH = chartH - pad.top - pad.bottom;
-	const isConversion = chartMetric.value === 'stack_conversion';
+	const isConversion = !!activeConversion.value;
 	return [0, 0.25, 0.5, 0.75, 1].map(f => {
 		const v = max * f;
 		return {
@@ -1048,7 +1096,7 @@ const yTicks = computed(() => {
 });
 
 function formatChartValue(v) {
-	if (chartMetric.value === 'stack_conversion') {
+	if (activeConversion.value) {
 		return (Number(v) || 0).toFixed(1);
 	}
 	return v;

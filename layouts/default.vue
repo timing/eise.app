@@ -306,6 +306,7 @@ watch(() => route.path, () => {
 	letter-spacing: -0.01em;
 	color: var(--eise-gilt);
 	text-decoration: none;
+	border: none;
 	white-space: nowrap;
 	flex-shrink: 0;
 }
@@ -361,23 +362,10 @@ watch(() => route.path, () => {
 	background: var(--eise-gilt);
 }
 
-.eise-cta {
-	padding: 7px 14px;
+/* .eise-cta itself is global (app.vue) so pages can reuse the same button;
+   only the nav spacing belongs here. */
+.eise-nav .eise-cta {
 	margin-left: 6px;
-	border: 1px solid rgba(217, 169, 74, 0.55);
-	border-radius: 6px;
-	white-space: nowrap;
-	flex-shrink: 0;
-	font-size: 13.5px;
-	color: var(--eise-gilt-lt);
-	text-decoration: none;
-	background: rgba(217, 169, 74, 0.08);
-	transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
-}
-.eise-cta:hover {
-	background: var(--eise-gilt);
-	border-color: var(--eise-gilt);
-	color: var(--eise-ink);
 }
 
 .eise-menu {
@@ -427,6 +415,7 @@ watch(() => route.path, () => {
 	padding: 12px 16px;
 	color: #333;
 	text-decoration: none;
+	border: none;
 	font-size: 14px;
 	background: none;
 }
