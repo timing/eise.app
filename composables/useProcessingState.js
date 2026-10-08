@@ -58,6 +58,15 @@ const trackingContext = ref({
 // rejections can report what was rejected. Survives until the next selection.
 const selectedFileContext = ref(null);
 
+// The file this session is working from, shown as a card while selecting,
+// while stacking, and in the post processor. Kept here rather than passed
+// down because three unrelated components render it.
+const sourceFile = ref(null); // { name, size, lastModified }
+// Bayer pattern / colour format of that file, e.g. 'RGGB' or 'RGB'. Null until
+// a reader has read the header, which is after selection - so every consumer
+// must be able to render the card without it.
+const sourceColorProfile = ref(null);
+
 const stackingMode = ref('single'); // 'single' or 'continuous'
 // When true, crop-detection analyze runs at half resolution (fixed 2× box-
 // filter downscale). Trade-off: ~1 source-pixel error in the initial centroid,
@@ -263,6 +272,20 @@ export function useProcessingState() {
         return selectedFileContext.value;
     }
 
+    // Remember the file itself for display. Clears the colour profile: the new
+    // file's pattern is unknown until its reader reports one, and showing the
+    // previous file's badge would be a lie.
+    function setSourceFile(file) {
+        sourceFile.value = file
+            ? { name: file.name, size: file.size, lastModified: file.lastModified }
+            : null;
+        sourceColorProfile.value = null;
+    }
+
+    function setSourceColorProfile(profile) {
+        sourceColorProfile.value = profile || null;
+    }
+
     function setTrackingContext({ file_type, reader, gpu_enabled }) {
         // initial_reader is sticky per job: whoever calls setTrackingContext first
         // owns it, and later fallback calls (mediabunny -> ffmpeg) only rewrite
@@ -356,6 +379,10 @@ export function useProcessingState() {
         getBatchStartIndex,
         setSelectedFileContext,
         getSelectedFileContext,
+        sourceFile,
+        setSourceFile,
+        sourceColorProfile,
+        setSourceColorProfile,
         setTrackingContext,
         getTrackingContext,
         getStackJobProps,

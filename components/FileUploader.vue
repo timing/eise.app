@@ -1,12 +1,17 @@
 <template>
 <div class="page-layout stack-layout">
 	<div class="panel">
+		<!-- What is being stacked, kept on screen for the whole run. -->
+		<div v-if="isProcessing && sourceFile" class="panel-section">
+			<FileMetaCard :file="sourceFile" :profile="sourceColorProfile" />
+		</div>
+
 		<!-- LoadingIndicator always mounted so it can receive events -->
 		<LoadingIndicator />
 
 		<!-- Cancel button during processing -->
 		<div v-if="isProcessing" class="action-buttons processing-actions panel-section">
-			<button class="btn-danger" @click="cancelProcessing">Cancel</button>
+			<button class="cancel-btn" @click="cancelProcessing">Cancel</button>
 			<p class="processing-hint">Stacking can take a while, but the results are hopefully worth the wait!</p>
 		</div>
 
@@ -48,22 +53,19 @@
 			<div class="panel-section">
 				<h3 class="panel-title">Select files</h3>
 				<p class="panel-sub">For stacking and post processing.</p>
-				<div class="file-input-wrapper" :class="{ 'has-files': selectedFiles.length > 0 }">
+				<!-- With files chosen the zone gives way to the file cards below,
+				     which name every file and its size, date and colour profile. -->
+				<div v-if="selectedFiles.length === 0" class="file-input-wrapper">
 					<input id="file-upload" ref="fileInput" type="file" accept="video/*,image/*,.ser,.dng,.cr2,.cr3,.nef,.arw,.orf,.rw2,.raf,.pef,.srw,.nrw,.sr2,.srf,.mrw,.rwl,.3fr,.iiq,.x3f" multiple @change="onFileChanged" title="" />
 					<label for="file-upload" class="file-label drop-zone">
-						<template v-if="selectedFiles.length > 0">
-							{{ selectedFilesDescription }}
-						</template>
-						<template v-else>
-							<svg class="drop-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-								<path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" />
-								<path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
-							</svg>
-							<span class="drop-text">Drop files here</span>
-							<span class="drop-sub">or <span class="drop-browse">browse</span> your computer</span>
-							<span class="drop-formats" title="SER, AVI, MP4, MOV, WebM, camera RAW (CR2, CR3, NEF, ARW, RAF, DNG and more), PNG, JPEG, TIFF">SER · AVI · MP4 · RAW · PNG · TIFF</span>
-							<span class="drop-privacy">Nothing is uploaded.</span>
-						</template>
+						<svg class="drop-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" />
+							<path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+						</svg>
+						<span class="drop-text">Drop files here</span>
+						<span class="drop-sub">or <span class="drop-browse">browse</span> your computer</span>
+						<span class="drop-formats" title="SER, AVI, MP4, MOV, WebM, camera RAW (CR2, CR3, NEF, ARW, RAF, DNG and more), PNG, JPEG, TIFF">SER · AVI · MP4 · RAW · PNG · TIFF</span>
+						<span class="drop-privacy">Nothing is uploaded.</span>
 					</label>
 				</div>
 
@@ -95,16 +97,21 @@
 				</div>
 
 				<div v-if="selectedFiles.length > 0 && !showBatchChoice && !isBatchMode" class="selected-files">
-					<div v-if="selectedFiles.length > 1" class="selected-file-list">
+					<div class="selected-file-list">
 						<div
 							v-for="(file, index) in selectedFiles"
 							:key="`${file.name}-${index}`"
 							class="selected-file-item"
 							:class="{ 'is-mismatched': mismatchedFileNames.has(file.name) }"
 						>
-							<span class="file-name" :title="file.name">{{ file.name }}</span>
-							<span class="file-size">{{ formatFileSize(file.size) }}</span>
+							<FileMetaCard
+								class="selected-file-meta"
+								:file="file"
+								:profile="selectedFiles.length === 1 ? sourceColorProfile : null"
+								flat
+							/>
 							<button
+								v-if="selectedFiles.length > 1"
 								class="remove-btn"
 								@click="removeSelectedFile(index)"
 								:title="`Remove ${file.name}`"
@@ -386,13 +393,14 @@ import { fetchFile } from '@ffmpeg/ffmpeg';
 import { computed, defineEmits, ref, onMounted, watch, inject } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
 // useSerReader removed - now using useSerParser + useDebayerReader
+import FileMetaCard from '@/components/FileMetaCard.vue';
 import { useAviReader } from '@/composables/useAviReader';
 import { useFFmpegReader } from '@/composables/useFFmpegReader';
 import { useMediabunnyReader } from '@/composables/useMediabunnyReader';
 import { useImageReader } from '@/composables/useImageReader';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { useStackLogTelemetry } from '@/composables/useStackLogTelemetry';
-import { useBatchProcessing, formatFileSize } from '@/composables/useBatchProcessing';
+import { useBatchProcessing } from '@/composables/useBatchProcessing';
 import { reportError, UserError } from '@/composables/useSentryReporting';
 import { FFmpegUnsupportedError } from '@/plugins/ffmpeg';
 import { useFeedback } from '@/composables/useFeedback';
@@ -500,6 +508,10 @@ const {
 	getTrackingContext,
 	getStackJobProps,
 	setSelectedFileContext,
+	sourceFile,
+	setSourceFile,
+	sourceColorProfile,
+	setSourceColorProfile,
 	lowResCropDetect: lowResCropDetectValue,
 	setLowResCropDetect,
 	alwaysShowColorPicker: alwaysShowColorPickerValue,
@@ -724,12 +736,6 @@ const batchSettings = computed(() => ({
 
 const emit = defineEmits(['postProcessing', 'processing-started']);
 
-const selectedFilesDescription = computed(() => {
-	if (selectedFiles.value.length === 0) return '';
-	if (selectedFiles.value.length === 1) return selectedFiles.value[0].name;
-	return `${selectedFiles.value.length} files`;
-});
-
 const startButtonText = computed(() => {
 	if (selectedFiles.value.length === 1) {
 		const file = selectedFiles.value[0];
@@ -849,6 +855,13 @@ function onFilesSelected(files){
 	// Record what was picked before any validation runs, so a rejection below
 	// (or anywhere downstream, pre-stack_start) can report ext/size/count.
 	setSelectedFileContext(files);
+	// The first file is the one the cards during and after stacking name.
+	setSourceFile(files[0] || null);
+	// Picking files is the start of a new job, so let go of a finished batch
+	// from earlier in the session. The picker is hidden while a batch is
+	// active, so this can only ever drop a completed one — and those hold a
+	// blob and a float32 buffer per file, which is a lot to keep around.
+	if (!isBatchMode.value) clearBatch();
 	eventBusEmit('stop-loading');
 
 	// Categorize files. Camera RAW is extension-detected because browsers report
@@ -1169,6 +1182,7 @@ function reloadPage() {
 
 function clearSelection() {
 	selectedFiles.value = [];
+	setSourceFile(null);
 	if (fileInput.value) {
 		fileInput.value.value = '';
 	}
@@ -1384,6 +1398,10 @@ function removeSelectedFile(index) {
 function processBatchMode() {
 	showBatchChoice.value = false;
 	isBatchMode.value = true;
+	// The queue is module-level state that outlives this component, so a batch
+	// from earlier in the session is still in it. addFiles appends, so without
+	// this the new files land underneath the finished ones.
+	clearBatch();
 	// Add files to batch queue
 	addBatchFiles(pendingBatchFiles.value);
 	pendingBatchFiles.value = [];
@@ -1459,6 +1477,14 @@ async function processFiles(files, options = {}) {
 	const primaryFile = videoFiles[0] || rawFiles[0] || imageFiles[0];
 	if (primaryFile) {
 		startNewStackJob(primaryFile.name);
+		// The sample clip skips onFilesSelected, so set the card's file here too.
+		setSourceFile(primaryFile);
+		// Only the debayer lane has a Bayer pattern to report, and it only
+		// knows it after reading the header — useDebayerReader.init fills it
+		// in. Every other reader hands us RGB frames, so say so right away
+		// rather than flashing a badge that changes a second later.
+		const debayerLane = rawFiles.length > 0 || videoFiles.some(f => /\.(ser|avi)$/i.test(f.name));
+		setSourceColorProfile(debayerLane ? null : 'RGB');
 		// Pin the log-shipping cursor to THIS moment so the first stack_ping
 		// includes "File: X" and all downstream pre-processing-started logs.
 		// Must run before addLog below and before any reader logs — logs.value
@@ -2706,6 +2732,27 @@ async function processFiles(files, options = {}) {
    light-theme rules above keep working where they are still used.
    ============================================================ */
 
+/* --- Progress block ----------------------------------------- */
+/* LoadingIndicator mounts unconditionally (it listens for the bus events), so
+   it can't carry .panel-section — it would paint an empty padded box on the
+   file-picking screen. Give it the section's padding from the outside, and the
+   hairline only when a section actually precedes it. Direct child only:
+   VideoFrameProcessor nests the same component inside a .panel-section, which
+   already has this padding. */
+.stack-layout .panel > .loading-wrapper {
+	margin-bottom: 0;
+	padding: 22px 22px 20px;
+}
+.stack-layout .panel > .panel-section + .loading-wrapper {
+	border-top: 1px solid var(--eise-panel-line);
+}
+/* Continues the progress block rather than starting a new section, so it
+   neither repeats that block's top padding nor draws a hairline. */
+.stack-layout .panel .processing-actions {
+	margin-top: 0;
+	padding-top: 0;
+}
+
 /* --- Drop zone --------------------------------------------- */
 .panel .file-input-wrapper {
 	margin-bottom: 0;
@@ -2876,15 +2923,21 @@ async function processFiles(files, options = {}) {
 }
 
 /* --- Selected files / batch boxes on the dark panel --------- */
+/* The file cards carry their own inset surface now, so the list sits
+   straight on the panel instead of inside a second box. */
 .panel .selected-files {
-	margin-top: 16px;
-	padding: 12px;
-	background: rgba(0, 0, 0, 0.18);
-	border: 1px solid var(--eise-panel-line);
-	border-radius: 8px;
+	margin-top: 0;
+	padding: 0;
+	background: none;
+	border: none;
 }
 .panel .selected-file-item {
-	background: rgba(255, 255, 255, 0.04);
+	align-items: flex-start;
+	gap: 12px;
+	padding: 12px 14px;
+	margin-bottom: 8px;
+	border-radius: 9px;
+	background: rgba(0, 0, 0, 0.2);
 	border-color: rgba(255, 255, 255, 0.1);
 	color: var(--eise-body);
 }
@@ -2892,9 +2945,9 @@ async function processFiles(files, options = {}) {
 	background: rgba(217, 83, 79, 0.14);
 	border-color: rgba(217, 83, 79, 0.5);
 }
-.panel .selected-file-item .file-size {
-	font-family: var(--eise-mono);
-	color: var(--eise-label);
+.panel .selected-file-meta {
+	flex: 1;
+	min-width: 0;
 }
 .panel .selected-file-item .remove-btn {
 	background: rgba(255, 255, 255, 0.08);

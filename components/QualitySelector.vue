@@ -538,24 +538,10 @@ function proceedWithStacking() {
 	background: #f3d290;
 	color: var(--eise-panel);
 }
+/* .cancel-btn itself is in app.vue; it only needs separating from the button
+   above it here. */
 .cancel-btn {
-	width: 100%;
 	margin-top: 10px;
-	padding: 10px 16px;
-	border-radius: 7px;
-	background: rgba(255, 255, 255, 0.06);
-	border: 1px solid rgba(255, 255, 255, 0.18);
-	color: #f0d6d6;
-	font: inherit;
-	font-size: 14px;
-	font-weight: 500;
-	cursor: pointer;
-	transition: background 120ms ease, border-color 120ms ease;
-}
-.cancel-btn:hover {
-	background: rgba(196, 92, 84, 0.22);
-	border-color: rgba(226, 120, 110, 0.6);
-	color: #ffdcd6;
 }
 
 /* Preview column */

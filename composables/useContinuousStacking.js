@@ -3,6 +3,17 @@ import { useStacker } from '@/composables/useStacker';
 import { useEventBus } from '@/composables/eventBus';
 import { useProcessingState } from '@/composables/useProcessingState';
 
+// The snapshots a continuous run produces: 5%, 10%, ... 90%. Exported so the
+// progress strip in ContinuousStackingResults can draw every step up front,
+// including the ones not stacked yet, instead of guessing the range.
+export const CONTINUOUS_START_PCT = 5;
+export const CONTINUOUS_END_PCT = 90;
+export const CONTINUOUS_STEP_PCT = 5;
+export const CONTINUOUS_PERCENTAGES = Array.from(
+    { length: Math.floor((CONTINUOUS_END_PCT - CONTINUOUS_START_PCT) / CONTINUOUS_STEP_PCT) + 1 },
+    (_, i) => CONTINUOUS_START_PCT + i * CONTINUOUS_STEP_PCT
+);
+
 export function useContinuousStacking() {
     const { stackContinuousLocally, calculateSharpness } = useStacker();
     const { emit, addLog } = useEventBus();
@@ -24,9 +35,9 @@ export function useContinuousStacking() {
      */
     async function runContinuousStacking(allFrames, options = {}) {
         const {
-            startPct = 5,
-            endPct = 90,
-            stepPct = 5,
+            startPct = CONTINUOUS_START_PCT,
+            endPct = CONTINUOUS_END_PCT,
+            stepPct = CONTINUOUS_STEP_PCT,
             drizzleScale = 1.5,
             useWebGPU = true,
             frameReReader = null,

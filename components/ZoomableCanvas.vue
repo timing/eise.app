@@ -1,31 +1,46 @@
 <template>
 	<div class="zoomable-canvas-outer">
 		<div class="canvas-topbar">
-			<span class="zoom-indicator">
-				Zoom:
-				<div class="kebab-menu">
-					<button class="kebab-btn" @click="showZoomDropdown = !showZoomDropdown">&#9662;</button>
-					<div v-if="showZoomDropdown" class="kebab-backdrop" @click="showZoomDropdown = false"></div>
-					<div v-if="showZoomDropdown" class="kebab-dropdown">
-						<button v-for="preset in [25, 50, 75, 100, 150, 200, 300]" :key="preset"
-							@click="setZoomPreset(preset); showZoomDropdown = false">{{ preset }}%</button>
-						<button @click="fitToView(); showZoomDropdown = false">Fit to view</button>
-						<button @click="centerCanvas(); showZoomDropdown = false">Center</button>
-					</div>
-				</div>
-				<input
-					type="number"
-					:value="Math.round(zoomLevel * 100)"
-					@change="setZoomFromInput"
-					min="10"
-					max="1500"
-					step="1"
-					class="zoom-input"
-				/>%
-			</span>
+			<!-- What is on screen: filename + metadata. -->
+			<div class="canvas-topbar-info">
+				<slot name="info"></slot>
+			</div>
+			<!-- Moving through a set of related images (the continuous stacks,
+			     a batch). -->
+			<slot name="nav"></slot>
 			<slot name="toolbar"></slot>
 		</div>
 		<div class="zoomable-canvas-wrapper">
+			<!-- Outside the pill on purpose: its backdrop-filter would make it the
+			     containing block for this fixed-position catcher, shrinking it to
+			     the pill and breaking click-outside-to-close. -->
+			<div v-if="showZoomDropdown" class="kebab-backdrop" @click="showZoomDropdown = false"></div>
+			<!-- Floats over the canvas rather than sitting in the row above: it
+			     belongs to the view, not to the image's actions. -->
+			<span class="zoom-indicator">
+				<span class="zoom-label">Zoom</span>
+				<span class="zoom-field">
+					<input
+						type="number"
+						:value="Math.round(zoomLevel * 100)"
+						@change="setZoomFromInput"
+						min="10"
+						max="1500"
+						step="1"
+						class="zoom-input"
+					/>
+					<span class="zoom-unit">%</span>
+					<div class="kebab-menu">
+						<button class="kebab-btn" @click="showZoomDropdown = !showZoomDropdown" aria-label="Zoom presets">&#9662;</button>
+						<div v-if="showZoomDropdown" class="kebab-dropdown">
+							<button v-for="preset in [25, 50, 75, 100, 150, 200, 300]" :key="preset"
+								@click="setZoomPreset(preset); showZoomDropdown = false">{{ preset }}%</button>
+							<button @click="fitToView(); showZoomDropdown = false">Fit to view</button>
+							<button @click="centerCanvas(); showZoomDropdown = false">Center</button>
+						</div>
+					</div>
+				</span>
+			</span>
 			<slot name="overlay"></slot>
 			<div class="zoomable-canvas-container" @wheel.prevent="handleWheel" @mousedown="startDrag" @dblclick="handleDoubleClick" ref="container">
 				<canvas ref="canvas" :id="id" :style="canvasStyle"></canvas>
@@ -219,53 +234,105 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 .zoomable-canvas-outer {
 	width: calc(100% - 40px);
 }
+/* A row of its own, not a bare strip of controls: the inset surface groups the
+   filename, the navigator and the actions into one bar above the canvas. */
 .canvas-topbar {
 	display: flex;
 	justify-content: space-between;
 	align-items: center;
-	gap: 16px;
+	gap: 12px 20px;
 	flex-wrap: wrap;
+	margin-bottom: 14px;
+	padding: 7px 8px 7px 14px;
+	border-radius: 10px;
+	background: rgba(0, 0, 0, 0.22);
+	border: 1px solid rgba(255, 255, 255, 0.1);
 	color: var(--eise-on-dark);
-	padding: 0 0 14px;
+	box-sizing: border-box;
 }
+/* Takes the slack so the zoom control and the actions stay right-aligned.
+   Empty when nothing fills the slot, and then contributes no width. */
+.canvas-topbar-info {
+	flex: 1 1 0;
+	min-width: 0;
+}
+.canvas-topbar-info:empty {
+	flex: 0 0 auto;
+}
+/* Floating pill over the top-left of the canvas. */
 .zoom-indicator {
-	font-size: 14px;
-	color: var(--eise-muted-2);
+	position: absolute;
+	top: 12px;
+	left: 12px;
+	z-index: 3;
 	display: inline-flex;
 	align-items: center;
-	gap: 6px;
+	gap: 8px;
+	padding: 4px 4px 4px 10px;
+	border-radius: 8px;
+	background: rgba(9, 52, 66, 0.88);
+	backdrop-filter: blur(8px);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+.zoom-label {
+	font-size: 12px;
+	color: var(--eise-muted-2);
+}
+.zoom-field {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 3px 3px 3px 7px;
+	border-radius: 7px;
+	background: rgba(0, 0, 0, 0.25);
+	border: 1px solid rgba(255, 255, 255, 0.12);
 }
 .zoom-input {
-	width: 52px;
-	background: rgba(0, 0, 0, 0.2);
-	border: 1px solid var(--eise-panel-border);
-	border-radius: 5px;
+	width: 30px;
+	padding: 0;
+	background: transparent;
+	border: none;
 	color: var(--eise-bright);
 	font-family: var(--eise-mono);
 	font-size: 12px;
-	padding: 4px 7px;
 	text-align: right;
-	box-sizing: border-box;
-	height: 26px;
+	box-sizing: content-box;
+	appearance: textfield;
+	-moz-appearance: textfield;
+}
+.zoom-input::-webkit-outer-spin-button,
+.zoom-input::-webkit-inner-spin-button {
+	-webkit-appearance: none;
+	margin: 0;
 }
 .zoom-input:focus {
 	outline: none;
-	border-color: var(--eise-gilt);
+	color: var(--eise-gilt-lt);
+}
+.zoom-unit {
+	font-family: var(--eise-mono);
+	font-size: 12px;
+	color: var(--eise-muted-2);
 }
 .kebab-menu {
 	position: relative;
 	display: inline-block;
 }
+/* Borderless inside the zoom field: the field is already the frame. */
 .kebab-btn {
+	display: grid;
+	place-items: center;
+	width: 20px;
+	height: 22px;
 	background: transparent;
-	border: 1px solid var(--eise-panel-border);
+	border: none;
 	color: var(--eise-on-dark);
 	font-size: 10px;
-	padding: 4px 7px;
+	padding: 0;
 	cursor: pointer;
 	border-radius: 5px;
 	box-sizing: border-box;
-	height: 26px;
 }
 .kebab-btn:hover {
 	background: rgba(255, 255, 255, 0.07);
@@ -288,7 +355,10 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 	box-shadow: 0 2px 10px rgba(0,0,0,0.2);
 	z-index: 100;
 	min-width: 120px;
-	overflow: hidden;
+	/* The pill now lives inside the canvas frame, which clips its overflow, so
+	   this list has to stay shorter than the frame on a short window. */
+	max-height: 40vh;
+	overflow-y: auto;
 }
 .kebab-dropdown button {
 	display: block;

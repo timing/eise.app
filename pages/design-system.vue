@@ -97,6 +97,19 @@
 		</div>
 
 		<div class="ds-group">
+			<h3>Quiet Cancel (on a panel)</h3>
+			<p class="ds-note">Stop/cancel/abort on a job that is already running. Destructive but never the thing to reach for, so it sits flat with a warm tint and only turns red on hover. Prefer this over .btn-danger whenever the action interrupts work the user asked for.</p>
+			<div class="ds-examples ds-examples-dark">
+				<button class="cancel-btn">Cancel</button>
+				<button class="cancel-btn">Abort stack</button>
+			</div>
+			<div class="ds-variants">
+				<strong>Class:</strong> .cancel-btn (global in app.vue)<br>
+				<strong>Used by:</strong> FileUploader, VideoFrameProcessor, QualitySelector, ContinuousStackingResults
+			</div>
+		</div>
+
+		<div class="ds-group">
 			<h3>Secondary Buttons (Gray)</h3>
 			<p class="ds-note">Used for secondary actions, dismiss dialogs</p>
 			<div class="ds-examples">
@@ -409,6 +422,25 @@
 		</div>
 	</section>
 
+	<!-- FILE META -->
+	<section class="ds-section">
+		<h2>File Meta Card</h2>
+
+		<div class="ds-group">
+			<h3>FileMetaCard</h3>
+			<p class="ds-note">Names the file being worked on: in the stack panel's selection list, above the progress bar while stacking, and in the post processor toolbar. The colour profile badge is dropped whenever the pattern is not known yet (it is only read once a reader opens the file).</p>
+			<div class="ds-examples ds-examples-dark">
+				<FileMetaCard :file="demoFile" profile="RGGB" />
+				<FileMetaCard :file="demoFile" />
+				<FileMetaCard :file="demoFile" profile="RGB" flat />
+			</div>
+			<div class="ds-variants">
+				<strong>Props:</strong> file ({ name, size, lastModified }), profile (string or null), flat (drop the inset surface)<br>
+				<strong>State:</strong> composables/useProcessingState — sourceFile, sourceColorProfile
+			</div>
+		</div>
+	</section>
+
 	<!-- POPUPS -->
 	<section class="ds-section">
 		<h2>Popups & Dialogs</h2>
@@ -615,9 +647,17 @@
 
 <script setup>
 // Hidden design system page - only for development reference
+import FileMetaCard from '@/components/FileMetaCard.vue';
+
 definePageMeta({
 	layout: 'default'
 });
+
+const demoFile = {
+	name: 'Multi-Jupiter__030673__20-48-29__data.ser',
+	size: 1843000000,
+	lastModified: Date.UTC(2026, 7, 30, 18, 48)
+};
 useHead({
 	meta: [
 		{ name: 'robots', content: 'noindex, nofollow' },
@@ -686,6 +726,12 @@ useHead({
 	color: #888;
 	font-size: 13px;
 	margin: 0 0 15px 0;
+}
+
+.ds-examples-dark {
+	background: var(--eise-panel);
+	flex-direction: column;
+	align-items: stretch;
 }
 
 .ds-examples {

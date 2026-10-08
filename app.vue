@@ -1500,6 +1500,29 @@ canvas {
 	color: var(--eise-ink);
 }
 
+/* Stop/cancel/abort on a running job. Deliberately quiet: destructive, but
+   never the thing to reach for, so it reads as a neutral panel button with a
+   warm tint and only turns red on hover. Use this rather than .btn-danger
+   anywhere the action interrupts work the user asked for. */
+.cancel-btn {
+	width: 100%;
+	padding: 10px 16px;
+	border-radius: 7px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	color: #f0d6d6;
+	font: inherit;
+	font-size: 14px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.cancel-btn:hover {
+	background: rgba(196, 92, 84, 0.22);
+	border-color: rgba(226, 120, 110, 0.6);
+	color: #ffdcd6;
+}
+
 /* Gilt call-to-action link. Lives here, not in the layout, so any page can
    drop <a class="eise-cta"> in and get the exact header button. */
 .eise-cta {

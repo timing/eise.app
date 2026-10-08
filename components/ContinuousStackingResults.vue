@@ -1,58 +1,92 @@
 <template>
-<div class="page-layout">
-	<div class="card header-card">
-		<h3>Continuous Stacking</h3>
-		<p>Eise is now stacking frames in continuously from 5% up to 90% so you can pick the best result in the Post Processor.</p>
+<div class="page-layout stack-layout">
+	<div class="panel">
+		<!-- Same card as the stack panel and the post processor: continuous runs
+		     are long, so what is being stacked stays named throughout. -->
+		<div v-if="sourceFile" class="panel-section">
+			<FileMetaCard :file="sourceFile" :profile="sourceColorProfile" />
+		</div>
 
-		<div v-if="isProcessing" class="processing-status">
-			<div class="frame-counter" v-if="stackingTotal > 0">{{ stackingCurrent }} / {{ stackingTotal }}</div>
-			<div class="loading-indicator">
-				<div class="determinate" :style="{ width: stackingProgress + '%' }"></div>
+		<div class="panel-section">
+			<div class="caption">
+				<span class="caption-dot" aria-hidden="true"></span>
+				<span>Continuous stacking</span>
 			</div>
-			<p>Stacking up to {{ currentPercentage }}% of frames</p>
-            <button class="btn-danger small" @click="abort">Abort stack</button>
+			<p class="panel-note csr-lede">Eise is now stacking frames continuously from {{ firstPercentage }}% up to {{ lastPercentage }}%, so you can pick the best result in the Post Processor.</p>
+
+			<template v-if="isProcessing">
+				<div class="loading-readout">
+					<span class="frame-counter" v-if="stackingTotal > 0">{{ stackingCurrent }} / {{ stackingTotal }}</span>
+					<span class="loading-percent">{{ stackingProgress }}%</span>
+				</div>
+				<div class="loading-indicator">
+					<div class="determinate" :style="{ width: stackingProgress + '%' }"></div>
+				</div>
+			</template>
+
+			<!-- One tick per snapshot the run will produce, so the remaining
+			     work is visible from the first stack onwards. -->
+			<div class="csr-stacks-head">
+				<span class="panel-label csr-stacks-label">Stacks</span>
+				<span v-if="isProcessing" class="csr-current">Stacking the <span class="csr-pct">{{ currentPercentage }}%</span> best frames</span>
+			</div>
+			<div class="csr-ticks" :style="{ gridTemplateColumns: `repeat(${ticks.length}, minmax(0, 1fr))` }">
+				<span v-for="tick in ticks" :key="tick.percentage" class="csr-tick" :class="tick.state" :title="`${tick.percentage}%`"></span>
+			</div>
+			<div class="csr-scale">
+				<span>{{ firstPercentage }}%</span>
+				<span>{{ readyLabel }}</span>
+				<span>{{ lastPercentage }}%</span>
+			</div>
 		</div>
 
-		<div v-if="!isProcessing && results.length === 0" class="no-results">
-			<p>No results produced yet. Stacking may have failed.</p>
-			<button class="btn-primary" @click="cancel">Back</button>
+		<div v-if="!isProcessing && results.length === 0" class="panel-section">
+			<p class="panel-note csr-empty">No results produced yet. Stacking may have failed.</p>
 		</div>
 
-		<div class="action-buttons" v-if="!isProcessing">
-			<button class="btn-secondary" @click="cancel">Cancel</button>
+		<div class="panel-section csr-actions">
+			<button v-if="isProcessing" class="cancel-btn" @click="abort">Abort stack</button>
+			<button v-else class="btn-secondary" @click="cancel">{{ results.length === 0 ? 'Back' : 'Cancel' }}</button>
+			<p v-if="isProcessing" class="panel-note csr-hint">Finished stacks can already be opened in the Post Processor while the rest continue.</p>
 		</div>
 	</div>
 
-    <div class="content results-content" v-if="results.length > 0">
+	<div class="content results-content" v-if="results.length > 0">
+		<div class="csr-results-head">
+			<span class="panel-label csr-results-label">Results</span>
+			<span class="csr-ready">{{ readyLabel }}</span>
+		</div>
 		<div class="results-grid">
-			<div v-for="result in sortedResults" 
-                 :key="result.percentage" 
-                 class="result-item no-click">
+			<div v-for="result in sortedResults"
+				 :key="result.percentage"
+				 class="result-item no-click">
 				<div class="result-preview">
 					<img :src="getBlobUrl(result)" alt="Stacked result" />
 					<div class="percentage-badge">{{ result.percentage }}%</div>
 				</div>
+				<!-- Direct children of the grid, not wrapped rows: the label and
+				     the value are the two columns. -->
 				<div class="result-info">
-					<div class="info-row">
-						<span class="label">Frames:</span>
-						<span class="value">{{ result.frameCount }}</span>
-					</div>
-					<div class="info-row">
-						<span class="label">Sharpness:</span>
-						<span class="value">{{ formatScore(result.sharpness) }}</span>
-					</div>
+					<span class="label">Frames</span>
+					<span class="value">{{ result.frameCount }}</span>
+					<span class="label">Sharpness</span>
+					<span class="value">{{ formatScore(result.sharpness) }}</span>
 				</div>
 			</div>
 		</div>
-    </div>
+	</div>
 </div>
 </template>
 
 <script setup>
 import { computed, ref, onMounted, onUnmounted } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
+import { useProcessingState } from '@/composables/useProcessingState';
+import { CONTINUOUS_PERCENTAGES } from '@/composables/useContinuousStacking';
+import FileMetaCard from '@/components/FileMetaCard.vue';
 
 const { on, off } = useEventBus();
+const { sourceFile, sourceColorProfile } = useProcessingState();
 
 const stackingProgress = ref(0);
 const stackingCurrent = ref(0);
@@ -103,6 +137,21 @@ const sortedResults = computed(() => {
     return [...props.results].sort((a, b) => a.percentage - b.percentage);
 });
 
+const firstPercentage = CONTINUOUS_PERCENTAGES[0];
+const lastPercentage = CONTINUOUS_PERCENTAGES[CONTINUOUS_PERCENTAGES.length - 1];
+
+const ticks = computed(() => {
+    const done = new Set(props.results.map(r => r.percentage));
+    return CONTINUOUS_PERCENTAGES.map(percentage => ({
+        percentage,
+        state: done.has(percentage) ? 'is-done'
+            : (props.isProcessing && percentage === props.currentPercentage) ? 'is-active'
+            : 'is-pending'
+    }));
+});
+
+const readyLabel = computed(() => `${props.results.length} of ${CONTINUOUS_PERCENTAGES.length} ready`);
+
 function formatScore(val) {
     if (val === undefined || val === null) return 'N/A';
     return val.toFixed(4);
@@ -122,34 +171,113 @@ function abort() {
 </script>
 
 <style scoped>
-.processing-status {
-	margin: 20px 0;
-	text-align: center;
+/* Panel column -------------------------------------------------- */
+/* .caption / .caption-dot / .loading-* come from LoadingIndicator's global
+   stylesheet, so the progress block here reads identically to the one on the
+   stack panel. */
+.caption {
+	margin-bottom: 10px;
+}
+.csr-lede {
+	margin: 0 0 20px;
+}
+.csr-stacks-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 22px;
+}
+.csr-stacks-label {
+	margin-bottom: 0;
+}
+.csr-current {
+	font-size: 12px;
+	color: var(--eise-body);
+	text-align: right;
+}
+.csr-pct {
+	font-family: var(--eise-mono);
+	color: var(--eise-gilt-lt);
+}
+.csr-ticks {
+	display: grid;
+	gap: 3px;
+	margin-top: 9px;
+}
+.csr-tick {
+	height: 14px;
+	border-radius: 2px;
+	background: rgba(255, 255, 255, 0.08);
+}
+.csr-tick.is-done {
+	background: var(--eise-gilt);
+}
+.csr-tick.is-active {
+	background: rgba(217, 169, 74, 0.5);
+	animation: caption-pulse 1.4s ease-in-out infinite;
+}
+.csr-scale {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 6px;
+	font-family: var(--eise-mono);
+	font-size: 10px;
+	color: var(--eise-label);
+}
+.csr-empty {
+	margin: 0;
+	color: #e58a8a;
+}
+.csr-actions {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 0;
+}
+.csr-actions button {
+	width: 100%;
+}
+.csr-hint {
+	margin: 12px 0 0;
 }
 
-.btn-danger.small {
-    padding: 4px 12px;
-    font-size: 12px;
-    margin-top: 8px;
+/* Results column ------------------------------------------------ */
+.csr-results-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 16px;
+	margin-bottom: 12px;
 }
-
+.csr-results-label {
+	margin-bottom: 0;
+}
+.csr-ready {
+	font-family: var(--eise-mono);
+	font-size: 11px;
+	color: var(--eise-muted);
+}
+/* Small tiles on purpose: this is a contact sheet of 18 near-identical stacks
+   to scan for the sweet spot, not a place to judge detail. The chosen one gets
+   the full canvas in the post processor. */
 .results-grid {
 	display: grid;
-	grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-	gap: 15px;
-	margin: 20px 0;
+	grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+	gap: 12px;
 }
 
 .result-item {
-	background-color: #152525;
-	border: 1px solid #2a4a4a;
-	border-radius: 8px;
+	background: rgba(0, 0, 0, 0.24);
+	border: 1px solid var(--eise-panel-border);
+	border-radius: 10px;
 	overflow: hidden;
-	transition: transform 0.2s, border-color 0.2s;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
 }
 
 .result-item.no-click {
-    cursor: default;
+	cursor: default;
 }
 
 .result-preview {
@@ -169,54 +297,33 @@ function abort() {
 
 .percentage-badge {
 	position: absolute;
-	top: 8px;
-	left: 8px;
-	background-color: rgba(0, 0, 0, 0.7);
-	color: #fff;
-	padding: 2px 6px;
+	top: 6px;
+	left: 6px;
+	padding: 1px 6px;
 	border-radius: 4px;
-	font-size: 12px;
-	font-weight: bold;
+	background: rgba(9, 52, 66, 0.82);
+	border: 1px solid var(--eise-panel-border);
+	font-family: var(--eise-mono);
+	font-size: 10px;
+	color: #fff;
 }
 
 .result-info {
-	padding: 10px;
-}
-
-.info-row {
-	display: flex;
-	justify-content: space-between;
-	margin-bottom: 2px;
-	font-size: 14px;
-}
-
-.info-row.small {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	gap: 2px 10px;
+	padding: 8px 10px;
 	font-size: 11px;
-	color: #8ababa;
 }
 
 .label {
-	color: var(--eise-on-dark);
-	opacity: 0.8;
+	color: #8fa9b1;
 }
 
 .value {
-	font-family: monospace;
-	font-weight: bold;
-	color: var(--eise-on-dark);
-}
-
-.no-results {
-	padding: 40px;
-	text-align: center;
-	color: #ff5252;
-}
-
-.action-buttons {
-	margin-top: 20px;
-	display: flex;
-	justify-content: center;
-	gap: 10px;
+	font-family: var(--eise-mono);
+	color: var(--eise-bright);
+	text-align: right;
 }
 
 @media (max-width: 600px) {

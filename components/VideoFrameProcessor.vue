@@ -1,6 +1,11 @@
 <template>
 	<div class="page-layout pp-layout">
 		<div class="panel">
+			<!-- What is being stacked, named for the whole run. -->
+			<div v-if="sourceFile" class="panel-section">
+				<FileMetaCard :file="sourceFile" :profile="sourceColorProfile" />
+			</div>
+
 			<div class="panel-section">
 				<LoadingIndicator />
 
@@ -105,6 +110,7 @@
 <script setup>
 import { onMounted, ref, computed, watch, defineProps, onBeforeUpdate, nextTick } from 'vue';
 import { useEventBus } from '@/composables/eventBus';
+import FileMetaCard from '@/components/FileMetaCard.vue';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
 import { useStackLogTelemetry } from '@/composables/useStackLogTelemetry';
@@ -113,7 +119,7 @@ import { useFeedback } from '@/composables/useFeedback';
 
 const { on, addLog, emit } = useEventBus();
 const { track } = useTracking();
-const { getTrackingContext, getStackJobProps } = useProcessingState();
+const { getTrackingContext, getStackJobProps, sourceFile, sourceColorProfile } = useProcessingState();
 const { getLogTail } = useStackLogTelemetry();
 const { workerUrl } = useWorkerUrl();
 const { openFeedback } = useFeedback();
@@ -165,9 +171,21 @@ const displayStage = computed(() => {
 	if (processingStage.value === 'analyzing' || sawAnalysisCaption.value) return 1;
 	return 0;
 });
+// Frame counts for the analysis step's meta. `update-loading` counts frames
+// analysed during analysis and frames stacked afterwards, so the analysis
+// figure is latched at the handover rather than read live.
+const ANALYSIS_STAGE = STAGE_LABELS.indexOf('Analyzing frames');
+const loadingCurrent = ref(0);
+const loadingTotal = ref(0);
+const analyzedFrames = ref(0);
 const stageSteps = computed(() => STAGE_LABELS.map((label, i) => {
 	const state = displayStage.value > i ? 'done' : displayStage.value === i ? 'active' : 'pending';
-	return { label, state, meta: state === 'done' ? 'done' : state === 'active' ? 'in progress' : 'queued' };
+	let meta = state === 'done' ? 'done' : state === 'active' ? 'in progress' : 'queued';
+	if (i === ANALYSIS_STAGE) {
+		if (state === 'active' && loadingTotal.value > 0) meta = `${loadingCurrent.value}/${loadingTotal.value}`;
+		else if (state === 'done' && analyzedFrames.value > 0) meta = `${analyzedFrames.value} frames`;
+	}
+	return { label, state, meta };
 }));
 const uploadError = ref(null); // New ref for upload errors
 const showCancelledMessage = ref(false);
@@ -350,8 +368,15 @@ onMounted(async () => {
 		updateRefCandidateCanvas();
 	});
 
+	on('update-loading', (data) => {
+		if (typeof data !== 'object' || !data) return;
+		if (data.current !== undefined) loadingCurrent.value = data.current;
+		if (data.total !== undefined) loadingTotal.value = data.total;
+	});
+
 	on('stacking-started', (data) => {
 		processingStage.value = 'stacking';
+		analyzedFrames.value = loadingTotal.value;
 		if (data && data.referenceFrame) {
 			referenceFrame.value = data.referenceFrame;
 			updateReferenceFrameCanvas();
@@ -711,25 +736,8 @@ async function processImageFrames(files) {
 	.stage-step.done .step-meta {
 		color: #8fa9b1;
 	}
-	/* Cancel is deliberately quiet: destructive, but not the thing to reach for. */
-	.cancel-btn {
-		width: 100%;
-		padding: 10px 16px;
-		border-radius: 7px;
-		background: rgba(255, 255, 255, 0.06);
-		border: 1px solid rgba(255, 255, 255, 0.18);
-		color: #f0d6d6;
-		font: inherit;
-		font-size: 14px;
-		font-weight: 500;
-		cursor: pointer;
-		transition: background 120ms ease, border-color 120ms ease;
-	}
-	.cancel-btn:hover {
-		background: rgba(196, 92, 84, 0.22);
-		border-color: rgba(226, 120, 110, 0.6);
-		color: #ffdcd6;
-	}
+	/* .cancel-btn itself now lives in app.vue, shared with the stack panel and
+	   the continuous run so all three stop buttons read the same. */
 	.preview-frames-row {
 		display: flex;
 		gap: 24px;
@@ -894,19 +902,22 @@ async function processImageFrames(files) {
 	.dual-preview {
 		min-width: 500px;
 	}
+	/* Left-aligned, not centred: the two canvases are different widths, so
+	   centring each one made the pair drift sideways as the crop changed. */
 	.dual-canvas-row {
 		display: flex;
 		gap: 15px;
-		justify-content: center;
+		justify-content: flex-start;
+		align-items: flex-start;
 	}
 	.canvas-wrapper {
 		display: flex;
 		flex-direction: column;
-		align-items: center;
+		align-items: flex-start;
 	}
 	.canvas-label {
 		font-size: 11px;
-		color: #999;
+		color: var(--eise-label);
 		margin-bottom: 5px;
 	}
 </style>

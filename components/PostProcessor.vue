@@ -195,10 +195,21 @@
 		</div>
 		<template v-else>
 			<ZoomableCanvas ref="zoomableCanvasRef" id="postProcessCanvas" @canvasReady="handleCanvasReady" :disableDrag="cropMode || edgeMaskMode" :previewRotation="previewRotationAngle">
+				<template #info v-if="sourceFile">
+					<FileMetaCard :file="sourceFile" :profile="sourceColorProfile" flat />
+				</template>
+				<!-- Filled by BatchPostProcessor when there is a set to step through. -->
+				<template #nav>
+					<slot name="nav"></slot>
+				</template>
 				<template #overlay>
 					<span v-if="isLoadingImage" class="loading-inline">
 						<span class="spinner"></span> Loading image...
 					</span>
+					<!-- Long-running status from a parent (exporting a whole set).
+					     Floats over the canvas so it cannot reflow the page every
+					     time it appears and disappears. -->
+					<slot name="status"></slot>
 				</template>
 				<template #toolbar>
 					<div class="toolbar-actions">
@@ -208,9 +219,18 @@
 						<button class="btn-primary btn-publish" @click="openPublishModal('toolbar')" title="Publish to Eise Gallery">
 							✨ Publish
 						</button>
-						<button class="btn-primary" @click="openExportPopup">
-							⬇ Export
-						</button>
+						<!-- Split button: the body exports this image, the chevron opens
+						     the set-wide options a parent contributed. -->
+						<div class="export-split kebab-menu">
+							<button class="btn-primary btn-export" @click="openExportPopup">
+								⬇ Export
+								<span v-if="hasExportMenu" class="export-chevron" title="More export options" @click.stop="showExportMenu = !showExportMenu">▾</span>
+							</button>
+							<div v-if="showExportMenu" class="kebab-backdrop" @click="showExportMenu = false"></div>
+							<div v-if="showExportMenu" class="kebab-dropdown export-dropdown" @click="showExportMenu = false">
+								<slot name="export-menu"></slot>
+							</div>
+						</div>
 						<div class="kebab-menu">
 							<button class="kebab-btn" @click="showKebabMenu = !showKebabMenu" title="More options">
 								⋮
@@ -355,7 +375,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch, defineProps, reactive, onUnmounted, computed, nextTick, inject } from 'vue';
+import { ref, onMounted, watch, defineProps, reactive, onUnmounted, computed, nextTick, inject, useSlots } from 'vue';
 import debounce from 'lodash/debounce';
 import { adjustGain, adjustGainMultiply, cvMatToImageData } from '@/utils/sobel.js'
 import { deconvolveWebGL, deconvolveWebGL16, disposeDeconvWebGL } from '@/utils/webglDeconv.js'
@@ -365,6 +385,7 @@ import { initWebGL2, processWithWebGL2, isWebGL2Available, disposeWebGL2, blurWi
 import { download16BitPNG, decodePNG } from '@/utils/png16Encoder.js'
 import { decodeTIFF } from '@/utils/tiffDecoder.js'
 import ZoomableCanvas from '@/components/ZoomableCanvas.vue';
+import FileMetaCard from '@/components/FileMetaCard.vue';
 import PublishModal from '@/components/PublishModal.vue';
 import { useTracking } from '@/composables/useTracking';
 import { useProcessingState } from '@/composables/useProcessingState';
@@ -386,7 +407,7 @@ const directFileInput = ref(null);
 
 const { track } = useTracking();
 const { openFeedbackAfterDownload } = useFeedback();
-const { inputFilename, getOutputFilename, getStackJobId, getTrackingContext } = useProcessingState();
+const { inputFilename, getOutputFilename, getStackJobId, getTrackingContext, sourceFile, sourceColorProfile, setSourceFile, setSourceColorProfile } = useProcessingState();
 const { workerUrl } = useWorkerUrl();
 const { captureProcessedImage, canExport, generateComparisonVideo, getExportStatus } = useComparisonExport();
 const { trackPostOpen, trackPostFailed } = useDirectImageLoad();
@@ -407,6 +428,12 @@ let previewDragState = null;
 const showResizePreview = computed(() => showExportPopup.value && !!image16);
 const showKebabMenu = ref(false);
 const showHelpPopup = ref(false);
+// Set-wide export options (export all, choose a folder) come from whoever holds
+// the set — BatchPostProcessor. Without that slot the Export button is a plain
+// button rather than a split one, so a single image shows no empty chevron.
+const slots = useSlots();
+const showExportMenu = ref(false);
+const hasExportMenu = computed(() => !!slots['export-menu']);
 
 // Publish flow state
 const showPublishModal = ref(false);
@@ -496,6 +523,14 @@ async function handleDirectFileSelect(event) {
 	const fmt = detectImageFormat(file);
 
 	const { setInputFilename } = useProcessingState();
+	// Loading an image here replaces whatever a previous stack left behind, so
+	// the toolbar names this file rather than the footage it came from. Only
+	// once the format is accepted, so a rejected pick leaves the card alone.
+	const nameThisFile = () => {
+		setInputFilename(file.name);
+		setSourceFile(file);
+		setSourceColorProfile('RGB');
+	};
 
 	// Camera RAW: LibRaw demosaics it (its own worker, ~2MB wasm loaded on
 	// demand) and we load the result like any other image. 8-bit, because this
@@ -504,7 +539,7 @@ async function handleDirectFileSelect(event) {
 		try {
 			const { decodeRawToPngBlob } = await import('@/composables/useLibRawRgb');
 			const blob = await decodeRawToPngBlob(file);
-			setInputFilename(file.name);
+			nameThisFile();
 			trackPostOpen(file);
 			selectedFile.value = blob;
 		} catch (err) {
@@ -518,7 +553,7 @@ async function handleDirectFileSelect(event) {
 	if (fmt.isHeic) {
 		try {
 			const blob = await decodeHeicToBlob(file);
-			setInputFilename(file.name);
+			nameThisFile();
 			trackPostOpen(file);
 			selectedFile.value = blob;
 		} catch (err) {
@@ -540,7 +575,7 @@ async function handleDirectFileSelect(event) {
 		return;
 	}
 
-	setInputFilename(file.name);
+	nameThisFile();
 	trackPostOpen(file);
 	selectedFile.value = file;
 }
@@ -2654,7 +2689,8 @@ canvas {
 	align-items: center;
 	gap: 8px;
 }
-.toolbar-actions > button {
+.toolbar-actions > button,
+.toolbar-actions .btn-export {
 	font-size: 14px;
 	line-height: 1;
 }
@@ -2674,15 +2710,37 @@ canvas {
 	color: #ffffff;
 }
 /* Export is the primary action. */
-.toolbar-actions > .btn-primary:not(.btn-rate):not(.btn-publish) {
+.toolbar-actions .btn-export {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
 	padding: 8px 15px;
 	border-radius: 7px;
 	background: var(--eise-gilt);
 	color: var(--eise-ink);
 	font-weight: 600;
 }
-.toolbar-actions > .btn-primary:not(.btn-rate):not(.btn-publish):hover {
+.toolbar-actions .btn-export:hover {
 	background: #f3d290;
+}
+/* Chevron half of the split button: a hit area inside the button, divided from
+   the label by a hairline in the button's own ink rather than a second border. */
+.export-chevron {
+	display: flex;
+	align-items: center;
+	align-self: stretch;
+	margin: -8px -15px -8px 6px;
+	padding: 0 9px;
+	border-left: 1px solid rgba(17, 50, 63, 0.25);
+	border-radius: 0 7px 7px 0;
+	font-size: 11px;
+}
+.export-chevron:hover {
+	background: rgba(17, 50, 63, 0.12);
+}
+/* Wider than the kebab default: these entries carry a second explanatory line. */
+.export-dropdown {
+	min-width: 230px;
 }
 
 /* Kebab menu */

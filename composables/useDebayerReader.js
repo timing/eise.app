@@ -192,6 +192,20 @@ export function useDebayerReader() {
     // Bayer, unknown colorID - is a guess, and that is when the picker earns
     // its place.
     const SER_EXPLICIT_BAYER_IDS = [8, 9, 10, 11];
+
+    // The badge on the file card. Industry CFA names (RGGB...), not OpenCV's
+    // inverted ones — the card is read by people, not by cv.cvtColor. Indexed
+    // by the GPU pattern, which is the one value every path keeps in sync.
+    const GPU_PATTERN_NAMES = ['RGGB', 'BGGR', 'GRBG', 'GBRG'];
+    function publishColorProfile() {
+        const { setSourceColorProfile } = useProcessingState();
+        if (isRgbPassthrough) {
+            setSourceColorProfile(isBgr ? 'BGR' : 'RGB');
+            return;
+        }
+        setSourceColorProfile(GPU_PATTERN_NAMES[bayerPattern] || 'MONO');
+    }
+
     function hasDeclaredBayerPattern() {
         if (SER_EXPLICIT_BAYER_IDS.includes(metadata?.colorID)) return true;
         const declared = metadata?.bayerPattern?.opencv;
@@ -251,6 +265,7 @@ export function useDebayerReader() {
         } else {
             addLog(`[DebayerReader] Bayer pattern: ${bayerChoice} (GPU index: ${bayerPattern})`);
         }
+        publishColorProfile();
 
         // Log detailed SER header info
         const colorNames = {
@@ -1092,6 +1107,7 @@ export function useDebayerReader() {
                     bayerChoice = selectedProfile;
                     bayerPattern = bayerChoiceToGpuPattern(selectedProfile);
                     addLog(`[DebayerReader] User selected: ${bayerChoice} (GPU: ${bayerPattern})`);
+                    publishColorProfile();
                     resolve(selectedProfile);
                 }
             });
@@ -1250,6 +1266,7 @@ export function useDebayerReader() {
                 bayerChoice = forceBayerPattern;
                 bayerPattern = bayerChoiceToGpuPattern(forceBayerPattern);
                 addLog(`[DebayerReader] Using forced bayer pattern: ${bayerChoice} (GPU: ${bayerPattern})`);
+                publishColorProfile();
                 // Emit processing-started since color profile selector was skipped
                 emit('debayer-processing-started');
             } else {

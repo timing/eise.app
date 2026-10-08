@@ -1,52 +1,8 @@
 <template>
 <div class="batch-post-processor">
-	<!-- Navigation header -->
-	<div class="batch-nav-header">
-		<div class="nav-controls">
-			<button class="nav-btn" @click="prevImage" :disabled="currentIndex <= 0 || isNavigating">&larr;</button>
-			<span class="nav-title">
-				{{ currentResult?.name || 'Image' }}
-				<span class="nav-index">({{ currentIndex + 1 }}/{{ results.length }})</span>
-				<span v-if="isNavigating" class="nav-saving">saving...</span>
-                
-                <!-- Continuous stacking sharpness info -->
-                <div v-if="isContinuousMode && currentResult" class="sharpness-info">
-                    Sharpness: <span class="score">{{ formatScore(currentResult.sharpness) }}</span>
-                </div>
-			</span>
-			<button class="nav-btn" @click="nextImage" :disabled="currentIndex >= results.length - 1 || isNavigating">&rarr;</button>
-		</div>
-		<div class="header-actions">
-			<button v-if="!isContinuousMode" class="btn-secondary btn-small" @click="alignAllStacks" :disabled="isAligning || results.length < 2">
-				{{ isAligning ? 'Aligning...' : 'Align Stacks' }}
-			</button>
-			<div class="export-dropdown" ref="exportDropdownRef">
-				<button class="btn-primary btn-small" @click="toggleExportMenu" :disabled="isExporting || isProcessingAll || isEncodingVideo">
-					{{ isProcessingAll ? processingAllProgress : (isExporting ? 'Exporting...' : (isEncodingVideo ? videoProgress : 'Export All')) }} <span class="dropdown-arrow">▾</span>
-				</button>
-				<div class="dropdown-menu" v-if="showExportMenu">
-					<button @click="exportAll('processed')" :disabled="isProcessingAll || isExporting">
-						Export all processed (PNG)
-					</button>
-					<button @click="exportAll('unprocessed')" :disabled="isExporting">
-						Export all unprocessed (PNG)
-					</button>
-					<button
-						v-if="videoEncodingSupported && !isContinuousMode"
-						@click="exportVideo"
-						:disabled="isEncodingVideo || isProcessingAll || results.length < 2"
-					>
-						Export video (MP4)
-					</button>
-					<hr />
-					<button @click="selectExportDirectory">
-						{{ exportDirHandle ? '✓ ' : '' }}Select export folder...
-					</button>
-					<div v-if="exportDirName" class="export-dir-name">{{ exportDirName }}</div>
-				</div>
-			</div>
-		</div>
-	</div>
+	<!-- Everything this component contributes now lives in the post processor's
+	     toolbar and canvas (the #nav, #status and #export-menu slots below), so
+	     there is no bar of its own above the canvas any more. -->
 
 	<!-- Main post processor wrapper (grows to fill space) -->
 	<div class="post-processor-wrapper">
@@ -58,7 +14,72 @@
 			:float32Data="currentFloat32Data"
 			:imageDimensions="currentDimensions"
 			@processed="onProcessed"
-		/>
+		>
+			<template #nav>
+				<div class="nav-group">
+					<div class="variant-nav">
+						<button class="variant-arrow" aria-label="Previous stack" @click="prevImage" :disabled="currentIndex <= 0 || isNavigating">
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+						</button>
+						<div class="variant-label">
+							<div class="variant-title">
+								<span class="variant-name">{{ currentResult?.name || 'Image' }}</span>
+								<span class="variant-index">{{ currentIndex + 1 }}/{{ results.length }}</span>
+							</div>
+							<div v-if="isNavigating" class="variant-sub is-saving">saving…</div>
+							<div v-else-if="isContinuousMode && currentResult" class="variant-sub">sharpness <span class="variant-score">{{ formatScore(currentResult.sharpness) }}</span></div>
+						</div>
+						<button class="variant-arrow" aria-label="Next stack" @click="nextImage" :disabled="currentIndex >= results.length - 1 || isNavigating">
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+						</button>
+					</div>
+					<!-- Aligns the stacks you step through with those arrows, so it
+					     belongs beside them. Continuous runs already share one
+					     reference frame, so there is nothing to align. -->
+					<button
+						v-if="!isContinuousMode"
+						class="align-btn"
+						@click="alignAllStacks"
+						:disabled="isAligning || results.length < 2"
+					>
+						{{ isAligning ? 'Aligning…' : 'Align Stacks' }}
+					</button>
+				</div>
+			</template>
+
+			<!-- Progress for a whole-set export. Over the canvas, opposite the
+			     zoom pill, because it comes and goes for minutes at a time and
+			     must not move anything when it does. -->
+			<template #status>
+				<span v-if="exportStatus" class="export-status">{{ exportStatus }}</span>
+			</template>
+
+			<!-- Hangs off the Export button's chevron: the whole-set options,
+			     next to the single-image export they belong with. -->
+			<template #export-menu>
+				<button class="export-menu-item" @click="exportAll('processed')" :disabled="isProcessingAll || isExporting">
+					Export all processed (PNG)
+					<small>{{ results.length }} stacks with current adjustments</small>
+				</button>
+				<button class="export-menu-item" @click="exportAll('unprocessed')" :disabled="isExporting">
+					Export all unprocessed (PNG)
+					<small>{{ results.length }} stacks as stacked</small>
+				</button>
+				<button
+					v-if="videoEncodingSupported && !isContinuousMode"
+					class="export-menu-item"
+					@click="exportVideo"
+					:disabled="isEncodingVideo || isProcessingAll || results.length < 2"
+				>
+					Export video (MP4)
+				</button>
+				<div class="export-menu-sep"></div>
+				<button class="export-menu-item" @click="selectExportDirectory">
+					{{ exportDirHandle ? '✓ ' : '' }}Select export folder…
+					<small v-if="exportDirName">{{ exportDirName }}</small>
+				</button>
+			</template>
+		</PostProcessor>
 	</div>
 </div>
 </template>
@@ -113,8 +134,6 @@ const videoProgress = ref('');
 const videoEncodingSupported = ref(false);
 const alignedResults = ref(null); // Store aligned versions
 const processedResults = ref({}); // Store post-processed versions keyed by result id
-const showExportMenu = ref(false);
-const exportDropdownRef = ref(null);
 const exportDirHandle = ref(null); // File System Access API directory handle
 const exportDirName = ref(null);
 const postProcessorRef = ref(null);
@@ -256,17 +275,15 @@ async function processAllImages(onProgress = null) {
 	}
 }
 
-// Toggle export dropdown menu
-function toggleExportMenu() {
-	showExportMenu.value = !showExportMenu.value;
-}
-
-// Close dropdown when clicking outside
-function handleClickOutside(e) {
-	if (exportDropdownRef.value && !exportDropdownRef.value.contains(e.target)) {
-		showExportMenu.value = false;
-	}
-}
+// What the leftover header bar reports while a whole-set export runs. The menu
+// that starts these lives in the post processor toolbar now, so the progress
+// can no longer ride on its button label.
+const exportStatus = computed(() => {
+	if (isProcessingAll.value) return processingAllProgress.value;
+	if (isEncodingVideo.value) return videoProgress.value;
+	if (isExporting.value) return 'Exporting…';
+	return '';
+});
 
 // Select export directory using File System Access API
 async function selectExportDirectory() {
@@ -274,7 +291,6 @@ async function selectExportDirectory() {
 		const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
 		exportDirHandle.value = handle;
 		exportDirName.value = handle.name;
-		showExportMenu.value = false;
 		console.log('[Export] Selected directory:', handle.name);
 	} catch (err) {
 		if (err.name === 'AbortError') {
@@ -287,8 +303,6 @@ async function selectExportDirectory() {
 
 // Export all images (processed or unprocessed)
 async function exportAll(type) {
-	showExportMenu.value = false;
-
 	// Process all images first when exporting processed
 	if (type === 'processed') {
 		await processAllImages();
@@ -401,8 +415,6 @@ async function downloadBlob(blob, filename) {
 
 // Export video (MP4) from all processed frames
 async function exportVideo() {
-	showExportMenu.value = false;
-
 	if (props.results.length < 2) {
 		console.warn('[Video] Need at least 2 frames for video');
 		return;
@@ -535,14 +547,12 @@ function handleKeydown(e) {
 
 onMounted(async () => {
 	window.addEventListener('keydown', handleKeydown);
-	document.addEventListener('click', handleClickOutside);
 	// Check if video encoding is supported
 	videoEncodingSupported.value = await isVideoEncodingSupported();
 });
 
 onUnmounted(() => {
 	window.removeEventListener('keydown', handleKeydown);
-	document.removeEventListener('click', handleClickOutside);
 });
 
 // Update export filename when navigating between images
@@ -563,109 +573,123 @@ watch(currentResult, (result) => {
 	width: 100%;
 }
 
-.batch-nav-header {
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	padding: 10px 15px;
-	background: #1a1a2e;
-	border-bottom: 1px solid #333;
-	flex-shrink: 0;
-}
-
-.nav-controls {
+/* The navigator and the action that operates on what it steps through. */
+.nav-group {
 	display: flex;
 	align-items: center;
-	gap: 15px;
-	flex: 1;
-	justify-content: center;
+	gap: 8px;
 }
 
-.btn-small {
-	padding: 6px 12px;
-	font-size: 14px;
-}
-
-.nav-btn {
-	background: #333;
-	color: white;
-	border: none;
+/* Matches the toolbar's other secondary buttons (Rate, Publish). Styled here
+   rather than in PostProcessor because scoped CSS does not reach into another
+   component's slot content. */
+.align-btn {
 	padding: 8px 15px;
-	border-radius: 4px;
+	border-radius: 7px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.16);
+	color: var(--eise-bright);
+	font: inherit;
+	font-size: 14px;
+	font-weight: 500;
+	line-height: 1;
 	cursor: pointer;
-	font-size: 16px;
+	transition: background 120ms ease;
 }
-
-.nav-btn:hover:not(:disabled) {
-	background: #444;
+.align-btn:hover:not(:disabled) {
+	background: rgba(255, 255, 255, 0.11);
+	color: #ffffff;
 }
-
-.nav-btn:disabled {
-	opacity: 0.4;
+.align-btn:disabled {
+	opacity: 0.45;
 	cursor: not-allowed;
 }
 
-.nav-title {
-	font-size: 14px;
-	color: white;
-}
-
-.nav-index {
-	color: #888;
-	margin-left: 5px;
-}
-
-.nav-saving {
-	color: #f0ad4e;
-	margin-left: 8px;
-	font-size: 12px;
-}
-
-.sharpness-info {
-    font-size: 12px;
-    color: #888;
-    margin-top: 2px;
-    font-weight: normal;
-}
-
-.sharpness-info .score {
-    color: #4caf50;
-    font-weight: bold;
-    font-family: monospace;
-}
-
-.header-actions {
+/* Variant navigator, rendered into the post processor's toolbar. Steps through
+   the set this component holds: the continuous stacks, or a batch of files. */
+.variant-nav {
 	display: flex;
-	gap: 10px;
+	align-items: center;
+	gap: 2px;
+	height: 38px;
+	box-sizing: border-box;
+	padding: 3px;
+	border-radius: 7px;
+	background: rgba(0, 0, 0, 0.22);
+	border: 1px solid rgba(217, 169, 74, 0.3);
 }
 
-/* Export dropdown - uses kebab-dropdown pattern from design system */
-.export-dropdown {
-	position: relative;
-}
-
-.dropdown-arrow {
-	margin-left: 4px;
-	font-size: 10px;
-}
-
-.dropdown-menu {
-	position: absolute;
-	top: 100%;
-	right: 0;
-	margin-top: 4px;
-	background: #fefefe;
+.variant-arrow {
+	width: 24px;
+	height: 30px;
+	display: grid;
+	place-items: center;
+	padding: 0;
+	border: none;
 	border-radius: 6px;
-	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
-	min-width: 200px;
-	z-index: 200;
-	overflow: hidden;
+	background: transparent;
+	color: var(--eise-gilt-lt);
+	cursor: pointer;
 }
 
-.dropdown-menu button {
+.variant-arrow:hover:not(:disabled) {
+	background: rgba(217, 169, 74, 0.16);
+}
+
+.variant-arrow:disabled {
+	opacity: 0.35;
+	cursor: not-allowed;
+}
+
+.variant-label {
+	padding: 0 2px;
+	text-align: center;
+	line-height: 1.2;
+}
+
+.variant-title {
+	display: flex;
+	align-items: baseline;
+	justify-content: center;
+	gap: 7px;
+}
+
+.variant-name {
+	font-size: 14px;
+	font-weight: 600;
+	color: #ffffff;
+	white-space: nowrap;
+}
+
+.variant-index {
+	font-family: var(--eise-mono);
+	font-size: 11px;
+	color: var(--eise-muted);
+}
+
+.variant-sub {
+	font-family: var(--eise-mono);
+	font-size: 11px;
+	color: var(--eise-muted-2);
+	white-space: nowrap;
+}
+
+.variant-score {
+	color: #8CCF7E;
+}
+
+.variant-sub.is-saving {
+	color: var(--eise-gilt-lt);
+}
+
+/* Entries for the Export button's dropdown in the post processor toolbar. The
+   dropdown itself is PostProcessor's (the kebab-dropdown pattern); these are
+   slotted in from here, so they are styled here — scoped CSS does not reach
+   across into another component's slot content. */
+.export-menu-item {
 	display: block;
 	width: 100%;
-	padding: 10px 15px;
+	padding: 8px 12px;
 	background: none;
 	border: none;
 	color: #333;
@@ -675,23 +699,52 @@ watch(currentResult, (result) => {
 	font-weight: bold;
 }
 
-.dropdown-menu button:hover {
+.export-menu-item:hover:not(:disabled) {
 	background: #f0f0f0;
 }
 
-.dropdown-menu hr {
-	border: none;
-	border-top: 1px solid #eee;
-	margin: 4px 0;
+.export-menu-item:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
 }
 
-.export-dir-name {
-	padding: 6px 15px 10px;
+.export-menu-item small {
+	display: block;
+	margin-top: 1px;
 	font-size: 11px;
-	color: #666;
+	font-weight: normal;
+	color: #888;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
+}
+
+.export-menu-sep {
+	height: 1px;
+	margin: 4px 6px;
+	background: #eee;
+}
+
+/* Progress for a whole-set export. A floating pill in the canvas's top-right,
+   mirroring the zoom pill opposite it, so showing and hiding it reflows
+   nothing — an export runs for minutes and the page used to jump twice. */
+.export-status {
+	position: absolute;
+	top: 12px;
+	right: 12px;
+	z-index: 3;
+	display: inline-flex;
+	align-items: center;
+	padding: 6px 12px;
+	border-radius: 8px;
+	background: rgba(9, 52, 66, 0.88);
+	backdrop-filter: blur(8px);
+	border: 1px solid rgba(217, 169, 74, 0.3);
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+	font-family: var(--eise-mono);
+	font-size: 12px;
+	color: var(--eise-gilt-lt);
+	white-space: nowrap;
 }
 
 /* PostProcessor wrapper - fills available space */
