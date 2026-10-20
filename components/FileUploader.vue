@@ -1636,15 +1636,6 @@ async function processFiles(files, options = {}) {
 		// the correct reader; the fallback bridge is stack_reader_fallback.
 		let stackStartEmitted = false;
 
-		const MAX_SIZE = 1.9 * 1024 * 1024 * 1024;
-		if (!fileToProcess.name.endsWith('.ser') && !fileToProcess.name.endsWith('.avi') && fileToProcess.size > MAX_SIZE) {
-			if (confirm('The selected file is larger than 2GB. Do you want to trim it to 2GB? This might not work for all video formats.')) {
-				const trimmedBlob = fileToProcess.slice(0, MAX_SIZE);
-				fileToProcess = new File([trimmedBlob], fileToProcess.name, { type: fileToProcess.type });
-				addLog('File trimmed to fit within the memory limit');
-			}
-		}
-
 		// Handle SER files with unified debayer reader
 		if (fileToProcess.name.endsWith('.ser')) {
 			if (!effectiveUseGpu.value) {
@@ -1938,6 +1929,24 @@ async function processFiles(files, options = {}) {
 			addLog('Variant B: using FFmpeg directly (skipping Mediabunny)');
 		} else {
 			addLog('CPU mode: using FFmpeg directly');
+		}
+
+		// Trim oversized files, but only here, on the FFmpeg path. Everything above
+		// has either returned or committed to FFmpeg, and FFmpeg-WASM loads the whole
+		// file into its heap (fetchFile + FS.writeFile below), so it needs the cap.
+		// The streaming readers do not, and for mediabunny the trim was actively
+		// harmful: BlobSource reads lazily by byte range, and a raw slice() left it
+		// with a moov indexing mdat bytes we had thrown away, so the first sample
+		// past the cut made requestSlice() return null and mediabunny asserted
+		// ("Assertion failed.", EISE-SY). No format exemption here: an AVI that gets
+		// this far (unsupported fourCC, lite mode, CPU mode) goes into the same heap.
+		const MAX_SIZE = 1.9 * 1024 * 1024 * 1024;
+		if (fileToProcess.size > MAX_SIZE) {
+			if (confirm('The selected file is larger than 2GB. Do you want to trim it to 2GB? This might not work for all video formats.')) {
+				const trimmedBlob = fileToProcess.slice(0, MAX_SIZE);
+				fileToProcess = new File([trimmedBlob], fileToProcess.name, { type: fileToProcess.type });
+				addLog('File trimmed to fit within the memory limit');
+			}
 		}
 
 		// Show loading indicator for FFmpeg path (SER files handle this after color profile selection)

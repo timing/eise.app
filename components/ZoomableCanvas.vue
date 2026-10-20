@@ -338,13 +338,18 @@ defineExpose({ centerCanvas, adjustPositionForCrop });
 	background: rgba(255, 255, 255, 0.07);
 	color: #fff;
 }
+/* Must stay BELOW the zoom pill. The pill's backdrop-filter makes it a
+   stacking context, so the dropdown's own z-index counts only inside the pill
+   and cannot climb over this catcher from there — give it a higher number and
+   it swallows every click on the menu. Above the canvas (z-index auto, but
+   later in the DOM) is all it needs to be. */
 .kebab-backdrop {
 	position: fixed;
 	top: 0;
 	left: 0;
 	right: 0;
 	bottom: 0;
-	z-index: 99;
+	z-index: 2;
 }
 .kebab-dropdown {
 	position: absolute;
