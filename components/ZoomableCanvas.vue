@@ -151,6 +151,11 @@ const canvasStyle = computed(() => {
 		transform,
 		transformOrigin: 'top left',
 		transition: isRotating ? 'none' : 'transform 0.05s ease',
+		// Magnifying has to show the real pixels as squares. The browser's
+		// default filtering smooths an upscaled canvas into a gradient, hiding
+		// exactly the detail you zoom in to judge. Below 1:1 keep the smooth
+		// filter, where nearest-neighbour would alias badly.
+		imageRendering: zoomLevel.value >= 1 ? 'pixelated' : 'auto',
 		cursor: props.disableDrag ? 'crosshair' : (isDragging.value ? 'grabbing' : 'grab')
 	};
 });
