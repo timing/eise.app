@@ -251,67 +251,137 @@
 
 	<!-- Export Popup -->
 	<div v-if="showExportPopup" class="export-popup-overlay" @click.self="showExportPopup = false">
-		<div class="export-popup">
-			<button class="popup-close-x" aria-label="Close" @click="showExportPopup = false">×</button>
-			<h3>Export</h3>
-			<p class="popup-intro">
-				Save your image to your computer. Choose 16-bit for maximum precision (best for further editing in other apps) or 8-bit for a smaller file that displays anywhere.
-			</p>
-
-			<div class="export-filename">
-				<label>Filename:</label>
-				<input type="text" v-model="exportFilename" @keydown.enter="downloadCanvasAsPNG" />
-			</div>
-
-			<div class="export-resize">
-				<label>Output size:</label>
-				<input type="number" min="10" max="100" step="5" v-model.number="exportResizePercent" />
-				<span class="resize-unit">%</span>
-				<span v-if="exportResizeSuggestion" class="resize-suggestion">
-					For optimal sharpness (limb ~{{ exportResizeSuggestion.edgeWidth.toFixed(1) }} px):
-					<button type="button" class="resize-target-link" :class="{ active: exportResizePercent === exportResizeSuggestion.suggestions.aggressive }" @click="exportResizePercent = exportResizeSuggestion.suggestions.aggressive">{{ exportResizeSuggestion.suggestions.aggressive }}% aggressive</button>
-					<span class="target-sep">·</span>
-					<button type="button" class="resize-target-link" :class="{ active: exportResizePercent === exportResizeSuggestion.suggestions.balanced }" @click="exportResizePercent = exportResizeSuggestion.suggestions.balanced">{{ exportResizeSuggestion.suggestions.balanced }}% balanced</button>
-					<span class="target-sep">·</span>
-					<button type="button" class="resize-target-link" :class="{ active: exportResizePercent === exportResizeSuggestion.suggestions.conservative }" @click="exportResizePercent = exportResizeSuggestion.suggestions.conservative">{{ exportResizeSuggestion.suggestions.conservative }}% conservative</button>
-				</span>
-			</div>
-			<div v-if="showResizePreview" class="resize-preview">
-				<div class="preview-cell">
-					<div class="preview-label">100%</div>
-					<canvas ref="previewOriginalCanvas" @mousedown="onPreviewMouseDown('left', $event)"></canvas>
+		<div class="export-popup" role="dialog" aria-label="Export">
+			<div class="modal-head">
+				<div class="modal-head-text">
+					<h3>Export</h3>
+					<p class="popup-intro">
+						Save your image to your computer. Choose 16-bit for maximum precision (best for further editing in other apps) or 8-bit for a smaller file that displays anywhere.
+					</p>
 				</div>
-				<div class="preview-cell">
-					<div class="preview-label">{{ exportResizePercent }}%</div>
-					<canvas ref="previewResizedCanvas" @mousedown="onPreviewMouseDown('right', $event)"></canvas>
+				<button class="popup-close-x" aria-label="Close" @click="showExportPopup = false">
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+				</button>
+			</div>
+
+			<div class="modal-grid">
+				<div class="modal-media">
+					<!-- The whole image while you pick a filename, swapped for the
+					     1:1 crop pair once you open the size panel: that comparison
+					     is the only reason to look closely at pixels here. -->
+					<div v-if="!sizeOpen" class="export-preview-frame">
+						<canvas ref="exportPreviewCanvas"></canvas>
+					</div>
+					<template v-else>
+						<div class="resize-preview">
+							<div class="preview-cell">
+								<div class="preview-label">Original (100%)</div>
+								<div class="preview-canvas-box">
+									<canvas ref="previewOriginalCanvas" @mousedown="onPreviewMouseDown('left', $event)"></canvas>
+								</div>
+							</div>
+							<div class="preview-cell">
+								<div class="preview-label">Output (<span class="preview-label-pct">{{ exportResizePercent }}%</span>)</div>
+								<div class="preview-canvas-box">
+									<canvas ref="previewResizedCanvas" @mousedown="onPreviewMouseDown('right', $event)"></canvas>
+								</div>
+							</div>
+						</div>
+						<p class="preview-hint">Drag either preview to pan.</p>
+					</template>
 				</div>
-			</div>
-			<p v-if="showResizePreview" class="preview-hint">Drag either preview to pan.</p>
 
-			<div class="export-buttons">
-				<button class="export-option" @click="downloadCanvasAsPNG">
-					⬇ PNG 8-bit
-				</button>
-				<button v-if="sharpenedImage16" class="export-option" @click="download16BitProcessedPNG">
-					⬇ PNG 16-bit
-				</button>
-				<button class="export-option" @click="downloadUnprocessedPNG">
-					⬇ PNG 16-bit (unprocessed)
-				</button>
-				<button v-if="props.croppedSerData" class="export-option secondary" @click="downloadCroppedSer">
-					⬇ Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})
-				</button>
-			</div>
+				<div class="modal-controls">
+					<label class="field">
+						<span class="field-label">Filename</span>
+						<!-- No extension chip here, unlike the mockup. Each export appends
+						     its own suffix to this base name (_processed.png,
+						     _processed_16bit.png, _unprocessed.png, _cropped.ser,
+						     _comparison.mp4), so a fixed ".png" would misname four of the
+						     five and claim the SER and video exports were PNGs. -->
+						<span class="filename-input">
+							<input type="text" v-model="exportFilename" @keydown.enter="downloadCanvasAsPNG" />
+						</span>
+					</label>
 
-			<p class="share-note">If you share this image, a mention of Eise.app is appreciated.</p>
+					<div class="field">
+						<div class="field-row">
+							<span class="field-label">Output size</span>
+							<span class="size-value">{{ exportResizePercent }}%</span>
+							<button type="button" class="size-toggle" @click="sizeOpen = !sizeOpen">
+								{{ sizeOpen ? 'Done' : 'Optimize size for sharpness' }}
+							</button>
+						</div>
+						<div v-if="sizeOpen" class="size-panel">
+							<p v-if="exportResizeSuggestion" class="size-hint">
+								For optimal sharpness (limb ~{{ exportResizeSuggestion.edgeWidth.toFixed(1) }} px)
+							</p>
+							<div class="size-controls">
+								<div class="preset-group">
+									<button v-for="p in sizePresets" :key="p.label" type="button"
+										class="preset-btn" :class="{ active: exportResizePercent === p.pct }"
+										@click="exportResizePercent = p.pct">
+										<span class="preset-pct">{{ p.pct }}%</span>
+										<span class="preset-label">{{ p.label }}</span>
+									</button>
+								</div>
+								<span class="custom-size">
+									<input type="number" min="10" max="100" step="5" aria-label="Custom output size"
+										v-model.number="exportResizePercent" />
+									<span class="custom-size-unit">%</span>
+								</span>
+							</div>
+						</div>
+					</div>
 
-			<div class="publish-section">
-				<p class="publish-section-text">
-					Proud of your result? Publish it to the <strong>Eise Gallery</strong> for others to see.
-				</p>
-				<button class="btn-publish" @click="openPublishModal('export_popup')">
-					✨ Publish to Eise Gallery
-				</button>
+					<div class="field">
+						<div class="field-row">
+							<span class="field-label">Export</span>
+							<button type="button" class="help-toggle" :class="{ active: exportHelp }"
+								aria-label="About export options" @click="exportHelp = !exportHelp">
+								<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9" /><path d="M12 11v5.5" stroke-linecap="round" /><circle cx="12" cy="7.8" r="0.9" fill="currentColor" stroke="none" /></svg>
+							</button>
+						</div>
+						<div v-if="exportHelp" class="export-help">
+							<p><strong>PNG 16-bit:</strong> Maximum precision, with all your Post Processor adjustments. Best for further editing in other apps.</p>
+							<p><strong>PNG 8-bit:</strong> Smaller file with your adjustments applied. Displays anywhere.</p>
+							<p><strong>PNG 16-bit unprocessed:</strong> The plain stack result, without any sharpening or color adjustments.</p>
+						</div>
+						<div class="export-buttons">
+							<button class="export-option" @click="downloadUnprocessedPNG">
+								<svg class="dl-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M4 19h16" /></svg>
+								PNG 16-bit unprocessed
+							</button>
+							<button class="export-option" :class="{ primary: !sharpenedImage16 }" @click="downloadCanvasAsPNG">
+								<svg class="dl-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M4 19h16" /></svg>
+								PNG 8-bit
+							</button>
+							<button v-if="sharpenedImage16" class="export-option primary" @click="download16BitProcessedPNG">
+								<svg class="dl-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M4 19h16" /></svg>
+								PNG 16-bit
+							</button>
+							<button v-if="props.croppedSerData" class="export-option" @click="downloadCroppedSer">
+								<svg class="dl-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M4 19h16" /></svg>
+								Cropped SER ({{ props.croppedSerData.cropSize }}x{{ props.croppedSerData.cropSize }})
+							</button>
+						</div>
+						<p class="share-note">
+							If you share this image, a mention of Eise.app is appreciated.
+							Happy with the quality? Please consider
+							<a href="https://buymeacoffee.com/timing" target="_blank" rel="noopener">buying me a coffee</a>.
+						</p>
+					</div>
+
+					<div class="publish-section">
+						<span class="publish-section-text">
+							Proud of your result? Publish it to the <strong>Eise Gallery</strong> for others to see.
+						</span>
+						<button class="btn-publish" @click="openPublishModal('export_popup')">
+							<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" /></svg>
+							Publish
+						</button>
+					</div>
+				</div>
 			</div>
 		</div>
 	</div>
@@ -368,7 +438,9 @@
 	<PublishModal
 		v-if="showPublishModal"
 		:canvas="publishCanvas"
+		:from-export="publishFromExport"
 		@close="showPublishModal = false"
+		@back="onPublishBack"
 	/>
 
 </div>
@@ -425,7 +497,34 @@ const previewOriginalCanvas = ref(null);
 const previewResizedCanvas = ref(null);
 const previewCenter = ref({ x: 0, y: 0 }); // in original image coordinates
 let previewDragState = null;
-const showResizePreview = computed(() => showExportPopup.value && !!image16);
+// Output size starts collapsed: most exports are 100%, and the crop comparison
+// only earns the space once someone is actually weighing a downscale.
+const sizeOpen = ref(false);
+const exportHelp = ref(false);
+const exportPreviewCanvas = ref(null);
+
+// The three sharpness targets, plus 100% so "leave it alone" is a button rather
+// than a thing you have to type. Without a suggestion (no edge found, or no
+// 16-bit source) only the 100% entry is offered.
+//
+// Deduped by percentage: an image that is not oversampled has all three targets
+// clamp to 100, and four identical buttons that all highlight at once read as a
+// bug rather than as "there is nothing to gain here".
+const sizePresets = computed(() => {
+	const s = exportResizeSuggestion.value;
+	const byPct = new Map();
+	if (s) {
+		byPct.set(s.suggestions.aggressive, 'aggressive');
+		byPct.set(s.suggestions.balanced, 'balanced');
+		byPct.set(s.suggestions.conservative, 'conservative');
+	}
+	// Set last so 100 always reads "original", even when a suggestion clamped
+	// there too. Keyed by percentage, so collapsed targets merge into one button.
+	byPct.set(100, 'original');
+	return [...byPct.entries()]
+		.map(([pct, label]) => ({ pct, label }))
+		.sort((a, b) => a.pct - b.pct);
+});
 const showKebabMenu = ref(false);
 const showHelpPopup = ref(false);
 // Set-wide export options (export all, choose a folder) come from whoever holds
@@ -437,6 +536,7 @@ const hasExportMenu = computed(() => !!slots['export-menu']);
 
 // Publish flow state
 const showPublishModal = ref(false);
+const publishFromExport = ref(false);
 const didExport = ref(false);
 const publishCanvas = ref(null);
 
@@ -613,9 +713,65 @@ function openExportPopup() {
 	exportFilename.value = inputFilename.value || 'eise_app';
 	didExport.value = false;
 	showExportPopup.value = true;
+	// Both panels start closed on every open, so the modal looks the same each
+	// time rather than reopening in whatever state the last export left behind.
+	sizeOpen.value = false;
+	exportHelp.value = false;
 	computeResizeSuggestion();
-	nextTick(() => renderResizePreview());
+	nextTick(() => renderExportPreview());
 }
+
+// Whole-image preview in the left column. Drawn at devicePixelRatio because a
+// CSS-sized canvas renders the stack soft on exactly the screens people use to
+// judge whether it came out sharp.
+function renderExportPreview() {
+	const src = canvas?.value;
+	const dst = exportPreviewCanvas.value;
+	if (!src || !dst) return;
+	// Measured on the canvas itself, not the frame: the frame carries padding,
+	// so its rect is larger than the area actually being drawn into.
+	const box = dst.getBoundingClientRect();
+	if (!box.width || !box.height) return;
+	const dpr = window.devicePixelRatio || 1;
+	const cw = Math.max(1, Math.round(box.width * dpr));
+	const ch = Math.max(1, Math.round(box.height * dpr));
+	dst.width = cw;
+	dst.height = ch;
+	const pctx = dst.getContext('2d');
+	pctx.clearRect(0, 0, cw, ch);
+	// Contain, not cover: cropping the planet out of its own preview would be
+	// worse than letterboxing it.
+	const scale = Math.min(cw / src.width, ch / src.height);
+	const w = Math.max(1, Math.round(src.width * scale));
+	const h = Math.max(1, Math.round(src.height * scale));
+	pctx.imageSmoothingEnabled = true;
+	pctx.imageSmoothingQuality = 'high';
+	pctx.drawImage(src, Math.round((cw - w) / 2), Math.round((ch - h) / 2), w, h);
+}
+
+// The two canvases live in different branches of a v-if, so each toggle has to
+// redraw whichever one just mounted.
+watch(sizeOpen, (open) => {
+	nextTick(() => (open ? renderResizePreview() : renderExportPreview()));
+});
+
+// CSS stretches this canvas to fill its frame, but the backing store is sized
+// once at draw time. Resize the window and the frame changes while the bitmap
+// does not, which stretches the planet. Redrawing on every frame resize keeps
+// the two in step. Observing also fires once immediately, which covers the
+// initial draw.
+let exportPreviewResizeObserver = null;
+watch(exportPreviewCanvas, (el) => {
+	exportPreviewResizeObserver?.disconnect();
+	exportPreviewResizeObserver = null;
+	if (!el?.parentElement || typeof ResizeObserver === 'undefined') return;
+	exportPreviewResizeObserver = new ResizeObserver(() => renderExportPreview());
+	exportPreviewResizeObserver.observe(el.parentElement);
+});
+onUnmounted(() => {
+	exportPreviewResizeObserver?.disconnect();
+	exportPreviewResizeObserver = null;
+});
 
 function computeResizeSuggestion() {
 	const source = sharpenedImage16 || image16;
@@ -719,14 +875,25 @@ function onPreviewMouseUp() {
 }
 
 watch(exportResizePercent, () => {
-	if (showExportPopup.value) nextTick(renderResizePreview);
+	// Only the size panel holds the crop canvases now, so redraw only when it
+	// is the thing on screen.
+	if (showExportPopup.value && sizeOpen.value) nextTick(renderResizePreview);
 });
 
 function openPublishModal(source) {
 	publishCanvas.value = canvas?.value || null;
 	track('publish_open', { source: source || 'toolbar' });
+	// Remembered so the modal's secondary button can put the export flow back
+	// rather than dumping the user on the bare image mid-export.
+	publishFromExport.value = source === 'export_popup';
 	showExportPopup.value = false;
 	showPublishModal.value = true;
+}
+
+function onPublishBack() {
+	showPublishModal.value = false;
+	showExportPopup.value = true;
+	nextTick(() => (sizeOpen.value ? renderResizePreview() : renderExportPreview()));
 }
 
 const { $ffmpeg, $loadFFmpeg } = useNuxtApp();
@@ -3010,220 +3177,433 @@ canvas {
 	opacity: 0.6;
 	cursor: not-allowed;
 }
+/* Clears the sticky chrome rather than fighting it: layouts/default.vue puts
+   .app-content in its own stacking context (position: relative; z-index: 1),
+   so the header (z-index 20) and the Logger bar (20) paint over any overlay
+   rendered inside it no matter how high its z-index. Sitting below the header
+   instead of behind it needs no z-index at all. */
 .export-popup-overlay {
 	position: fixed;
-	top: 0;
-	left: 0;
-	right: 0;
-	bottom: 0;
-	background: rgba(0, 0, 0, 0.6);
-	display: flex;
-	justify-content: center;
-	align-items: center;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	padding: 72px 16px 52px;
+	box-sizing: border-box;
+	background: rgba(3, 16, 22, 0.6);
+	backdrop-filter: blur(3px);
 	z-index: 1000;
 }
+/* Dark panel, matching the toolbar and the other redesigned surfaces. Two
+   columns: the image on the left, everything you decide on the right. */
 .export-popup {
-	background: #fefefe;
-	color: #333;
-	border-radius: 10px;
-	padding: 25px 30px;
-	max-width: 600px;
-	width: 90%;
+	width: 100%;
+	max-width: 1080px;
 	max-height: 100%;
 	overflow-y: auto;
 	box-sizing: border-box;
-	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+	background: var(--eise-panel);
+	border: 1px solid var(--eise-panel-border);
+	border-radius: 14px;
+	box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+	color: var(--eise-body);
+}
+.modal-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 20px;
+	padding: 22px 24px 0;
+}
+.modal-head-text { min-width: 0; }
+/* The shared .popup-close-x is absolutely positioned and light-themed for the
+   help and rating popups. In this header it is a flex item, so both have to be
+   undone rather than inherited. */
+.modal-head .popup-close-x {
+	position: static;
+	flex: 0 0 auto;
+	width: 32px;
+	height: 32px;
+	display: grid;
+	place-items: center;
+	border-radius: 7px;
+	background: transparent;
+	border: 1px solid var(--eise-panel-border);
+	color: var(--eise-on-dark);
+}
+.modal-head .popup-close-x:hover {
+	background: rgba(255, 255, 255, 0.07);
+	color: var(--eise-bright);
 }
 .export-popup h3 {
-	margin: 0 0 20px 0;
-	color: #333;
+	margin: 0 0 6px;
 	font-size: 18px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+	color: var(--eise-bright);
 }
-.export-filename {
-	margin-bottom: 20px;
-}
-.export-filename label {
-	display: block;
-	margin-bottom: 5px;
-	font-weight: bold;
+.popup-intro {
+	margin: 0;
+	max-width: 68ch;
 	font-size: 14px;
+	line-height: 1.55;
+	color: var(--eise-muted-2);
+	text-wrap: pretty;
 }
-.export-filename input {
-	width: 100%;
+.modal-grid {
+	display: grid;
+	grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+	gap: 24px;
+	padding: 20px 24px 24px;
+}
+.modal-media { min-width: 0; }
+.modal-controls {
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+}
+.export-preview-frame {
+	position: relative;
+	aspect-ratio: 4 / 3;
+	/* Inset for the same reason as .publish-preview: the stack's own black
+	   background would otherwise run straight into the rounded corners. */
 	padding: 10px;
-	border: 1px solid #ccc;
-	border-radius: 5px;
-	font-size: 14px;
 	box-sizing: border-box;
+	background: #000000;
+	border: 1px solid rgba(255, 255, 255, 0.09);
+	border-radius: 10px;
+	overflow: hidden;
 }
-.export-filename input:focus {
-	outline: none;
-	border-color: #8CCF7E;
+.export-preview-frame canvas {
+	display: block;
+	width: 100%;
+	height: 100%;
 }
-.export-resize {
-	margin-bottom: 10px;
+
+/* Shared label/field scaffolding for the right column. */
+.field {
 	display: flex;
-	flex-wrap: wrap;
+	flex-direction: column;
+	gap: 7px;
+	min-width: 0;
+}
+.field-label {
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--eise-label);
+}
+.field-row {
+	display: flex;
 	align-items: baseline;
-	gap: 4px 8px;
-}
-.export-resize label {
-	font-weight: bold;
-	font-size: 14px;
-}
-.export-resize input {
-	width: 64px;
-	padding: 6px 8px;
-	border: 1px solid #ccc;
-	border-radius: 5px;
-	font-size: 14px;
-	box-sizing: border-box;
-}
-.export-resize input:focus {
-	outline: none;
-	border-color: #8CCF7E;
-}
-.export-resize .resize-unit {
-	font-size: 14px;
-	color: #333;
-}
-.export-resize .resize-suggestion {
-	flex: 1 1 100%;
-	font-size: 12px;
-	color: #666;
-	line-height: 1.4;
-}
-.export-resize .resize-target-link {
-	background: none;
-	border: none;
-	padding: 0 2px;
-	color: #4a7cbf;
-	cursor: pointer;
-	font: inherit;
-	text-decoration: underline;
-}
-.export-resize .resize-target-link.active {
-	color: #2a5a99;
-	font-weight: bold;
-	text-decoration: none;
-	cursor: default;
-}
-.export-resize .target-sep {
-	color: #aaa;
-	padding: 0 2px;
-}
-.resize-preview {
-	display: flex;
 	gap: 10px;
-	justify-content: center;
-	margin: 0 0 16px 0;
-	padding: 8px;
-	background: #f5f5f5;
-	border-radius: 6px;
 }
-.resize-preview .preview-cell {
+.filename-input {
+	display: flex;
+	align-items: center;
+	height: 38px;
+	box-sizing: border-box;
+	border-radius: 7px;
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid var(--eise-panel-border);
+	overflow: hidden;
+}
+.filename-input:focus-within { border-color: rgba(217, 169, 74, 0.6); }
+.filename-input input {
+	flex: 1;
+	min-width: 0;
+	height: 100%;
+	padding: 0 11px;
+	background: transparent;
+	border: none;
+	outline: none;
+	color: var(--eise-bright);
+	font-family: var(--eise-mono);
+	font-size: 12px;
+}
+.size-value {
+	font-family: var(--eise-mono);
+	font-size: 14px;
+	color: var(--eise-gilt-lt);
+}
+.size-toggle {
+	margin-left: auto;
+	padding: 0;
+	border: none;
+	background: none;
+	font: inherit;
+	font-size: 12px;
+	color: var(--eise-link);
+	border-bottom: 1px solid rgba(143, 207, 224, 0.35);
+	cursor: pointer;
+}
+.size-toggle:hover { color: #b7e4f2; }
+.size-hint {
+	margin: 0 0 7px;
+	font-size: 12px;
+	color: var(--eise-muted-2);
+}
+.size-controls {
+	display: flex;
+	gap: 8px;
+}
+.preset-group {
+	flex: 1;
+	min-width: 0;
+	display: grid;
+	grid-auto-flow: column;
+	grid-auto-columns: minmax(0, 1fr);
+	gap: 3px;
+	padding: 3px;
+	border-radius: 8px;
+	background: rgba(0, 0, 0, 0.2);
+	border: 1px solid rgba(255, 255, 255, 0.09);
+}
+.preset-btn {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
+	gap: 1px;
+	padding: 6px 4px;
+	border: none;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--eise-body);
+	font-family: inherit;
+	cursor: pointer;
+}
+.preset-btn:hover:not(.active) { background: rgba(255, 255, 255, 0.06); }
+.preset-btn.active {
+	background: var(--eise-gilt);
+	color: var(--eise-ink);
+}
+.preset-pct {
+	font-family: var(--eise-mono);
+	font-size: 14px;
+	font-weight: 500;
+}
+.preset-label {
+	font-size: 11px;
+	opacity: 0.8;
+}
+.custom-size {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
 	gap: 4px;
-	flex: 1 1 0;
-	min-width: 0;
+	padding: 0 10px;
+	border-radius: 8px;
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid var(--eise-panel-border);
 }
+.custom-size input {
+	width: 44px;
+	background: transparent;
+	border: none;
+	outline: none;
+	color: var(--eise-bright);
+	font-family: var(--eise-mono);
+	font-size: 14px;
+	text-align: right;
+}
+.custom-size-unit {
+	font-family: var(--eise-mono);
+	font-size: 12px;
+	color: var(--eise-muted-2);
+}
+.help-toggle {
+	display: grid;
+	place-items: center;
+	width: 18px;
+	height: 18px;
+	padding: 0;
+	border: none;
+	border-radius: 50%;
+	background: transparent;
+	color: var(--eise-label);
+	cursor: pointer;
+}
+.help-toggle.active {
+	background: rgba(217, 169, 74, 0.16);
+	color: var(--eise-gilt-lt);
+}
+.export-help {
+	padding: 12px 14px;
+	border-radius: 8px;
+	background: rgba(0, 0, 0, 0.2);
+	border: 1px solid rgba(255, 255, 255, 0.09);
+	font-size: 12px;
+	line-height: 1.55;
+	color: var(--eise-muted-2);
+}
+.export-help p { margin: 0 0 8px; }
+.export-help p:last-child { margin: 0; }
+.export-help strong {
+	font-weight: 600;
+	color: var(--eise-bright);
+}
+
+/* Crop comparison, shown only while the size panel is open. */
+.resize-preview {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	gap: 10px;
+	padding: 12px;
+	border-radius: 10px;
+	background: rgba(0, 0, 0, 0.22);
+	border: 1px solid rgba(255, 255, 255, 0.09);
+}
+.resize-preview .preview-cell { min-width: 0; }
 .resize-preview .preview-label {
+	margin-bottom: 7px;
+	font-family: var(--eise-mono);
 	font-size: 11px;
-	color: #666;
-	font-weight: bold;
+	color: var(--eise-muted-2);
 }
-.resize-preview canvas {
-	image-rendering: pixelated;
-	image-rendering: -moz-crisp-edges;
-	max-width: 100%;
-	height: auto;
-	background: #000;
-	border: 1px solid #ddd;
-	display: block;
+.preview-label-pct { color: var(--eise-gilt-lt); }
+/* The scaled canvas is physically smaller than the full-size one, so it is
+   centred in a fixed square rather than stretched back up, which would undo the
+   very downscale being judged. */
+.preview-canvas-box {
+	display: grid;
+	place-items: center;
+	aspect-ratio: 1 / 1;
+	background: #000000;
+	border-radius: 6px;
+	overflow: hidden;
 	cursor: grab;
-	user-select: none;
-	-webkit-user-select: none;
 }
-.resize-preview canvas:active {
-	cursor: grabbing;
+.preview-canvas-box canvas {
+	display: block;
+	/* See .publish-preview img: a grid item's automatic minimum size overrides
+	   max-height, so a crop taller than the box would overflow and be clipped. */
+	min-width: 0;
+	min-height: 0;
+	max-width: 100%;
+	max-height: 100%;
+	image-rendering: pixelated;
 }
+.preview-canvas-box:active { cursor: grabbing; }
 .preview-hint {
+	margin: 8px 0 0;
+	font-size: 12px;
+	color: var(--eise-muted);
 	text-align: center;
-	font-size: 11px;
-	color: #888;
-	margin: -8px 0 12px 0;
 }
+
 .export-buttons {
 	display: flex;
-	flex-direction: row;
 	flex-wrap: wrap;
 	gap: 8px;
-	margin-bottom: 20px;
 }
 .export-option {
-	flex: 1 1 140px;
-	padding: 12px 14px;
-	border: none;
-	border-radius: 5px;
-	cursor: pointer;
+	flex: 1 1 auto;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	height: 40px;
+	padding: 0 14px;
+	border-radius: 7px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	color: var(--eise-bright);
+	font-family: inherit;
 	font-size: 14px;
-	text-align: center;
-	transition: background-color 0.2s;
-	background-color: #8CCF7E;
-	color: #111;
-	font-weight: bold;
+	font-weight: 600;
+	white-space: nowrap;
+	cursor: pointer;
+	transition: background-color 0.15s, border-color 0.15s;
 }
 .export-option:hover:not(:disabled) {
-	background-color: #7ABF6E;
+	background: rgba(255, 255, 255, 0.12);
+	border-color: rgba(255, 255, 255, 0.3);
 }
-.export-option.secondary {
-	background-color: #e8e8e8;
-	color: #333;
-	font-weight: normal;
+.export-option .dl-icon {
+	flex: 0 0 auto;
+	color: var(--eise-gilt-lt);
 }
-.export-option.secondary:hover:not(:disabled) {
-	background-color: #d8d8d8;
+.export-option.primary {
+	background: var(--eise-gilt);
+	border-color: transparent;
+	color: var(--eise-panel);
 }
-.export-option.video {
-	background-color: #5bc0de;
-	color: #fff;
-}
-.export-option.video:hover:not(:disabled) {
-	background-color: #4ab0ce;
-}
+.export-option.primary:hover:not(:disabled) { background: #f3d290; }
+.export-option.primary .dl-icon { color: currentColor; }
 .export-option:disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
 }
 .share-note {
-	font-size: 14px;
-	color: #666;
-	text-align: center;
-	margin: 15px 0 0 0;
-	padding-top: 15px;
-	border-top: 1px solid #eee;
+	margin: 0;
+	font-size: 12px;
+	line-height: 1.55;
+	color: var(--eise-muted-2);
 }
-.popup-intro {
-	font-size: 14px;
-	color: #555;
-	margin: 0 0 20px 0;
-	line-height: 1.5;
+/* The donation ask rides on the credit line because this is the one moment the
+   result is already on screen and good. beacon.js auto-tracks outbound clicks,
+   so this needs no handler to show up as a coffee click from /post-processor. */
+.share-note a {
+	color: var(--eise-link);
+	font-weight: 600;
 }
 .publish-section {
-	margin-top: 20px;
-	padding: 15px;
-	background: #f4f6ff;
-	border: 1px solid #d8dffa;
-	border-radius: 8px;
-	text-align: center;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+	margin-top: auto;
+	padding: 12px 14px;
+	border-radius: 9px;
+	background: rgba(217, 169, 74, 0.08);
+	border: 1px solid rgba(217, 169, 74, 0.25);
 }
 .publish-section-text {
-	margin: 0 0 12px 0;
 	font-size: 14px;
-	color: #333;
-	line-height: 1.5;
+	line-height: 1.45;
+	color: var(--eise-body);
+	text-wrap: pretty;
+}
+.publish-section-text strong {
+	font-weight: 600;
+	color: var(--eise-bright);
+}
+/* Scoped so the toolbar's own .btn-publish keeps its rules. */
+.publish-section .btn-publish {
+	flex: 0 0 auto;
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	height: 36px;
+	padding: 0 14px;
+	border-radius: 7px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.16);
+	color: var(--eise-bright);
+	font-size: 14px;
+	font-weight: 500;
+}
+.publish-section .btn-publish:hover { background: rgba(255, 255, 255, 0.11); }
+.publish-section .btn-publish svg {
+	flex: 0 0 auto;
+	color: var(--eise-gilt-lt);
+}
+/* One column once the two would be too narrow to compare crops in. */
+@media (max-width: 860px) {
+	.modal-grid { grid-template-columns: minmax(0, 1fr); }
+	.publish-section { flex-wrap: wrap; }
+	/* Stacked, a 4:3 preview eats most of the viewport and pushes the export
+	   buttons off-screen. It is only there to confirm which image this is, and
+	   the full-size version is already behind the modal, so it shrinks to a
+	   strip rather than disappearing. The crop comparison keeps its size: that
+	   one exists to be looked at closely. */
+	.export-preview-frame {
+		aspect-ratio: auto;
+		height: 130px;
+		max-width: 190px;
+		margin: 0 auto;
+	}
 }
 .btn-publish {
 	padding: 10px 20px;
@@ -3254,6 +3634,9 @@ canvas {
 	left: 0;
 	right: 0;
 	bottom: 0;
+	/* See .export-popup-overlay: below the sticky header, not behind it. */
+	padding: 72px 16px 52px;
+	box-sizing: border-box;
 	background: rgba(0, 0, 0, 0.6);
 	display: flex;
 	justify-content: center;
@@ -3355,6 +3738,9 @@ canvas {
 	left: 0;
 	right: 0;
 	bottom: 0;
+	/* See .export-popup-overlay: below the sticky header, not behind it. */
+	padding: 72px 16px 52px;
+	box-sizing: border-box;
 	background: rgba(0, 0, 0, 0.6);
 	display: flex;
 	justify-content: center;
