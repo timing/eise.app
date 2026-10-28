@@ -361,6 +361,68 @@
 			</table>
 		</section>
 
+		<section>
+			<h3>
+				Desktop pricing poll
+				<span class="info-icon" @click.stop>?<span class="info-tooltip">
+					Answers to "What would you pay for a desktop Eise.app?" on /download.
+					People can change their answer, so only the last vote per session
+					counts; earlier ones show up under "changed". "Would pay" excludes
+					everyone who picked Nothing.
+				</span></span>
+			</h3>
+			<!-- Shown even at zero. A panel that disappears when empty gives no way
+			     to tell "nobody has voted" from "the request failed", and the poll
+			     only lives on /download, so most sites will sit at zero legitimately. -->
+			<div v-if="!pricePoll.totals.respondents" class="admin-msg">
+				No answers yet on <code>{{ siteId }}</code> in this range.
+				The poll is on /download; votes from localhost land on <code>eise-dev</code>.
+			</div>
+			<template v-else>
+			<div class="totals poll-totals">
+				<div class="stat">
+					<div class="stat-label">Respondents</div>
+					<div class="stat-value">{{ pricePoll.totals.respondents }}</div>
+					<div class="stat-sub">
+						{{ pricePoll.totals.clicks }} click{{ pricePoll.totals.clicks === 1 ? '' : 's' }},
+						{{ pricePoll.totals.changed }} changed
+					</div>
+				</div>
+				<div class="stat">
+					<div class="stat-label">Would pay</div>
+					<div class="stat-value">{{ pollShare(pricePoll.totals.would_pay) }}</div>
+					<div class="stat-sub">{{ pricePoll.totals.would_pay }} of {{ pricePoll.totals.respondents }}</div>
+				</div>
+				<div class="stat">
+					<div class="stat-label">Median price</div>
+					<div class="stat-value">{{ money(pricePoll.totals.median_paying) }}</div>
+					<div class="stat-sub">among those who would pay</div>
+				</div>
+				<div class="stat">
+					<div class="stat-label">Avg per respondent</div>
+					<div class="stat-value">{{ money(pricePoll.totals.average_all) }}</div>
+					<div class="stat-sub">zeros included</div>
+				</div>
+			</div>
+			<table class="stats-table">
+				<thead>
+					<tr><th>Answer</th><th>Respondents</th><th>Share</th><th></th></tr>
+				</thead>
+				<tbody>
+					<tr v-for="row in pricePoll.items" :key="row.value">
+						<td class="mono">{{ row.value === 0 ? 'Nothing' : '$' + row.value }}</td>
+						<td>{{ row.respondents }}</td>
+						<td>{{ pollShare(row.respondents) }}</td>
+						<td class="poll-bar-cell">
+							<span class="poll-bar" :class="{ zero: row.value === 0 }"
+								:style="{ width: pollShare(row.respondents) }"></span>
+						</td>
+					</tr>
+				</tbody>
+			</table>
+			</template>
+		</section>
+
 		<section v-if="events.length">
 			<h3>Custom events</h3>
 			<table class="stats-table">
@@ -482,6 +544,27 @@ const eventDetailLoading = ref(false);
 const eventDetailError = ref('');
 const refUrls = ref({});
 const breakdowns = ref({ country: [], device: [], os: [], browser: [] });
+const EMPTY_POLL = {
+	items: [],
+	totals: {
+		respondents: 0, clicks: 0, changed: 0, would_pay: 0,
+		average_paying: null, median_paying: null, average_all: null, median_all: null,
+	},
+};
+const pricePoll = ref(EMPTY_POLL);
+
+// Every share on this panel is out of respondents, never clicks: one person
+// who changed their mind twice must not count as three.
+function pollShare(n) {
+	const total = pricePoll.value.totals.respondents;
+	return total ? `${((n / total) * 100).toFixed(1)}%` : '0%';
+}
+
+// Null means nobody has answered in a way that produces a price (e.g. every
+// respondent picked Nothing), which is a real result rather than an error.
+function money(v) {
+	return v === null || v === undefined ? '—' : `$${Number(v).toFixed(2)}`;
+}
 
 const loading = ref(false);
 const error = ref('');
@@ -830,7 +913,13 @@ async function fetchAll() {
 	eventDetail.value = [];
 	eventDetailError.value = '';
 	try {
-		const d = await apiGet('/admin/analytics/dashboard', { limit: '50' });
+		// Its own request rather than another field on /dashboard: the poll is a
+		// temporary panel, and a failure to read it must not blank the whole page.
+		const [d, poll] = await Promise.all([
+			apiGet('/admin/analytics/dashboard', { limit: '50' }),
+			apiGet('/admin/analytics/price-poll').catch(() => EMPTY_POLL),
+		]);
+		pricePoll.value = poll?.totals ? poll : EMPTY_POLL;
 		summary.value = { range: d.range, include_admin: d.include_admin, totals: d.totals, days: d.days };
 		pages.value = d.pages || [];
 		if (!pathFilter.value) pathOptions.value = (d.pages || []).map(p => p.path).filter(Boolean);
@@ -1262,6 +1351,20 @@ button.stat.active {
 }
 .stat-value { font-size: 22px; font-weight: bold; color: #111; }
 .stat-sub { font-size: 11px; color: #666; margin-top: 2px; }
+
+/* Pricing poll. The bar cell is the widest column so the distribution reads
+   at a glance; the table beside it carries the exact numbers. */
+.poll-totals { margin-bottom: 1rem; }
+.poll-bar-cell { width: 45%; }
+.poll-bar {
+	display: block;
+	height: 10px;
+	min-width: 2px;
+	border-radius: 5px;
+	background: #8CCF7E;
+}
+/* "Nothing" is not a price, so it reads as grey rather than joining the scale. */
+.poll-bar.zero { background: #c9c9c9; }
 
 .live-dot {
 	display: inline-block;

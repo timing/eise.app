@@ -44,8 +44,11 @@
 			</div>
 
 			<div class="support">
-				<p class="support-copy">If you are happy with Eise, please consider donating. It is free and open source, and your support keeps it going. I'm also considering requiring a paid license for the offline builds, but I'd first like to know your opinion on that :-).</p>
-				<a href="https://buymeacoffee.com/timing" target="_blank" rel="noopener" class="eise-cta">Buy me a coffee</a>
+				<div class="support-row">
+					<p class="support-copy">If you are happy with Eise, please consider donating. It is free and open source, and your support keeps it going. I'm also considering requiring a paid license for the offline builds, but I'd first like to know your opinion on that :-).</p>
+					<a href="https://buymeacoffee.com/timing" target="_blank" rel="noopener" class="eise-cta">Buy me a coffee</a>
+				</div>
+				<LicensePoll source="download" />
 			</div>
 
 			<div class="interest-form">
@@ -291,18 +294,20 @@ useBreadcrumbSchema([
 	line-height: 1.5;
 	overflow-wrap: anywhere;
 }
-/* Donation ask under the platform cards. */
+/* Donation ask under the platform cards, with the pricing poll below it. */
 .support {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 18px;
-	flex-wrap: wrap;
 	margin-top: 24px;
 	padding: 18px 22px;
 	border-radius: 10px;
 	background: rgba(255, 255, 255, 0.045);
 	border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.support-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 18px;
+	flex-wrap: wrap;
 }
 .support-copy {
 	margin: 0;

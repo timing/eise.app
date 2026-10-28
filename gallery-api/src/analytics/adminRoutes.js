@@ -431,6 +431,94 @@ export function createAnalyticsAdminRoutes({ db }) {
     return c.json({ items: res.rows });
   });
 
+  // Pricing poll on /download: a `license_price_vote` event per click, carrying
+  // props.value as a number ($0 is the "Nothing" option). Reported separately
+  // from /events because the interesting part is the distribution of the
+  // values, which the generic event list can only show one row at a time.
+  //
+  // People can change their answer, so a raw GROUP BY would count one undecided
+  // visitor three times. Only the LAST vote per session is counted; the ones it
+  // supersedes are reported as `changed` instead. Session is the unit of
+  // analysis throughout, so `respondents` is the number to quote.
+  app.get('/price-poll', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const { from, to } = parseRange(c);
+    const inc = includeAdmin(c);
+    const incBots = includeBots(c);
+    const osF = osFilter(c);
+
+    const res = await db.execute({
+      sql: `
+        WITH votes AS (
+          SELECT session_id,
+                 CAST(json_extract(props_json, '$.value') AS INTEGER) AS value,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY session_id ORDER BY ts DESC, id DESC
+                 ) AS rn,
+                 COUNT(*) OVER (PARTITION BY session_id) AS votes_in_session
+          FROM events
+          WHERE site_id = ? AND event_name = 'license_price_vote'
+            AND ts >= ? AND ts < ?
+            AND json_extract(props_json, '$.value') IS NOT NULL
+            AND (? = 1 OR COALESCE(role, '') != 'admin')
+            AND (? = 1 OR bot IS NULL)${osF.sql}
+        )
+        SELECT value,
+               COUNT(*) AS respondents,
+               SUM(votes_in_session) AS clicks,
+               SUM(CASE WHEN votes_in_session > 1 THEN 1 ELSE 0 END) AS changed
+        FROM votes
+        WHERE rn = 1
+        GROUP BY value
+        ORDER BY value ASC
+      `,
+      args: [site, from, to, inc, incBots, ...osF.args],
+    });
+
+    const items = res.rows.map(r => ({
+      value: Number(r.value),
+      respondents: Number(r.respondents),
+      clicks: Number(r.clicks),
+      changed: Number(r.changed),
+    }));
+
+    const respondents = items.reduce((a, r) => a + r.respondents, 0);
+    const clicks = items.reduce((a, r) => a + r.clicks, 0);
+    const changed = items.reduce((a, r) => a + r.changed, 0);
+
+    // Averaging over everyone, zeros included, answers "what is a visitor
+    // worth". Averaging over only those who named a price answers "what should
+    // it cost". They are different questions, so both are returned rather than
+    // one standing in for the other.
+    const paying = items.filter(r => r.value > 0);
+    const payingN = paying.reduce((a, r) => a + r.respondents, 0);
+    const payingSum = paying.reduce((a, r) => a + r.value * r.respondents, 0);
+
+    // Median off the expanded list. With five buckets this is cheap, and it is
+    // the figure that survives one person picking $100 out of a dozen answers.
+    const medianOf = (rows) => {
+      const expanded = rows.flatMap(r => Array(r.respondents).fill(r.value));
+      if (!expanded.length) return null;
+      const mid = Math.floor(expanded.length / 2);
+      return expanded.length % 2 ? expanded[mid] : (expanded[mid - 1] + expanded[mid]) / 2;
+    };
+
+    return c.json({
+      items,
+      totals: {
+        respondents,
+        clicks,
+        changed,
+        would_pay: payingN,
+        average_paying: payingN ? payingSum / payingN : null,
+        median_paying: medianOf(paying),
+        average_all: respondents ? payingSum / respondents : null,
+        median_all: medianOf(items),
+      },
+    });
+  });
+
   app.get('/timeseries', async c => {
     const site = siteId(c);
     if (!site) return c.json({ error: 'site_id required' }, 400);
