@@ -61,9 +61,11 @@
 			</nav>
 		</header>
 
-		<div class="app-content">
+		<!-- <main>, not a div, so crawlers and HTML-to-text converters can tell the
+		     page body apart from the header, the affiliate aside and the footer. -->
+		<main class="app-content">
 			<slot />
-		</div>
+		</main>
 
 		<div class="clearb"></div>
 

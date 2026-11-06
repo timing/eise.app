@@ -41,9 +41,11 @@ export default defineNuxtConfig({
 	devtools: { enabled: true },
 	app: {
 		head: {
-			link: [
-				{ rel: 'alternate', type: 'text/markdown', href: '/llms.txt' }
-			],
+			// No sitewide rel="alternate" type="text/markdown" here: that would
+			// claim one file is the Markdown twin of every page. scripts/
+			// generate-markdown-routes.mjs injects a per-page one at build time,
+			// pointing at that page's own .md. /llms.txt stays discoverable at
+			// its conventional root path.
 			meta: [
 				{ name: 'robots', content: robotsContent },
 				{ property: 'og:type', content: 'website' },

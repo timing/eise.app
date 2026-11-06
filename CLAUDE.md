@@ -130,6 +130,12 @@ UI settings in FileUploader.vue sync to this shared state via watchers, and useS
 
 **SharedArrayBuffer Requirements**: `nuxt.config.ts` sets CORP/COOP headers for WebWorker memory sharing. Cloudflare headers in `config/cloudflare_headers.txt`. **When adding new JS files to `public/`**, you MUST add them to `config/cloudflare_headers.txt` with COEP headers, otherwise they will be blocked by Cross-Origin-Embedder-Policy on production.
 
+**Markdown routes for AI agents (`/about/help.md` etc.)**: `scripts/generate-markdown-routes.mjs` runs in `postgenerate` and derives a Markdown twin of every public page from the prerendered HTML, plus a per-page `<link rel="alternate">` and `Link:` header. **These are build output, never hand-written, and never in git.** They cannot go stale: every `nuxt generate` rebuilds them from the page, so changing or adding a page updates its `.md` automatically (a new page enters via `public/sitemap.xml`, which `generate-sitemap.mjs` derives from `pages/`). Two things would silently break it:
+- The layout must keep wrapping `<slot />` in `<main class="app-content">` (`layouts/default.vue`). The script throws if it is gone, which fails the build on purpose.
+- A page whose prose lives behind client-side rendering produces an empty `.md` and is skipped (currently `/post-processor/`). The build log lists what it skipped and why.
+
+Content negotiation on `Accept: text/markdown` is deliberately NOT implemented: that needs a Cloudflare Pages Function, and a Function that returns its own response does not get `config/cloudflare_headers.txt` applied, which would strip COEP from `/` and break SharedArrayBuffer sitewide. Validate on a preview deployment first if you ever add it.
+
 **Float32 Data is Source of Truth (CRITICAL)**: All image processing and exports use float32 data stored in memory, NOT the canvas. The canvas is display-only. When exporting/downloading images, always use the underlying `float32Data` and convert to the target format (PNG, TIFF, etc.) - never use `canvas.toDataURL()` or `canvas.toBlob()` on the display canvas. This preserves 16-bit precision. When applying transforms (alignment, etc.), modify the float32 data directly using GPU shaders, not canvas 2D transforms.
 
 ## WebGPU Helper Functions (MUST USE)

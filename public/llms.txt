@@ -1,6 +1,6 @@
 # eise.app
 
-> eise.app is a free, browser-based planetary image stacking tool for astrophotography. It processes videos of planets, the Moon, and Sun using the lucky imaging technique - selecting and combining the sharpest frames to overcome atmospheric turbulence. All processing happens locally in your browser using WebAssembly and WebGPU. No installation, no uploads, works on any operating system.
+> eise.app is a free, browser-based planetary image stacking tool for astrophotography. It processes videos and image sequences of planets, the Moon, and Sun using the lucky imaging technique - selecting and combining the sharpest frames to overcome atmospheric turbulence. All processing happens locally in the browser using WebAssembly and WebGPU. No installation, no uploads, no signup, works on any operating system. An optional desktop build (macOS, Windows, Linux) runs the same app offline.
 
 ## What is Planetary Stacking?
 
@@ -15,32 +15,43 @@ Planetary stacking (lucky imaging) combines hundreds or thousands of video frame
 - **Drizzle**: 1.5x output resolution using sub-pixel frame offsets.
 - **Wavelet Sharpening**: Built-in multi-layer wavelet sharpening to enhance surface details.
 - **RGB Alignment**: Automatic detection and correction of atmospheric dispersion (color fringing).
-- **GPU Accelerated**: WebGPU provides fast processing on modern browsers.
+- **GPU Accelerated**: WebGPU provides fast processing on modern browsers, with a CPU fallback.
 - **Privacy**: 100% local processing - your images never leave your computer.
 
 ## Supported File Formats
 
-- **SER**: Astronomical video format (recommended for planetary imaging)
-- **AVI**: Uncompressed AVI files
-- **Video**: MP4, MOV, WebM via FFmpeg.js
-- **Images**: PNG, TIFF, JPEG for post-processing only
+- **SER**: Astronomical video format with Bayer pattern detection (recommended for planetary imaging)
+- **AVI**: Uncompressed, MJPEG and raw Bayer AVI
+- **Video**: MP4, MOV, WebM
+- **Camera RAW**: CR2, CR3, NEF, ARW, ORF, RW2, RAF, DNG, PEF, SRW and other LibRaw-supported formats, decoded at full sensor bit depth
+- **Images**: PNG, JPEG, WebP, AVIF and TIFF, either as a sequence to stack or as a single image to post-process
 
 ## Pages
 
-- [Home](https://eise.app/): Main stacking interface - upload videos and stack frames
-- [Post Processor](https://eise.app/post-processor/): Wavelet sharpening, RGB alignment, color correction, crop - can also be used standalone on any image
-- [Tools](https://eise.app/tools/): Additional utilities
+- [Home](https://eise.app/): Main stacking interface - drop a video or image sequence and stack the sharpest frames
+- [Post Processor](https://eise.app/post-processor/): Wavelet sharpening, deconvolution, RGB alignment, color correction, crop - also usable standalone on any image
+- [Download](https://eise.app/download/): Desktop builds of eise.app for macOS, Windows and Linux, for offline use
+- [Gallery](https://eise.app/gallery/): Community-published stacks of Jupiter, Saturn, Mars and the Moon made with eise.app
+- [SER Tools](https://eise.app/tools/): SER file analyzer, player and trimmer
 - [About](https://eise.app/about/): Project background and acknowledgments
 - [Help](https://eise.app/about/help/): Step-by-step guide and troubleshooting
-- [Software Comparison](https://eise.app/about/planetary-stacking-software-comparison/): Compare eise.app with AutoStakkert!, PSS, Registax, Planet Stacker X, and PIPP
+- [Technical Architecture](https://eise.app/about/architecture/): Processing pipeline, algorithms and implementation details
+- [Software Comparison](https://eise.app/about/planetary-stacking-software-comparison/): Side-by-side comparison of AutoStakkert!, Registax, PSS, PlanetStackerX, LuckyStackWorker, ImPPG, AstroSurface and eise.app
+- [AutoStakkert! vs eise.app](https://eise.app/about/autostakkert-vs-eise/): Feature and workflow comparison, and when each is the better fit
+- [Registax vs eise.app](https://eise.app/about/registax-vs-eise/): Comparison with Registax 6, which has not been updated since 2011
+- [Planetary System Stacker vs eise.app](https://eise.app/about/planetary-system-stacker-vs-eise/): Comparison with the PSS Python desktop stacker
+- [Planetary stacking on Mac](https://eise.app/planetary-stacking-mac/): Stacking on macOS without Wine or a Python setup, on Apple Silicon and Intel
+- [Seestar planetary stacking](https://eise.app/seestar-planetary-stacking/): Stacking Seestar S50 and S30 Pro Moon and planet MP4 videos
 
 ## Technical Stack
 
-- **Frontend**: Nuxt.js / Vue.js
-- **Image Processing**: OpenCV.js (WebAssembly)
-- **Video Decoding**: FFmpeg.js
-- **GPU Compute**: WebGPU for template matching and frame stacking
+- **Frontend**: Nuxt.js / Vue.js, statically prerendered
+- **Image Processing**: OpenCV.js (WebAssembly) on the CPU fallback path
+- **Video Decoding**: WebCodecs via Mediabunny, with FFmpeg.js as fallback
+- **RAW Decoding**: LibRaw compiled to WebAssembly
+- **GPU Compute**: WebGPU for demosaicing, frame analysis, template matching and stacking
 - **Parallel Processing**: Web Workers
+- **Desktop**: Electron, wrapping the same web app
 
 ## Browser Requirements
 
@@ -58,8 +69,8 @@ eise.app is unique as the only fully browser-based planetary stacker. Alternativ
 - **AutoStakkert!**: Windows-only, gold standard for stacking, no built-in sharpening
 - **Planetary System Stacker (PSS)**: Cross-platform Python app, requires dependency setup
 - **Planet Stacker X**: macOS-only native app
-- **Registax**: Windows-only, famous for wavelet sharpening
-- **PIPP**: Windows-only preprocessor for centering and cropping
+- **Registax**: Windows-only, famous for wavelet sharpening, last updated 2011
+- **PIPP**: Windows-only preprocessor for centering and cropping (eise.app does this automatically, so no PIPP step is needed)
 
 ## Open Source
 

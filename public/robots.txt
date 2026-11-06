@@ -1,6 +1,13 @@
 User-agent: *
 Allow: /
 
+# Cloudflare's Content Signals Policy (CC0). Declares three separate intents:
+# appear in search results, be quoted in live AI answers, be used as training
+# data. Eise.app is a free tool, so all three are yes - being cited by an
+# assistant is the point. Not part of RFC 9309, so linters flag it as unknown
+# and compliant crawlers ignore lines they do not recognise.
+Content-Signal: search=yes, ai-input=yes, ai-train=yes
+
 # Internal pages. These also send `noindex` in their meta, which is what
 # actually keeps them out of the index; this block just saves crawl budget.
 Disallow: /admin/
