@@ -55,7 +55,7 @@
 				<li><strong>Fix RGB alignment</strong> - If you see colored fringes, use Auto RGB alignment or adjust manually.</li>
 				<li><strong>Crop edges last</strong> - The edges often have stacking artifacts. Crop them away at the end.</li>
 			</ul>
-			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image - just open a PNG or TIFF for wavelet sharpening without stacking.</p>
+			<p class="tip">You can also use the <NuxtLink to="/post-processor/" :prefetch="false">post-processor</NuxtLink> directly on any image - just open a PNG or TIFF for wavelet sharpening without stacking.</p>
 
 			<h3>Technology</h3>
 			<p>Eise.app is built with Nuxt/Vue, OpenCV.js (WebAssembly), Web Workers for parallel processing, and FFmpeg.js for video decoding.

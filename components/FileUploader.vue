@@ -364,12 +364,12 @@
 			</div>
 			<div class="spec-row">
 				<dt>Image sequences (PNG, TIFF)</dt>
-				<dd>Multiple images start a stack. A single image opens the <NuxtLink to="/post-processor/">post processor</NuxtLink>.</dd>
+				<dd>Multiple images start a stack. A single image opens the <NuxtLink to="/post-processor/" :prefetch="false">post processor</NuxtLink>.</dd>
 			</div>
 		</dl>
 
 		<h2 class="home-h2">Eise's post processor</h2>
-		<p>Eise has its own <NuxtLink to="/post-processor/">post processor</NuxtLink> included and automatically opens after your stack is finished. There is however no need to go through the whole stacking pipeline to open Eise's postprocessor. You can also open images stacked with <NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert!</NuxtLink> if you have stacks lying around, or you prefer AutoStakkert! over Eise.</p>
+		<p>Eise has its own <NuxtLink to="/post-processor/" :prefetch="false">post processor</NuxtLink> included and automatically opens after your stack is finished. There is however no need to go through the whole stacking pipeline to open Eise's postprocessor. You can also open images stacked with <NuxtLink to="/about/autostakkert-vs-eise/">AutoStakkert!</NuxtLink> if you have stacks lying around, or you prefer AutoStakkert! over Eise.</p>
 
 		<h2 class="home-h2">Download Eise for offline use</h2>
 		<p>Head over to the <NuxtLink to="/download/">Eise download page</NuxtLink> to get an offline version of Eise for OSX, Windows or Linux. For now these are free, but I'm considering making those paid.</p>

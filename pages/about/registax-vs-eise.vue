@@ -129,7 +129,7 @@
 
 			<h3>Try Eise.app</h3>
 			<p>The quickest test is to drop an already-stacked TIFF into Eise.app's post-processor and compare the sharpening result to Registax.</p>
-			<NuxtLink to="/post-processor/" class="cta-link">Open the Eise.app post-processor &rarr;</NuxtLink>
+			<NuxtLink to="/post-processor/" :prefetch="false" class="cta-link">Open the Eise.app post-processor &rarr;</NuxtLink>
 
 			<h3>See also</h3>
 			<ul>

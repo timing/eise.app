@@ -19,7 +19,7 @@
 				<NuxtLink to="/about/help/">Tips on using Eise.app</NuxtLink>,
 				<NuxtLink to="/about/planetary-stacking-software-comparison/">compare it to other stacking software</NuxtLink>.
 			</p>
-			<p class="tip">You can also use the <NuxtLink to="/post-processor/">post-processor</NuxtLink> directly on any image.</p>
+			<p class="tip">You can also use the <NuxtLink to="/post-processor/" :prefetch="false">post-processor</NuxtLink> directly on any image.</p>
 
 			<p>Curious what people are making with Eise? Browse the <NuxtLink to="/gallery/">community gallery</NuxtLink>. I would love to see yourt stacks, so please show them!</p>
 

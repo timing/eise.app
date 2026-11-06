@@ -59,6 +59,10 @@ const DROP_SELECTORS = [
 	// Markdown client.
 	'[style*="display:none"]',
 	'[style*="display: none"]',
+	// Controls a reader cannot use yet because nothing is loaded. The post
+	// processor prerenders its whole panel this way, which would otherwise put
+	// "Radius 0 Amount 0 Denoise Off" above the page's actual explanation.
+	'.controls-disabled',
 ];
 
 // Below this many characters of body text a page is a pure app surface (the

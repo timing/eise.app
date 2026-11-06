@@ -23,9 +23,14 @@
 				<span class="eise-tagline">Easy Image Stacker Engine</span>
 			</div>
 
+			<!-- :prefetch="false" on every /post-processor/ link: that page imports
+			     PostProcessor statically so its intro copy prerenders, which makes
+			     the route chunk ~25 KB gzipped. Without this the header nav would
+			     prefetch it on idle from every page, for visitors who may never
+			     open it. It still loads on navigation. -->
 			<nav class="eise-nav">
 				<NuxtLink to="/" class="eise-tab" data-label="Stack" :class="{ 'is-active': route.path === '/' }">Stack</NuxtLink>
-				<NuxtLink to="/post-processor/" class="eise-tab" data-label="Post Processor" :class="{ 'is-active': route.path.startsWith('/post-processor') }">Post Processor</NuxtLink>
+				<NuxtLink to="/post-processor/" :prefetch="false" class="eise-tab" data-label="Post Processor" :class="{ 'is-active': route.path.startsWith('/post-processor') }">Post Processor</NuxtLink>
 				<NuxtLink to="/gallery/" class="eise-tab hide-below-460" data-label="Gallery" :class="{ 'is-active': route.path.startsWith('/gallery') }">Gallery</NuxtLink>
 				<NuxtLink to="/download/" class="eise-tab hide-below-560" data-label="Download" :class="{ 'is-active': route.path.startsWith('/download') }">Download</NuxtLink>
 				<a href="https://buymeacoffee.com/timing" target="_blank" rel="noopener" class="eise-cta hide-below-700">Buy me a coffee</a>
@@ -97,7 +102,7 @@
 						<h4>App</h4>
 						<ul>
 							<li><NuxtLink to="/">Stack images</NuxtLink></li>
-							<li><NuxtLink to="/post-processor/">Post Processor</NuxtLink></li>
+							<li><NuxtLink to="/post-processor/" :prefetch="false">Post Processor</NuxtLink></li>
 							<li><NuxtLink to="/tools/">SER Tools</NuxtLink></li>
 							<li><NuxtLink to="/download/">Download desktop app</NuxtLink></li>
 						</ul>
