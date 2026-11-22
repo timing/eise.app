@@ -649,6 +649,43 @@ export function createAnalyticsAdminRoutes({ db }) {
     return c.json({ items: res.rows });
   });
 
+  // The individual star ratings behind the stack_rating count, newest first.
+  // A bare count hides what matters here: the distribution is bimodal (lots of
+  // 1s and lots of 5s), and the 1s usually come with a comment explaining a bad
+  // stack. Those comments are the useful part, so they are pulled out as a
+  // column rather than left inside props_json.
+  app.get('/stack-ratings', async c => {
+    const site = siteId(c);
+    if (!site) return c.json({ error: 'site_id required' }, 400);
+    const { from, to } = parseRange(c);
+    const inc = includeAdmin(c);
+    const incBots = includeBots(c);
+    const osF = osFilter(c);
+    const limit = limitArg(c, 200);
+
+    const res = await db.execute({
+      sql: `
+        SELECT ts,
+               CAST(json_extract(props_json, '$.rating') AS INTEGER) AS rating,
+               json_extract(props_json, '$.comment')       AS comment,
+               json_extract(props_json, '$.file_type')     AS file_type,
+               json_extract(props_json, '$.reader')        AS reader,
+               json_extract(props_json, '$.stacking_mode') AS stacking_mode,
+               json_extract(props_json, '$.stack_job_id')  AS stack_job_id
+        FROM events
+        WHERE site_id = ? AND event_name = 'stack_rating'
+          AND ts >= ? AND ts < ?
+          AND json_extract(props_json, '$.rating') IS NOT NULL
+          AND (? = 1 OR COALESCE(role, '') != 'admin')
+          AND (? = 1 OR bot IS NULL)${osF.sql}
+        ORDER BY ts DESC
+        LIMIT ?
+      `,
+      args: [site, from, to, inc, incBots, ...osF.args, limit],
+    });
+    return c.json({ items: res.rows });
+  });
+
   // Distinct experiment names ever seen for a site — powers the A/B dropdown
   // so we can look up historical (finalized) experiments too.
   app.get('/ab-experiments', async c => {

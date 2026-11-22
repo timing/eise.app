@@ -239,6 +239,45 @@
 			</div>
 		</section>
 
+		<!-- The stack_rating count on its own is misleading: the distribution is
+		     bimodal and the low scores carry the comments worth reading. Shown
+		     only when that event is the selected metric. -->
+		<section v-if="chartMetric === 'event:stack_rating'">
+			<h3>
+				Ratings
+				<span v-if="ratings.length" class="ratings-summary">
+					{{ ratings.length }} rated{{ ratingsCapped ? ' (most recent, capped)' : '' }},
+					average {{ ratingsAverage }} / 5
+					<span class="ratings-dist">{{ ratingsDistribution }}</span>
+				</span>
+			</h3>
+			<div v-if="ratingsLoading" class="chart-loading">Loading…</div>
+			<div v-else-if="ratingsError" class="breakdown-empty">{{ ratingsError }}</div>
+			<div v-else-if="!ratings.length" class="breakdown-empty">No ratings in the selected range.</div>
+			<table v-else class="stats-table">
+				<thead>
+					<tr>
+						<th>When</th>
+						<th>Rating</th>
+						<th>Comment</th>
+						<th>Input</th>
+						<th>Mode</th>
+						<th>Job</th>
+					</tr>
+				</thead>
+				<tbody>
+					<tr v-for="r in ratings" :key="r.ts + '-' + r.stack_job_id">
+						<td>{{ formatTs(r.ts) }}</td>
+						<td class="rating-cell">{{ '★'.repeat(r.rating) }}<span class="rating-dim">{{ '★'.repeat(5 - r.rating) }}</span></td>
+						<td>{{ r.comment || '' }}</td>
+						<td>{{ [r.file_type, r.reader].filter(Boolean).join(' / ') }}</td>
+						<td>{{ r.stacking_mode }}</td>
+						<td>{{ r.stack_job_id }}</td>
+					</tr>
+				</tbody>
+			</table>
+		</section>
+
 		<section v-if="summary && summary.days.length">
 			<h3>By day</h3>
 			<table class="stats-table">
@@ -579,6 +618,32 @@ const chartData = ref([]);
 const chartData2 = ref([]);
 const chartLoading = ref(false);
 const chartHover = ref(null);
+
+// Individual star ratings, loaded only while stack_rating is the chart metric.
+const ratings = ref([]);
+const ratingsLoading = ref(false);
+const ratingsError = ref('');
+
+// The endpoint caps at RATINGS_LIMIT. Say so rather than letting the count and
+// average silently describe a truncated slice.
+const RATINGS_LIMIT = 200;
+const ratingsCapped = computed(() => ratings.value.length >= RATINGS_LIMIT);
+
+const ratingsAverage = computed(() => {
+	if (!ratings.value.length) return '0.0';
+	const sum = ratings.value.reduce((s, r) => s + Number(r.rating || 0), 0);
+	return (sum / ratings.value.length).toFixed(1);
+});
+
+// "1★ 13 · 2★ 3 · …" — the shape matters more than the mean here, because a
+// bimodal split averages out to a middling number that describes nobody.
+const ratingsDistribution = computed(() => {
+	const counts = [1, 2, 3, 4, 5].map(
+		(star) => `${star}★ ${ratings.value.filter((r) => Number(r.rating) === star).length}`,
+	);
+	return counts.join(' · ');
+});
+
 const chartEl = ref(null);
 const chartSectionEl = ref(null);
 const chartW = ref(800);
@@ -975,6 +1040,28 @@ async function fetchChart() {
 		error.value = err.message;
 	} finally {
 		chartLoading.value = false;
+	}
+	// Hung off fetchChart rather than a watcher so the ratings table picks up
+	// every refresh path the chart already handles: metric change, date range,
+	// site switch, admin/bot toggles.
+	await fetchStackRatings();
+}
+
+async function fetchStackRatings() {
+	if (chartMetric.value !== 'event:stack_rating') {
+		ratings.value = [];
+		return;
+	}
+	ratingsLoading.value = true;
+	ratingsError.value = '';
+	try {
+		const body = await apiGet('/admin/analytics/stack-ratings', { limit: String(RATINGS_LIMIT) });
+		ratings.value = body.items || [];
+	} catch (err) {
+		ratingsError.value = err.message;
+		ratings.value = [];
+	} finally {
+		ratingsLoading.value = false;
 	}
 }
 
@@ -1413,6 +1500,13 @@ button.stat.active {
 
 section { margin-bottom: 2rem; }
 section h3 { font-size: 15px; margin-bottom: 8px; color: #333; }
+
+/* Stars use the app's gilt token (app.vue sets it on html) rather than a new
+   colour; the unfilled half is the same grey as other muted text here. */
+.ratings-summary { font-size: 12px; font-weight: normal; color: #666; margin-left: 8px; }
+.ratings-dist { margin-left: 8px; color: #888; }
+.rating-cell { color: var(--eise-gilt); white-space: nowrap; letter-spacing: 1px; }
+.rating-dim { color: #ddd; }
 
 .chart-section {
 	background: #fafafa; padding: 16px; border-radius: 6px;
