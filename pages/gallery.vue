@@ -19,7 +19,14 @@
 			<div v-else class="gallery-grid">
 				<button v-for="item in items" :key="item.id" class="gallery-card" @click="selected = item" :title="cardTitle(item)">
 					<span class="gallery-card-frame">
-						<img :src="item.thumb_url" :alt="cardAlt(item)" loading="lazy" decoding="async" />
+						<img
+						:src="item.thumb_url"
+						:srcset="cardSrcset(item)"
+						sizes="(max-width: 600px) calc(100vw - 32px), 260px"
+						:width="item.width || null"
+						:height="item.height || null"
+						:alt="cardAlt(item)"
+						loading="lazy" decoding="async" />
 					</span>
 					<span class="gallery-card-caption">
 						<span class="card-title">{{ item.title || 'Untitled' }}</span>
@@ -193,6 +200,34 @@ function cardAlt(item) {
 	return `${item.title || 'Planetary stack'} by ${item.name}, stacked with Eise.app`;
 }
 
+// PublishModal caps the thumb at 400px on its longest edge and never upscales
+// (see makeThumb), so the thumb's real width is derivable from the full image's
+// dimensions rather than assumed to be 400.
+const THUMB_MAX_EDGE = 400;
+function thumbWidth(item) {
+	if (!item.width || !item.height) return null;
+	const scale = Math.min(1, THUMB_MAX_EDGE / Math.max(item.width, item.height));
+	return Math.max(1, Math.round(item.width * scale));
+}
+
+// Above this the original stays out of the grid's candidate list. Cards render
+// at roughly 210-300px, so a 2x display asks for ~500-600px, which the 400px
+// thumb cannot serve — the browser would then take the original, and 17 of the
+// 82 approved stacks are over 1600px wide (up to 5088px / 7.4 MB). Those still
+// reach Google through the JSON-LD contentUrl and the lightbox, just not as a
+// thumbnail-grid download. Measured in gallery-api/scripts/gallery-image-dims.mjs.
+const MAX_SRCSET_WIDTH = 1600;
+
+function cardSrcset(item) {
+	const tw = thumbWidth(item);
+	// No dimensions (pre-backfill row), original no bigger than the thumb, or
+	// too heavy to offer: in all three cases the thumb alone is correct.
+	if (!tw || !item.width) return undefined;
+	if (item.width <= tw) return undefined;
+	if (item.width > MAX_SRCSET_WIDTH) return undefined;
+	return `${item.thumb_url} ${tw}w, ${item.image_url} ${item.width}w`;
+}
+
 // Built from the prerendered snapshot (not the reactive `items`) so the JSON-LD
 // is baked into the static HTML and does not churn after the client refresh.
 const galleryLd = {
@@ -207,6 +242,9 @@ const galleryLd = {
 		...(item.description ? { description: item.description } : {}),
 		contentUrl: item.image_url,
 		thumbnailUrl: item.thumb_url,
+		// Google Images uses dimensions to judge whether an image clears its
+		// quality bar, so state them rather than making it fetch to find out.
+		...(item.width && item.height ? { width: item.width, height: item.height } : {}),
 		creditText: item.name,
 		creator: { '@type': 'Person', name: item.name },
 		...(item.captured_at ? { dateCreated: item.captured_at } : {}),

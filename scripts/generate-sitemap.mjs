@@ -122,10 +122,56 @@ if (violations.length) {
 	process.exit(1);
 }
 
+// Gallery images, attached to /gallery/ as <image:image> entries so Google
+// Images can discover them without crawling and rendering the page first.
+//
+// Deliberately fail-soft: a sitemap missing its image block is a minor SEO
+// loss, while a failed build over a third-party fetch is an outage. If the API
+// is unreachable we warn loudly and emit the plain sitemap.
+//
+// Google caps this at 1,000 images per URL. We are well under; revisit if the
+// gallery ever approaches it, and note that per-image pages (see
+// GALLERY_SEO_PLAN.md item 3) would move these entries to their own URLs.
+const GALLERY_API = 'https://gallery.eise.app/submissions?limit=200';
+
+function xmlEscape(s) {
+	return String(s).replace(/[<>&'"]/g, (ch) => (
+		{ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[ch]
+	));
+}
+
+async function galleryImages() {
+	try {
+		const res = await fetch(GALLERY_API, { signal: AbortSignal.timeout(15000) });
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		const body = await res.json();
+		return (body.items || []).filter((i) => i.image_url);
+	} catch (err) {
+		console.warn(`\nWARNING: gallery images omitted from sitemap (${err.message}).`);
+		console.warn('The sitemap is still valid; re-run the build once the API is reachable.');
+		return [];
+	}
+}
+
+const images = await galleryImages();
+const imageBlock = images
+	.map((i) => {
+		const title = i.title ? `${i.title} by ${i.name}` : `Planetary stack by ${i.name}`;
+		return `\t\t<image:image>\n` +
+			`\t\t\t<image:loc>${xmlEscape(i.image_url)}</image:loc>\n` +
+			`\t\t\t<image:title>${xmlEscape(title)}</image:title>\n` +
+			`\t\t</image:image>`;
+	})
+	.join('\n');
+
 const xml =
 	`<?xml version="1.0" encoding="UTF-8"?>\n` +
-	`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-	routes.map((r) => `\t<url>\n\t\t<loc>${BASE_URL}${r}</loc>\n\t</url>`).join('\n') +
+	`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n` +
+	`        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">\n` +
+	routes.map((r) => {
+		const extra = r === '/gallery/' && imageBlock ? `\n${imageBlock}` : '';
+		return `\t<url>\n\t\t<loc>${BASE_URL}${r}</loc>${extra}\n\t</url>`;
+	}).join('\n') +
 	`\n</urlset>\n`;
 
 await fs.writeFile(OUT_PATH, xml);

@@ -26,6 +26,12 @@ const MIGRATIONS = [
   // ever ends up set.
   `ALTER TABLE submissions ADD COLUMN featured_at INTEGER`,
   `CREATE INDEX IF NOT EXISTS idx_submissions_featured ON submissions(featured_at DESC)`,
+  // Pixel size of the full image. Needed for srcset `w` descriptors and for
+  // width/height attributes on the gallery grid; without them Google Images
+  // only ever sees the 400px thumbnail. Backfilled for pre-existing rows by
+  // scripts/backfill-image-dims.mjs.
+  `ALTER TABLE submissions ADD COLUMN width INTEGER`,
+  `ALTER TABLE submissions ADD COLUMN height INTEGER`,
 ];
 
 export function createDb(env) {

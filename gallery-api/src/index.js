@@ -17,6 +17,20 @@ function isPng(bytes) {
   return PNG_MAGIC.every((b, i) => bytes[i] === b);
 }
 
+// Pixel size straight out of the PNG header. Read here rather than accepting
+// it as a form field: the bytes are already in hand and validated as PNG, so
+// there is nothing to trust and nothing to validate. IHDR is the first chunk,
+// so width/height sit at a fixed offset after the 8-byte signature and the
+// 4-byte length + 4-byte type that precede the chunk data.
+function pngDimensions(bytes) {
+  if (bytes.length < 24) return { width: null, height: null };
+  const read32 = (o) => (bytes[o] << 24 | bytes[o + 1] << 16 | bytes[o + 2] << 8 | bytes[o + 3]) >>> 0;
+  const width = read32(16);
+  const height = read32(20);
+  if (!width || !height) return { width: null, height: null };
+  return { width, height };
+}
+
 function isWebp(bytes) {
   if (bytes.length < 12) return false;
   const riff = WEBP_MAGIC_RIFF.every((b, i) => bytes[i] === b);
@@ -127,10 +141,11 @@ export function createApp(env, deps = {}) {
     await storage.put(thumbPath, thumbBytes, 'image/webp');
 
     const createdAt = Date.now();
+    const { width, height } = pngDimensions(imageBytes);
     await db.execute({
-      sql: `INSERT INTO submissions (id, name, title, description, astrobin_url, status, image_path, thumb_path, created_at, captured_at, ip)
-            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
-      args: [id, name, title || null, description || null, astrobinUrl || null, imagePath, thumbPath, createdAt, capturedAt || null, ip],
+      sql: `INSERT INTO submissions (id, name, title, description, astrobin_url, status, image_path, thumb_path, created_at, captured_at, ip, width, height)
+            VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+      args: [id, name, title || null, description || null, astrobinUrl || null, imagePath, thumbPath, createdAt, capturedAt || null, ip, width, height],
     });
 
     return c.json({ id, status: 'pending' }, 201);
@@ -139,7 +154,7 @@ export function createApp(env, deps = {}) {
   // Homepage card. Returns the admin-picked stack, falling back to the newest
   // approved one so the card is never empty before anything is featured.
   app.get('/featured', async c => {
-    const cols = `id, name, title, description, astrobin_url, image_path, thumb_path, created_at, approved_at, captured_at, featured_at`;
+    const cols = `id, name, title, description, astrobin_url, image_path, thumb_path, created_at, approved_at, captured_at, featured_at, width, height`;
     let res = await db.execute({
       sql: `SELECT ${cols} FROM submissions
             WHERE status = 'approved' AND featured_at IS NOT NULL
@@ -159,7 +174,7 @@ export function createApp(env, deps = {}) {
     const limit = Math.min(Number(c.req.query('limit') || 60), 200);
     const offset = Math.max(Number(c.req.query('offset') || 0), 0);
     const res = await db.execute({
-      sql: `SELECT id, name, title, description, astrobin_url, image_path, thumb_path, created_at, approved_at, captured_at, featured_at
+      sql: `SELECT id, name, title, description, astrobin_url, image_path, thumb_path, created_at, approved_at, captured_at, featured_at, width, height
             FROM submissions WHERE status = 'approved'
             ORDER BY approved_at DESC LIMIT ? OFFSET ?`,
       args: [limit, offset],
@@ -257,6 +272,10 @@ function publicRow(row, storage) {
     captured_at: row.captured_at,
     image_url: storage.publicUrlFor(row.image_path),
     thumb_url: storage.publicUrlFor(row.thumb_path),
+    // Null for rows predating the dimension columns that the backfill has not
+    // reached; the gallery falls back to the thumb alone when either is missing.
+    width: row.width ?? null,
+    height: row.height ?? null,
     approved_at: row.approved_at,
     featured: !!row.featured_at,
   };

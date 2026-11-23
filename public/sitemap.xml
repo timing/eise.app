@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
 	<url>
 		<loc>https://eise.app/</loc>
 	</url>
@@ -29,6 +30,334 @@
 	</url>
 	<url>
 		<loc>https://eise.app/gallery/</loc>
+		<image:image>
+			<image:loc>https://img.eise.app/0a727c7b409c402439b2ef918dec27ff/full.png</image:loc>
+			<image:title>Moon by foxto7</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/ded548bb96ff0843633d7cd2f741ceb8/full.png</image:loc>
+			<image:title>The moon with phone by Anonymous</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/eb194e42595ac0b95c1dca7f59912554/full.png</image:loc>
+			<image:title>Moon 01 by 6M</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/c39f4f64eecc808f92d41e985c0b809d/full.png</image:loc>
+			<image:title>rigel by KBELL</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/3e984fa25d383a3ea8970bbffa092b09/full.png</image:loc>
+			<image:title>First Saturn by Ellis</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/dffbbd852cf4ef4e2789967a551fc93c/full.png</image:loc>
+			<image:title>First Moon Stack by Ellis</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/bff98ae332c381c1e7e53bc43fa6087f/full.png</image:loc>
+			<image:title>Moon/Luna by C</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/dbd104f5b7cadd05c81bddf89323e37c/full.png</image:loc>
+			<image:title>jupiter and io&apos;s eclipse by CoolAstronomer</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/902970155d50c488c8f73ffc17131fa3/full.png</image:loc>
+			<image:title>Suturn take1 by Takayasu</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/4a5361b4505e5ae9a1faedca39a17dfc/full.png</image:loc>
+			<image:title>Moon by SDC</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/37987fc1225f73b80c9c235da7248812/full.png</image:loc>
+			<image:title>Moon by Hemanth Ramesh &amp; Tejas Ramesh</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/cd7cb52f61ba2c7af82a8a3c31e22e49/full.png</image:loc>
+			<image:title>Jupiter and GRS by densu</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/adf71a0e114e0afea66cb43ee29c6f62/full.png</image:loc>
+			<image:title>Saturn by Flip</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/d7ebefd7a489eca3893cf6c9ac6dc39d/full.png</image:loc>
+			<image:title>Saturn by Max</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/c824ee3761ab8c07c6b33c2a8eeadd95/full.png</image:loc>
+			<image:title>moon by no name</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/6a1d24bf631409524a8126f0eaa72403/full.png</image:loc>
+			<image:title>amazing lunar shot by idk</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/9e28613221668badf2e3c299d47103f5/full.png</image:loc>
+			<image:title>saturn by @Space12Y</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/1fe39c4c8654715452a263deb9fbcc5c/full.png</image:loc>
+			<image:title>Saturn by monstruo</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/207c412393aa1515d5b96459804961b9/full.png</image:loc>
+			<image:title>Saturn by Anonymous</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/c2f9ceb197a80aaacb126eabeb0d8d2f/full.png</image:loc>
+			<image:title>Saturn by Josh Greig</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/a783ee92665e55c7decbbf15e4e4c684/full.png</image:loc>
+			<image:title>Saturn by 人</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/7d22d8e985fa2757ecc721d432b1f0c0/full.png</image:loc>
+			<image:title>Saturnus by Daan</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/4cc543bb575d776186eddc4cefd4952f/full.png</image:loc>
+			<image:title>Saturn! by @AstroPixel03</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/dd8e7bea413d8c260a9fd0f8b3315be2/full.png</image:loc>
+			<image:title>Jupiter by Jayce</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/2f2f1dd128ef01447f3f470d9b14a0ca/full.png</image:loc>
+			<image:title>Saturn by Jayce</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/9fc974f9c5d27098c404a72559a93ff7/full.png</image:loc>
+			<image:title>Saturn by SOMEONE</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/7c75e8337e000b95cf989be7fd47bdaa/full.png</image:loc>
+			<image:title>Moon by VIcktor Moberg</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/99fa6ca0cb1b693919f0b69733b1cd90/full.png</image:loc>
+			<image:title>Jupiter from Oyster Bay by Hans Feitz</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/10d9a1577b40e2067bc0754b4fdd664d/full.png</image:loc>
+			<image:title>Saturn by GeekTeacherAstro</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/1c3474b1cbe79f43fff2f1ffa9500efb/full.png</image:loc>
+			<image:title>土星 by 人</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/7f9596e7c4393584caea52358d18313a/full.png</image:loc>
+			<image:title>My first picture of Saturn by Beginner Stargazer</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/0854766167525f1c8734d44b84ce4677/full.png</image:loc>
+			<image:title>Planetary stack by lisa</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/73bf6c8ed68b59a53725cf7c368deb24/full.png</image:loc>
+			<image:title>Moon up close by Imager</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/c3af93e7f24d3094098245eba019ff64/full.png</image:loc>
+			<image:title>Saturn Through heriatge 130P by blackhole freak</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/4d6b80901e01555a846770536046270e/full.png</image:loc>
+			<image:title>Moon by Nishad Islam</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/e800edddd80a8f0407e962e65341c71c/full.png</image:loc>
+			<image:title>Moon by slingPhoto</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/16578db979180b25d00ae49b910583d5/full.png</image:loc>
+			<image:title>Saturn by Mika</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/ce76a8303d2162406c62f70589b3af7b/full.png</image:loc>
+			<image:title>saturne by menzy_mlb</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/cf489583ee039b9b15c568d1b720edd7/full.png</image:loc>
+			<image:title>Moon by slingPhoto</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/3d1273de6aba9bbe320b028ef267491c/full.png</image:loc>
+			<image:title>Saturn by Anon</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/e5bde1cd28ecb9b69fa7b8a4a835f0c9/full.png</image:loc>
+			<image:title>Saturn by Beginner Astronomer</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/ab129cdccff09212a935eb3a5eaf23c6/full.png</image:loc>
+			<image:title>Saturn re-edit by chrissmitty</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/22e94f26c9f10a82d4478ba29b18dc53/full.png</image:loc>
+			<image:title>Sol 14 Octubre 2026 by juan</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/c1902fd69290a67db34ce73e4c7963f9/full.png</image:loc>
+			<image:title>Planetary stack by mr lapis 02</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/0b1bdd06719b1995f7ec9ef912b72f8d/full.png</image:loc>
+			<image:title>Luna by Seth</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/4fbfcecfb135c48f0f3046ad4980f64d/full.png</image:loc>
+			<image:title>SATURN by ARITZ</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/63ac20e444654a932d8da69956430e48/full.png</image:loc>
+			<image:title>Saturn by Omer Gumus</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/3e49e1fc72021cf438e2b626fc23f182/full.png</image:loc>
+			<image:title>Saturn at opposition by mbacik</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/2d464491d3e54a97d33d5e259bbeba7d/full.png</image:loc>
+			<image:title>Saturn by Lijah</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/f530700fbb59685b2a7d374bf122377d/full.png</image:loc>
+			<image:title>Saturn at opposition by Clovis</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/e3f17609e25bc3066cadcd2110da7f2b/full.png</image:loc>
+			<image:title>Moon by Mario Capone</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/e5dd4fcf49d86c4fa3dd9ffe44bfdedf/full.png</image:loc>
+			<image:title>Saturn by anonymuss</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/9c6d2c68baca9341e77eae2e32d18389/full.png</image:loc>
+			<image:title>Moon by Cesmar_63</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/ee904ce4b177c3e77367eb08e7ef8276/full.png</image:loc>
+			<image:title>Saturn, blurry by P</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/f7a459db6d0fe502bbc7bd9f8b843812/full.png</image:loc>
+			<image:title>月球 by 金金</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/2571943d0c3324a54e9cb5573828acc2/full.png</image:loc>
+			<image:title>moonwith apexelx28 by devntrophile</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/2f1c94afc3429f2f96b55098a9fa2411/full.png</image:loc>
+			<image:title>啊 by 金金</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/51810e186a97d17d34723cb2bcf08ad8/full.png</image:loc>
+			<image:title>Planetary stack by FirestormXXL</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/6538b9ca909485d9e7411825e17dc5a3/full.png</image:loc>
+			<image:title>Planetary stack by 金金</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/d815aaf7122fffcd20b0d27c8c97687f/full.png</image:loc>
+			<image:title>Saturn by Chrissmitty</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/481ec83fef853c323e34dd71d0c77172/full.png</image:loc>
+			<image:title>My first saturn stack by Astrogeorge</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/d9b087a639f0ea757154f8c205d1468b/full.png</image:loc>
+			<image:title>Saturn by chrissmitty</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/7009350216dddc318f37167593b73f83/full.png</image:loc>
+			<image:title>Saturn by Rosanna R.</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/c70f979d7dde08c4cb901ec918a9d448/full.png</image:loc>
+			<image:title>Saturne by Jean-Claude Leclercq</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/696ed85e794b46bcfee4ded7f28d448c/full.png</image:loc>
+			<image:title>Saturn by Jean-Claude Leclercq</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/df7b1fb0560b0ee7fe5449918ecba35e/full.png</image:loc>
+			<image:title>Mars by meiscoolbutmo</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/38e8a2211855ec00c13fdd2bc25535a2/full.png</image:loc>
+			<image:title>saturno by Corrado</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/dd11d112ea4d05a91e8036a0a6df431d/full.png</image:loc>
+			<image:title>saturn by someone</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/979c21ee532c9ef0774fc6afe89635f1/full.png</image:loc>
+			<image:title>Moon by Sinock</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/dbdbf6aea7dc65433c12bb7ecc7cb55b/full.png</image:loc>
+			<image:title>Lunar by Justin Baker</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/014f93489cbd7cbc981f57d093e6cac5/full.png</image:loc>
+			<image:title>Moon by Shubhranil</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/f2a6605328b25a15533064a335e04977/full.png</image:loc>
+			<image:title>Luna by J</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/0fec15c3d9fd1d4a2a363dbcb292fdf4/full.png</image:loc>
+			<image:title>Sun 2026/08/24 by Andries Cafmeyer</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/3ce78556cd15e98449129f1fb688d4a8/full.png</image:loc>
+			<image:title>Moon 2026/08/06 by Andries Cafmeyer</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/464edd9d7856c46f5ec520bae5e67954/full.png</image:loc>
+			<image:title>Sun 2026/08/05 by Andries Cafmeyer</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/14ee5c6fbe62ae0c555bec540c44bd28/full.png</image:loc>
+			<image:title>Full Moon_8.27.26 by mrcobblepot</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/c25a465d7343e1b66c34cb3490d17bde/full.png</image:loc>
+			<image:title>Venus by Ash astrographer</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/2141f700c99099fd097b29990e4a3b79/full.png</image:loc>
+			<image:title>Saturn by Engin Deniz Sargın</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/7e16bfda032019c656b57be191ac4264/full.png</image:loc>
+			<image:title>Jupiter, testing Eise&apos;s &quot;continuous stacking&quot; by Tijmen (Eise dev)</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/2aa20a91f85b1e2a454708b85dfc9d32/full.png</image:loc>
+			<image:title>Venus by Ash_astrographer</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/07a9633bc4410b681d2c2a52c4f85597/full.png</image:loc>
+			<image:title>Saturn - December 2025 by Tijmen (Eise dev)</image:title>
+		</image:image>
+		<image:image>
+			<image:loc>https://img.eise.app/15034b0df20f1c86ed11eb3ac4848718/full.png</image:loc>
+			<image:title>Moon by Cody</image:title>
+		</image:image>
 	</url>
 	<url>
 		<loc>https://eise.app/planetary-stacking-mac/</loc>

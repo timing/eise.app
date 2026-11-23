@@ -81,9 +81,19 @@ turndown.use(gfm);
 
 // A <button> is an action, not prose. Keep the label as plain text so a reader
 // can still tell what the page offers, but drop the markup around it.
+//
+// Block when the button wraps an image, inline otherwise. The gallery builds
+// each card as a <button> around an image and a caption, and inline output ran
+// all 61 into one unreadable paragraph; but plain text buttons appear mid-
+// sentence ("or <button>upload an Eise stack</button> you've already saved")
+// and breaking those into blocks splits the sentence.
 turndown.addRule('buttonLabel', {
 	filter: ['button'],
-	replacement: (content) => (content.trim() ? `${content.trim()} ` : ''),
+	replacement: (content, node) => {
+		const text = content.trim();
+		if (!text) return '';
+		return node.querySelector('img') ? `\n\n${text}\n\n` : `${text} `;
+	},
 });
 
 // Sibling <span>s and <label>s are laid out as blocks by CSS but are inline in
@@ -94,15 +104,37 @@ turndown.addRule('spacedInline', {
 	replacement: (content) => (content.trim() ? `${content.trim()} ` : ''),
 });
 
-// Images carry alt text worth keeping, but the src is a hashed asset URL that
-// is pure token cost for a text client. Keep alt, drop the link.
-turndown.addRule('imageAltOnly', {
+// Real Markdown images, so a client can actually fetch them. On pages where the
+// images are the content (the gallery) a bare "(image: alt)" placeholder is
+// useless, and the URLs here are stable public paths, not hashed build assets.
+//
+// Prefers the largest srcset candidate over src, because src is the 400px
+// thumbnail while srcset carries the original.
+turndown.addRule('image', {
 	filter: 'img',
 	replacement: (_content, node) => {
 		const alt = (node.getAttribute('alt') || '').trim();
-		return alt ? `(image: ${alt})` : '';
+		const src = largestSource(node);
+		if (!src) return alt ? `(image: ${alt})` : '';
+		return `![${alt}](${src})`;
 	},
 });
+
+// Picks the highest-resolution candidate an <img> offers: the widest `w`
+// descriptor in srcset, falling back to src.
+function largestSource(node) {
+	const srcset = (node.getAttribute('srcset') || '').trim();
+	if (srcset) {
+		const best = srcset
+			.split(',')
+			.map((part) => part.trim().split(/\s+/))
+			.map(([url, descriptor]) => ({ url, w: parseInt(descriptor, 10) || 0 }))
+			.filter((c) => c.url)
+			.sort((a, b) => b.w - a.w)[0];
+		if (best) return best.url;
+	}
+	return (node.getAttribute('src') || '').trim();
+}
 
 function routeToMarkdownPath(route) {
 	// '/' -> '/index.md', '/about/help/' -> '/about/help.md'
@@ -124,6 +156,10 @@ function extractMain(document, route) {
 	// /about/ against, so site-relative links become absolute.
 	for (const link of Array.from(main.querySelectorAll('a[href^="/"]'))) {
 		link.setAttribute('href', BASE_URL + link.getAttribute('href'));
+	}
+	// Same for images, which are mostly site-relative paths under public/.
+	for (const img of Array.from(main.querySelectorAll('img[src^="/"]'))) {
+		img.setAttribute('src', BASE_URL + img.getAttribute('src'));
 	}
 	return main;
 }
